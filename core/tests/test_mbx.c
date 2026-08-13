@@ -37,7 +37,13 @@ static int g_pass, g_fail;
 #define REG_MASK       0x00000130u
 #define REG_ACK        0x00000134u
 #define REG_KICK       0x000006d8u
+#define REG_TA_START   0x00000800u
+#define REG_TA_DB      0x0000083cu
+#define REG_TA_REGION  0x00000844u
+#define REG_CTX_LOAD   0x00000814u
+#define REG_CTX_STORE  0x00000818u
 #define REG_CTX_RESET  0x0000081cu
+#define REG_3D_FIFO    0x00800000u
 #define REG_RGNBASE    0x00000608u
 #define REG_OBJBASE    0x0000060cu
 #define REG_PIXSAMP    0x0000061cu
@@ -277,6 +283,122 @@ static void test_ta_context_reset_handshake(void) {
     s5l8900_free(&m);
 }
 
+static void test_ta_context_store_handshake(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE), "machine init failed");
+    if (!m.ram) return;
+
+    /* AppleMBX at 0xc077d570 writes exactly one to 0x818, polls status bit
+     * 0x100 at 0xc077d588, and panics at 0xc077d5ac if it never arrives. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_CTX_STORE, 0u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "zero context-store write raised completion");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_CTX_STORE, 2u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "unmeasured context-store value raised completion");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_CTX_STORE, 1u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_CTX_STORE) == 1u,
+          "context-store request did not remain readable storage");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x100u,
+          "context-store request did not raise TA_CONTEXT");
+    CHECK(!s5l_mbx_irq(&m.mbx),
+          "masked synchronous context-store completion asserted IRQ");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_MASK, 0x100u);
+    CHECK(s5l_mbx_irq(&m.mbx),
+          "unmasking context-store completion did not assert pending IRQ");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x100u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "context-store acknowledge left TA_CONTEXT pending");
+    CHECK(!s5l_mbx_irq(&m.mbx),
+          "context-store acknowledge did not lower IRQ");
+
+    s5l8900_free(&m);
+}
+
+static void test_ta_context_load_handshake(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE), "machine init failed");
+    if (!m.ram) return;
+
+    /* AppleMBX at 0xc077d6f4 writes exactly one to 0x814, polls status bit
+     * 0x100 at 0xc077d700, and panics at 0xc077d724 if it never arrives. The
+     * literal register/value pair was captured at the write-helper call. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_CTX_LOAD, 0u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "zero context-load write raised completion");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_CTX_LOAD, 2u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "unmeasured context-load value raised completion");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_CTX_LOAD, 1u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_CTX_LOAD) == 1u,
+          "context-load request did not remain readable storage");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x100u,
+          "context-load request did not raise TA_CONTEXT");
+    CHECK(!s5l_mbx_irq(&m.mbx),
+          "masked synchronous context-load completion asserted IRQ");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_MASK, 0x100u);
+    CHECK(s5l_mbx_irq(&m.mbx),
+          "unmasking context-load completion did not assert pending IRQ");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x100u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "context-load acknowledge left TA_CONTEXT pending");
+    CHECK(!s5l_mbx_irq(&m.mbx),
+          "context-load acknowledge did not lower IRQ");
+
+    s5l8900_free(&m);
+}
+
+static void test_ta_submission_completion(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE), "machine init failed");
+    if (!m.ram) return;
+
+    /* AppleMBX at 0xc077ed54 sets TAStatus=1, writes exactly one to 0x800 at
+     * 0xc077ed84, and later recovers that outstanding state by injecting status
+     * bit 0x10 at 0xc077f3c4. Keep the recovered literals independent of the
+     * model constants, and reject unobserved request values. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_START, 0u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "zero TA-start write raised completion");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_START, 2u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "unmeasured TA-start value raised completion");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_START, 1u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_TA_START) == 1u,
+          "TA-start request did not arm its in-flight latch");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "TA-start request completed before its FIFO stream");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_3D_FIFO, 0x10000004u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "ordinary 3D FIFO data completed the TA submission");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_3D_FIFO, 0xf0000000u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_TA_START) == 0u,
+          "3D FIFO terminator did not consume the in-flight TA latch");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x10u,
+          "3D FIFO terminator did not raise TA_COMPLETE");
+    CHECK(!s5l_mbx_irq(&m.mbx),
+          "masked TA completion asserted IRQ");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_MASK, 0x10u);
+    CHECK(s5l_mbx_irq(&m.mbx),
+          "unmasking TA_COMPLETE did not assert its pending IRQ");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x10u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "TA_COMPLETE acknowledge left status pending");
+    CHECK(!s5l_mbx_irq(&m.mbx),
+          "TA_COMPLETE acknowledge did not lower IRQ");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_3D_FIFO, 0xf0000000u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "unarmed 3D FIFO terminator manufactured TA_COMPLETE");
+
+    s5l8900_free(&m);
+}
+
 static uint32_t test_gpu_pa(s5l8900_t *m, uint32_t gpu) {
     uint32_t chunk = gpu >> 22;
     uint32_t root = m->bus.read32(m->bus.ctx,
@@ -443,6 +565,503 @@ static void test_map_gpu_page(s5l8900_t *m, uint32_t table,
                               uint32_t gpu, uint32_t pa) {
     m->bus.write32(m->bus.ctx,
         table + (((gpu >> 12) & 0x3ffu) * 4u), pa);
+}
+
+static uint32_t test_ta_solid_draw(uint32_t *stream, uint32_t start,
+                                   float x0, float y0, float x1, float y1,
+                                   uint32_t colour) {
+    stream[start] = 0x10000021u;
+    stream[start + 1u] = 0x22600e80u;
+    stream[start + 2u] = 0x00000504u;
+    stream[start + 3u] = 0x48020000u;
+    stream[start + 4u] = 0xf0020004u;
+    static const uint8_t corners[4][2] = {
+        {1u, 0u}, {1u, 1u}, {0u, 0u}, {0u, 1u},
+    };
+    for (uint32_t vertex = 0u; vertex < 4u; vertex++) {
+        uint32_t base = start + 5u + vertex * 6u;
+        stream[base] = 0u;
+        stream[base + 1u] = test_float_word(
+            corners[vertex][0] ? x1 : x0);
+        stream[base + 2u] = test_float_word(
+            corners[vertex][1] ? y1 : y0);
+        stream[base + 3u] = 0u;
+        stream[base + 4u] = 0x3f800000u;
+        stream[base + 5u] = colour;
+    }
+    stream[start + 29u] = 0x00000003u;
+    return start + 30u;
+}
+
+static uint32_t test_ta_solid_continuation(
+        uint32_t *stream, uint32_t start,
+        float x0, float y0, float x1, float y1, uint32_t colour) {
+    stream[start] = 0x48020000u;
+    stream[start + 1u] = 0xf0020004u;
+    static const uint8_t corners[4][2] = {
+        {1u, 0u}, {1u, 1u}, {0u, 0u}, {0u, 1u},
+    };
+    for (uint32_t vertex = 0u; vertex < 4u; vertex++) {
+        uint32_t base = start + 2u + vertex * 6u;
+        stream[base] = 0u;
+        stream[base + 1u] = test_float_word(
+            corners[vertex][0] ? x1 : x0);
+        stream[base + 2u] = test_float_word(
+            corners[vertex][1] ? y1 : y0);
+        stream[base + 3u] = 0u;
+        stream[base + 4u] = 0x3f800000u;
+        stream[base + 5u] = colour;
+    }
+    stream[start + 26u] = 0x00000003u;
+    return start + 27u;
+}
+
+static uint32_t test_ta_textured_vertices(
+        uint32_t *stream, uint32_t start,
+        const float x[4], const float y[4],
+        const float u[4], const float v[4], uint32_t colour) {
+    stream[start] = 0x48020000u;
+    stream[start + 1u] = 0xf0020044u;
+    for (uint32_t vertex = 0u; vertex < 4u; vertex++) {
+        uint32_t base = start + 2u + vertex * 8u;
+        stream[base] = 0u;
+        stream[base + 1u] = test_float_word(x[vertex]);
+        stream[base + 2u] = test_float_word(y[vertex]);
+        stream[base + 3u] = 0u;
+        stream[base + 4u] = 0x3f800000u;
+        stream[base + 5u] = colour;
+        stream[base + 6u] = test_float_word(u[vertex]);
+        stream[base + 7u] = test_float_word(v[vertex]);
+    }
+    stream[start + 34u] = 0x00000003u;
+    return start + 35u;
+}
+
+static uint32_t test_ta_textured_draw(
+        uint32_t *stream, uint32_t start,
+        uint32_t header, uint32_t source, uint32_t sampler,
+        const float x[4], const float y[4],
+        const float u[4], const float v[4], uint32_t colour) {
+    stream[start] = 0x10000004u;
+    stream[start + 1u] = header;
+    stream[start + 2u] = source;
+    stream[start + 3u] = sampler;
+    return test_ta_textured_vertices(
+        stream, start + 4u, x, y, u, v, colour);
+}
+
+static uint32_t test_ta_global_transform(
+        uint32_t *stream, uint32_t start,
+        uint32_t width, uint32_t height,
+        float origin_x, float origin_y) {
+    stream[start] = 0xa0000003u;
+    stream[start + 1u] = test_float_word(2.0f / (float)width);
+    stream[start + 2u] = 0u;
+    stream[start + 3u] = 0u;
+    stream[start + 4u] = test_float_word(
+        origin_x * 2.0f / (float)width - 1.0f);
+    stream[start + 5u] = 0u;
+    stream[start + 6u] = test_float_word(2.0f / (float)height);
+    stream[start + 7u] = 0u;
+    stream[start + 8u] = test_float_word(
+        origin_y * 2.0f / (float)height - 1.0f);
+    stream[start + 9u] = 0u;
+    stream[start + 10u] = 0u;
+    stream[start + 11u] = 0u;
+    stream[start + 12u] = 0u;
+    stream[start + 13u] = 0u;
+    stream[start + 14u] = 0u;
+    stream[start + 15u] = 0u;
+    stream[start + 16u] = 0x3f800000u;
+    return start + 17u;
+}
+
+static void test_ta_run_stream(s5l8900_t *m,
+                               const uint32_t *stream, uint32_t count) {
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_TA_START, 1u);
+    for (uint32_t i = 0u; i < count; i++)
+        m->bus.write32(m->bus.ctx, MBX_BASE + REG_3D_FIFO, stream[i]);
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_ACK, 0x10u);
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_RENDER, 1u);
+}
+
+static void test_ta_stream_axis_aligned_atomic_scene(void) {
+    enum {
+        TARGET_STRIDE = 0x500u,
+        TARGET_HEIGHT = 480u,
+        TARGET_BYTES = TARGET_STRIDE * TARGET_HEIGHT,
+    };
+    const uint32_t table0 = 0x08003000u;
+    const uint32_t table2 = 0x08004000u;
+    const uint32_t object = 0x00100000u;
+    const uint32_t region = 0x00040000u;
+    const uint32_t target = 0x00810000u;
+    const uint32_t object_pa = 0x08010000u;
+    const uint32_t target_pa = 0x08080000u;
+    uint32_t stream[76] = {0x10000010u};
+    uint32_t next = test_ta_solid_draw(
+        stream, 1u, 10.0f, 20.0f, 14.0f, 23.0f, 0xff0000ffu);
+    static const uint32_t state[14] = {
+        0xa01b001cu, 0u, 0u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0xa01d001du, 0u, 0u, 0u, 0x3f800000u,
+    };
+    memcpy(&stream[next], state, sizeof state);
+    next += 14u;
+    next = test_ta_solid_draw(
+        stream, next, 20.0f, 30.0f, 22.0f, 32.0f, 0xff00ff00u);
+    stream[next++] = 0xf0000000u;
+    CHECK(next == sizeof stream / sizeof stream[0],
+          "TA stream fixture has %u words, expected %u", next,
+          (unsigned)(sizeof stream / sizeof stream[0]));
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
+          "TA stream machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART0, table0);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    test_map_gpu_page(&m, table0, object, object_pa);
+    for (uint32_t page = 0u; page < TARGET_BYTES; page += 0x1000u)
+        test_map_gpu_page(&m, table2, target + page, target_pa + page);
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_DB, object);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_REGION, region);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RGNBASE, region);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_OBJBASE, object);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_PIXSAMP, 0x00020007u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBCTL, 6u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP, 0x013f0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBYCLIP, 0x01df0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTART, target);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTRIDE, 320u);
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_START, 1u);
+    for (uint32_t i = 0u; i < next; i++) {
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_3D_FIFO, stream[i]);
+        CHECK(test_gpu_read32(&m, object + i * 4u) == stream[i],
+              "TA word %u was not staged through its object database", i);
+    }
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x10u,
+          "complete TA stream did not raise exactly TA_COMPLETE");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x10u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+
+    uint32_t mismatches = 0u;
+    for (uint32_t y = 20u; y < 23u; y++)
+        for (uint32_t x = 10u; x < 14u; x++)
+            mismatches += test_gpu_read32(
+                &m, target + y * TARGET_STRIDE + x * 4u) != 0xff0000ffu;
+    for (uint32_t y = 30u; y < 32u; y++)
+        for (uint32_t x = 20u; x < 22u; x++)
+            mismatches += test_gpu_read32(
+                &m, target + y * TARGET_STRIDE + x * 4u) != 0xff00ff00u;
+    CHECK(mismatches == 0u, "%u TA solid-scene pixels mismatched", mismatches);
+    CHECK(test_gpu_read32(&m, target + 20u * TARGET_STRIDE + 9u * 4u) == 0u &&
+          test_gpu_read32(&m, target + 23u * TARGET_STRIDE + 10u * 4u) == 0u &&
+          test_gpu_read32(&m, target + 30u * TARGET_STRIDE + 19u * 4u) == 0u,
+          "TA scene changed a pixel outside its rectangles");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+          "accepted TA scene did not raise all three render events");
+    CHECK(m.mbx_telemetry.candidates_3d == 1u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 0u &&
+          m.mbx_telemetry.pixels_3d == 16u &&
+          m.mbx_telemetry.accepted_3d_history[0].kind ==
+              S5L_MBX_3D_ACCEPT_TA_STREAM,
+          "accepted TA scene telemetry=%llu/%llu/%llu/%llu kind=%u",
+          (unsigned long long)m.mbx_telemetry.candidates_3d,
+          (unsigned long long)m.mbx_telemetry.completed_3d,
+          (unsigned long long)m.mbx_telemetry.rejected_3d,
+          (unsigned long long)m.mbx_telemetry.pixels_3d,
+          m.mbx_telemetry.accepted_3d_history[0].kind);
+
+    /* The same TA grammar also backs temporary full-clip surfaces. The live
+     * Voice Memos transition uses 64x32 and 192x64/96 targets before blending
+     * them into the 320x480 screen. Stride is pixels, and must control both
+     * staging and commit rather than being mistaken for a fixed phone width. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP, 0x003f0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBYCLIP, 0x001f0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTRIDE, 64u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_START, 1u);
+    for (uint32_t i = 0u; i < next; i++)
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_3D_FIFO, stream[i]);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x10u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(test_gpu_read32(
+              &m, target + (20u * 64u + 10u) * 4u) == 0xff0000ffu &&
+          test_gpu_read32(
+              &m, target + (30u * 64u + 20u) * 4u) == 0xff00ff00u,
+          "small-stride TA scene did not use its framebuffer stride");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu &&
+          m.mbx_telemetry.candidates_3d == 2u &&
+          m.mbx_telemetry.completed_3d == 2u &&
+          m.mbx_telemetry.rejected_3d == 0u &&
+          m.mbx_telemetry.pixels_3d == 32u &&
+          m.mbx_telemetry.accepted_3d_history[1].kind ==
+              S5L_MBX_3D_ACCEPT_TA_STREAM,
+          "small-stride TA scene did not complete with exact telemetry");
+
+    /* A malformed second draw must reject the complete scene without leaking
+     * the earlier valid draw into guest RAM. This is the critical difference
+     * between a diagnostic approximation and a transactional renderer. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP, 0x013f0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBYCLIP, 0x01df0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTRIDE, 320u);
+    for (uint32_t y = 20u; y < 23u; y++)
+        for (uint32_t x = 10u; x < 14u; x++)
+            test_gpu_write32(&m,
+                target + y * TARGET_STRIDE + x * 4u, 0xff102030u);
+    stream[49] ^= 1u; /* second draw's f0020004 control */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_START, 1u);
+    for (uint32_t i = 0u; i < next; i++)
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_3D_FIFO, stream[i]);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x10u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(test_gpu_read32(
+              &m, target + 20u * TARGET_STRIDE + 10u * 4u) == 0xff102030u,
+          "rejected TA scene committed its earlier valid draw");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
+          m.mbx_telemetry.candidates_3d == 3u &&
+          m.mbx_telemetry.completed_3d == 2u &&
+          m.mbx_telemetry.rejected_3d == 1u,
+          "rejected TA scene raised completion or corrupted telemetry");
+
+    s5l8900_free(&m);
+}
+
+static void test_ta_stream_orthographic_affine_texture(void) {
+    enum {
+        WIDTH = 64u,
+        HEIGHT = 32u,
+        TARGET_BYTES = WIDTH * HEIGHT * 4u,
+        SOURCE_STRIDE = 64u,
+        SOURCE_HEIGHT = 128u,
+    };
+    const uint32_t table0 = 0x08002000u;
+    const uint32_t table2 = 0x08003000u;
+    const uint32_t object = 0x00100000u;
+    const uint32_t region = 0x00040000u;
+    const uint32_t source = 0x00820000u;
+    const uint32_t target = 0x00840000u;
+    uint32_t stream[64] = {0x10000010u};
+    uint32_t next = test_ta_global_transform(
+        stream, 1u, WIDTH, HEIGHT, -10.0f, -20.0f);
+    const float x[4] = {20.0f, 16.0f, 20.0f, 16.0f};
+    const float y[4] = {34.0f, 34.0f, 30.0f, 30.0f};
+    const float u[4] = {4.0f, 4.0f, 0.0f, 0.0f};
+    const float v[4] = {0.0f, 4.0f, 0.0f, 4.0f};
+    uint32_t source_word = 0x8e040000u |
+        ((source >> 7) & 0x0003ffffu);
+    next = test_ta_textured_draw(
+        stream, next, 0xa1418000u, source_word, 0xd6087610u,
+        x, y, u, v, 0xffffffffu);
+    stream[next++] = 0xf0000000u;
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
+          "affine TA machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART0, table0);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    test_map_gpu_page(&m, table0, object, 0x08010000u);
+    for (uint32_t page = 0u; page < SOURCE_STRIDE * SOURCE_HEIGHT;
+         page += 0x1000u)
+        test_map_gpu_page(&m, table2, source + page, 0x08030000u + page);
+    for (uint32_t page = 0u; page < TARGET_BYTES; page += 0x1000u)
+        test_map_gpu_page(&m, table2, target + page, 0x08040000u + page);
+    for (uint32_t row = 0u; row < SOURCE_HEIGHT; row++)
+        for (uint32_t column = 0u; column < SOURCE_STRIDE / 4u; column++)
+            test_gpu_write32(&m, source + row * SOURCE_STRIDE + column * 4u,
+                             test_sprite_source_pixel(column, row));
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_DB, object);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_REGION, region);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RGNBASE, region);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_OBJBASE, object);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_PIXSAMP, 0x00020007u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBCTL, 6u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP, 0x003f0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBYCLIP, 0x001f0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTART, target);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTRIDE, WIDTH);
+    test_ta_run_stream(&m, stream, next);
+
+    struct test_affine_transform transform = {
+        10.0f, 10.0f, 0.0f, 4.0f, -4.0f, 0.0f, 16.0f,
+    };
+    uint32_t mismatches = 0u;
+    for (uint32_t py = 10u; py < 14u; py++) {
+        for (uint32_t px = 6u; px < 10u; px++) {
+            float uf, vf;
+            struct test_bilinear_axis sx, sy;
+            bool covered = test_affine_pixel(
+                &transform, px, py, &uf, &vf);
+            bool sampled = covered &&
+                test_bilinear_coordinate(uf * 4.0f, 16u, &sx) &&
+                test_bilinear_coordinate(vf * 4.0f, SOURCE_HEIGHT, &sy);
+            uint32_t expected = sampled
+                ? test_bilinear_sprite_pixel(&sx, &sy) : 0u;
+            mismatches += test_gpu_read32(
+                &m, target + (py * WIDTH + px) * 4u) != expected;
+        }
+    }
+    CHECK(mismatches == 0u,
+          "%u orthographic affine TA pixels mismatched", mismatches);
+    CHECK(test_gpu_read32(&m, target + (10u * WIDTH + 5u) * 4u) == 0u &&
+          test_gpu_read32(&m, target + (10u * WIDTH + 10u) * 4u) == 0u &&
+          test_gpu_read32(&m, target + (14u * WIDTH + 6u) * 4u) == 0u,
+          "orthographic affine TA draw changed an outside guard");
+    CHECK(m.mbx_telemetry.candidates_3d == 1u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 0u &&
+          m.mbx_telemetry.pixels_3d == 16u &&
+          m.mbx_telemetry.accepted_3d_history[0].kind ==
+              S5L_MBX_3D_ACCEPT_TA_STREAM,
+          "orthographic affine TA telemetry is not exact");
+
+    /* A transform that no longer encodes 2/height is not a second affine
+     * family. The earlier valid draw must remain untouched on rejection. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    uint32_t marker_address = target + (10u * WIDTH + 6u) * 4u;
+    test_gpu_write32(&m, marker_address, 0xff102030u);
+    stream[7] ^= 1u;
+    test_ta_run_stream(&m, stream, next);
+    CHECK(test_gpu_read32(&m, marker_address) == 0xff102030u,
+          "bad orthographic transform committed a TA scene");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
+          m.mbx_telemetry.candidates_3d == 2u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 1u,
+          "bad orthographic transform completed or corrupted telemetry");
+    s5l8900_free(&m);
+}
+
+static void test_ta_stream_immediate_state_reuse_and_alias_bounds(void) {
+    enum {
+        WIDTH = 64u,
+        HEIGHT = 32u,
+        TARGET_BYTES = WIDTH * HEIGHT * 4u,
+        SOURCE_STRIDE = 64u,
+    };
+    const uint32_t table0 = 0x08002000u;
+    const uint32_t table2 = 0x08003000u;
+    const uint32_t object = 0x00100000u;
+    const uint32_t region = 0x00040000u;
+    const uint32_t target = 0x00830000u;
+    /* The encoded 16x32 allocation extends 0x400 bytes into target, exactly
+     * like the captured temporary-surface case. The measured rows used below
+     * stop 0x40 bytes before target, so sampled bytes do not alias it. */
+    const uint32_t source = target - 0x400u;
+    uint32_t stream[160] = {0x10000010u};
+    uint32_t next = test_ta_solid_draw(
+        stream, 1u, 20.0f, 20.0f, 22.0f, 22.0f, 0xff0000ffu);
+    next = test_ta_solid_continuation(
+        stream, next, 22.0f, 20.0f, 24.0f, 22.0f, 0xff00ff00u);
+    static const uint32_t state[14] = {
+        0xa01b001cu, 0u, 0u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0xa01d001du, 0u, 0u, 0u, 0x3f800000u,
+    };
+    memcpy(&stream[next], state, sizeof state);
+    next += 14u;
+    const float fractional_15 = test_float_value(0x416ffffeu);
+    const float x0[4] = {9.0f, 9.0f, 1.0f, 1.0f};
+    const float y0[4] = {1.0f, 16.0f, 1.0f, 16.0f};
+    const float u0[4] = {8.0f, 8.0f, 0.0f, 0.0f};
+    const float v0[4] = {0.0f, fractional_15, 0.0f, fractional_15};
+    uint32_t source_word = 0x0e040000u |
+        ((source >> 7) & 0x0003ffffu);
+    uint32_t textured_start = next;
+    next = test_ta_textured_draw(
+        stream, next, 0xa1218000u, source_word, 0xd6087610u,
+        x0, y0, u0, v0, 0xffffffffu);
+    const float x1[4] = {11.0f, 11.0f, 9.0f, 9.0f};
+    const float y1[4] = {1.0f, 3.0f, 1.0f, 3.0f};
+    const float u1[4] = {10.0f, 10.0f, 8.0f, 8.0f};
+    const float v1[4] = {0.0f, 2.0f, 0.0f, 2.0f};
+    uint32_t textured_continuation = next;
+    next = test_ta_textured_vertices(
+        stream, next, x1, y1, u1, v1, 0xffffffffu);
+    stream[next++] = 0xf0000000u;
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
+          "state-reuse TA machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART0, table0);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    test_map_gpu_page(&m, table0, object, 0x08010000u);
+    test_map_gpu_page(&m, table2, source & ~0xfffu, 0x08030000u);
+    test_map_gpu_page(&m, table2, target, 0x08031000u);
+    test_map_gpu_page(&m, table2, target + 0x1000u, 0x08032000u);
+    for (uint32_t row = 0u; row < 15u; row++)
+        for (uint32_t column = 0u; column < SOURCE_STRIDE / 4u; column++)
+            test_gpu_write32(&m, source + row * SOURCE_STRIDE + column * 4u,
+                             test_sprite_source_pixel(column, row));
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_DB, object);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_REGION, region);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RGNBASE, region);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_OBJBASE, object);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_PIXSAMP, 0x00020007u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBCTL, 6u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP, 0x003f0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBYCLIP, 0x001f0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTART, target);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTRIDE, WIDTH);
+    test_ta_run_stream(&m, stream, next);
+
+    CHECK(test_gpu_read32(&m, target + (20u * WIDTH + 20u) * 4u) ==
+              0xff0000ffu &&
+          test_gpu_read32(&m, target + (20u * WIDTH + 22u) * 4u) ==
+              0xff00ff00u,
+          "solid immediate TA continuation did not preserve pipeline state");
+    CHECK(test_gpu_read32(&m, target + (1u * WIDTH + 1u) * 4u) ==
+              test_sprite_source_pixel(0u, 0u) &&
+          test_gpu_read32(&m, target + (15u * WIDTH + 8u) * 4u) ==
+              test_sprite_source_pixel(7u, 14u) &&
+          test_gpu_read32(&m, target + (1u * WIDTH + 9u) * 4u) ==
+              test_sprite_source_pixel(8u, 0u) &&
+          test_gpu_read32(&m, target + (2u * WIDTH + 10u) * 4u) ==
+              test_sprite_source_pixel(9u, 1u),
+          "fractional-edge texture or immediate TA continuation copied wrong pixels");
+    CHECK(m.mbx_telemetry.candidates_3d == 1u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 0u &&
+          m.mbx_telemetry.pixels_3d == 132u,
+          "state-reuse TA telemetry is not exact");
+
+    /* A vertex-only continuation may reuse state, but may not switch from the
+     * immediately preceding texture pipeline to a solid vertex format. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    uint32_t marker_address = target + (20u * WIDTH + 20u) * 4u;
+    test_gpu_write32(&m, marker_address, 0xff102030u);
+    stream[textured_continuation + 1u] = 0xf0020004u;
+    test_ta_run_stream(&m, stream, next);
+    CHECK(test_gpu_read32(&m, marker_address) == 0xff102030u,
+          "cross-pipeline TA continuation committed an earlier draw");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
+          m.mbx_telemetry.candidates_3d == 2u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 1u,
+          "cross-pipeline TA continuation completed or corrupted telemetry");
+
+    /* Unused allocation padding may overlap FBSTART, but sampled rows may not.
+     * Pointing the same measured draw directly at target must remain atomic. */
+    stream[textured_continuation + 1u] = 0xf0020044u;
+    stream[textured_start + 2u] = 0x0e040000u |
+        ((target >> 7) & 0x0003ffffu);
+    test_gpu_write32(&m, marker_address, 0xff405060u);
+    test_ta_run_stream(&m, stream, next);
+    CHECK(test_gpu_read32(&m, marker_address) == 0xff405060u,
+          "sampled TA texture alias committed an earlier draw");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
+          m.mbx_telemetry.candidates_3d == 3u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 2u,
+          "sampled TA texture alias completed or corrupted telemetry");
+    s5l8900_free(&m);
 }
 
 /* Wallpaper Preview's rejected r447 submit contains five simple-copy strips
@@ -5642,6 +6261,12 @@ int main(void) {
     test_springboard_settings_black_fill_batch();
     test_status_write_to_set_and_ack();
     test_ta_context_reset_handshake();
+    test_ta_context_store_handshake();
+    test_ta_context_load_handshake();
+    test_ta_submission_completion();
+    test_ta_stream_axis_aligned_atomic_scene();
+    test_ta_stream_orthographic_affine_texture();
+    test_ta_stream_immediate_state_reuse_and_alias_bounds();
     test_premultiplied_2d_clock_form();
     test_opaque_global_alpha_2d_form();
     test_ordered_atomic_2d_batches();

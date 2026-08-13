@@ -7251,11 +7251,12 @@ static struct {
     } as_hist[16];
 
 
-    /* --- DIAGNOSTIC: the single hottest unmodelled MMIO page ---------------
-     * One physical page absorbs ~2% of every instruction in a 200M boot. This
-     * probe answers, for that page alone: which word offsets, from which PCs,
-     * called from where, reading/writing what, and *when* -- so we can tell a
-     * loop that eventually gives up from one that never does. */
+    /* --- DIAGNOSTIC: selected physical pages -------------------------------
+     * The default page is the hottest unmodelled MMIO page from the original
+     * boot investigation. Explicit -H pages may also lie in RAM: that makes it
+     * possible to identify a CPU or emulated-DMA write which corrupts a guest
+     * object. RAM observation stays behind one cached boolean so the default
+     * MMIO-only diagnostic does not search the page table on every RAM access. */
     uint64_t    hot_now;                 /* instruction index, updated per step */
     uint64_t    hot_r[HOT_PAGE_MAX][1024], hot_w[HOT_PAGE_MAX][1024];
     uint32_t    hot_last[HOT_PAGE_MAX][1024];   /* last value read/written    */
@@ -7272,6 +7273,7 @@ static struct {
     uint64_t    hot_steps;               /* run length, for bucket scaling */
     uint32_t    hot_page[HOT_PAGE_MAX];  /* selected physical pages; -H       */
     unsigned    hot_page_n;
+    bool        hot_ram_selected;        /* at least one -H page lies in RAM   */
 
     /* --- DIAGNOSTIC: the lossless console tee -----------------------------
      * s5l_uart_t's tx buffer is a FIRST-8191-BYTES CAP, not a ring: run59 wrote
@@ -19582,6 +19584,15 @@ static void ppp_pump_step(uint64_t n) {
     if (G.ppp_rx_bytes != pushed) s5l8900_tick(G.mach, 0);
 }
 
+static void spy_selected_hot(
+        uint32_t addr, uint32_t val, unsigned bytes, bool wr) {
+    for (unsigned h = 0; h < G.hot_page_n; h++)
+        if ((addr & ~0xfffu) == G.hot_page[h]) {
+            note_hot(h, addr, val, bytes, wr);
+            break;
+        }
+}
+
 static void spy_nonram(
         uint32_t addr, uint32_t val, unsigned bytes, bool wr) {
     uint32_t pc = G.mach->cpu.r[15];
@@ -19590,11 +19601,7 @@ static void spy_nonram(
         (G.mach->cpu.cp15.sctlr & ARM_SCTLR_M) != 0u;
     tvout_mmio_note(addr, val, bytes, wr);
     note_dev_page(addr, pc, cpsr, mmu_enabled, wr);
-    for (unsigned h = 0; h < G.hot_page_n; h++)
-        if ((addr & ~0xfffu) == G.hot_page[h]) {
-            note_hot(h, addr, val, bytes, wr);
-            break;
-        }
+    spy_selected_hot(addr, val, bytes, wr);
     /* uart4's transmit register, teed and scanned. Placed before the console
      * page test rather than inside it: the two pages are 64 KiB apart and a
      * single `else` chain that got the order wrong would silently send PPP
@@ -19626,8 +19633,12 @@ static void spy_nonram(
 }
 
 static void spy_read(uint32_t addr, uint32_t val, unsigned bytes) {
-    if (!is_ram(addr, bytes))
+    if (is_ram(addr, bytes)) {
+        if (G.hot_ram_selected)
+            spy_selected_hot(addr, val, bytes, false);
+    } else {
         spy_nonram(addr, val, bytes, false);
+    }
 }
 
 #define SEQUENCE_WRITE_CAPTURE_CAP 64u
@@ -19671,6 +19682,8 @@ static void spy_write(uint32_t addr, uint32_t val, unsigned bytes) {
         G.framebuffer_surface_cache_valid = false;
 
     if (is_ram(addr, bytes)) {
+        if (G.hot_ram_selected)
+            spy_selected_hot(addr, val, bytes, true);
         if (framebuffer_trace_active)
             note_framebuffer_write(addr, val, bytes);
         return;
@@ -19718,7 +19731,10 @@ static void spy_install(s5l8900_t *m, uint32_t virt_base, uint32_t phys_base,
     G.mach  = m;
     G.inner = m->bus;
     if (hot_page_n > HOT_PAGE_MAX) hot_page_n = HOT_PAGE_MAX;
-    for (unsigned i = 0; i < hot_page_n; i++) G.hot_page[i] = hot_page[i];
+    for (unsigned i = 0; i < hot_page_n; i++) {
+        G.hot_page[i] = hot_page[i];
+        if (is_ram(hot_page[i], 1u)) G.hot_ram_selected = true;
+    }
     G.hot_page_n = hot_page_n;
     m->bus.read32 = sr32; m->bus.read16 = sr16; m->bus.read8 = sr8;
     m->bus.write32 = sw32; m->bus.write16 = sw16; m->bus.write8 = sw8;
@@ -33832,8 +33848,9 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "      stall; a window that starts after the last milestone\n"
             "      characterises what is actually spinning.\n"
             "  -Z  <n> print pc/mode/symbol every n instructions\n"
-            "  -H  select a 4 KiB-aligned physical page for the bounded\n"
-            "      hot-page diagnostics (default 0x39a00000). REPEATABLE: the\n"
+            "  -H  select a 4 KiB-aligned physical MMIO or RAM page for the\n"
+            "      bounded hot-page diagnostics (default 0x39a00000). RAM\n"
+            "      tracing is enabled only when a RAM page is selected. REPEATABLE: the\n"
             "      first -H replaces the default, later ones add, up to 4\n"
             "  -T  how many trace lines to print at the first data abort\n",
             stream);
@@ -38570,7 +38587,7 @@ external_md_work_ready:
                    G.dev_page[i].first_pc, G.dev_page[i].first_cpsr,
                    G.dev_page[i].first_mmu_enabled, NULL));
 
-    /* ----------------------------------------------- the hot MMIO pages --- */
+    /* ----------------------------------------------- selected hot pages --- */
     for (unsigned p = 0; p < G.hot_page_n; p++) {
         printf("\n=== HOT PAGE 0x%08x: PER-REGISTER ===\n", G.hot_page[p]);
         printf("    off    reads      writes     lastval    firstwrite\n");

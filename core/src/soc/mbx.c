@@ -146,6 +146,19 @@
 #define MBX_3D_TARGET_STRIDE   0x500u
 #define MBX_3D_ADDRESS_MASK    0x0003ffffu
 
+/* A FIFO has no readable backing store, but a checkpoint can stop between any
+ * two of its writes. Preserve the accepted words in the TA object database,
+ * which is the GART allocation the hardware would populate and which guest
+ * RAM snapshots already carry. Only the cursor needs private device state.
+ * CORE_ID/REVISION reads bypass reg[] and return S5L_MBX_REVISION_ID, so its
+ * otherwise unreachable backing slot can hold that cursor just as STATUS's
+ * unreachable slot holds the pending 2D batch marker above. */
+#define MBX_TA_CAPTURE_MAGIC       0x54400000u
+#define MBX_TA_CAPTURE_MAGIC_M     0xfff00000u
+#define MBX_TA_CAPTURE_FAILED      0x54500000u
+#define MBX_TA_CAPTURE_COUNT_M     0x0000ffffu
+#define MBX_TA_CAPTURE_MAX_WORDS   16384u
+
 /* Later _mbx3DCtxQuadCopyPerspective records and live object streams recover
  * the padlock, `Searching...`, and battery status sprites, plus clipped
  * padlock and battery redraws. Their texture-control words encode different
@@ -160,6 +173,7 @@ static uint32_t mbx_ring_val[MBX_RING];
 static uint8_t  mbx_ring_wr[MBX_RING];
 static uint64_t mbx_ring_n;
 static int      mbx_trace_state;   /* 0 unknown, 1 on, -1 off */
+static int      mbx_fifo_trace_state;
 static uint64_t mbx_2d_candidates;
 static uint64_t mbx_2d_completed;
 static uint64_t mbx_2d_rejected;
@@ -168,6 +182,8 @@ static uint64_t mbx_3d_candidates;
 static uint64_t mbx_3d_completed;
 static uint64_t mbx_3d_rejected;
 static uint64_t mbx_3d_pixels;
+static uint64_t mbx_3d_fifo_words;
+static uint64_t mbx_3d_fifo_scene_words;
 
 static void mbx_counter_add(uint64_t *counter, uint64_t amount) {
     if (!counter) return;
@@ -184,6 +200,14 @@ static bool mbx_trace_enabled(void) {
         if (mbx_trace_state == 1) atexit(mbx_trace_dump);
     }
     return mbx_trace_state == 1;
+}
+
+static bool mbx_fifo_trace_enabled(void) {
+    if (mbx_fifo_trace_state == 0) {
+        const char *e = getenv("S5LBOX_MBX_FIFO_TRACE");
+        mbx_fifo_trace_state = (e && *e && *e != '0') ? 1 : -1;
+    }
+    return mbx_fifo_trace_state == 1;
 }
 
 static void mbx_trace_dump(void) {
@@ -437,6 +461,48 @@ static bool mbx_gart_write(const s5l_mbx_t *m, const arm_bus_t *bus,
         gpu_va += span;
         len -= span;
     }
+    return true;
+}
+
+static uint32_t *mbx_ta_capture_slot(s5l_mbx_t *m) {
+    return &m->reg[S5L_MBX_REVISION / 4u];
+}
+
+bool s5l_mbx_stage_ta_write(s5l_mbx_t *m, const arm_bus_t *bus,
+                            uint32_t off, uint32_t val) {
+    if (!m) return false;
+
+    if (off == S5L_MBX_TA_START && val == 1u) {
+        *mbx_ta_capture_slot(m) = MBX_TA_CAPTURE_MAGIC;
+        return true;
+    }
+    if (off != S5L_MBX_3D_DATA_FIFO ||
+        m->reg[S5L_MBX_TA_START / 4u] != 1u)
+        return false;
+
+    uint32_t state = *mbx_ta_capture_slot(m);
+    if ((state & MBX_TA_CAPTURE_MAGIC_M) != MBX_TA_CAPTURE_MAGIC)
+        return false;
+    uint32_t count = state & MBX_TA_CAPTURE_COUNT_M;
+    uint32_t object = m->reg[S5L_MBX_TA_OBJECT_DATABASE / 4u];
+    uint8_t bytes[4] = {
+        (uint8_t)val, (uint8_t)(val >> 8),
+        (uint8_t)(val >> 16), (uint8_t)(val >> 24)
+    };
+    const char *why = NULL;
+    if (count >= MBX_TA_CAPTURE_MAX_WORDS || !object ||
+        object > UINT32_MAX - count * 4u ||
+        !mbx_gart_write(m, bus, object + count * 4u,
+                        bytes, sizeof bytes, &why)) {
+        *mbx_ta_capture_slot(m) = MBX_TA_CAPTURE_FAILED;
+        if (mbx_trace_state == 1) {
+            fprintf(stderr, "MBX3D TA capture failed at word %u: %s\n",
+                    count, why ? why : "invalid object-database span");
+            fflush(stderr);
+        }
+        return false;
+    }
+    *mbx_ta_capture_slot(m) = MBX_TA_CAPTURE_MAGIC | (count + 1u);
     return true;
 }
 
@@ -3655,6 +3721,950 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     return ok;
 }
 
+/* The PIO TA stream retained from Voice Memos is not an object list: it is
+ * the input from which real MBX hardware would build the region and object
+ * buffers. The stream nevertheless describes ordinary BGRA8 quads using the
+ * same texture header, pitch, sampler, vertex-alpha and source-over
+ * conventions already proved by the object-list decoders above. Decode only
+ * that measured subset. In particular, an unfamiliar state block, control
+ * word, vertex layout, transform, colour modulation, or texture alias rejects
+ * the entire scene before the first target write. */
+#define MBX_TA_STATE_WORDS 14u
+
+enum mbx_ta_parse_result {
+    MBX_TA_NOT_DRAW = 0,
+    MBX_TA_DRAW_OK,
+    MBX_TA_DRAW_BAD,
+};
+
+struct mbx_ta_draw {
+    uint32_t next_word;
+    bool textured;
+    bool filtered;
+    bool affine;
+    uint32_t source;
+    uint32_t source_stride;
+    uint32_t texture_width;
+    uint32_t texture_height;
+    uint32_t colour;
+    float x0, y0, x1, y1;
+    float u0, v0, u1, v1;
+    struct mbx_affine_transform transform;
+};
+
+struct mbx_ta_global_transform {
+    float origin_x;
+    float origin_y;
+};
+
+static bool mbx_ta_sampler(uint32_t value) {
+    return value == 0xd6087610u || value == 0x86084610u ||
+           value == 0x86081e10u;
+}
+
+static bool mbx_ta_texture_state(const uint32_t *words, uint32_t start,
+                                 uint32_t control,
+                                 struct mbx_ta_draw *draw) {
+    uint32_t matches = 0u;
+    for (uint32_t i = start + 1u; i + 2u < control; i++) {
+        uint32_t header = words[i];
+        uint32_t source_word = words[i + 1u];
+        if (!mbx_ta_sampler(words[i + 2u])) continue;
+
+        uint32_t width_field = (header >> 24) & 7u;
+        uint32_t height_field = (header >> 20) & 7u;
+        uint32_t width = 8u << width_field;
+        uint32_t height = 8u << height_field;
+        bool filtered = (source_word & 0x80000000u) != 0u;
+        uint32_t pitch_units = ((source_word >> 16) & 0xfcu) |
+                               ((header & 1u) << 1);
+        uint32_t expected_header = 0xa0018000u |
+            (width_field << 24) | (height_field << 20) |
+            ((pitch_units & 2u) >> 1);
+        uint32_t expected_source =
+            (filtered ? 0x8e000000u : 0x0e000000u) |
+            ((pitch_units & ~3u) << 16);
+        if (!pitch_units || width > 512u || height > 512u ||
+            header != expected_header ||
+            (source_word & ~MBX_3D_ADDRESS_MASK) != expected_source)
+            continue;
+
+        matches++;
+        draw->filtered = filtered;
+        draw->source = mbx_3d_decode_address(source_word);
+        draw->source_stride = pitch_units * 16u;
+        draw->texture_width = width;
+        draw->texture_height = height;
+    }
+    return matches == 1u;
+}
+
+static enum mbx_ta_parse_result mbx_ta_parse_vertices(
+        const uint32_t *words, uint32_t count, uint32_t control,
+        uint32_t stride, float origin_x, float origin_y,
+        struct mbx_ta_draw *draw, const char **why) {
+    if (control > UINT32_MAX - 2u - 4u * stride ||
+        control + 1u + 4u * stride >= count ||
+        words[control + 1u + 4u * stride] != 0x00000003u) {
+        if (why) *why = "TA draw has an unknown vertex boundary";
+        return MBX_TA_DRAW_BAD;
+    }
+
+    draw->next_word = control + 2u + 4u * stride;
+    draw->textured = stride == 8u;
+    float x[4], y[4], u[4] = {0}, v[4] = {0};
+    uint32_t colour = words[control + 1u + 5u];
+    for (uint32_t vertex = 0u; vertex < 4u; vertex++) {
+        uint32_t base = control + 1u + vertex * stride;
+        if (words[base] != 0u || words[base + 3u] != 0u ||
+            words[base + 4u] != 0x3f800000u ||
+            words[base + 5u] != colour ||
+            !mbx_3d_word_to_finite_float(words[base + 1u], &x[vertex]) ||
+            !mbx_3d_word_to_finite_float(words[base + 2u], &y[vertex])) {
+            if (why) *why = "TA draw has an unknown vertex layout";
+            return MBX_TA_DRAW_BAD;
+        }
+        if (draw->textured &&
+            (!mbx_3d_word_to_nonnegative_float(words[base + 6u],
+                                                &u[vertex]) ||
+             !mbx_3d_word_to_nonnegative_float(words[base + 7u],
+                                                &v[vertex]))) {
+            if (why) *why = "TA draw has invalid texture coordinates";
+            return MBX_TA_DRAW_BAD;
+        }
+        x[vertex] += origin_x;
+        y[vertex] += origin_y;
+    }
+
+    draw->colour = colour;
+    uint32_t corner_index[4] = {UINT32_MAX, UINT32_MAX,
+                                UINT32_MAX, UINT32_MAX};
+    if (draw->textured) {
+        draw->u0 = draw->u1 = u[0];
+        draw->v0 = draw->v1 = v[0];
+        for (uint32_t i = 1u; i < 4u; i++) {
+            if (u[i] < draw->u0) draw->u0 = u[i];
+            if (u[i] > draw->u1) draw->u1 = u[i];
+            if (v[i] < draw->v0) draw->v0 = v[i];
+            if (v[i] > draw->v1) draw->v1 = v[i];
+        }
+        if (!(draw->u0 < draw->u1) || !(draw->v0 < draw->v1)) {
+            if (why) *why = "TA draw has an empty texture rectangle";
+            return MBX_TA_DRAW_BAD;
+        }
+        uint32_t seen_corners = 0u;
+        for (uint32_t i = 0u; i < 4u; i++) {
+            if ((u[i] != draw->u0 && u[i] != draw->u1) ||
+                (v[i] != draw->v0 && v[i] != draw->v1)) {
+                if (why) *why = "TA draw UVs are not a rectangle";
+                return MBX_TA_DRAW_BAD;
+            }
+            uint32_t corner = (u[i] == draw->u1 ? 1u : 0u) |
+                              (v[i] == draw->v1 ? 2u : 0u);
+            if (seen_corners & (1u << corner)) {
+                if (why) *why = "TA draw repeats a texture corner";
+                return MBX_TA_DRAW_BAD;
+            }
+            seen_corners |= 1u << corner;
+            corner_index[corner] = i;
+        }
+        if (seen_corners != 0x0fu) {
+            if (why) *why = "TA draw does not contain four texture corners";
+            return MBX_TA_DRAW_BAD;
+        }
+        uint32_t alpha = colour >> 24;
+        if (colour != alpha * 0x01010101u) {
+            if (why) *why = "TA draw uses coloured vertex modulation";
+            return MBX_TA_DRAW_BAD;
+        }
+    } else {
+        draw->x0 = draw->x1 = x[0];
+        draw->y0 = draw->y1 = y[0];
+        for (uint32_t i = 1u; i < 4u; i++) {
+            if (x[i] < draw->x0) draw->x0 = x[i];
+            if (x[i] > draw->x1) draw->x1 = x[i];
+            if (y[i] < draw->y0) draw->y0 = y[i];
+            if (y[i] > draw->y1) draw->y1 = y[i];
+        }
+        uint32_t seen_corners = 0u;
+        for (uint32_t i = 0u; i < 4u; i++) {
+            if ((x[i] != draw->x0 && x[i] != draw->x1) ||
+                (y[i] != draw->y0 && y[i] != draw->y1)) {
+                if (why) *why = "TA solid draw is affine or perspective geometry";
+                return MBX_TA_DRAW_BAD;
+            }
+            uint32_t corner = (x[i] == draw->x1 ? 1u : 0u) |
+                              (y[i] == draw->y1 ? 2u : 0u);
+            if (seen_corners & (1u << corner)) {
+                if (why) *why = "TA solid draw repeats a rectangle corner";
+                return MBX_TA_DRAW_BAD;
+            }
+            seen_corners |= 1u << corner;
+        }
+        if (!(draw->x0 < draw->x1) || !(draw->y0 < draw->y1) ||
+            seen_corners != 0x0fu) {
+            if (why) *why = "TA solid draw does not contain a rectangle";
+            return MBX_TA_DRAW_BAD;
+        }
+        return MBX_TA_DRAW_OK;
+    }
+
+    const uint32_t p00 = corner_index[0u];
+    const uint32_t p10 = corner_index[1u];
+    const uint32_t p01 = corner_index[2u];
+    const uint32_t p11 = corner_index[3u];
+    bool axis_aligned = x[p00] == x[p01] && x[p10] == x[p11] &&
+                        y[p00] == y[p10] && y[p01] == y[p11] &&
+                        x[p00] < x[p10] && y[p00] < y[p01];
+    if (axis_aligned) {
+        draw->x0 = x[p00];
+        draw->y0 = y[p00];
+        draw->x1 = x[p11];
+        draw->y1 = y[p11];
+        return MBX_TA_DRAW_OK;
+    }
+
+    const float epsilon = 0.0009765625f;
+    float closure_x = x[p00] + x[p11] - x[p10] - x[p01];
+    float closure_y = y[p00] + y[p11] - y[p10] - y[p01];
+    if (!draw->filtered || closure_x < -epsilon || closure_x > epsilon ||
+        closure_y < -epsilon || closure_y > epsilon) {
+        if (why) *why = "TA textured draw is not a measured affine quad";
+        return MBX_TA_DRAW_BAD;
+    }
+    draw->affine = true;
+    draw->transform.origin_x = x[p00];
+    draw->transform.origin_y = y[p00];
+    draw->transform.u_x = x[p10] - x[p00];
+    draw->transform.u_y = y[p10] - y[p00];
+    draw->transform.v_x = x[p01] - x[p00];
+    draw->transform.v_y = y[p01] - y[p00];
+    draw->transform.determinant =
+        draw->transform.u_x * draw->transform.v_y -
+        draw->transform.u_y * draw->transform.v_x;
+    if (draw->transform.determinant <= 0.0f) {
+        if (why) *why = "TA affine draw is degenerate or reversed";
+        return MBX_TA_DRAW_BAD;
+    }
+
+    uint32_t source_left = (uint32_t)draw->u0;
+    uint32_t source_top = (uint32_t)draw->v0;
+    int32_t source_right_i = mbx_3d_ceil_to_i32(draw->u1);
+    int32_t source_bottom_i = mbx_3d_ceil_to_i32(draw->v1);
+    if (source_right_i <= (int32_t)source_left ||
+        source_bottom_i <= (int32_t)source_top) {
+        if (why) *why = "TA affine draw has an invalid source extent";
+        return MBX_TA_DRAW_BAD;
+    }
+    uint32_t source_width = (uint32_t)source_right_i - source_left;
+    uint32_t source_height = (uint32_t)source_bottom_i - source_top;
+    float u2 = draw->transform.u_x * draw->transform.u_x +
+               draw->transform.u_y * draw->transform.u_y;
+    float v2 = draw->transform.v_x * draw->transform.v_x +
+               draw->transform.v_y * draw->transform.v_y;
+    float dot = draw->transform.u_x * draw->transform.v_x +
+                draw->transform.u_y * draw->transform.v_y;
+    float expected_u2 = (float)source_width * (float)source_width;
+    float expected_v2 = (float)source_height * (float)source_height;
+    float expected_det = (float)source_width * (float)source_height;
+    float u_error = u2 - expected_u2;
+    float v_error = v2 - expected_v2;
+    float det_error = draw->transform.determinant - expected_det;
+    if (dot < 0.0f) dot = -dot;
+    if (u_error < 0.0f) u_error = -u_error;
+    if (v_error < 0.0f) v_error = -v_error;
+    if (det_error < 0.0f) det_error = -det_error;
+    float tolerance = ((float)source_width + (float)source_height) * epsilon;
+    if (source_width > MBX_3D_WIDTH || source_height > 480u ||
+        u_error > tolerance || v_error > tolerance || dot > tolerance ||
+        det_error > tolerance) {
+        if (why) *why = "TA affine draw is not the measured rigid unity transform";
+        return MBX_TA_DRAW_BAD;
+    }
+
+    draw->x0 = draw->x1 = x[0];
+    draw->y0 = draw->y1 = y[0];
+    for (uint32_t i = 1u; i < 4u; i++) {
+        if (x[i] < draw->x0) draw->x0 = x[i];
+        if (x[i] > draw->x1) draw->x1 = x[i];
+        if (y[i] < draw->y0) draw->y0 = y[i];
+        if (y[i] > draw->y1) draw->y1 = y[i];
+    }
+    if (!(draw->x0 < draw->x1) || !(draw->y0 < draw->y1)) {
+        if (why) *why = "TA affine draw has empty destination bounds";
+        return MBX_TA_DRAW_BAD;
+    }
+    return MBX_TA_DRAW_OK;
+}
+
+static enum mbx_ta_parse_result mbx_ta_parse_draw(
+        const uint32_t *words, uint32_t count, uint32_t start,
+        float origin_x, float origin_y,
+        struct mbx_ta_draw *draw, const char **why) {
+    if (start >= count ||
+        (words[start] & 0xff000000u) != 0x10000000u)
+        return MBX_TA_NOT_DRAW;
+
+    uint32_t limit = start + 21u;
+    if (limit > count) limit = count;
+    uint32_t control = UINT32_MAX;
+    uint32_t stride = 0u;
+    for (uint32_t i = start + 1u; i < limit; i++) {
+        uint32_t candidate_stride = words[i] == 0xf0020004u ? 6u :
+                                    words[i] == 0xf0020044u ? 8u : 0u;
+        if (!candidate_stride) continue;
+        if (control != UINT32_MAX) {
+            if (why) *why = "TA draw contains multiple raster controls";
+            return MBX_TA_DRAW_BAD;
+        }
+        control = i;
+        stride = candidate_stride;
+    }
+    if (control == UINT32_MAX) return MBX_TA_NOT_DRAW;
+    if (control == start + 1u || words[control - 1u] != 0x48020000u) {
+        if (why) *why = "TA draw has an unknown vertex boundary";
+        return MBX_TA_DRAW_BAD;
+    }
+
+    memset(draw, 0, sizeof *draw);
+    draw->textured = stride == 8u;
+    if (draw->textured &&
+        !mbx_ta_texture_state(words, start, control, draw)) {
+        if (why) *why = "TA draw has no unique measured BGRA8 texture state";
+        return MBX_TA_DRAW_BAD;
+    }
+    return mbx_ta_parse_vertices(words, count, control, stride,
+                                 origin_x, origin_y, draw, why);
+}
+
+/* Voice Memos changes only vertex data for adjacent draws in two measured
+ * places: a solid footer strip and a pair of textured two-pixel edge quads.
+ * The continuation begins at the exact 0x48020000 vertex boundary and reuses
+ * only the immediately preceding pipeline type (and texture state, when
+ * textured). No search or older draw is eligible for inheritance. */
+static enum mbx_ta_parse_result mbx_ta_parse_continuation(
+        const uint32_t *words, uint32_t count, uint32_t start,
+        float origin_x, float origin_y, const struct mbx_ta_draw *previous,
+        struct mbx_ta_draw *draw, const char **why) {
+    if (start >= count || words[start] != 0x48020000u)
+        return MBX_TA_NOT_DRAW;
+    if (!previous || start + 1u >= count) {
+        if (why) *why = "TA continuation has no preceding measured draw";
+        return MBX_TA_DRAW_BAD;
+    }
+    uint32_t stride = words[start + 1u] == 0xf0020004u ? 6u :
+                      words[start + 1u] == 0xf0020044u ? 8u : 0u;
+    if (!stride || previous->textured != (stride == 8u)) {
+        if (why) *why = "TA continuation changes its measured pipeline type";
+        return MBX_TA_DRAW_BAD;
+    }
+    memset(draw, 0, sizeof *draw);
+    draw->textured = previous->textured;
+    if (draw->textured) {
+        draw->filtered = previous->filtered;
+        draw->source = previous->source;
+        draw->source_stride = previous->source_stride;
+        draw->texture_width = previous->texture_width;
+        draw->texture_height = previous->texture_height;
+    }
+    return mbx_ta_parse_vertices(words, count, start + 1u, stride,
+                                 origin_x, origin_y, draw, why);
+}
+
+static bool mbx_ta_global_transform(
+        const uint32_t *words, uint32_t first_draw,
+        uint32_t target_width, uint32_t target_height,
+        struct mbx_ta_global_transform *transform, const char **why) {
+    memset(transform, 0, sizeof *transform);
+    uint32_t matches = 0u;
+    for (uint32_t i = 1u; i < first_draw; i++) {
+        if (words[i] != 0xa0000003u) continue;
+        if (first_draw - i <= 16u) {
+            if (why) *why = "TA global transform is truncated";
+            return false;
+        }
+        matches++;
+        if (matches != 1u ||
+            words[i + 1u] != mbx_3d_float_to_word(
+                2.0f / (float)target_width) ||
+            words[i + 2u] != 0u || words[i + 3u] != 0u ||
+            words[i + 5u] != 0u ||
+            words[i + 6u] != mbx_3d_float_to_word(
+                2.0f / (float)target_height) ||
+            words[i + 7u] != 0u ||
+            words[i + 9u] != 0u || words[i + 10u] != 0u ||
+            words[i + 11u] != 0u || words[i + 12u] != 0u ||
+            words[i + 13u] != 0u || words[i + 14u] != 0u ||
+            words[i + 15u] != 0u || words[i + 16u] != 0x3f800000u) {
+            if (why) *why = "TA global transform is outside the measured orthographic form";
+            return false;
+        }
+        float tx, ty;
+        if (!mbx_3d_word_to_finite_float(words[i + 4u], &tx) ||
+            !mbx_3d_word_to_finite_float(words[i + 8u], &ty)) {
+            if (why) *why = "TA global transform translation is not finite";
+            return false;
+        }
+        float origin_x = (tx + 1.0f) * (float)target_width * 0.5f;
+        float origin_y = (ty + 1.0f) * (float)target_height * 0.5f;
+        if (origin_x <= -4096.0f || origin_x >= 4096.0f ||
+            origin_y <= -4096.0f || origin_y >= 4096.0f) {
+            if (why) *why = "TA global transform translation is out of range";
+            return false;
+        }
+        int32_t rounded_x = origin_x >= 0.0f
+            ? (int32_t)(origin_x + 0.5f) : (int32_t)(origin_x - 0.5f);
+        int32_t rounded_y = origin_y >= 0.0f
+            ? (int32_t)(origin_y + 0.5f) : (int32_t)(origin_y - 0.5f);
+        float error_x = origin_x - (float)rounded_x;
+        float error_y = origin_y - (float)rounded_y;
+        if (error_x < 0.0f) error_x = -error_x;
+        if (error_y < 0.0f) error_y = -error_y;
+        if (error_x > 0.0009765625f || error_y > 0.0009765625f) {
+            if (why) *why = "TA global transform is not an integer surface translation";
+            return false;
+        }
+        transform->origin_x = (float)rounded_x;
+        transform->origin_y = (float)rounded_y;
+    }
+    return true;
+}
+
+static bool mbx_ta_state_block(const uint32_t *words, uint32_t count,
+                               uint32_t start) {
+    if (start > count || count - start < MBX_TA_STATE_WORDS) return false;
+    if (words[start] != 0xa01b001cu ||
+        words[start + 2u] != 0u || words[start + 3u] != 0u ||
+        words[start + 4u] != 0u || words[start + 5u] != 0u ||
+        words[start + 7u] != 0u || words[start + 8u] != 0u ||
+        words[start + 9u] != 0xa01d001du ||
+        words[start + 10u] != 0u || words[start + 11u] != 0u ||
+        words[start + 12u] != 0u ||
+        words[start + 13u] != 0x3f800000u)
+        return false;
+    float first, second;
+    return mbx_3d_word_to_nonnegative_float(words[start + 1u], &first) &&
+           mbx_3d_word_to_nonnegative_float(words[start + 6u], &second) &&
+           first <= 1.0f && second <= 1.0f;
+}
+
+static bool mbx_ta_premultiplied(uint32_t pixel) {
+    uint32_t alpha = pixel >> 24;
+    return (pixel & 0xffu) <= alpha &&
+           ((pixel >> 8) & 0xffu) <= alpha &&
+           ((pixel >> 16) & 0xffu) <= alpha;
+}
+
+static bool mbx_ta_near_u32(float value, uint32_t maximum,
+                            uint32_t *rounded) {
+    if (!rounded || value < 0.0f || value > (float)maximum + 0.0009765625f)
+        return false;
+    uint32_t candidate = (uint32_t)(value + 0.5f);
+    if (candidate > maximum) return false;
+    float error = value - (float)candidate;
+    if (error < 0.0f) error = -error;
+    if (error > 0.0009765625f) return false;
+    *rounded = candidate;
+    return true;
+}
+
+static bool mbx_ta_apply_draw(
+        const s5l_mbx_t *m, const arm_bus_t *bus,
+        const struct mbx_ta_draw *draw, uint32_t target,
+        uint32_t target_width, uint32_t target_height,
+        uint32_t target_bytes,
+        uint32_t clip_left, uint32_t clip_top,
+        uint32_t clip_right, uint32_t clip_bottom,
+        uint8_t *target_pixels,
+        uint32_t *dirty_left, uint32_t *dirty_top,
+        uint32_t *dirty_right, uint32_t *dirty_bottom,
+        uint64_t *pixels_blended, const char **why) {
+    const float coordinate_limit = (float)INT32_MAX - 1024.0f;
+    if (draw->x0 <= -coordinate_limit || draw->y0 <= -coordinate_limit ||
+        draw->x1 >= coordinate_limit || draw->y1 >= coordinate_limit) {
+        if (why) *why = "TA draw destination coordinates overflow";
+        return false;
+    }
+    int32_t raster_left = mbx_3d_ceil_to_i32(draw->x0 - 0.5f);
+    int32_t raster_top = mbx_3d_ceil_to_i32(draw->y0 - 0.5f);
+    int32_t raster_right = mbx_3d_ceil_to_i32(draw->x1 - 0.5f);
+    int32_t raster_bottom = mbx_3d_ceil_to_i32(draw->y1 - 0.5f);
+    if (raster_left < (int32_t)clip_left)
+        raster_left = (int32_t)clip_left;
+    if (raster_top < (int32_t)clip_top)
+        raster_top = (int32_t)clip_top;
+    if (raster_right > (int32_t)clip_right)
+        raster_right = (int32_t)clip_right;
+    if (raster_bottom > (int32_t)clip_bottom)
+        raster_bottom = (int32_t)clip_bottom;
+    if (raster_left < 0) raster_left = 0;
+    if (raster_top < 0) raster_top = 0;
+    if (raster_right > (int32_t)target_width)
+        raster_right = (int32_t)target_width;
+    if (raster_bottom > (int32_t)target_height)
+        raster_bottom = (int32_t)target_height;
+    if (raster_left >= raster_right || raster_top >= raster_bottom)
+        return true;
+
+    uint32_t left = (uint32_t)raster_left;
+    uint32_t top = (uint32_t)raster_top;
+    uint32_t right = (uint32_t)raster_right;
+    uint32_t bottom = (uint32_t)raster_bottom;
+    uint32_t width = right - left;
+    uint32_t height = bottom - top;
+    uint64_t draw_pixels = 0u;
+    if (!draw->textured) {
+        if (!mbx_ta_premultiplied(draw->colour)) {
+            if (why) *why = "TA solid colour is not premultiplied BGRA8";
+            return false;
+        }
+        for (uint32_t y = top; y < bottom; y++) {
+            for (uint32_t x = left; x < right; x++) {
+                uint8_t *pixel = target_pixels +
+                    (y * target_width + x) * 4u;
+                uint32_t output = mbx_source_over_clamped(
+                    mbx_load_le32(pixel), draw->colour);
+                pixel[0] = (uint8_t)output;
+                pixel[1] = (uint8_t)(output >> 8);
+                pixel[2] = (uint8_t)(output >> 16);
+                pixel[3] = (uint8_t)(output >> 24);
+            }
+        }
+        draw_pixels = (uint64_t)width * height;
+    } else {
+        uint32_t pitch_pixels = draw->source_stride / 4u;
+        if (!pitch_pixels || draw->u1 > (float)pitch_pixels ||
+            draw->u1 > (float)draw->texture_width ||
+            draw->v1 > (float)draw->texture_height) {
+            if (why) *why = "TA texture rectangle exceeds its allocation";
+            return false;
+        }
+        uint64_t allocation_bytes =
+            (uint64_t)draw->source_stride * draw->texture_height;
+        if (!allocation_bytes || allocation_bytes > UINT32_MAX ||
+            (uint64_t)draw->source + allocation_bytes >
+                (uint64_t)UINT32_MAX + 1u) {
+            if (why) *why = "TA texture allocation is invalid";
+            return false;
+        }
+
+        struct mbx_bilinear_axis x_axis[MBX_3D_WIDTH];
+        struct mbx_bilinear_axis y_axis[480u];
+        uint32_t source_x0 = UINT32_MAX, source_y0 = UINT32_MAX;
+        uint32_t source_x1 = 0u, source_y1 = 0u;
+        if (draw->filtered) {
+            if (draw->affine) {
+                uint32_t source_left = (uint32_t)draw->u0;
+                uint32_t source_top = (uint32_t)draw->v0;
+                uint32_t source_right =
+                    (uint32_t)mbx_3d_ceil_to_i32(draw->u1);
+                uint32_t source_bottom =
+                    (uint32_t)mbx_3d_ceil_to_i32(draw->v1);
+                source_x0 = source_left ? source_left - 1u : 0u;
+                source_y0 = source_top ? source_top - 1u : 0u;
+                source_x1 = source_right < pitch_pixels
+                    ? source_right + 1u : pitch_pixels;
+                source_y1 = source_bottom < draw->texture_height
+                    ? source_bottom + 1u : draw->texture_height;
+            } else {
+                float dx = draw->x1 - draw->x0;
+                float dy = draw->y1 - draw->y0;
+                float du = draw->u1 - draw->u0;
+                float dv = draw->v1 - draw->v0;
+                for (uint32_t x = 0u; x < width; x++) {
+                    if (!mbx_bilinear_axis(draw->x0, dx, draw->u0, du,
+                                           left + x, pitch_pixels,
+                                           &x_axis[x])) {
+                        if (why) *why =
+                            "TA filtered horizontal sample is invalid";
+                        return false;
+                    }
+                    if (x_axis[x].first < source_x0)
+                        source_x0 = x_axis[x].first;
+                    if (x_axis[x].second > source_x1)
+                        source_x1 = x_axis[x].second;
+                }
+                for (uint32_t y = 0u; y < height; y++) {
+                    if (!mbx_bilinear_axis(draw->y0, dy, draw->v0, dv,
+                                           top + y, draw->texture_height,
+                                           &y_axis[y])) {
+                        if (why) *why =
+                            "TA filtered vertical sample is invalid";
+                        return false;
+                    }
+                    if (y_axis[y].first < source_y0)
+                        source_y0 = y_axis[y].first;
+                    if (y_axis[y].second > source_y1)
+                        source_y1 = y_axis[y].second;
+                }
+                source_x1++;
+                source_y1++;
+            }
+        } else {
+            int32_t destination_x = (int32_t)draw->x0;
+            int32_t destination_y = (int32_t)draw->y0;
+            int32_t destination_right = (int32_t)draw->x1;
+            int32_t destination_bottom = (int32_t)draw->y1;
+            uint32_t texture_x, texture_y, texture_right, texture_bottom;
+            if ((float)destination_x != draw->x0 ||
+                (float)destination_y != draw->y0 ||
+                (float)destination_right != draw->x1 ||
+                (float)destination_bottom != draw->y1 ||
+                !mbx_ta_near_u32(draw->u0, pitch_pixels, &texture_x) ||
+                !mbx_ta_near_u32(draw->v0, draw->texture_height,
+                                 &texture_y) ||
+                !mbx_ta_near_u32(draw->u1, pitch_pixels,
+                                 &texture_right) ||
+                !mbx_ta_near_u32(draw->v1, draw->texture_height,
+                                 &texture_bottom) ||
+                destination_right - destination_x !=
+                    (int32_t)(texture_right - texture_x) ||
+                destination_bottom - destination_y !=
+                    (int32_t)(texture_bottom - texture_y)) {
+                if (why) *why = "TA unfiltered texture is not a measured 1:1 crop";
+                return false;
+            }
+            int64_t first_x = (int64_t)texture_x +
+                              (int64_t)raster_left - destination_x;
+            int64_t first_y = (int64_t)texture_y +
+                              (int64_t)raster_top - destination_y;
+            if (first_x < 0 || first_y < 0 ||
+                (uint64_t)first_x + width > pitch_pixels ||
+                (uint64_t)first_x + width > draw->texture_width ||
+                (uint64_t)first_y + height > draw->texture_height) {
+                if (why) *why = "TA unfiltered crop leaves its texture";
+                return false;
+            }
+            source_x0 = (uint32_t)first_x;
+            source_y0 = (uint32_t)first_y;
+            source_x1 = source_x0 + width;
+            source_y1 = source_y0 + height;
+        }
+
+        uint32_t source_width = source_x1 - source_x0;
+        uint32_t source_height = source_y1 - source_y0;
+        uint32_t source_row_bytes = source_width * 4u;
+        uint32_t source_total = source_row_bytes * source_height;
+        uint8_t *source_pixels = malloc(source_total);
+        if (!source_pixels) {
+            if (why) *why = "host allocation for staged TA texture failed";
+            return false;
+        }
+        bool ok = source_row_bytes <= draw->source_stride;
+        for (uint32_t row = 0u; row < source_height && ok; row++) {
+            uint64_t source64 = (uint64_t)draw->source +
+                (uint64_t)(source_y0 + row) * draw->source_stride +
+                (uint64_t)source_x0 * 4u;
+            if (source64 > UINT32_MAX ||
+                mbx_2d_ranges_overlap((uint32_t)source64,
+                                      source_row_bytes,
+                                      target, target_bytes)) {
+                if (why) *why = source64 > UINT32_MAX
+                    ? "TA texture sample address overflows"
+                    : "TA sampled texture rows alias FBSTART";
+                ok = false;
+                break;
+            }
+            ok = mbx_gart_read(m, bus, (uint32_t)source64,
+                               source_pixels + row * source_row_bytes,
+                               source_row_bytes, why);
+        }
+        for (uint32_t offset = 0u; offset < source_total && ok;
+             offset += 4u) {
+            if (!mbx_ta_premultiplied(
+                    mbx_load_le32(source_pixels + offset))) {
+                if (why) *why = "TA texture contains non-premultiplied BGRA8";
+                ok = false;
+            }
+        }
+        uint32_t vertex_alpha = draw->colour >> 24;
+        for (uint32_t y = 0u; y < height && ok; y++) {
+            for (uint32_t x = 0u; x < width; x++) {
+                uint32_t source_pixel;
+                if (draw->filtered) {
+                    struct mbx_bilinear_axis affine_x, affine_y;
+                    const struct mbx_bilinear_axis *sample_x = &x_axis[x];
+                    const struct mbx_bilinear_axis *sample_y = &y_axis[y];
+                    if (draw->affine) {
+                        float u_fraction, v_fraction;
+                        if (!mbx_affine_pixel(&draw->transform,
+                                              left + x, top + y,
+                                              &u_fraction, &v_fraction))
+                            continue;
+                        float u_coordinate = draw->u0 +
+                            u_fraction * (draw->u1 - draw->u0);
+                        float v_coordinate = draw->v0 +
+                            v_fraction * (draw->v1 - draw->v0);
+                        if (!mbx_bilinear_coordinate(
+                                u_coordinate, pitch_pixels, &affine_x) ||
+                            !mbx_bilinear_coordinate(
+                                v_coordinate, draw->texture_height,
+                                &affine_y)) {
+                            if (why) *why =
+                                "TA affine sample changed during staging";
+                            ok = false;
+                            break;
+                        }
+                        sample_x = &affine_x;
+                        sample_y = &affine_y;
+                    }
+                    if (sample_x->first < source_x0 ||
+                        sample_x->second >= source_x1 ||
+                        sample_y->first < source_y0 ||
+                        sample_y->second >= source_y1) {
+                        if (why) *why =
+                            "TA filtered sample escaped its staged source window";
+                        ok = false;
+                        break;
+                    }
+                    uint32_t x0 = sample_x->first - source_x0;
+                    uint32_t x1 = sample_x->second - source_x0;
+                    uint32_t y0 = sample_y->first - source_y0;
+                    uint32_t y1 = sample_y->second - source_y0;
+                    uint32_t top_left = mbx_load_le32(source_pixels +
+                        y0 * source_row_bytes + x0 * 4u);
+                    uint32_t bottom_left = mbx_load_le32(source_pixels +
+                        y1 * source_row_bytes + x0 * 4u);
+                    uint32_t top_right = mbx_load_le32(source_pixels +
+                        y0 * source_row_bytes + x1 * 4u);
+                    uint32_t bottom_right = mbx_load_le32(source_pixels +
+                        y1 * source_row_bytes + x1 * 4u);
+                    uint32_t vertical_left = top_left == bottom_left
+                        ? top_left : mbx_linear_bgra8(
+                            top_left, bottom_left, sample_y->weight);
+                    uint32_t vertical_right = top_right == bottom_right
+                        ? top_right : mbx_linear_bgra8(
+                            top_right, bottom_right, sample_y->weight);
+                    source_pixel = vertical_left == vertical_right
+                        ? vertical_left : mbx_linear_bgra8(
+                            vertical_left, vertical_right,
+                            sample_x->weight);
+                } else {
+                    source_pixel = mbx_load_le32(source_pixels +
+                        y * source_row_bytes + x * 4u);
+                }
+                source_pixel = mbx_modulate_vertex_alpha(
+                    source_pixel, vertex_alpha);
+                uint8_t *destination = target_pixels +
+                    ((top + y) * target_width + left + x) * 4u;
+                uint32_t output = mbx_source_over_clamped(
+                    mbx_load_le32(destination), source_pixel);
+                destination[0] = (uint8_t)output;
+                destination[1] = (uint8_t)(output >> 8);
+                destination[2] = (uint8_t)(output >> 16);
+                destination[3] = (uint8_t)(output >> 24);
+                draw_pixels++;
+            }
+        }
+        free(source_pixels);
+        if (!ok) return false;
+        if (draw->affine && !draw_pixels) {
+            if (why) *why = "TA affine draw covers no destination pixel centres";
+            return false;
+        }
+    }
+
+    if (left < *dirty_left) *dirty_left = left;
+    if (top < *dirty_top) *dirty_top = top;
+    if (right > *dirty_right) *dirty_right = right;
+    if (bottom > *dirty_bottom) *dirty_bottom = bottom;
+    *pixels_blended += draw_pixels;
+    return true;
+}
+
+static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
+                                  const char **why,
+                                  uint32_t *pixels_blended) {
+    uint32_t capture = *mbx_ta_capture_slot(m);
+    if ((capture & MBX_TA_CAPTURE_MAGIC_M) != MBX_TA_CAPTURE_MAGIC) {
+        if (why) *why = "no complete staged TA stream";
+        return false;
+    }
+    uint32_t count = capture & MBX_TA_CAPTURE_COUNT_M;
+    uint32_t object = m->reg[S5L_MBX_OBJBASE / 4u];
+    uint32_t target = m->reg[S5L_MBX_FBSTART / 4u];
+    if (count < 3u || count > MBX_TA_CAPTURE_MAX_WORDS ||
+        !object || object != m->reg[S5L_MBX_TA_OBJECT_DATABASE / 4u] ||
+        m->reg[S5L_MBX_RGNBASE / 4u] !=
+            m->reg[S5L_MBX_TA_REGION_BASE / 4u]) {
+        if (why) *why = "staged TA stream does not belong to this render";
+        return false;
+    }
+    if ((object & 3u) || (target & 3u) ||
+        m->reg[S5L_MBX_3DPIXSAMP / 4u] != 0x00020007u ||
+        m->reg[S5L_MBX_FBCTL / 4u] != 0x00000006u) {
+        if (why) *why = "TA render registers are outside the measured BGRA8 form";
+        return false;
+    }
+    uint32_t xclip = m->reg[S5L_MBX_FBXCLIP / 4u];
+    uint32_t yclip = m->reg[S5L_MBX_FBYCLIP / 4u];
+    uint32_t clip_left = xclip & 0xffffu;
+    uint32_t clip_top = yclip & 0xffffu;
+    uint32_t clip_right = (xclip >> 16) + 1u;
+    uint32_t clip_bottom = (yclip >> 16) + 1u;
+    uint32_t target_width = m->reg[S5L_MBX_FBLINESTRIDE / 4u];
+    uint32_t target_height = clip_bottom;
+    if (!target_width || target_width > MBX_3D_WIDTH ||
+        clip_left >= clip_right || clip_right > target_width ||
+        clip_top >= clip_bottom || target_height > 480u) {
+        if (why) *why = "TA framebuffer stride or clip is invalid";
+        return false;
+    }
+    uint32_t target_bytes = target_width * target_height * 4u;
+    if (target > UINT32_MAX - target_bytes) {
+        if (why) *why = "TA framebuffer target span overflows";
+        return false;
+    }
+
+    uint32_t byte_count = count * 4u;
+    uint8_t *raw = malloc(byte_count);
+    uint32_t *words = malloc(byte_count);
+    struct mbx_ta_draw *draws = calloc(count, sizeof *draws);
+    if (!raw || !words || !draws) {
+        free(raw);
+        free(words);
+        free(draws);
+        if (why) *why = "host allocation for staged TA stream failed";
+        return false;
+    }
+    bool ok = mbx_gart_read(m, bus, object, raw, byte_count, why);
+    for (uint32_t i = 0u; i < count && ok; i++)
+        words[i] = mbx_load_le32(raw + i * 4u);
+    free(raw);
+    if (!ok || words[0] != 0x10000010u ||
+        words[count - 1u] != S5L_MBX_3D_SUBMIT) {
+        free(words);
+        free(draws);
+        if (ok && why) *why = "TA stream framing is unknown or incomplete";
+        return false;
+    }
+
+    uint32_t cursor = 1u;
+    uint32_t first_draw = UINT32_MAX;
+    uint32_t draw_count = 0u;
+    for (; cursor < count - 1u; cursor++) {
+        enum mbx_ta_parse_result parsed = mbx_ta_parse_draw(
+            words, count, cursor, 0.0f, 0.0f, &draws[0], why);
+        if (parsed == MBX_TA_DRAW_BAD) {
+            free(words);
+            free(draws);
+            return false;
+        }
+        if (parsed == MBX_TA_DRAW_OK) {
+            first_draw = cursor;
+            break;
+        }
+    }
+    if (first_draw == UINT32_MAX) {
+        free(words);
+        free(draws);
+        if (why) *why = "TA stream contains no measured draw";
+        return false;
+    }
+    struct mbx_ta_global_transform transform;
+    if (!mbx_ta_global_transform(words, first_draw,
+                                 target_width, target_height,
+                                 &transform, why) ||
+        mbx_ta_parse_draw(words, count, first_draw,
+                          transform.origin_x, transform.origin_y,
+                          &draws[0], why) != MBX_TA_DRAW_OK) {
+        free(words);
+        free(draws);
+        return false;
+    }
+    draw_count = 1u;
+    cursor = draws[0].next_word;
+
+    while (cursor != count - 1u) {
+        if (cursor >= count - 1u || draw_count >= count) {
+            ok = false;
+            if (why) *why = "TA draw chain leaves the stream";
+            break;
+        }
+        enum mbx_ta_parse_result parsed = mbx_ta_parse_draw(
+            words, count, cursor, transform.origin_x, transform.origin_y,
+            &draws[draw_count], why);
+        if (parsed == MBX_TA_NOT_DRAW &&
+            mbx_ta_state_block(words, count, cursor)) {
+            cursor += MBX_TA_STATE_WORDS;
+            parsed = mbx_ta_parse_draw(
+                words, count, cursor, transform.origin_x, transform.origin_y,
+                &draws[draw_count], why);
+        }
+        if (parsed == MBX_TA_NOT_DRAW) {
+            parsed = mbx_ta_parse_continuation(
+                words, count, cursor, transform.origin_x, transform.origin_y,
+                &draws[draw_count - 1u], &draws[draw_count], why);
+        }
+        if (parsed != MBX_TA_DRAW_OK) {
+            ok = false;
+            if (parsed == MBX_TA_NOT_DRAW && why) {
+                *why = "TA draw chain contains unknown inter-draw state";
+                if (mbx_trace_state == 1) {
+                    fprintf(stderr, "MBX3D TA unknown word %u/%u", cursor,
+                            count);
+                    uint32_t end = cursor + 20u;
+                    if (end > count) end = count;
+                    for (uint32_t i = cursor; i < end; i++)
+                        fprintf(stderr, ":%08x", words[i]);
+                    fputc('\n', stderr);
+                }
+            }
+            break;
+        }
+        cursor = draws[draw_count].next_word;
+        draw_count++;
+    }
+    free(words);
+    if (!ok) {
+        free(draws);
+        return false;
+    }
+    uint8_t *target_pixels = malloc(target_bytes);
+    if (!target_pixels) {
+        free(draws);
+        if (why) *why = "host allocation for staged TA target failed";
+        return false;
+    }
+    ok = mbx_gart_read(m, bus, target, target_pixels, target_bytes, why);
+    uint32_t dirty_left = target_width, dirty_top = target_height;
+    uint32_t dirty_right = 0u, dirty_bottom = 0u;
+    uint64_t total_pixels = 0u;
+    for (uint32_t i = 0u; i < draw_count && ok; i++) {
+        ok = mbx_ta_apply_draw(
+            m, bus, &draws[i], target, target_width, target_height,
+            target_bytes,
+            clip_left, clip_top, clip_right, clip_bottom,
+            target_pixels, &dirty_left, &dirty_top,
+            &dirty_right, &dirty_bottom, &total_pixels, why);
+    }
+    free(draws);
+    if (ok && (!total_pixels || total_pixels > UINT32_MAX)) {
+        if (why) *why = "TA scene covers no pixels or exceeds telemetry bounds";
+        ok = false;
+    }
+    uint32_t dirty_row_bytes = dirty_right > dirty_left
+        ? (dirty_right - dirty_left) * 4u : 0u;
+    for (uint32_t row = dirty_top; row < dirty_bottom && ok; row++) {
+        ok = mbx_gart_validate(m, bus,
+            target + row * target_width * 4u + dirty_left * 4u,
+            dirty_row_bytes, why);
+    }
+    for (uint32_t row = dirty_top; row < dirty_bottom && ok; row++) {
+        uint32_t offset = row * target_width * 4u + dirty_left * 4u;
+        ok = mbx_gart_write(m, bus, target + offset,
+                            target_pixels + offset,
+                            dirty_row_bytes, why);
+    }
+    free(target_pixels);
+    if (!ok) return false;
+    if (pixels_blended) *pixels_blended = (uint32_t)total_pixels;
+    if (mbx_trace_state == 1)
+        fprintf(stderr, "MBX3D TA stream accepted: %u draws, %u pixels\n",
+                draw_count, (uint32_t)total_pixels);
+    return true;
+}
+
 static void mbx_capture_3d_rejection(
         const s5l_mbx_t *m, const arm_bus_t *bus,
         const char *tiled_why, const char *status_why,
@@ -3827,6 +4837,7 @@ bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
     const char *status_why = "unknown status rejection";
     const char *sprite_why = "unknown sprite rejection";
     const char *solid_why = "unknown solid rejection";
+    const char *ta_why = "unknown TA-stream rejection";
     uint32_t pixels = 0u;
     uint32_t kind = S5L_MBX_3D_ACCEPT_TILED;
     bool accepted = mbx_execute_first_tiled_over(
@@ -3844,6 +4855,10 @@ bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
         accepted = mbx_execute_solid_quad(m, bus, &solid_why, &pixels);
     }
     if (!accepted) {
+        kind = S5L_MBX_3D_ACCEPT_TA_STREAM;
+        accepted = mbx_execute_ta_stream(m, bus, &ta_why, &pixels);
+    }
+    if (!accepted) {
         mbx_counter_add(&mbx_3d_rejected, 1u);
         if (telemetry) {
             mbx_counter_add(&telemetry->rejected_3d, 1u);
@@ -3854,8 +4869,33 @@ bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
         if (mbx_trace_state == 1) {
             fprintf(stderr,
                     "MBX3D reject STARTRENDER: tiled=%s; status=%s; "
-                    "sprite=%s; solid=%s\n",
-                    tiled_why, status_why, sprite_why, solid_why);
+                    "sprite=%s; solid=%s; ta=%s\n",
+                    tiled_why, status_why, sprite_why, solid_why, ta_why);
+            if (telemetry && telemetry->rejected_3d) {
+                uint64_t sequence = telemetry->rejected_3d;
+                const s5l_mbx_3d_rejection_witness_t *witness =
+                    &telemetry->rejected_3d_history[
+                        (sequence - 1u) % S5L_MBX_3D_REJECTION_HISTORY];
+                fprintf(stderr,
+                        "MBX3D witness #%llu regs "
+                        "%08x:%08x:%08x:%08x:%08x:%08x:%08x:%08x "
+                        "list %x:%08x:%08x:%08x:%08x record %08x:%u",
+                        (unsigned long long)sequence,
+                        witness->region, witness->object,
+                        witness->target, witness->xclip, witness->yclip,
+                        witness->pixel_sample, witness->framebuffer_control,
+                        witness->framebuffer_stride,
+                        witness->list_valid_mask, witness->list_words[0],
+                        witness->list_words[1], witness->list_words[2],
+                        witness->list_words[3], witness->record_base,
+                        witness->record_valid_words);
+                uint32_t valid = witness->record_valid_words;
+                if (valid > S5L_MBX_3D_REJECTION_RECORD_WORDS)
+                    valid = S5L_MBX_3D_REJECTION_RECORD_WORDS;
+                for (uint32_t i = 0u; i < valid; i++)
+                    fprintf(stderr, ":%08x", witness->record_words[i]);
+                fputc('\n', stderr);
+            }
         }
         return false;
     }
@@ -3985,6 +5025,36 @@ void s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val) {
         m->edram[o + 1u] = (uint8_t)((val >> 8) & 0xffu);
         m->edram[o + 2u] = (uint8_t)((val >> 16) & 0xffu);
         m->edram[o + 3u] = (uint8_t)((val >> 24) & 0xffu);
+        if (off == S5L_MBX_3D_DATA_FIFO && mbx_trace_enabled()) {
+            if (mbx_fifo_trace_enabled())
+                fprintf(stderr, "MBX3D FIFO[%llu] = 0x%08x\n",
+                        (unsigned long long)mbx_3d_fifo_words, val);
+            mbx_3d_fifo_words++;
+            mbx_3d_fifo_scene_words++;
+        }
+        /* AppleMBX writes START before streaming the scene. Its polled fallback
+         * feeds every word to this one FIFO port and ends with 0xf0000000.
+         * Raise TA_COMPLETE only at that measured boundary: doing it at START
+         * lets the ISR context-switch while the producer is still writing and
+         * exposes an empty object list to the following render. The START
+         * register is the snapshotted in-flight latch and self-clears here. */
+        if (off == S5L_MBX_3D_DATA_FIFO &&
+            val == S5L_MBX_3D_SUBMIT &&
+            m->reg[S5L_MBX_TA_START / 4u] == 1u) {
+            if (mbx_trace_state == 1) {
+                fprintf(stderr,
+                        "MBX3D TA end words=%llu render-id=%08x "
+                        "rgn=%08x obj=%08x fb=%08x\n",
+                        (unsigned long long)mbx_3d_fifo_scene_words,
+                        m->reg[0x810u / 4u],
+                        m->reg[S5L_MBX_RGNBASE / 4u],
+                        m->reg[S5L_MBX_OBJBASE / 4u],
+                        m->reg[S5L_MBX_FBSTART / 4u]);
+                fflush(stderr);
+            }
+            m->reg[S5L_MBX_TA_START / 4u] = 0u;
+            m->status |= S5L_MBX_STATUS_TA_COMPLETE;
+        }
         /* The register histogram deliberately covers only the 8 KiB register
          * block. The command ring is 64 KiB inside the much larger EDRAM
          * aperture, so record its sparse live writes separately when the same
@@ -4055,4 +5125,55 @@ void s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val) {
      * moves no pixels and is not a substitute for a TA or render consumer. */
     if (off == S5L_MBX_TA_CONTEXT_RESET && val == 1u)
         m->status |= S5L_MBX_STATUS_TA_CONTEXT;
+
+    /* The context-store companion uses the same synchronous TA_CONTEXT event.
+     * Without it, the first correctly completed TA submission reaches the
+     * driver's bounded poll and panics with `ta store timeout`. */
+    if (off == S5L_MBX_TA_CONTEXT_STORE && val == 1u)
+        m->status |= S5L_MBX_STATUS_TA_CONTEXT;
+
+    /* Context load is the second half of the same driver transaction and has
+     * an independent bounded poll for the shared TA_CONTEXT completion. */
+    if (off == S5L_MBX_TA_CONTEXT_LOAD && val == 1u)
+        m->status |= S5L_MBX_STATUS_TA_CONTEXT;
+
+    /* AppleMBX sets TAStatus=1 immediately before writing one to 0x800. Its
+     * watchdog's recovery for that exact outstanding state manufactures bit 4
+     * (TA_COMPLETE), proving which event the real device failed to deliver in
+     * the old model. TA submission bins a scene; it is distinct from the later
+     * STARTRENDER operation that validates and commits pixels above. */
+    /* TA_START is the in-flight latch consumed by the 3DDATA FIFO terminator
+     * above. It deliberately raises nothing here: STARTRENDER is later still,
+     * after TA completion and the context-store/load transaction. */
+    if (off == S5L_MBX_TA_START && val == 1u) {
+        mbx_3d_fifo_scene_words = 0u;
+        if (mbx_trace_state == 1) {
+            fprintf(stderr,
+                    "MBX3D TA start render-id=%08x rgn=%08x obj=%08x "
+                    "fb=%08x ctx=%08x evm=%08x:%08x:%08x db=%08x "
+                    "tail=%08x region=%08x global=%08x clip=%08x:%08x "
+                    "cfg=%08x\n",
+                    m->reg[0x810u / 4u],
+                    m->reg[S5L_MBX_RGNBASE / 4u],
+                    m->reg[S5L_MBX_OBJBASE / 4u],
+                    m->reg[S5L_MBX_FBSTART / 4u],
+                    m->reg[0x820u / 4u], m->reg[0x824u / 4u],
+                    m->reg[0x828u / 4u], m->reg[0x82cu / 4u],
+                    m->reg[0x83cu / 4u], m->reg[0x840u / 4u],
+                    m->reg[0x844u / 4u], m->reg[0x848u / 4u],
+                    m->reg[0x84cu / 4u], m->reg[0x850u / 4u],
+                    m->reg[0x85cu / 4u]);
+            fflush(stderr);
+        }
+    }
+    if (off == S5L_MBX_STARTRENDER && val == 1u && mbx_trace_state == 1) {
+        fprintf(stderr,
+                "MBX3D render start render-id=%08x rgn=%08x obj=%08x "
+                "fb=%08x\n",
+                m->reg[0x810u / 4u],
+                m->reg[S5L_MBX_RGNBASE / 4u],
+                m->reg[S5L_MBX_OBJBASE / 4u],
+                m->reg[S5L_MBX_FBSTART / 4u]);
+        fflush(stderr);
+    }
 }

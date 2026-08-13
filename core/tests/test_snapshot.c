@@ -121,6 +121,80 @@ static size_t find_section(const uint8_t *buf, size_t len, uint32_t tag) {
     return 0;
 }
 
+/* A TA checkpoint can land between any two PIO FIFO writes. The stream bytes
+ * live in guest RAM, while its cursor uses the read-only revision register's
+ * snapshotted backing slot. Prove both halves resume together: continuing the
+ * original machine and continuing its restored copy must stage the remaining
+ * words at identical offsets and reach the same TA completion boundary. */
+static void test_mbx_ta_fifo_midstream_round_trip(void) {
+    const uint32_t table = 0x00001000u;
+    const uint32_t object = 0x00100000u;
+    const uint32_t object_pa = 0x00002000u;
+    static const uint32_t stream[5] = {
+        0x10000010u, 0x12345678u, 0x89abcdefu,
+        0x0badc0deu, S5L_MBX_3D_SUBMIT,
+    };
+    s5l8900_t a, b;
+    CHECK(s5l8900_init(&a, 0u, RAMSZ), "TA snapshot source init");
+    CHECK(s5l8900_init(&b, 0u, RAMSZ), "TA snapshot target init");
+    if (!a.ram || !b.ram) {
+        s5l8900_free(&a);
+        s5l8900_free(&b);
+        return;
+    }
+
+    a.bus.write32(a.bus.ctx, S5L8900_MBX_BASE + 0x1000u, table);
+    a.bus.write32(a.bus.ctx,
+        table + (((object >> 12) & 0x3ffu) * 4u), object_pa);
+    a.bus.write32(a.bus.ctx,
+        S5L8900_MBX_BASE + S5L_MBX_TA_OBJECT_DATABASE, object);
+    a.bus.write32(a.bus.ctx,
+        S5L8900_MBX_BASE + S5L_MBX_TA_START, 1u);
+    for (unsigned i = 0u; i < 3u; i++)
+        a.bus.write32(a.bus.ctx,
+            S5L8900_MBX_BASE + S5L_MBX_3D_DATA_FIFO, stream[i]);
+    CHECK(a.mbx.status == 0u &&
+          a.mbx.reg[S5L_MBX_TA_START / 4u] == 1u,
+          "partial TA stream completed before its terminator");
+    CHECK(roundtrip(&a, &b), "mid-TA FIFO round trip");
+
+    for (unsigned i = 3u; i < 5u; i++) {
+        a.bus.write32(a.bus.ctx,
+            S5L8900_MBX_BASE + S5L_MBX_3D_DATA_FIFO, stream[i]);
+        b.bus.write32(b.bus.ctx,
+            S5L8900_MBX_BASE + S5L_MBX_3D_DATA_FIFO, stream[i]);
+    }
+    uint32_t mismatches = 0u;
+    for (unsigned i = 0u; i < 5u; i++) {
+        uint32_t a_word = a.bus.read32(a.bus.ctx, object_pa + i * 4u);
+        uint32_t b_word = b.bus.read32(b.bus.ctx, object_pa + i * 4u);
+        mismatches += a_word != stream[i] || b_word != stream[i];
+    }
+    CHECK(mismatches == 0u,
+          "%u staged TA words differed after mid-stream restore", mismatches);
+    CHECK(a.mbx.status == S5L_MBX_STATUS_TA_COMPLETE &&
+          b.mbx.status == S5L_MBX_STATUS_TA_COMPLETE &&
+          a.mbx.reg[S5L_MBX_TA_START / 4u] == 0u &&
+          b.mbx.reg[S5L_MBX_TA_START / 4u] == 0u &&
+          a.mbx.reg[S5L_MBX_REVISION / 4u] ==
+              b.mbx.reg[S5L_MBX_REVISION / 4u],
+          "restored TA stream did not reach the identical completion state");
+
+    uint8_t *left = NULL, *right = NULL;
+    size_t left_len = 0u, right_len = 0u;
+    CHECK(snapshot_save_mem(&a, &left, &left_len) == SNAP_OK,
+          "save continued TA source");
+    CHECK(snapshot_save_mem(&b, &right, &right_len) == SNAP_OK,
+          "save continued TA restore");
+    CHECK(left && right && left_len == right_len &&
+          memcmp(left, right, left_len) == 0,
+          "mid-TA restore diverged after identical remaining FIFO writes");
+    free(left);
+    free(right);
+    s5l8900_free(&a);
+    s5l8900_free(&b);
+}
+
 /* ------------------------------------------------------------- CPU state --- */
 
 /*
@@ -1093,6 +1167,7 @@ static void test_restore_is_idempotent(void) {
 
 int main(void) {
     printf("S5LBox snapshot tests\n");
+    test_mbx_ta_fifo_midstream_round_trip();
     test_cpu_state_round_trips();
     test_device_state_round_trips();
     test_tvout_snapshot_invariants();

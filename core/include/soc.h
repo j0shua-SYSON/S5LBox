@@ -854,6 +854,49 @@ void     s5l_power_write(s5l_power_t *p, uint32_t off, uint32_t val);
  */
 #define S5L_MBX_TA_CONTEXT_RESET 0x0000081cu
 
+/* The companion context-store handshake reached after TA_COMPLETE. AppleMBX
+ * at 0xc077d570..0xc077d5bc writes one to 0x818, polls status bit 8, panics
+ * with `ta store timeout` if it stays clear, and acknowledges that same bit.
+ * Store and reset are different requests with the shared TA_CONTEXT event. */
+#define S5L_MBX_TA_CONTEXT_STORE 0x00000818u
+
+/* The load half follows the store. A register capture at AppleMBX 0xc077d6f4
+ * has r1=0x814 and r2=1; the following loop polls the same bit 8 and panics
+ * with `ta load timeout` when it is absent. The adjacent 0x810 setup write is
+ * not this doorbell. */
+#define S5L_MBX_TA_CONTEXT_LOAD  0x00000814u
+
+/* The TA-side scene identity and output buffers. The public MBX1 map names
+ * these registers, and the retained Voice Memos transition ties them to the
+ * following render independently: TA render-id 1 programmed object database
+ * 0x00100000 and region base 0x00040000; STARTRENDER then consumed OBJBASE
+ * 0x00100000 and RGNBASE 0x00040000. The raw PIO stream is preserved in that
+ * already-snapshotted output allocation until the software TA consumer has
+ * converted or rendered it. */
+#define S5L_MBX_TA_RENDER_ID       0x00000810u
+#define S5L_MBX_TA_OBJECT_DATABASE 0x0000083cu
+#define S5L_MBX_TA_TAILPTR_BASE    0x00000840u
+#define S5L_MBX_TA_REGION_BASE     0x00000844u
+
+/*
+ * THE TA SUBMISSION DOORBELL. The iPhone OS 3 AppleMBX path at
+ * 0xc077ed54..0xc077ed84 sets its software TA state to 1 and then writes the
+ * literal one to 0x800. Its recovery path at 0xc077f3a4..0xc077f3c8 treats a
+ * non-zero TA state as a missing bit-4 completion: it changes the software
+ * state to 8 and injects exactly 0x10 into INTSTATUS.
+ *
+ * A captured Voice Memos transition made that sequence concrete: 0x800 was
+ * written while status stayed zero, and the watchdog later printed
+ * `TAStatus=1`, injected 0x10, and discarded the scene. Complete only the
+ * measured request value; other values remain ordinary register storage.
+ * Completion is not immediate: that submission then wrote 2,570 words
+ * through the single 3DDATA FIFO port and ended in 0xf0000000; the next wrote
+ * 2,430 words and ended identically. START arms the transaction and the
+ * measured FIFO terminator completes it. Completing at START races the
+ * driver's own stream producer.
+ */
+#define S5L_MBX_TA_START       0x00000800u
+
 /* The first measured tiled-render register set. The names come from the
  * PowerVR MBX register definitions and match AppleMBX's stores immediately
  * before it writes STARTRENDER. Values remain ordinary register storage;
@@ -933,6 +976,10 @@ void     s5l_power_write(s5l_power_t *p, uint32_t off, uint32_t val);
 #define S5L_MBX_2D_RING_SIZE 0x00010000u
 #define S5L_MBX_2D_COMMAND_HEADER 0xa0060500u
 #define S5L_MBX_2D_SUBMIT 0xf0000000u
+/* AppleMBX+0x41b8 writes every submitted TA word to this one FIFO port.
+ * The public MBX1 register map calls the same aperture offset 3DDATA. */
+#define S5L_MBX_3D_DATA_FIFO 0x00800000u
+#define S5L_MBX_3D_SUBMIT    0xf0000000u
 
 typedef struct {
     uint32_t reg[S5L_MBX_SIZE / 4u];
@@ -956,6 +1003,7 @@ typedef struct {
 #define S5L_MBX_3D_ACCEPT_STATUS 2u
 #define S5L_MBX_3D_ACCEPT_SPRITE 3u
 #define S5L_MBX_3D_ACCEPT_SOLID  4u
+#define S5L_MBX_3D_ACCEPT_TA_STREAM 5u
 
 /* Host-only evidence for one fail-closed STARTRENDER. Four records cover the
  * complete burst observed during the SpringBoard-to-Settings transition.
@@ -1067,6 +1115,13 @@ typedef struct {
 void     s5l_mbx_reset(s5l_mbx_t *m);
 uint32_t s5l_mbx_read(s5l_mbx_t *m, uint32_t off);
 void     s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val);
+/* Called immediately before s5l_mbx_write() for the same store. TA command
+ * words enter through a write-only FIFO, while their measured output buffer
+ * is GART-backed guest RAM. This bridge retains the raw stream there so a
+ * checkpoint taken mid-submission carries both the words already accepted and
+ * the word cursor in snap_mbx()'s existing register file. */
+bool     s5l_mbx_stage_ta_write(s5l_mbx_t *m, const arm_bus_t *bus,
+                                uint32_t off, uint32_t val);
 
 /* Observe one CPU write to the MBX2D command ring. AppleMBX+0x1188 copies a
  * command beginning with 0xa0060500; AppleMBX+0x1f58 then submits it with the

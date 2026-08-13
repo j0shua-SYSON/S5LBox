@@ -520,6 +520,7 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
     if (in_mbx(addr, bytes)) {
         note_device(m, addr, val, true);
         uint32_t off = addr - S5L8900_MBX_BASE;
+        (void)s5l_mbx_stage_ta_write(&m->mbx, &m->bus, off, val);
         s5l_mbx_write(&m->mbx, off, val);
         /* The MBX owns its register/EDRAM aperture; the machine owns DRAM and
          * the observer-aware bus. Keep that ownership boundary explicit. */
