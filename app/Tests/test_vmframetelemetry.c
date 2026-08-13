@@ -77,6 +77,17 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.mbx_3d_pixels = base + 33u;
     value.mbx_3d_rejection_history[0].sequence = base + 79u;
     value.mbx_3d_rejection_history[0].sprite_reason_hash = base + 80u;
+    value.mbx_3d_rejection_history[0].ta_reason_hash = base + 101u;
+    value.mbx_3d_rejection_history[0].ta_word_count =
+        (uint32_t)(base + 102u);
+    value.mbx_3d_rejection_history[0].ta_failure_word =
+        (uint32_t)(base + 103u);
+    value.mbx_3d_rejection_history[0].ta_window_start_word =
+        (uint32_t)(base + 104u);
+    value.mbx_3d_rejection_history[0].ta_window_valid_words =
+        VM_MBX_3D_REJECTION_TA_WORDS;
+    value.mbx_3d_rejection_history[0].ta_window_words[63] =
+        (uint32_t)(base + 105u);
     value.mbx_3d_rejection_history[0].record_valid_words =
         VM_MBX_3D_REJECTION_RECORD_WORDS;
     value.mbx_3d_rejection_history[0].record_words[43] = base + 81u;
@@ -340,6 +351,18 @@ static void test_boundaries_and_sampled_changes(void) {
                2079u &&
            state.execution_last.mbx_3d_rejection_history[0].
                sprite_reason_hash == 2080u &&
+           state.execution_last.mbx_3d_rejection_history[0].
+               ta_reason_hash == 2101u &&
+           state.execution_last.mbx_3d_rejection_history[0].
+               ta_word_count == 2102u &&
+           state.execution_last.mbx_3d_rejection_history[0].
+               ta_failure_word == 2103u &&
+           state.execution_last.mbx_3d_rejection_history[0].
+               ta_window_start_word == 2104u &&
+           state.execution_last.mbx_3d_rejection_history[0].
+               ta_window_valid_words == VM_MBX_3D_REJECTION_TA_WORDS &&
+           state.execution_last.mbx_3d_rejection_history[0].
+               ta_window_words[63] == 2105u &&
            state.execution_last.mbx_3d_rejection_history[0].
                record_valid_words == VM_MBX_3D_REJECTION_RECORD_WORDS &&
            state.execution_last.mbx_3d_rejection_history[0].

@@ -707,6 +707,7 @@ static void test_ta_stream_axis_aligned_atomic_scene(void) {
     };
     memcpy(&stream[next], state, sizeof state);
     next += 14u;
+    uint32_t second_start = next;
     next = test_ta_solid_draw(
         stream, next, 20.0f, 30.0f, 22.0f, 32.0f, 0xff00ff00u);
     stream[next++] = 0xf0000000u;
@@ -813,7 +814,7 @@ static void test_ta_stream_axis_aligned_atomic_scene(void) {
         for (uint32_t x = 10u; x < 14u; x++)
             test_gpu_write32(&m,
                 target + y * TARGET_STRIDE + x * 4u, 0xff102030u);
-    stream[49] ^= 1u; /* second draw's f0020004 control */
+    stream[second_start + 4u] ^= 1u; /* second draw's raster control */
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_START, 1u);
     for (uint32_t i = 0u; i < next; i++)
         m.bus.write32(m.bus.ctx, MBX_BASE + REG_3D_FIFO, stream[i]);
@@ -827,6 +828,20 @@ static void test_ta_stream_axis_aligned_atomic_scene(void) {
           m.mbx_telemetry.completed_3d == 2u &&
           m.mbx_telemetry.rejected_3d == 1u,
           "rejected TA scene raised completion or corrupted telemetry");
+    const s5l_mbx_3d_rejection_witness_t *ta_reject =
+        &m.mbx_telemetry.rejected_3d_history[0];
+    uint32_t expected_window_start = second_start - 16u;
+    CHECK(ta_reject->sequence == 1u &&
+          ta_reject->ta_reason_hash != 0u &&
+          ta_reject->ta_word_count == next &&
+          ta_reject->ta_failure_word == second_start &&
+          ta_reject->ta_window_start_word == expected_window_start &&
+          ta_reject->ta_window_valid_words == next - expected_window_start &&
+          ta_reject->ta_window_words[0] == stream[expected_window_start] &&
+          ta_reject->ta_window_words[16] == stream[second_start] &&
+          ta_reject->ta_window_words[
+              ta_reject->ta_window_valid_words - 1u] == stream[next - 1u],
+          "TA rejection witness lost reason, parser cursor, or stream window");
 
     s5l8900_free(&m);
 }

@@ -598,8 +598,9 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
                 &last->mbx_3d_rejection_history[
                     (sequence - 1u) % VM_MBX_3D_REJECTION_HISTORY];
             if (witness->sequence != sequence) continue;
-            /* Decoder reasons retain their execution order: tiled, status,
-             * textured sprite, then solid quad. */
+            /* Direct-decoder reasons retain their execution order: tiled,
+             * status, textured sprite, then solid quad. The staged TA parser
+             * has a separate cursor/window witness below. */
             [rejectionWitnesses appendFormat:
                 @",mbx_3d_reject_%llu_reasons=%016llx:%016llx:%016llx:%016llx,"
                  "mbx_3d_reject_%llu_regs=%08x:%08x:%08x:%08x:%08x:%08x:%08x:%08x,"
@@ -626,6 +627,19 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
             for (uint32_t i = 0u; i < validWords; i++)
                 [rejectionWitnesses appendFormat:@":%08x",
                     witness->record_words[i]];
+            [rejectionWitnesses appendFormat:
+                @",mbx_3d_reject_%llu_ta=%016llx:%u:%u:%u:%u",
+                (unsigned long long)sequence,
+                (unsigned long long)witness->ta_reason_hash,
+                witness->ta_word_count, witness->ta_failure_word,
+                witness->ta_window_start_word,
+                witness->ta_window_valid_words];
+            uint32_t taWords = witness->ta_window_valid_words;
+            if (taWords > VM_MBX_3D_REJECTION_TA_WORDS)
+                taWords = VM_MBX_3D_REJECTION_TA_WORDS;
+            for (uint32_t i = 0u; i < taWords; i++)
+                [rejectionWitnesses appendFormat:@":%08x",
+                    witness->ta_window_words[i]];
         }
         if (rejectionWitnesses.length)
             execution = [execution stringByAppendingString:

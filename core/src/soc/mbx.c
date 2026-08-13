@@ -3738,6 +3738,7 @@ enum mbx_ta_parse_result {
 };
 
 struct mbx_ta_draw {
+    uint32_t start_word;
     uint32_t next_word;
     bool textured;
     bool filtered;
@@ -3756,6 +3757,17 @@ struct mbx_ta_global_transform {
     float origin_x;
     float origin_y;
 };
+
+struct mbx_ta_rejection_diagnostic {
+    uint32_t word_count;
+    uint32_t failure_word;
+};
+
+static void mbx_ta_rejection_at(
+        struct mbx_ta_rejection_diagnostic *diagnostic,
+        uint32_t word) {
+    if (diagnostic) diagnostic->failure_word = word;
+}
 
 static bool mbx_ta_sampler(uint32_t value) {
     return value == 0xd6087610u || value == 0x86084610u ||
@@ -4027,6 +4039,7 @@ static enum mbx_ta_parse_result mbx_ta_parse_draw(
     }
 
     memset(draw, 0, sizeof *draw);
+    draw->start_word = start;
     draw->textured = stride == 8u;
     if (draw->textured &&
         !mbx_ta_texture_state(words, start, control, draw)) {
@@ -4059,6 +4072,7 @@ static enum mbx_ta_parse_result mbx_ta_parse_continuation(
         return MBX_TA_DRAW_BAD;
     }
     memset(draw, 0, sizeof *draw);
+    draw->start_word = start;
     draw->textured = previous->textured;
     if (draw->textured) {
         draw->filtered = previous->filtered;
@@ -4474,13 +4488,20 @@ static bool mbx_ta_apply_draw(
 
 static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
                                   const char **why,
-                                  uint32_t *pixels_blended) {
+                                  uint32_t *pixels_blended,
+                                  struct mbx_ta_rejection_diagnostic
+                                      *diagnostic) {
+    if (diagnostic) {
+        diagnostic->word_count = 0u;
+        diagnostic->failure_word = UINT32_MAX;
+    }
     uint32_t capture = *mbx_ta_capture_slot(m);
     if ((capture & MBX_TA_CAPTURE_MAGIC_M) != MBX_TA_CAPTURE_MAGIC) {
         if (why) *why = "no complete staged TA stream";
         return false;
     }
     uint32_t count = capture & MBX_TA_CAPTURE_COUNT_M;
+    if (diagnostic) diagnostic->word_count = count;
     uint32_t object = m->reg[S5L_MBX_OBJBASE / 4u];
     uint32_t target = m->reg[S5L_MBX_FBSTART / 4u];
     if (count < 3u || count > MBX_TA_CAPTURE_MAX_WORDS ||
@@ -4533,6 +4554,8 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
     free(raw);
     if (!ok || words[0] != 0x10000010u ||
         words[count - 1u] != S5L_MBX_3D_SUBMIT) {
+        mbx_ta_rejection_at(diagnostic,
+            ok && words[0] == 0x10000010u ? count - 1u : 0u);
         free(words);
         free(draws);
         if (ok && why) *why = "TA stream framing is unknown or incomplete";
@@ -4546,6 +4569,7 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
         enum mbx_ta_parse_result parsed = mbx_ta_parse_draw(
             words, count, cursor, 0.0f, 0.0f, &draws[0], why);
         if (parsed == MBX_TA_DRAW_BAD) {
+            mbx_ta_rejection_at(diagnostic, cursor);
             free(words);
             free(draws);
             return false;
@@ -4556,6 +4580,7 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
         }
     }
     if (first_draw == UINT32_MAX) {
+        mbx_ta_rejection_at(diagnostic, 1u);
         free(words);
         free(draws);
         if (why) *why = "TA stream contains no measured draw";
@@ -4564,10 +4589,16 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
     struct mbx_ta_global_transform transform;
     if (!mbx_ta_global_transform(words, first_draw,
                                  target_width, target_height,
-                                 &transform, why) ||
-        mbx_ta_parse_draw(words, count, first_draw,
+                                 &transform, why)) {
+        mbx_ta_rejection_at(diagnostic, 1u);
+        free(words);
+        free(draws);
+        return false;
+    }
+    if (mbx_ta_parse_draw(words, count, first_draw,
                           transform.origin_x, transform.origin_y,
                           &draws[0], why) != MBX_TA_DRAW_OK) {
+        mbx_ta_rejection_at(diagnostic, first_draw);
         free(words);
         free(draws);
         return false;
@@ -4578,6 +4609,7 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
     while (cursor != count - 1u) {
         if (cursor >= count - 1u || draw_count >= count) {
             ok = false;
+            mbx_ta_rejection_at(diagnostic, cursor);
             if (why) *why = "TA draw chain leaves the stream";
             break;
         }
@@ -4598,6 +4630,7 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
         }
         if (parsed != MBX_TA_DRAW_OK) {
             ok = false;
+            mbx_ta_rejection_at(diagnostic, cursor);
             if (parsed == MBX_TA_NOT_DRAW && why) {
                 *why = "TA draw chain contains unknown inter-draw state";
                 if (mbx_trace_state == 1) {
@@ -4637,6 +4670,7 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
             clip_left, clip_top, clip_right, clip_bottom,
             target_pixels, &dirty_left, &dirty_top,
             &dirty_right, &dirty_bottom, &total_pixels, why);
+        if (!ok) mbx_ta_rejection_at(diagnostic, draws[i].start_word);
     }
     free(draws);
     if (ok && (!total_pixels || total_pixels > UINT32_MAX)) {
@@ -4669,6 +4703,8 @@ static void mbx_capture_3d_rejection(
         const s5l_mbx_t *m, const arm_bus_t *bus,
         const char *tiled_why, const char *status_why,
         const char *sprite_why, const char *solid_why,
+        const char *ta_why,
+        const struct mbx_ta_rejection_diagnostic *ta_diagnostic,
         s5l_mbx_telemetry_t *telemetry) {
     if (!m || !bus || !telemetry || !telemetry->rejected_3d) return;
 
@@ -4682,6 +4718,12 @@ static void mbx_capture_3d_rejection(
     witness->status_reason_hash = mbx_rejection_reason_hash(status_why);
     witness->sprite_reason_hash = mbx_rejection_reason_hash(sprite_why);
     witness->solid_reason_hash = mbx_rejection_reason_hash(solid_why);
+    witness->ta_reason_hash = mbx_rejection_reason_hash(ta_why);
+    witness->ta_failure_word = UINT32_MAX;
+    if (ta_diagnostic) {
+        witness->ta_word_count = ta_diagnostic->word_count;
+        witness->ta_failure_word = ta_diagnostic->failure_word;
+    }
     witness->region = m->reg[S5L_MBX_RGNBASE / 4u];
     witness->object = m->reg[S5L_MBX_OBJBASE / 4u];
     witness->target = m->reg[S5L_MBX_FBSTART / 4u];
@@ -4691,6 +4733,42 @@ static void mbx_capture_3d_rejection(
     witness->framebuffer_control = m->reg[S5L_MBX_FBCTL / 4u];
     witness->framebuffer_stride =
         m->reg[S5L_MBX_FBLINESTRIDE / 4u];
+
+    /* The PIO command stream is the only authoritative witness when the
+     * object database contains staged TA words rather than a legacy object
+     * list. Retain a bounded window around the parser cursor before the guest
+     * reuses that allocation. A missing cursor deliberately captures the
+     * header instead; diagnostics must never change completion semantics. */
+    if (witness->ta_word_count > 0u &&
+        witness->ta_word_count <= MBX_TA_CAPTURE_MAX_WORDS &&
+        witness->object != 0u && (witness->object & 3u) == 0u &&
+        witness->object ==
+            m->reg[S5L_MBX_TA_OBJECT_DATABASE / 4u]) {
+        uint32_t start = 0u;
+        if (witness->ta_failure_word != UINT32_MAX) {
+            uint32_t anchor = witness->ta_failure_word;
+            if (anchor >= witness->ta_word_count)
+                anchor = witness->ta_word_count - 1u;
+            start = anchor > 16u ? anchor - 16u : 0u;
+        }
+        witness->ta_window_start_word = start;
+        uint32_t available = witness->ta_word_count - start;
+        if (available > S5L_MBX_3D_REJECTION_TA_WORDS)
+            available = S5L_MBX_3D_REJECTION_TA_WORDS;
+        uint64_t base64 = (uint64_t)witness->object + start * 4u;
+        if (base64 <= UINT32_MAX - (available - 1u) * 4u) {
+            const char *ta_capture_why =
+                "TA rejection-window read failed";
+            for (uint32_t i = 0u; i < available; i++) {
+                uint32_t value = 0u;
+                if (!mbx_gart_u32(m, bus, (uint32_t)base64 + i * 4u,
+                                  &value, &ta_capture_why))
+                    break;
+                witness->ta_window_words[i] = value;
+                witness->ta_window_valid_words = i + 1u;
+            }
+        }
+    }
 
     const char *capture_why = "rejection-witness read failed";
     uint64_t list64 = (uint64_t)witness->object + 0x68u;
@@ -4838,6 +4916,9 @@ bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
     const char *sprite_why = "unknown sprite rejection";
     const char *solid_why = "unknown solid rejection";
     const char *ta_why = "unknown TA-stream rejection";
+    struct mbx_ta_rejection_diagnostic ta_diagnostic = {
+        .failure_word = UINT32_MAX,
+    };
     uint32_t pixels = 0u;
     uint32_t kind = S5L_MBX_3D_ACCEPT_TILED;
     bool accepted = mbx_execute_first_tiled_over(
@@ -4856,7 +4937,8 @@ bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
     }
     if (!accepted) {
         kind = S5L_MBX_3D_ACCEPT_TA_STREAM;
-        accepted = mbx_execute_ta_stream(m, bus, &ta_why, &pixels);
+        accepted = mbx_execute_ta_stream(
+            m, bus, &ta_why, &pixels, &ta_diagnostic);
     }
     if (!accepted) {
         mbx_counter_add(&mbx_3d_rejected, 1u);
@@ -4864,7 +4946,7 @@ bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
             mbx_counter_add(&telemetry->rejected_3d, 1u);
             mbx_capture_3d_rejection(
                 m, bus, tiled_why, status_why, sprite_why, solid_why,
-                telemetry);
+                ta_why, &ta_diagnostic, telemetry);
         }
         if (mbx_trace_state == 1) {
             fprintf(stderr,
@@ -4879,12 +4961,17 @@ bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
                 fprintf(stderr,
                         "MBX3D witness #%llu regs "
                         "%08x:%08x:%08x:%08x:%08x:%08x:%08x:%08x "
+                        "ta %016llx:%u:%u:%u:%u "
                         "list %x:%08x:%08x:%08x:%08x record %08x:%u",
                         (unsigned long long)sequence,
                         witness->region, witness->object,
                         witness->target, witness->xclip, witness->yclip,
                         witness->pixel_sample, witness->framebuffer_control,
                         witness->framebuffer_stride,
+                        (unsigned long long)witness->ta_reason_hash,
+                        witness->ta_word_count, witness->ta_failure_word,
+                        witness->ta_window_start_word,
+                        witness->ta_window_valid_words,
                         witness->list_valid_mask, witness->list_words[0],
                         witness->list_words[1], witness->list_words[2],
                         witness->list_words[3], witness->record_base,

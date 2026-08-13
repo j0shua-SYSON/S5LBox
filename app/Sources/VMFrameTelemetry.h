@@ -76,6 +76,7 @@ typedef struct {
 #define VM_COMPACT_PC_PROFILE_HOT_COUNT 8u
 #define VM_MBX_3D_REJECTION_HISTORY 4u
 #define VM_MBX_3D_REJECTION_RECORD_WORDS 44u
+#define VM_MBX_3D_REJECTION_TA_WORDS 64u
 #define VM_MBX_3D_ACCEPT_HISTORY 16u
 #define VM_MBX_3D_ACCEPT_RECORD_WORDS 8u
 #define VM_MBX_3D_TARGET_LEDGER 8u
@@ -86,6 +87,12 @@ typedef struct {
     uint64_t status_reason_hash;
     uint64_t sprite_reason_hash;
     uint64_t solid_reason_hash;
+    uint64_t ta_reason_hash;
+    uint32_t ta_word_count;
+    uint32_t ta_failure_word;
+    uint32_t ta_window_start_word;
+    uint32_t ta_window_valid_words;
+    uint32_t ta_window_words[VM_MBX_3D_REJECTION_TA_WORDS];
     uint32_t region;
     uint32_t object;
     uint32_t target;

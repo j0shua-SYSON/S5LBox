@@ -87,6 +87,9 @@ _Static_assert(S5L_MBX_3D_REJECTION_HISTORY ==
 _Static_assert(S5L_MBX_3D_REJECTION_RECORD_WORDS ==
                    VM_MBX_3D_REJECTION_RECORD_WORDS,
                "core/app 3D rejection record sizes differ");
+_Static_assert(S5L_MBX_3D_REJECTION_TA_WORDS ==
+                   VM_MBX_3D_REJECTION_TA_WORDS,
+               "core/app 3D rejection TA windows differ");
 _Static_assert(sizeof(s5l_mbx_3d_rejection_witness_t) ==
                    sizeof(vm_mbx_3d_rejection_witness_t),
                "core/app 3D rejection witness layouts differ");
@@ -99,6 +102,12 @@ VM_ASSERT_MBX_REJECTION_OFFSET(tiled_reason_hash);
 VM_ASSERT_MBX_REJECTION_OFFSET(status_reason_hash);
 VM_ASSERT_MBX_REJECTION_OFFSET(sprite_reason_hash);
 VM_ASSERT_MBX_REJECTION_OFFSET(solid_reason_hash);
+VM_ASSERT_MBX_REJECTION_OFFSET(ta_reason_hash);
+VM_ASSERT_MBX_REJECTION_OFFSET(ta_word_count);
+VM_ASSERT_MBX_REJECTION_OFFSET(ta_failure_word);
+VM_ASSERT_MBX_REJECTION_OFFSET(ta_window_start_word);
+VM_ASSERT_MBX_REJECTION_OFFSET(ta_window_valid_words);
+VM_ASSERT_MBX_REJECTION_OFFSET(ta_window_words);
 VM_ASSERT_MBX_REJECTION_OFFSET(region);
 VM_ASSERT_MBX_REJECTION_OFFSET(object);
 VM_ASSERT_MBX_REJECTION_OFFSET(target);
