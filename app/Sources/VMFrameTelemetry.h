@@ -142,6 +142,8 @@ typedef struct {
     uint32_t cpu_fiq_line;
     uint32_t wfi_host_pacing_enabled;
     uint32_t active_host_clock_enabled;
+    uint32_t active_clock_input_guard_active;
+    uint32_t active_clock_deadline_shield_active;
     uint64_t cpu_retired;
     uint64_t interpreter_tick_batches;
     uint64_t interpreter_tick_batched_retired;
@@ -188,6 +190,9 @@ typedef struct {
     uint64_t active_clock_added_ticks;
     uint64_t active_clock_clamps;
     uint64_t active_clock_failures;
+    uint64_t active_clock_input_guards;
+    uint64_t active_clock_input_guard_quiesces;
+    uint64_t active_clock_deadline_shields;
     uint64_t wfi_paced_waits;
     uint64_t wfi_paced_wait_ns;
     uint64_t wfi_paced_partial_advances;

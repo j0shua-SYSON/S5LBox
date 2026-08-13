@@ -36,6 +36,12 @@ static int g_pass, g_fail;
     } \
 } while (0)
 
+static bool active_clock_now_probe(void *ctx, uint64_t *nanoseconds) {
+    if (!ctx || !nanoseconds) return false;
+    *nanoseconds = *(const uint64_t *)ctx;
+    return true;
+}
+
 /*
  * THE DEVICE TREE, TRANSCRIBED HERE INDEPENDENTLY of the model's own table, so
  * that changing the model is a test failure rather than a silently agreed
@@ -888,6 +894,10 @@ static void test_power_wakes_standby_through_retained_reset(void) {
     s5l8900_t m;
     CHECK(s5l8900_init(&m, S5L8900_SDRAM_BASE, 1u << 16),
           "machine init failed");
+    uint64_t host_now_ns = UINT64_C(1000000000);
+    CHECK(s5l8900_set_active_host_clock(
+              &m, active_clock_now_probe, &host_now_ns),
+          "could not install active clock for Power-wake guard test");
     arm_all(&m);
     arm_pmu_irq(&m);
     unsigned pmu_group = S5L_GPIOIC_LINE_PMU >> 5;
@@ -905,6 +915,10 @@ static void test_power_wakes_standby_through_retained_reset(void) {
     m.active_clock_guest_ticks_since_sync = 88u;
     m.active_clock_fraction = 77u;
     m.active_clock_anchor_valid = true;
+    m.active_clock_input_guard_host_ns = 99u;
+    m.active_clock_input_guard = true;
+    m.active_clock_input_guard_host_valid = true;
+    m.active_clock_deadline_shield = true;
 
     CHECK(!s5l8900_set_button(&m, S5L_BUTTON_COUNT, true),
           "nonexistent sleeping button was accepted");
@@ -945,6 +959,13 @@ static void test_power_wakes_standby_through_retained_reset(void) {
           m.active_clock_guest_ticks_since_sync == 0u &&
           m.active_clock_fraction == 0u,
           "warm reset retained stale host-clock state");
+    CHECK(m.active_clock_input_guard_host_ns == 0u &&
+          m.active_clock_input_guards == 1u &&
+          m.active_clock_input_guard &&
+          !m.active_clock_input_guard_host_valid &&
+          !m.active_clock_deadline_shield,
+          "physical Power wake did not replace stale clock state with one "
+          "fresh input guard");
     unsigned hold_line = s5l_button_line(S5L_BUTTON_HOLD);
     uint32_t hold_bit = 1u << (hold_line & 31u);
     unsigned hold_group = hold_line >> 5;
@@ -996,6 +1017,10 @@ static void test_restore_wakes_standby_without_a_button(void) {
           "NULL machine was reported as woken");
     CHECK(s5l8900_init(&m, S5L8900_SDRAM_BASE, 1u << 16),
           "machine init failed");
+    uint64_t host_now_ns = UINT64_C(2000000000);
+    CHECK(s5l8900_set_active_host_clock(
+              &m, active_clock_now_probe, &host_now_ns),
+          "could not install active clock for restore-wake test");
     arm_all(&m);
     arm_pmu_irq(&m);
     CHECK(!s5l8900_wake_from_standby(&m),
@@ -1014,6 +1039,10 @@ static void test_restore_wakes_standby_without_a_button(void) {
     m.active_clock_guest_ticks_since_sync = 188u;
     m.active_clock_fraction = 177u;
     m.active_clock_anchor_valid = true;
+    m.active_clock_input_guard_host_ns = 199u;
+    m.active_clock_input_guard = true;
+    m.active_clock_input_guard_host_valid = true;
+    m.active_clock_deadline_shield = true;
 
     uint8_t pressed = m.buttons.pressed;
     uint64_t sets = m.buttons.sets;
@@ -1043,6 +1072,12 @@ static void test_restore_wakes_standby_without_a_button(void) {
           m.active_clock_guest_ticks_since_sync == 0u &&
           m.active_clock_fraction == 0u,
           "restore wake retained stale host-clock state");
+    CHECK(m.active_clock_input_guard_host_ns == 0u &&
+          m.active_clock_input_guards == 0u &&
+          !m.active_clock_input_guard &&
+          !m.active_clock_input_guard_host_valid &&
+          !m.active_clock_deadline_shield,
+          "buttonless restore wake retained or manufactured an input guard");
     CHECK(m.buttons.pressed == pressed && m.buttons.sets == sets &&
           m.buttons.edges == edges && m.buttons.refused == refused,
           "restore wake manufactured a host button transition");

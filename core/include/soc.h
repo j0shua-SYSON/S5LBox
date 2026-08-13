@@ -3842,6 +3842,15 @@ typedef void (*s5l_uart4_host_service_fn)(void *ctx, unsigned retired);
  * debugger stop or starved frontend interval still cannot arrive in one
  * burst. During active execution the clock is sampled much more frequently. */
 #define S5L8900_ACTIVE_CLOCK_MAX_STEP_NS UINT64_C(8000000)
+/* Accepted input normally keeps the active host clock: that is what gives UI
+ * timers real-time cadence. Only a foreground interval that is still not
+ * quiescent after this much host time is pathological enough to protect from
+ * guest deadlines by falling back to instruction-clocked execution. */
+#define S5L8900_ACTIVE_CLOCK_INPUT_SHIELD_NS UINT64_C(15000000000)
+/* A wait this far from its next modeled wake is a strong quiescence witness.
+ * Short display/animation waits must not end deadline protection midway
+ * through the transition that required it. */
+#define S5L8900_ACTIVE_CLOCK_QUIESCENT_WFI_SECONDS UINT64_C(1)
 /* Keep engine/interpreter retirement groups small for input and MMIO checks,
  * but do not turn every such boundary into an expensive host clock call. At
  * the measured 16--30 Minsn/s, 4096 retirements are about 0.14--0.26 ms. */
@@ -4084,7 +4093,8 @@ typedef struct {
      * The callback/context and evidence counters survive snapshot restore.
      * The anchor, conversion remainder and ticks observed since the anchor are
      * transient: snapshot_load() clears them so a restored guest instant can
-     * never be compared with an older host instant.
+     * never be compared with an older host instant. The interaction guard's
+     * host anchor and active/shield flags are transient for the same reason.
      *
      * Every s5l8900_tick() while the callback is installed contributes to
      * guest_ticks_since_sync. That includes paced WFI intervals, allowing the
@@ -4100,7 +4110,19 @@ typedef struct {
     uint64_t               active_clock_added_ticks;
     uint64_t               active_clock_clamps;
     uint64_t               active_clock_failures;
+    /* Accepted input starts (or renews) a guarded foreground interval without
+     * changing normal active-clock cadence. If that interval outlives the
+     * threshold above, a deadline shield temporarily selects instruction time
+     * until a long paced WFI proves quiescence. These are host-policy state and
+     * evidence, not serialized guest state. */
+    uint64_t               active_clock_input_guard_host_ns;
+    uint64_t               active_clock_input_guards;
+    uint64_t               active_clock_input_guard_quiesces;
+    uint64_t               active_clock_deadline_shields;
     bool                   active_clock_anchor_valid;
+    bool                   active_clock_input_guard;
+    bool                   active_clock_input_guard_host_valid;
+    bool                   active_clock_deadline_shield;
 
     /*
      * uart4's optional host peer. Host wiring, never guest state: snapshot

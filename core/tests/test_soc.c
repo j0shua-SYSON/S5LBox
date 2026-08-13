@@ -573,7 +573,14 @@ static void test_active_host_clock_is_optional_bounded_and_fail_closed(void) {
           active.active_host_now_ctx == NULL &&
           active.active_clock_updates == 0u &&
           active.active_clock_failures == 0u &&
-          !active.active_clock_anchor_valid,
+          active.active_clock_input_guard_host_ns == 0u &&
+          active.active_clock_input_guards == 0u &&
+          active.active_clock_input_guard_quiesces == 0u &&
+          active.active_clock_deadline_shields == 0u &&
+          !active.active_clock_anchor_valid &&
+          !active.active_clock_input_guard &&
+          !active.active_clock_input_guard_host_valid &&
+          !active.active_clock_deadline_shield,
           "active-clock clear retained policy, evidence or anchor");
     s5l8900_free(&active);
 
@@ -640,6 +647,215 @@ static void test_active_host_clock_does_not_double_count_paced_wfi(void) {
           (unsigned long long)m.active_clock_added_ticks,
           (unsigned long long)m.active_clock_updates,
           (unsigned long long)m.active_clock_guest_ticks_since_sync);
+    s5l8900_free(&m);
+}
+
+static void test_active_host_clock_shields_only_pathological_input_work(void) {
+    uint32_t program[32];
+    fill_arm_nops(program, sizeof program / sizeof program[0]);
+    const uint32_t wfi = 0xee070f90u;
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20),
+          "input-guard clock machine init failed");
+    s5l8900_load(&m, 0, program, sizeof program);
+    m.cpu_hz = m.tb_hz = 1000u;
+    m.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I | ARM_CPSR_F;
+
+    active_clock_probe_t probe = {
+        .now_ns = UINT64_C(1000000000), .succeeds = true
+    };
+    CHECK(s5l8900_set_active_host_clock(
+              &m, active_clock_probe_now, &probe) &&
+          s5l8900_set_wfi_host_pacing(
+              &m, active_clock_probe_sleep, &probe),
+          "could not enable guarded active-clock policy");
+
+    arm_status_t st = ARM_OK;
+    unsigned ran = s5l8900_run(&m, 1u, &st);
+    CHECK(st == ARM_OK && ran == 1u && m.timer.ticks == 0u &&
+          m.active_clock_anchor_valid,
+          "guarded-clock setup did not establish a stationary host anchor");
+
+    unsigned menu_line = s5l_button_line(S5L_BUTTON_MENU);
+    uint32_t menu_bit = UINT32_C(1) << (menu_line & 31u);
+    m.gpioic.en[menu_line >> 5] |= menu_bit;
+    CHECK(s5l8900_set_button(&m, S5L_BUTTON_MENU, true) &&
+          m.active_clock_input_guard &&
+          m.active_clock_input_guards == 1u &&
+          !m.active_clock_input_guard_host_valid &&
+          !m.active_clock_deadline_shield &&
+          !m.active_clock_anchor_valid,
+          "accepted button input did not begin a fresh guard: guard=%d "
+          "starts=%llu host_valid=%d shield=%d anchor=%d",
+          (int)m.active_clock_input_guard,
+          (unsigned long long)m.active_clock_input_guards,
+          (int)m.active_clock_input_guard_host_valid,
+          (int)m.active_clock_deadline_shield,
+          (int)m.active_clock_anchor_valid);
+
+    /* Input must not immediately select instruction time: the first sample
+     * anchors the interaction and the next 5 ms advances at wall cadence. */
+    probe.now_ns += UINT64_C(5000000);
+    ran = s5l8900_run(&m, 1u, &st);
+    CHECK(st == ARM_OK && ran == 1u && m.timer.ticks == 0u &&
+          m.active_clock_input_guard_host_valid &&
+          m.active_clock_anchor_valid &&
+          !m.active_clock_deadline_shield,
+          "first guarded run did not anchor normal active time");
+    probe.now_ns += UINT64_C(5000000);
+    ran = s5l8900_run(&m, 1u, &st);
+    CHECK(st == ARM_OK && ran == 1u && m.timer.ticks == 5u &&
+          m.active_clock_added_ticks == 5u &&
+          !m.active_clock_deadline_shield,
+          "accepted input disabled normal wall-clock cadence: status=%d "
+          "ran=%u ticks=%llu added=%llu shield=%d",
+          (int)st, ran, (unsigned long long)m.timer.ticks,
+          (unsigned long long)m.active_clock_added_ticks,
+          (int)m.active_clock_deadline_shield);
+
+    /* Repeating the same held electrical state delivers no new guest edge and
+     * must not renew the interaction deadline. */
+    CHECK(s5l8900_set_button(&m, S5L_BUTTON_MENU, true) &&
+          m.active_clock_input_guards == 1u,
+          "idempotent button state manufactured a second input guard");
+
+    /* This is the app's real touch sequence: mutate the nested controller,
+     * then immediately request a zero-time machine refresh. Detecting only at
+     * the next run entry would be too late because ext_seen is updated here. */
+    m.mtz2.atn = true;
+    s5l8900_tick(&m, 0u);
+    CHECK(m.active_clock_input_guard &&
+          m.active_clock_input_guards == 2u &&
+          !m.active_clock_input_guard_host_valid &&
+          !m.active_clock_deadline_shield &&
+          !m.active_clock_anchor_valid,
+          "zero-tick touch refresh did not renew the input guard");
+    s5l8900_tick(&m, 0u);
+    CHECK(m.active_clock_input_guards == 2u,
+          "one asserted touch report manufactured multiple guards");
+
+    ran = s5l8900_run(&m, 1u, &st); /* fresh interaction anchor */
+    CHECK(st == ARM_OK && ran == 1u &&
+          m.active_clock_input_guard_host_valid &&
+          !m.active_clock_deadline_shield,
+          "touch guard did not establish a host deadline anchor");
+
+    /* Even a very late but still sub-threshold sample keeps normal active time
+     * (bounded by the ordinary 8 ms catch-up cap). Crossing the threshold is
+     * the first point at which instruction time is selected. */
+    probe.now_ns += S5L8900_ACTIVE_CLOCK_INPUT_SHIELD_NS - UINT64_C(1);
+    ran = s5l8900_run(&m, 1u, &st);
+    CHECK(st == ARM_OK && ran == 1u &&
+          !m.active_clock_deadline_shield &&
+          m.active_clock_deadline_shields == 0u,
+          "deadline shield engaged before its documented threshold");
+    uint64_t ticks_before_shield = m.timer.ticks;
+    probe.now_ns += UINT64_C(1);
+    ran = s5l8900_run(&m, 1u, &st);
+    CHECK(st == ARM_OK && ran == 1u &&
+          m.timer.ticks == ticks_before_shield + 1u &&
+          m.active_clock_input_guard &&
+          m.active_clock_deadline_shield &&
+          m.active_clock_deadline_shields == 1u &&
+          !m.active_clock_anchor_valid,
+          "pathological input work did not switch atomically to instruction "
+          "time: status=%d ran=%u ticks=%llu/%llu guard=%d shield=%d count=%llu",
+          (int)st, ran, (unsigned long long)m.timer.ticks,
+          (unsigned long long)ticks_before_shield,
+          (int)m.active_clock_input_guard,
+          (int)m.active_clock_deadline_shield,
+          (unsigned long long)m.active_clock_deadline_shields);
+
+    /* An actual new electrical edge starts a fresh normal-cadence interaction;
+     * repeating the already-observed touch level above deliberately did not. */
+    unsigned hold_line = s5l_button_line(S5L_BUTTON_HOLD);
+    uint32_t hold_bit = UINT32_C(1) << (hold_line & 31u);
+    m.gpioic.en[hold_line >> 5] |= hold_bit;
+    CHECK(s5l8900_set_button(&m, S5L_BUTTON_HOLD, true) &&
+          m.active_clock_input_guards == 3u &&
+          m.active_clock_input_guard &&
+          !m.active_clock_input_guard_host_valid &&
+          !m.active_clock_deadline_shield &&
+          !m.active_clock_anchor_valid,
+          "new input did not clear the old deadline shield safely");
+    ran = s5l8900_run(&m, 1u, &st); /* anchor the new guard */
+    CHECK(st == ARM_OK && ran == 1u &&
+          m.active_clock_input_guard_host_valid,
+          "replacement input guard did not anchor");
+    probe.now_ns += S5L8900_ACTIVE_CLOCK_INPUT_SHIELD_NS;
+    ran = s5l8900_run(&m, 1u, &st);
+    CHECK(st == ARM_OK && ran == 1u &&
+          m.active_clock_deadline_shield &&
+          m.active_clock_deadline_shields == 2u,
+          "replacement interaction did not independently reach its shield");
+
+    /* These synthetic button edges are intentionally not serviced by a guest
+     * driver. Stop routing them before WFI so the timer remains its only
+     * enabled wake source. */
+    m.gpioic.en[menu_line >> 5] &= ~menu_bit;
+    m.gpioic.en[hold_line >> 5] &= ~hold_bit;
+    m.level_dirty = true;
+    s5l8900_tick(&m, 0u);
+
+    /* A 16 ms modeled wait can be an animation/display boundary. WFI pacing
+     * advances only its first 8 ms slice and must retain the shield. */
+    s5l8900_load(&m, m.cpu.r[15], &wfi, sizeof wfi);
+    m.timer.t4_count = m.timer.t4_value = 16u;
+    m.timer.t4_state = TIMER4_STATE_START;
+    m.vic[0].enable = 1u << S5L8900_IRQ_TIMER;
+    unsigned sleeps_before = probe.sleep_calls;
+    ran = s5l8900_run(&m, 1u, &st);
+    CHECK(st == ARM_OK && ran == 1u &&
+          probe.sleep_calls == sleeps_before + 1u &&
+          probe.last_sleep_ns == UINT64_C(8000000) &&
+          m.active_clock_input_guard &&
+          m.active_clock_deadline_shield &&
+          m.active_clock_input_guard_quiesces == 0u,
+          "short animation-like WFI cleared deadline protection: status=%d "
+          "ran=%u sleeps=%u guard=%d shield=%d quiesces=%llu",
+          (int)st, ran, probe.sleep_calls,
+          (int)m.active_clock_input_guard,
+          (int)m.active_clock_deadline_shield,
+          (unsigned long long)m.active_clock_input_guard_quiesces);
+
+    /* A next modeled wake at least one second away is the strong idle witness.
+     * It clears both transients before pacing the same bounded 8 ms host slice. */
+    s5l8900_load(&m, m.cpu.r[15], &wfi, sizeof wfi);
+    m.timer.t4_count = m.timer.t4_value = 1000u;
+    m.timer.t4_state = TIMER4_STATE_START;
+    ran = s5l8900_run(&m, 1u, &st);
+    CHECK(st == ARM_OK && ran == 1u &&
+          probe.sleep_calls == sleeps_before + 2u &&
+          !m.active_clock_input_guard &&
+          !m.active_clock_input_guard_host_valid &&
+          !m.active_clock_deadline_shield &&
+          m.active_clock_input_guard_quiesces == 1u &&
+          !m.active_clock_anchor_valid,
+          "long paced WFI did not quiesce the guarded interval: status=%d "
+          "ran=%u sleeps=%u guard=%d shield=%d quiesces=%llu anchor=%d",
+          (int)st, ran, probe.sleep_calls,
+          (int)m.active_clock_input_guard,
+          (int)m.active_clock_deadline_shield,
+          (unsigned long long)m.active_clock_input_guard_quiesces,
+          (int)m.active_clock_anchor_valid);
+
+    uint32_t nop = 0xe1a00000u;
+    uint64_t ticks_at_quiescence = m.timer.ticks;
+    s5l8900_load(&m, m.cpu.r[15], &nop, sizeof nop);
+    ran = s5l8900_run(&m, 1u, &st); /* fresh anchor, no catch-up */
+    CHECK(st == ARM_OK && ran == 1u &&
+          m.timer.ticks == ticks_at_quiescence &&
+          m.active_clock_anchor_valid,
+          "post-shield anchor manufactured discarded host time");
+    probe.now_ns += UINT64_C(5000000);
+    s5l8900_load(&m, m.cpu.r[15], &nop, sizeof nop);
+    ran = s5l8900_run(&m, 1u, &st);
+    CHECK(st == ARM_OK && ran == 1u &&
+          m.timer.ticks == ticks_at_quiescence + 5u,
+          "wall-clock cadence did not resume after quiescence: status=%d "
+          "ran=%u ticks=%llu/%llu",
+          (int)st, ran, (unsigned long long)m.timer.ticks,
+          (unsigned long long)ticks_at_quiescence);
     s5l8900_free(&m);
 }
 
@@ -6066,6 +6282,7 @@ int main(void) {
     test_wfi_host_pacing_bounds_long_and_failed_waits();
     test_active_host_clock_is_optional_bounded_and_fail_closed();
     test_active_host_clock_does_not_double_count_paced_wfi();
+    test_active_host_clock_shields_only_pathological_input_work();
     test_active_host_clock_preserves_only_bounded_wfi_oversleep();
     test_active_host_clock_refreshes_devices_without_oversampling();
     test_wfi_unmasked_fiq_uses_the_post_mcr_return_link();

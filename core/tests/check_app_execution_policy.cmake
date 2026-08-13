@@ -66,13 +66,17 @@ if(NOT wfi_clock_count EQUAL 1 OR
         "intervals exactly once; found ${wfi_clock_count} references")
 endif()
 
-if(text MATCHES "S5LBOX_IOS_ACTIVE_REALTIME_CLOCK")
+string(REGEX MATCHALL "S5LBOX_IOS_ACTIVE_REALTIME_CLOCK"
+    active_clock_occurrences "${text}")
+list(LENGTH active_clock_occurrences active_clock_count)
+if(NOT active_clock_count EQUAL 1 OR
+   NOT text MATCHES "S5LBOX_IOS_ACTIVE_REALTIME_CLOCK=1")
     message(FATAL_ERROR
-        "${APP_PROJECT} must not synchronize active execution to wall time; "
-        "physical unlock replay proved that policy can expire guest sleep "
-        "deadlines before emulated foreground work completes")
+        "${APP_PROJECT} must select the interaction-safe active host clock "
+        "exactly once; found ${active_clock_count} references")
 endif()
 
 message(STATUS
     "iOS policy: compact live-byte engine plus direct writes selected; "
-    "WFI paced; active wall clock and rejected graph disabled")
+    "WFI and interaction-safe active wall clock enabled; rejected graph "
+    "disabled")

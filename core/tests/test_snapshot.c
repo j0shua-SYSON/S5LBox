@@ -505,6 +505,13 @@ static void test_device_state_round_trips(void) {
     b->active_clock_guest_ticks_since_sync = 406u;
     b->active_clock_fraction = 407u;
     b->active_clock_anchor_valid = true;
+    b->active_clock_input_guard_host_ns = 408u;
+    b->active_clock_input_guards = 409u;
+    b->active_clock_input_guard_quiesces = 410u;
+    b->active_clock_deadline_shields = 411u;
+    b->active_clock_input_guard = true;
+    b->active_clock_input_guard_host_valid = true;
+    b->active_clock_deadline_shield = true;
 
     /* uart4's peer is also live frontend wiring. A restore must retain the
      * destination callbacks and context, never import pointers from `a`. */
@@ -547,12 +554,19 @@ static void test_device_state_round_trips(void) {
           b->active_clock_added_ticks == 402u &&
           b->active_clock_clamps == 403u &&
           b->active_clock_failures == 404u &&
+          b->active_clock_input_guards == 409u &&
+          b->active_clock_input_guard_quiesces == 410u &&
+          b->active_clock_deadline_shields == 411u &&
           b->active_clock_last_host_ns == 0u &&
           b->active_clock_guest_ticks_since_sync == 0u &&
           b->active_clock_fraction == 0u &&
-          !b->active_clock_anchor_valid,
+          !b->active_clock_anchor_valid &&
+          b->active_clock_input_guard_host_ns == 0u &&
+          !b->active_clock_input_guard &&
+          !b->active_clock_input_guard_host_valid &&
+          !b->active_clock_deadline_shield,
           "snapshot restore changed active host policy/evidence or retained "
-          "a stale anchor");
+          "a stale anchor/interaction guard");
     CHECK(b->uart4_host_tx == snapshot_uart4_tx_probe &&
           b->uart4_host_service == snapshot_uart4_service_probe &&
           b->uart4_host_ctx == &uart4_host_context,

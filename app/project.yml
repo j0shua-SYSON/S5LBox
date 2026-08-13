@@ -158,12 +158,12 @@ targets:
           # time. Pace only autonomous idle intervals and yield every 8 ms;
           # active CPU execution and generic core harnesses remain unthrottled.
           - S5LBOX_IOS_WFI_REALTIME_PACING=1
-          # Do not synchronize active guest execution to wall time. A physical
-          # same-checkpoint A/B showed that slow unlock work then loses a race
-          # with the guest's own sleep deadline: the swipe is accepted, but the
-          # LCD, GPU and touch controller power down before SpringBoard finishes
-          # it. Retired instructions therefore remain the active-time clock;
-          # the WFI policy above still prevents autonomous idle fast-forward.
+          # Keep animations and active timer cadence tied to monotonic host
+          # time. Accepted input starts a guard but does not slow normal work;
+          # only a still-busy pathological transition reaches the core's
+          # deadline shield before Auto-Lock can overtake it. A long paced WFI
+          # ends that shield and anchors host time afresh.
+          - S5LBOX_IOS_ACTIVE_REALTIME_CLOCK=1
         # Stated rather than inherited: the Objective-C sources are written for
         # ARC, and would leak (or double-free) under manual retain/release.
         CLANG_ENABLE_OBJC_ARC: YES

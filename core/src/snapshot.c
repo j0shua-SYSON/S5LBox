@@ -198,10 +198,14 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * 125704 adds eight per-framebuffer target aggregates (8 x 40), likewise
  * host-only, so a short witness ring cannot hide which completed surface later
  * became the active CLCD scanout.
+ * 125736 adds the active-clock interaction guard's host anchor, three evidence
+ * counters and transient guard/shield flags. Snapshot restore preserves the
+ * counters but clears all transient clock policy beside the old host anchor;
+ * none is guest state or part of snap_mach().
  * SNAPSHOT_VERSION and the bytes on disk therefore do not move. The size below
  * must be read from the compiler's emitted `.space`, not inferred from source
  * padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         125704, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         125736, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -1562,6 +1566,10 @@ static snapshot_status_t snap_apply(s5l8900_t *m, FILE *f,
     m->active_clock_guest_ticks_since_sync = 0u;
     m->active_clock_fraction = 0u;
     m->active_clock_anchor_valid = false;
+    m->active_clock_input_guard_host_ns = 0u;
+    m->active_clock_input_guard = false;
+    m->active_clock_input_guard_host_valid = false;
+    m->active_clock_deadline_shield = false;
     return SNAP_OK;
 }
 

@@ -37,6 +37,8 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.cpu_fiq_line = (uint32_t)((base >> 1u) & 1u);
     value.wfi_host_pacing_enabled = 1u;
     value.active_host_clock_enabled = 1u;
+    value.active_clock_input_guard_active = 1u;
+    value.active_clock_deadline_shield_active = 1u;
     value.cpu_retired = base + 1u;
     value.interpreter_tick_batches = base + 2u;
     value.interpreter_tick_batched_retired = base + 3u;
@@ -100,6 +102,9 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.active_clock_added_ticks = base + 35u;
     value.active_clock_clamps = base + 36u;
     value.active_clock_failures = base + 37u;
+    value.active_clock_input_guards = base + 100u;
+    value.active_clock_input_guard_quiesces = base + 101u;
+    value.active_clock_deadline_shields = base + 102u;
     value.wfi_paced_waits = base + 82u;
     value.wfi_paced_wait_ns = base + 83u;
     value.wfi_paced_partial_advances = base + 84u;
@@ -319,7 +324,9 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.cpu_irq_line == 0u &&
            state.execution_last.cpu_fiq_line == 1u &&
            state.execution_last.wfi_host_pacing_enabled == 1u &&
-           state.execution_last.active_host_clock_enabled == 1u &&
+            state.execution_last.active_host_clock_enabled == 1u &&
+            state.execution_last.active_clock_input_guard_active == 1u &&
+            state.execution_last.active_clock_deadline_shield_active == 1u &&
            state.execution_first.compact_refused_privileged == 1017u &&
            state.execution_last.compact_window_fast_refills == 2014u &&
            state.execution_last.fetch_refill_skips == 2024u &&
@@ -360,8 +367,11 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.mbx_3d_target_ledger[7].last_kind == 2099u &&
            state.execution_last.active_clock_updates == 2034u &&
            state.execution_last.active_clock_added_ticks == 2035u &&
-           state.execution_last.active_clock_clamps == 2036u &&
-           state.execution_last.active_clock_failures == 2037u &&
+            state.execution_last.active_clock_clamps == 2036u &&
+            state.execution_last.active_clock_failures == 2037u &&
+            state.execution_last.active_clock_input_guards == 2100u &&
+            state.execution_last.active_clock_input_guard_quiesces == 2101u &&
+            state.execution_last.active_clock_deadline_shields == 2102u &&
            state.execution_last.wfi_paced_waits == 2082u &&
            state.execution_last.wfi_paced_wait_ns == 2083u &&
            state.execution_last.wfi_paced_partial_advances == 2084u &&

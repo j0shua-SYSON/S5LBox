@@ -712,7 +712,14 @@ bool s5l8900_set_active_host_clock(s5l8900_t *m,
     m->active_clock_added_ticks = 0u;
     m->active_clock_clamps = 0u;
     m->active_clock_failures = 0u;
+    m->active_clock_input_guard_host_ns = 0u;
+    m->active_clock_input_guards = 0u;
+    m->active_clock_input_guard_quiesces = 0u;
+    m->active_clock_deadline_shields = 0u;
     m->active_clock_anchor_valid = false;
+    m->active_clock_input_guard = false;
+    m->active_clock_input_guard_host_valid = false;
+    m->active_clock_deadline_shield = false;
     if (now) m->active_host_now = now;
     return true;
 }
@@ -1060,6 +1067,8 @@ s5l_wake_kind_t s5l8900_next_wake(const s5l8900_t *m,
  * farther would coalesce guest-visible work across an interrupt; advancing
  * less would merely replace the kernel's idle loop with a host idle loop.
  */
+static void active_clock_quiesce_input_guard(s5l8900_t *m);
+
 static bool machine_wait_for_interrupt(void *ctx) {
     s5l8900_t *m = ctx;
     if (!m) return false;
@@ -1123,6 +1132,17 @@ static bool machine_wait_for_interrupt(void *ctx) {
             m->wfi_paced_failures++;
             return false;
         }
+
+        /* Do not mistake a display or animation timer for completed foreground
+         * work. A next wake at least one modeled second away is a much stronger
+         * idle witness; only that can retire the interaction guard and any
+         * deadline shield it had to engage. */
+        uint64_t quiescent_ticks =
+            (uint64_t)m->cpu_hz *
+            S5L8900_ACTIVE_CLOCK_QUIESCENT_WFI_SECONDS;
+        if (m->active_clock_input_guard &&
+            cpu_ticks >= quiescent_ticks)
+            active_clock_quiesce_input_guard(m);
 
         uint64_t slice_ticks =
             (S5L8900_WFI_PACE_SLICE_NS * m->cpu_hz) / UINT64_C(1000000000);
@@ -1504,9 +1524,56 @@ static uint32_t ext_inputs(const s5l8900_t *m) {
          | ((uint32_t)(m->mtz2.atn ? 1u : 0u) << 16);
 }
 
+static void active_clock_counter_add(uint64_t *counter, uint64_t value);
+
+static void active_clock_reset_anchor(s5l8900_t *m) {
+    m->active_clock_last_host_ns = 0u;
+    m->active_clock_guest_ticks_since_sync = 0u;
+    m->active_clock_fraction = 0u;
+    m->active_clock_anchor_valid = false;
+}
+
+/*
+ * A physical input and the work it causes are one causal interval. Active host
+ * time remains enabled at first, because normal transitions need real-time UI
+ * timer cadence. If the interval is still not quiescent after the guarded host
+ * deadline, active_host_clock_sync() engages the instruction-clocked shield
+ * before the guest's own much later idle deadline can overtake slow CPU work.
+ */
+static void active_clock_begin_input_guard(s5l8900_t *m) {
+    if (!m || !m->active_host_now) return;
+    active_clock_counter_add(&m->active_clock_input_guards, 1u);
+    m->active_clock_input_guard_host_ns = 0u;
+    m->active_clock_input_guard = true;
+    m->active_clock_input_guard_host_valid = false;
+    m->active_clock_deadline_shield = false;
+    active_clock_reset_anchor(m);
+}
+
+static void active_clock_quiesce_input_guard(s5l8900_t *m) {
+    if (!m || !m->active_clock_input_guard) return;
+    active_clock_counter_add(&m->active_clock_input_guard_quiesces, 1u);
+    m->active_clock_input_guard_host_ns = 0u;
+    m->active_clock_input_guard = false;
+    m->active_clock_input_guard_host_valid = false;
+    m->active_clock_deadline_shield = false;
+    active_clock_reset_anchor(m);
+}
+
 static void s5l8900_refresh(s5l8900_t *m, uint32_t tb);
 
 void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
+    /* VMEngine injects a touch through the nested controller and immediately
+     * asks for this zero-tick refresh. Observe ATN before refresh records it in
+     * ext_seen; waiting until the next s5l8900_run() would miss the real app
+     * path. A falling ATN is guest consumption, not new host work. */
+    const uint32_t touch_atn = UINT32_C(1) << 16;
+    uint32_t inputs_at_entry = ext_inputs(m);
+    if (m->active_host_now &&
+        (inputs_at_entry & touch_atn) != 0u &&
+        (m->ext_seen & touch_atn) == 0u)
+        active_clock_begin_input_guard(m);
+
     /*
      * Convert elapsed emulated CPU-clock ticks into timebase ticks at the
      * guest's own CPU:timebase ratio, carrying the remainder so it stays exact
@@ -1557,7 +1624,7 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
          * exactly: same conversion, same order, same everything below.
          */
         if (ticks && !m->level_dirty && !g_tick_eager &&
-            m->tb_accum < m->cpu_hz && ext_inputs(m) == m->ext_seen) return;
+            m->tb_accum < m->cpu_hz && inputs_at_entry == m->ext_seen) return;
         tb = (uint32_t)(m->tb_accum / m->cpu_hz);
         m->tb_accum %= m->cpu_hz;
     }
@@ -1590,6 +1657,10 @@ bool s5l8900_wake_from_standby(s5l8900_t *m) {
     m->active_clock_guest_ticks_since_sync = 0u;
     m->active_clock_fraction = 0u;
     m->active_clock_anchor_valid = false;
+    m->active_clock_input_guard_host_ns = 0u;
+    m->active_clock_input_guard = false;
+    m->active_clock_input_guard_host_valid = false;
+    m->active_clock_deadline_shield = false;
     m->level_dirty = true;
     s5l8900_tick(m, 0u);
     return true;
@@ -1609,9 +1680,16 @@ bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
             m->buttons.refused++;
             return false;
         }
+        uint64_t edges_before = m->buttons.edges;
         bool accepted = s5l_buttons_set(&m->buttons, &m->gpio, &m->gpioic,
                                         which, pressed);
-        if (accepted) s5l8900_tick(m, 0u);
+        if (accepted) {
+            /* Repeating the electrical state already present is accepted by
+             * the public API, but it did not deliver new work to the guest. */
+            if (m->buttons.edges != edges_before)
+                active_clock_begin_input_guard(m);
+            s5l8900_tick(m, 0u);
+        }
         return accepted;
     }
 
@@ -1647,7 +1725,9 @@ bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
                        s5l_button_level(S5L_BUTTON_HOLD, true));
     }
 
-    return s5l8900_wake_from_standby(m);
+    bool woke = s5l8900_wake_from_standby(m);
+    if (woke) active_clock_begin_input_guard(m);
+    return woke;
 }
 
 /* One implementation of the observable device work, kept out of the public
@@ -1910,12 +1990,30 @@ static bool active_host_clock_sync(s5l8900_t *m,
     if (!m->active_host_now || !m->cpu_hz ||
         !m->active_host_now(m->active_host_now_ctx, &now_ns) ||
         (m->active_clock_anchor_valid &&
-         now_ns < m->active_clock_last_host_ns)) {
+         now_ns < m->active_clock_last_host_ns) ||
+        (m->active_clock_input_guard_host_valid &&
+         now_ns < m->active_clock_input_guard_host_ns)) {
         active_clock_counter_add(&m->active_clock_failures, 1u);
-        m->active_clock_anchor_valid = false;
-        m->active_clock_last_host_ns = 0u;
-        m->active_clock_fraction = 0u;
-        m->active_clock_guest_ticks_since_sync = 0u;
+        m->active_clock_input_guard_host_ns = 0u;
+        m->active_clock_input_guard_host_valid = false;
+        active_clock_reset_anchor(m);
+        s5l8900_tick(m, fallback_ticks);
+        return false;
+    }
+
+    if (m->active_clock_input_guard &&
+        !m->active_clock_input_guard_host_valid) {
+        m->active_clock_input_guard_host_ns = now_ns;
+        m->active_clock_input_guard_host_valid = true;
+    }
+
+    if (m->active_clock_input_guard &&
+        !m->active_clock_deadline_shield &&
+        now_ns - m->active_clock_input_guard_host_ns >=
+            S5L8900_ACTIVE_CLOCK_INPUT_SHIELD_NS) {
+        active_clock_counter_add(&m->active_clock_deadline_shields, 1u);
+        m->active_clock_deadline_shield = true;
+        active_clock_reset_anchor(m);
         s5l8900_tick(m, fallback_ticks);
         return false;
     }
@@ -2077,7 +2175,8 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
     /* A direct arm_step() may have used the same machine between run calls.
      * Only a wait reached during THIS bounded slice may shorten it. */
     m->wfi_pace_yield = false;
-    if (max_steps && m->active_host_now)
+    if (max_steps && m->active_host_now &&
+        !m->active_clock_deadline_shield)
         active_clock = active_host_clock_sync(m, 0u);
     while (n < max_steps) {
         if (pre_step_target_matches(m, m->cpu.r[15])) {

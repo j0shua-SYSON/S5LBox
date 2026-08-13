@@ -391,6 +391,16 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                 m->active_clock_added_ticks;
             execution.active_clock_clamps = m->active_clock_clamps;
             execution.active_clock_failures = m->active_clock_failures;
+            execution.active_clock_input_guards =
+                m->active_clock_input_guards;
+            execution.active_clock_input_guard_quiesces =
+                m->active_clock_input_guard_quiesces;
+            execution.active_clock_deadline_shields =
+                m->active_clock_deadline_shields;
+            execution.active_clock_input_guard_active =
+                m->active_clock_input_guard ? 1u : 0u;
+            execution.active_clock_deadline_shield_active =
+                m->active_clock_deadline_shield ? 1u : 0u;
             execution.wfi_paced_waits = m->wfi_paced_waits;
             execution.wfi_paced_wait_ns = m->wfi_paced_wait_ns;
             execution.wfi_paced_partial_advances =

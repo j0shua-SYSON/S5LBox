@@ -198,6 +198,9 @@ static bool vm_execution_telemetry_not_before(
            VM_EXEC_NOT_BEFORE(active_clock_added_ticks) &&
            VM_EXEC_NOT_BEFORE(active_clock_clamps) &&
            VM_EXEC_NOT_BEFORE(active_clock_failures) &&
+           VM_EXEC_NOT_BEFORE(active_clock_input_guards) &&
+           VM_EXEC_NOT_BEFORE(active_clock_input_guard_quiesces) &&
+           VM_EXEC_NOT_BEFORE(active_clock_deadline_shields) &&
            VM_EXEC_NOT_BEFORE(wfi_paced_waits) &&
            VM_EXEC_NOT_BEFORE(wfi_paced_wait_ns) &&
            VM_EXEC_NOT_BEFORE(wfi_paced_partial_advances) &&
