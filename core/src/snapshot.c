@@ -188,26 +188,26 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * another callback/context, seven uint64_t values and transient anchor flag;
  * it follows the same policy. 122192 adds three uint64_t witnesses identifying
  * the last rejected 2D batch inside the already host-only MBX ledger (24).
- * 139792 adds four bounded host-only MBX3D rejection witnesses (4 x 4400).
- * They now retain both the selected legacy object record and a 1,024-word
- * window around a staged TA parser failure. This is transient decoder evidence
- * only and remains outside snap_mach().
- * 139816 adds uart4's two host-peer callbacks and shared context (24), also
+ * 124432 adds four bounded host-only MBX3D rejection witnesses (4 x 560).
+ * They now retain both the selected legacy object record and a 64-word window
+ * around a staged TA parser failure. This is transient decoder evidence only
+ * and remains outside snap_mach().
+ * 124456 adds uart4's two host-peer callbacks and shared context (24), also
  * live host wiring and deliberately outside snap_mach().
- * 141864 adds sixteen bounded accepted-render witnesses (16 x 128) to the
+ * 126504 adds sixteen bounded accepted-render witnesses (16 x 128) to the
  * same host-only MBX ledger. They classify completed work and retain no guest
  * state, so a restore preserves the destination process's live evidence.
- * 142184 adds eight per-framebuffer target aggregates (8 x 40), likewise
+ * 126824 adds eight per-framebuffer target aggregates (8 x 40), likewise
  * host-only, so a short witness ring cannot hide which completed surface later
  * became the active CLCD scanout.
- * 142216 adds the active-clock interaction guard's host anchor, three evidence
+ * 126856 adds the active-clock interaction guard's host anchor, three evidence
  * counters and transient guard/shield flags. Snapshot restore preserves the
  * counters but clears all transient clock policy beside the old host anchor;
  * none is guest state or part of snap_mach().
  * SNAPSHOT_VERSION and the bytes on disk therefore do not move. The size below
  * must be read from the compiler's emitted `.space`, not inferred from source
  * padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         142216, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         126856, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */

@@ -3831,14 +3831,24 @@ static enum mbx_ta_parse_result mbx_ta_parse_vertices(
         const uint32_t *words, uint32_t count, uint32_t control,
         uint32_t stride, float origin_x, float origin_y,
         struct mbx_ta_draw *draw, const char **why) {
-    if (control > UINT32_MAX - 2u - 4u * stride ||
-        control + 1u + 4u * stride >= count ||
-        words[control + 1u + 4u * stride] != 0x00000003u) {
+    if (control > UINT32_MAX - 1u - 4u * stride) {
+        if (why) *why = "TA draw has an unknown vertex boundary";
+        return MBX_TA_DRAW_BAD;
+    }
+    uint32_t boundary = control + 1u + 4u * stride;
+    if (boundary >= count ||
+        (words[boundary] != 0x00000002u &&
+         words[boundary] != 0x00000003u) ||
+        (words[boundary] == 0x00000002u && stride != 8u)) {
         if (why) *why = "TA draw has an unknown vertex boundary";
         return MBX_TA_DRAW_BAD;
     }
 
-    draw->next_word = control + 2u + 4u * stride;
+    /* Weather's measured textured packet uses marker 2 between four-vertex
+     * quads and marker 3 after the last one. Keep the cursor on marker 2 so
+     * the next parser step must validate another complete quad before any
+     * framebuffer write; marker 3 is consumed as the final boundary. */
+    draw->next_word = boundary + (words[boundary] == 3u ? 1u : 0u);
     draw->textured = stride == 8u;
     float x[4], y[4], z[4], reciprocal_w[4];
     float u[4] = {0}, v[4] = {0};
@@ -4136,6 +4146,34 @@ static enum mbx_ta_parse_result mbx_ta_parse_continuation(
         draw->texture_height = previous->texture_height;
     }
     return mbx_ta_parse_vertices(words, count, start + 1u, stride,
+                                 origin_x, origin_y, draw, why);
+}
+
+/* Weather batches four textured quads under one pipeline state. A marker-2
+ * word replaces the ordinary final marker between quads; the following word
+ * is the first vertex, not a new raster control. Only the immediately
+ * preceding measured texture state is eligible for reuse. */
+static enum mbx_ta_parse_result mbx_ta_parse_primitive_continuation(
+        const uint32_t *words, uint32_t count, uint32_t start,
+        float origin_x, float origin_y, const struct mbx_ta_draw *previous,
+        struct mbx_ta_draw *draw, const char **why) {
+    if (start >= count || words[start] != 0x00000002u)
+        return MBX_TA_NOT_DRAW;
+    if (!previous || !previous->textured) {
+        if (why) *why =
+            "TA marker-2 continuation has no preceding textured draw";
+        return MBX_TA_DRAW_BAD;
+    }
+
+    memset(draw, 0, sizeof *draw);
+    draw->start_word = start;
+    draw->textured = true;
+    draw->filtered = previous->filtered;
+    draw->source = previous->source;
+    draw->source_stride = previous->source_stride;
+    draw->texture_width = previous->texture_width;
+    draw->texture_height = previous->texture_height;
+    return mbx_ta_parse_vertices(words, count, start, 8u,
                                  origin_x, origin_y, draw, why);
 }
 
@@ -4727,20 +4765,29 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
             cursor += auxiliary_words;
             continue;
         }
-        enum mbx_ta_parse_result parsed = mbx_ta_parse_draw(
-            words, count, cursor, transform.origin_x, transform.origin_y,
-            &draws[draw_count], why);
-        if (parsed == MBX_TA_NOT_DRAW &&
-            mbx_ta_state_block(words, count, cursor)) {
-            cursor += MBX_TA_STATE_WORDS;
+        enum mbx_ta_parse_result parsed =
+            mbx_ta_parse_primitive_continuation(
+                words, count, cursor,
+                transform.origin_x, transform.origin_y,
+                &draws[draw_count - 1u], &draws[draw_count], why);
+        if (parsed == MBX_TA_NOT_DRAW) {
             parsed = mbx_ta_parse_draw(
                 words, count, cursor, transform.origin_x, transform.origin_y,
                 &draws[draw_count], why);
-        }
-        if (parsed == MBX_TA_NOT_DRAW) {
-            parsed = mbx_ta_parse_continuation(
-                words, count, cursor, transform.origin_x, transform.origin_y,
-                &draws[draw_count - 1u], &draws[draw_count], why);
+            if (parsed == MBX_TA_NOT_DRAW &&
+                mbx_ta_state_block(words, count, cursor)) {
+                cursor += MBX_TA_STATE_WORDS;
+                parsed = mbx_ta_parse_draw(
+                    words, count, cursor,
+                    transform.origin_x, transform.origin_y,
+                    &draws[draw_count], why);
+            }
+            if (parsed == MBX_TA_NOT_DRAW) {
+                parsed = mbx_ta_parse_continuation(
+                    words, count, cursor,
+                    transform.origin_x, transform.origin_y,
+                    &draws[draw_count - 1u], &draws[draw_count], why);
+            }
         }
         if (parsed != MBX_TA_DRAW_OK) {
             ok = false;

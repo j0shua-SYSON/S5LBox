@@ -647,6 +647,26 @@ static uint32_t test_ta_textured_vertices(
     return start + 35u;
 }
 
+static uint32_t test_ta_textured_primitive(
+        uint32_t *stream, uint32_t start,
+        const float x[4], const float y[4],
+        const float u[4], const float v[4], uint32_t colour,
+        uint32_t boundary) {
+    for (uint32_t vertex = 0u; vertex < 4u; vertex++) {
+        uint32_t base = start + vertex * 8u;
+        stream[base] = 0u;
+        stream[base + 1u] = test_float_word(x[vertex]);
+        stream[base + 2u] = test_float_word(y[vertex]);
+        stream[base + 3u] = 0u;
+        stream[base + 4u] = 0x3f800000u;
+        stream[base + 5u] = colour;
+        stream[base + 6u] = test_float_word(u[vertex]);
+        stream[base + 7u] = test_float_word(v[vertex]);
+    }
+    stream[start + 32u] = boundary;
+    return start + 33u;
+}
+
 static uint32_t test_ta_textured_draw(
         uint32_t *stream, uint32_t start,
         uint32_t header, uint32_t source, uint32_t sampler,
@@ -1108,6 +1128,177 @@ static void test_ta_stream_orthographic_affine_texture(void) {
           m.mbx_telemetry.completed_3d == 1u &&
           m.mbx_telemetry.rejected_3d == 2u,
           "bad orthographic transform completed or corrupted telemetry");
+    s5l8900_free(&m);
+}
+
+static void test_ta_stream_weather_marker2_quads(void) {
+    enum {
+        WIDTH = 320u,
+        HEIGHT = 480u,
+        TARGET_BYTES = WIDTH * HEIGHT * 4u,
+        SOURCE_STRIDE = WIDTH * 4u,
+        SOURCE_HEIGHT = 512u,
+        SOURCE_BYTES = SOURCE_STRIDE * SOURCE_HEIGHT,
+    };
+    const uint32_t table0 = 0x08002000u;
+    const uint32_t table2 = 0x08003000u;
+    const uint32_t object = 0x00100000u;
+    const uint32_t region = 0x00040000u;
+    const uint32_t object_pa = 0x08010000u;
+    const uint32_t source = 0x00820000u;
+    const uint32_t source_pa = 0x08020000u;
+    const uint32_t target = 0x00900000u;
+    const uint32_t target_pa = 0x08100000u;
+    const uint32_t top_colour = 0xff0000ffu;
+    const uint32_t left_colour = 0xff00ff00u;
+    const uint32_t right_colour = 0xffff0000u;
+    const uint32_t bottom_colour = 0xff808080u;
+
+    uint32_t stream[192] = {0x10000010u};
+    uint32_t next = test_ta_global_transform(
+        stream, 1u, WIDTH, HEIGHT, 0.0f, 0.0f);
+    uint32_t draw_start = next;
+    uint32_t source_word = 0x0e500000u |
+        ((source >> 7) & 0x0003ffffu);
+    static const uint32_t measured_state_prefix[] = {
+        0x100001efu, 0x22620e80u, 0xe01fffffu, 0xa6618000u,
+    };
+    memcpy(&stream[next], measured_state_prefix,
+           sizeof measured_state_prefix);
+    next += (uint32_t)(sizeof measured_state_prefix /
+                       sizeof measured_state_prefix[0]);
+    stream[next++] = source_word;
+    stream[next++] = 0xd6087610u;
+    stream[next++] = 0u;
+    stream[next++] = 0u;
+    stream[next++] = 0u;
+    stream[next++] = 0x00002504u;
+    stream[next++] = 0u;
+    stream[next++] = test_float_word(160.0f);
+    stream[next++] = test_float_word(160.0f);
+    stream[next++] = test_float_word(240.0f);
+    stream[next++] = test_float_word(240.0f);
+    stream[next++] = test_float_word(0.5f);
+    stream[next++] = test_float_word(0.5f);
+    stream[next++] = 0x3727c5acu;
+    stream[next++] = 0x48020000u;
+    stream[next++] = 0xf0020044u;
+
+    const float top_x[4] = {320.0f, 320.0f, 0.0f, 0.0f};
+    const float top_y[4] = {20.0f, 74.0f, 20.0f, 74.0f};
+    const float top_u[4] = {320.0f, 320.0f, 0.0f, 0.0f};
+    const float top_v[4] = {0.0f, 54.0f, 0.0f, 54.0f};
+    next = test_ta_textured_primitive(
+        stream, next, top_x, top_y, top_u, top_v, 0xffffffffu, 2u);
+
+    const float left_x[4] = {10.0f, 10.0f, 0.0f, 0.0f};
+    const float left_y[4] = {74.0f, 354.0f, 74.0f, 354.0f};
+    const float left_u[4] = {10.0f, 10.0f, 0.0f, 0.0f};
+    const float left_v[4] = {54.0f, 334.0f, 54.0f, 334.0f};
+    next = test_ta_textured_primitive(
+        stream, next, left_x, left_y, left_u, left_v,
+        0xffffffffu, 2u);
+
+    const float right_x[4] = {320.0f, 320.0f, 310.0f, 310.0f};
+    const float right_y[4] = {74.0f, 354.0f, 74.0f, 354.0f};
+    const float right_u[4] = {320.0f, 320.0f, 310.0f, 310.0f};
+    const float right_v[4] = {54.0f, 334.0f, 54.0f, 334.0f};
+    next = test_ta_textured_primitive(
+        stream, next, right_x, right_y, right_u, right_v,
+        0xffffffffu, 2u);
+
+    const float bottom_x[4] = {320.0f, 320.0f, 0.0f, 0.0f};
+    const float bottom_y[4] = {354.0f, 480.0f, 354.0f, 480.0f};
+    const float bottom_u[4] = {320.0f, 320.0f, 0.0f, 0.0f};
+    const float bottom_v[4] = {334.0f, 460.0f, 334.0f, 460.0f};
+    next = test_ta_textured_primitive(
+        stream, next, bottom_x, bottom_y, bottom_u, bottom_v,
+        0xffffffffu, 3u);
+    uint32_t final_boundary = next - 1u;
+    stream[next++] = 0xf0000000u;
+    CHECK(next == 171u,
+          "Weather marker-2 fixture has %u words, expected 171", next);
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
+          "Weather marker-2 TA machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART0, table0);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    test_map_gpu_page(&m, table0, object, object_pa);
+    for (uint32_t page = 0u; page < SOURCE_BYTES; page += 0x1000u)
+        test_map_gpu_page(&m, table2, source + page, source_pa + page);
+    for (uint32_t page = 0u; page < TARGET_BYTES; page += 0x1000u)
+        test_map_gpu_page(&m, table2, target + page, target_pa + page);
+
+    for (uint32_t y = 0u; y < 54u; y++)
+        for (uint32_t x = 0u; x < WIDTH; x++)
+            test_gpu_write32(&m, source + y * SOURCE_STRIDE + x * 4u,
+                             top_colour);
+    for (uint32_t y = 54u; y < 334u; y++) {
+        for (uint32_t x = 0u; x < 10u; x++)
+            test_gpu_write32(&m, source + y * SOURCE_STRIDE + x * 4u,
+                             left_colour);
+        for (uint32_t x = 310u; x < WIDTH; x++)
+            test_gpu_write32(&m, source + y * SOURCE_STRIDE + x * 4u,
+                             right_colour);
+    }
+    for (uint32_t y = 334u; y < 460u; y++)
+        for (uint32_t x = 0u; x < WIDTH; x++)
+            test_gpu_write32(&m, source + y * SOURCE_STRIDE + x * 4u,
+                             bottom_colour);
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_DB, object);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_REGION, region);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RGNBASE, region);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_OBJBASE, object);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_PIXSAMP, 0x00020007u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBCTL, 6u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP, 0x013f0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBYCLIP, 0x01df0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTART, target);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTRIDE, WIDTH);
+
+    uint32_t centre = target + (200u * WIDTH + 160u) * 4u;
+    test_gpu_write32(&m, centre, 0xff112233u);
+    test_ta_run_stream(&m, stream, next);
+    CHECK(test_gpu_read32(&m, target + (30u * WIDTH + 100u) * 4u) ==
+              top_colour &&
+          test_gpu_read32(&m, target + (100u * WIDTH + 5u) * 4u) ==
+              left_colour &&
+          test_gpu_read32(&m, target + (100u * WIDTH + 315u) * 4u) ==
+              right_colour &&
+          test_gpu_read32(&m, target + (400u * WIDTH + 100u) * 4u) ==
+              bottom_colour,
+          "Weather marker-2 quads did not render all four measured regions");
+    CHECK(test_gpu_read32(&m, centre) == 0xff112233u,
+          "Weather marker-2 quads changed their central hole");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu &&
+          m.mbx_telemetry.candidates_3d == 1u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 0u &&
+          m.mbx_telemetry.pixels_3d == 63200u,
+          "Weather marker-2 scene did not complete with exact telemetry");
+
+    /* Marker 2 promises another complete quad. A truncated promise rejects
+     * the whole scene before an earlier quad reaches guest RAM. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    uint32_t atomic_guard = target + (30u * WIDTH + 100u) * 4u;
+    test_gpu_write32(&m, atomic_guard, 0xff102030u);
+    stream[final_boundary] = 2u;
+    test_ta_run_stream(&m, stream, next);
+    CHECK(test_gpu_read32(&m, atomic_guard) == 0xff102030u,
+          "truncated marker-2 chain committed an earlier quad");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
+          m.mbx_telemetry.candidates_3d == 2u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 1u &&
+          m.mbx_telemetry.rejected_3d_history[0].ta_failure_word ==
+              final_boundary,
+          "truncated marker-2 chain completed or lost its parser cursor");
+    stream[final_boundary] = 3u;
+    CHECK(draw_start == 18u,
+          "Weather marker-2 fixture moved its measured draw header");
     s5l8900_free(&m);
 }
 
@@ -6558,6 +6749,7 @@ int main(void) {
     test_ta_submission_completion();
     test_ta_stream_axis_aligned_atomic_scene();
     test_ta_stream_orthographic_affine_texture();
+    test_ta_stream_weather_marker2_quads();
     test_ta_stream_perspective_texture();
     test_ta_stream_immediate_state_reuse_and_alias_bounds();
     test_premultiplied_2d_clock_form();

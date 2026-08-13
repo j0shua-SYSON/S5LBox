@@ -995,7 +995,7 @@ typedef struct {
 
 #define S5L_MBX_3D_REJECTION_HISTORY 4u
 #define S5L_MBX_3D_REJECTION_RECORD_WORDS 44u
-#define S5L_MBX_3D_REJECTION_TA_WORDS 1024u
+#define S5L_MBX_3D_REJECTION_TA_WORDS 64u
 #define S5L_MBX_3D_ACCEPT_HISTORY 16u
 #define S5L_MBX_3D_ACCEPT_RECORD_WORDS 8u
 #define S5L_MBX_3D_TARGET_LEDGER 8u
@@ -1011,9 +1011,7 @@ typedef struct {
  * The selected legacy object record and a bounded window around a staged TA
  * parser failure are captured at rejection time because later accepted
  * renders may reuse the same guest allocation before a checkpoint can be
- * taken. 1,024 words is 4 KiB per record: enough to retain the measured
- * marker-2 primitive continuation without turning this into an unbounded
- * command dump. Nothing here is guest-visible or part of snap_mbx(). */
+ * taken. Nothing here is guest-visible or part of snap_mbx(). */
 typedef struct {
     uint64_t sequence;
     uint64_t tiled_reason_hash;
