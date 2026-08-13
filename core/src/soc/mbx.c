@@ -1339,6 +1339,18 @@ static uint32_t mbx_modulate_vertex_alpha(uint32_t src, uint32_t alpha) {
     return out;
 }
 
+/* TA's uniform 0xff585858 Weather vertices use the same per-channel equation
+ * already recovered for uniform alpha, rather than alpha-only modulation. */
+static uint32_t mbx_modulate_vertex_colour(uint32_t src, uint32_t colour) {
+    uint32_t out = 0u;
+    for (unsigned shift = 0; shift < 32u; shift += 8u) {
+        uint32_t component = (src >> shift) & 0xffu;
+        uint32_t modulation = (colour >> shift) & 0xffu;
+        out |= (((component + 1u) * modulation) >> 8) << shift;
+    }
+    return out;
+}
+
 /* QuartzCore's shipped sw_sample_linear_BGRA8 implementation at
  * 0x3122bc08..0x3122bcb4 interpolates BGRA8 in two packed byte lanes.  Keep
  * the unsigned wrapping multiply/adds: for a descending channel they are what
@@ -3730,6 +3742,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
  * word, vertex layout, transform, colour modulation, or texture alias rejects
  * the entire scene before the first target write. */
 #define MBX_TA_STATE_WORDS 14u
+#define MBX_TA_MAX_WIDTH   512u
 
 enum mbx_ta_parse_result {
     MBX_TA_NOT_DRAW = 0,
@@ -3743,6 +3756,7 @@ struct mbx_ta_draw {
     bool textured;
     bool filtered;
     bool affine;
+    bool perspective;
     uint32_t source;
     uint32_t source_stride;
     uint32_t texture_width;
@@ -3750,6 +3764,7 @@ struct mbx_ta_draw {
     uint32_t colour;
     float x0, y0, x1, y1;
     float u0, v0, u1, v1;
+    float reciprocal_w_left, reciprocal_w_right;
     struct mbx_affine_transform transform;
 };
 
@@ -3824,15 +3839,20 @@ static enum mbx_ta_parse_result mbx_ta_parse_vertices(
 
     draw->next_word = control + 2u + 4u * stride;
     draw->textured = stride == 8u;
-    float x[4], y[4], u[4] = {0}, v[4] = {0};
+    float x[4], y[4], z[4], reciprocal_w[4];
+    float u[4] = {0}, v[4] = {0};
     uint32_t colour = words[control + 1u + 5u];
     for (uint32_t vertex = 0u; vertex < 4u; vertex++) {
         uint32_t base = control + 1u + vertex * stride;
-        if (words[base] != 0u || words[base + 3u] != 0u ||
-            words[base + 4u] != 0x3f800000u ||
-            words[base + 5u] != colour ||
+        if (words[base] != 0u || words[base + 5u] != colour ||
             !mbx_3d_word_to_finite_float(words[base + 1u], &x[vertex]) ||
-            !mbx_3d_word_to_finite_float(words[base + 2u], &y[vertex])) {
+            !mbx_3d_word_to_finite_float(words[base + 2u], &y[vertex]) ||
+            !mbx_3d_word_to_finite_float(words[base + 3u], &z[vertex]) ||
+            !mbx_3d_word_to_finite_float(words[base + 4u],
+                                         &reciprocal_w[vertex]) ||
+            reciprocal_w[vertex] <= 0.0f ||
+            reciprocal_w[vertex] > 16.0f ||
+            z[vertex] <= -4096.0f || z[vertex] >= 4096.0f) {
             if (why) *why = "TA draw has an unknown vertex layout";
             return MBX_TA_DRAW_BAD;
         }
@@ -3846,6 +3866,17 @@ static enum mbx_ta_parse_result mbx_ta_parse_vertices(
         }
         x[vertex] += origin_x;
         y[vertex] += origin_y;
+    }
+
+    bool orthographic = z[0] == 0.0f && z[1] == 0.0f &&
+                        z[2] == 0.0f && z[3] == 0.0f &&
+                        reciprocal_w[0] == 1.0f &&
+                        reciprocal_w[1] == 1.0f &&
+                        reciprocal_w[2] == 1.0f &&
+                        reciprocal_w[3] == 1.0f;
+    if (!draw->textured && !orthographic) {
+        if (why) *why = "TA solid draw uses an unknown perspective layout";
+        return MBX_TA_DRAW_BAD;
     }
 
     draw->colour = colour;
@@ -3884,9 +3915,12 @@ static enum mbx_ta_parse_result mbx_ta_parse_vertices(
             if (why) *why = "TA draw does not contain four texture corners";
             return MBX_TA_DRAW_BAD;
         }
+        uint32_t blue = colour & 0xffu;
+        uint32_t green = (colour >> 8) & 0xffu;
+        uint32_t red = (colour >> 16) & 0xffu;
         uint32_t alpha = colour >> 24;
-        if (colour != alpha * 0x01010101u) {
-            if (why) *why = "TA draw uses coloured vertex modulation";
+        if (blue != green || green != red || red > alpha) {
+            if (why) *why = "TA draw uses nonuniform vertex modulation";
             return MBX_TA_DRAW_BAD;
         }
     } else {
@@ -3925,10 +3959,25 @@ static enum mbx_ta_parse_result mbx_ta_parse_vertices(
     const uint32_t p10 = corner_index[1u];
     const uint32_t p01 = corner_index[2u];
     const uint32_t p11 = corner_index[3u];
+    /* The captured page transition varies depth and reciprocal W only between
+     * the two U sides. That keeps V affine while U requires the bounded
+     * perspective correction applied by mbx_ta_apply_draw(). */
+    if (!orthographic) {
+        if (!draw->filtered ||
+            reciprocal_w[p00] != reciprocal_w[p01] ||
+            reciprocal_w[p10] != reciprocal_w[p11] ||
+            z[p00] != z[p01] || z[p10] != z[p11]) {
+            if (why) *why = "TA perspective terms do not form two vertical sides";
+            return MBX_TA_DRAW_BAD;
+        }
+        draw->perspective = true;
+        draw->reciprocal_w_left = reciprocal_w[p00];
+        draw->reciprocal_w_right = reciprocal_w[p10];
+    }
     bool axis_aligned = x[p00] == x[p01] && x[p10] == x[p11] &&
                         y[p00] == y[p10] && y[p01] == y[p11] &&
                         x[p00] < x[p10] && y[p00] < y[p01];
-    if (axis_aligned) {
+    if (axis_aligned && orthographic) {
         draw->x0 = x[p00];
         draw->y0 = y[p00];
         draw->x1 = x[p11];
@@ -3987,9 +4036,13 @@ static enum mbx_ta_parse_result mbx_ta_parse_vertices(
     if (v_error < 0.0f) v_error = -v_error;
     if (det_error < 0.0f) det_error = -det_error;
     float tolerance = ((float)source_width + (float)source_height) * epsilon;
-    if (source_width > MBX_3D_WIDTH || source_height > 480u ||
-        u_error > tolerance || v_error > tolerance || dot > tolerance ||
-        det_error > tolerance) {
+    bool rigid_unity = u_error <= tolerance && v_error <= tolerance &&
+                       dot <= tolerance && det_error <= tolerance;
+    if (source_width > MBX_TA_MAX_WIDTH || source_height > 480u) {
+        if (why) *why = "TA affine source extent exceeds its bounded limits";
+        return MBX_TA_DRAW_BAD;
+    }
+    if (!draw->perspective && !rigid_unity) {
         if (why) *why = "TA affine draw is not the measured rigid unity transform";
         return MBX_TA_DRAW_BAD;
     }
@@ -4162,6 +4215,40 @@ static bool mbx_ta_state_block(const uint32_t *words, uint32_t count,
            first <= 1.0f && second <= 1.0f;
 }
 
+/* Weather submits two measured non-colour primitives between ordinary
+ * textured draws. The same packet family also occurs in the pre-draw region,
+ * where the TA parser already treats it as setup rather than framebuffer
+ * work. Recognize only the two captured controls and their tightly bounded
+ * finite vertex grammar when they occur between draws. */
+static uint32_t mbx_ta_auxiliary_block(const uint32_t *words,
+                                       uint32_t count, uint32_t start) {
+    if (start > count || count - start < 21u ||
+        words[start] != 0x10000073u ||
+        words[start + 2u] != 0xe0000000u ||
+        words[start + 3u] != 0u || words[start + 4u] != 3u ||
+        words[start + 5u] != 0u ||
+        words[start + 6u] != 0x48000000u ||
+        words[start + 7u] != 0xb00e4000u)
+        return 0u;
+
+    uint32_t vertices = words[start + 1u] == 0x22206f80u ? 3u :
+                        words[start + 1u] == 0x22207f80u ? 4u : 0u;
+    uint32_t length = 8u + vertices * 4u + 1u;
+    if (!vertices || count - start < length ||
+        words[start + length - 1u] != 3u)
+        return 0u;
+    for (uint32_t vertex = 0u; vertex < vertices; vertex++) {
+        uint32_t base = start + 8u + vertex * 4u;
+        float x, y;
+        if (words[base] != 0u || words[base + 3u] != 0x3f800000u ||
+            !mbx_3d_word_to_nonnegative_float(words[base + 1u], &x) ||
+            !mbx_3d_word_to_nonnegative_float(words[base + 2u], &y) ||
+            x > 4096.0f || y > 4096.0f)
+            return 0u;
+    }
+    return length;
+}
+
 static bool mbx_ta_premultiplied(uint32_t pixel) {
     uint32_t alpha = pixel >> 24;
     return (pixel & 0xffu) <= alpha &&
@@ -4262,7 +4349,7 @@ static bool mbx_ta_apply_draw(
             return false;
         }
 
-        struct mbx_bilinear_axis x_axis[MBX_3D_WIDTH];
+        struct mbx_bilinear_axis x_axis[MBX_TA_MAX_WIDTH];
         struct mbx_bilinear_axis y_axis[480u];
         uint32_t source_x0 = UINT32_MAX, source_y0 = UINT32_MAX;
         uint32_t source_x1 = 0u, source_y1 = 0u;
@@ -4391,7 +4478,6 @@ static bool mbx_ta_apply_draw(
                 ok = false;
             }
         }
-        uint32_t vertex_alpha = draw->colour >> 24;
         for (uint32_t y = 0u; y < height && ok; y++) {
             for (uint32_t x = 0u; x < width; x++) {
                 uint32_t source_pixel;
@@ -4405,6 +4491,20 @@ static bool mbx_ta_apply_draw(
                                               left + x, top + y,
                                               &u_fraction, &v_fraction))
                             continue;
+                        if (draw->perspective) {
+                            float denominator =
+                                (1.0f - u_fraction) *
+                                    draw->reciprocal_w_left +
+                                u_fraction * draw->reciprocal_w_right;
+                            if (denominator <= 0.0f) {
+                                if (why) *why =
+                                    "TA perspective denominator is invalid";
+                                ok = false;
+                                break;
+                            }
+                            u_fraction = u_fraction *
+                                draw->reciprocal_w_right / denominator;
+                        }
                         float u_coordinate = draw->u0 +
                             u_fraction * (draw->u1 - draw->u0);
                         float v_coordinate = draw->v0 +
@@ -4457,8 +4557,8 @@ static bool mbx_ta_apply_draw(
                     source_pixel = mbx_load_le32(source_pixels +
                         y * source_row_bytes + x * 4u);
                 }
-                source_pixel = mbx_modulate_vertex_alpha(
-                    source_pixel, vertex_alpha);
+                source_pixel = mbx_modulate_vertex_colour(
+                    source_pixel, draw->colour);
                 uint8_t *destination = target_pixels +
                     ((top + y) * target_width + left + x) * 4u;
                 uint32_t output = mbx_source_over_clamped(
@@ -4525,7 +4625,7 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
     uint32_t clip_bottom = (yclip >> 16) + 1u;
     uint32_t target_width = m->reg[S5L_MBX_FBLINESTRIDE / 4u];
     uint32_t target_height = clip_bottom;
-    if (!target_width || target_width > MBX_3D_WIDTH ||
+    if (!target_width || target_width > MBX_TA_MAX_WIDTH ||
         clip_left >= clip_right || clip_right > target_width ||
         clip_top >= clip_bottom || target_height > 480u) {
         if (why) *why = "TA framebuffer stride or clip is invalid";
@@ -4612,6 +4712,12 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
             mbx_ta_rejection_at(diagnostic, cursor);
             if (why) *why = "TA draw chain leaves the stream";
             break;
+        }
+        uint32_t auxiliary_words =
+            mbx_ta_auxiliary_block(words, count, cursor);
+        if (auxiliary_words) {
+            cursor += auxiliary_words;
+            continue;
         }
         enum mbx_ta_parse_result parsed = mbx_ta_parse_draw(
             words, count, cursor, transform.origin_x, transform.origin_y,

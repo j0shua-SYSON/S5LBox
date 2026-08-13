@@ -459,6 +459,16 @@ static uint32_t test_modulate_vertex_alpha(uint32_t src, uint32_t alpha) {
     return out;
 }
 
+static uint32_t test_modulate_vertex_colour(uint32_t src, uint32_t colour) {
+    uint32_t out = 0u;
+    for (unsigned shift = 0; shift < 32u; shift += 8u) {
+        uint32_t component = (src >> shift) & 0xffu;
+        uint32_t modulation = (colour >> shift) & 0xffu;
+        out |= (((component + 1u) * modulation) >> 8) << shift;
+    }
+    return out;
+}
+
 static float test_float_value(uint32_t word) {
     float value = 0.0f;
     memcpy(&value, &word, sizeof value);
@@ -650,6 +660,63 @@ static uint32_t test_ta_textured_draw(
         stream, start + 4u, x, y, u, v, colour);
 }
 
+static uint32_t test_ta_projective_draw(
+        uint32_t *stream, uint32_t start,
+        uint32_t header, uint32_t source, uint32_t sampler,
+        const float x[4], const float y[4], const float z[4],
+        const float reciprocal_w[4], const float u[4], const float v[4],
+        uint32_t colour) {
+    stream[start] = 0x10000004u;
+    stream[start + 1u] = header;
+    stream[start + 2u] = source;
+    stream[start + 3u] = sampler;
+    stream[start + 4u] = 0x48020000u;
+    stream[start + 5u] = 0xf0020044u;
+    for (uint32_t vertex = 0u; vertex < 4u; vertex++) {
+        uint32_t base = start + 6u + vertex * 8u;
+        stream[base] = 0u;
+        stream[base + 1u] = test_float_word(x[vertex]);
+        stream[base + 2u] = test_float_word(y[vertex]);
+        stream[base + 3u] = test_float_word(z[vertex]);
+        stream[base + 4u] = test_float_word(reciprocal_w[vertex]);
+        stream[base + 5u] = colour;
+        stream[base + 6u] = test_float_word(u[vertex]);
+        stream[base + 7u] = test_float_word(v[vertex]);
+    }
+    stream[start + 38u] = 3u;
+    return start + 39u;
+}
+
+static uint32_t test_ta_auxiliary_block(uint32_t *stream, uint32_t start,
+                                        bool rectangle) {
+    stream[start] = 0x10000073u;
+    stream[start + 1u] = rectangle ? 0x22207f80u : 0x22206f80u;
+    stream[start + 2u] = 0xe0000000u;
+    stream[start + 3u] = 0u;
+    stream[start + 4u] = 3u;
+    stream[start + 5u] = 0u;
+    stream[start + 6u] = 0x48000000u;
+    stream[start + 7u] = 0xb00e4000u;
+    static const float triangle[3][2] = {
+        {0.0f, 0.0f}, {640.0f, 0.0f}, {0.0f, 960.0f},
+    };
+    static const float quad[4][2] = {
+        {0.0f, 20.0f}, {0.0f, 480.0f},
+        {320.0f, 20.0f}, {320.0f, 480.0f},
+    };
+    uint32_t vertices = rectangle ? 4u : 3u;
+    for (uint32_t vertex = 0u; vertex < vertices; vertex++) {
+        const float *point = rectangle ? quad[vertex] : triangle[vertex];
+        uint32_t base = start + 8u + vertex * 4u;
+        stream[base] = 0u;
+        stream[base + 1u] = test_float_word(point[0]);
+        stream[base + 2u] = test_float_word(point[1]);
+        stream[base + 3u] = 0x3f800000u;
+    }
+    stream[start + 8u + vertices * 4u] = 3u;
+    return start + 9u + vertices * 4u;
+}
+
 static uint32_t test_ta_global_transform(
         uint32_t *stream, uint32_t start,
         uint32_t width, uint32_t height,
@@ -689,7 +756,7 @@ static void test_ta_stream_axis_aligned_atomic_scene(void) {
     enum {
         TARGET_STRIDE = 0x500u,
         TARGET_HEIGHT = 480u,
-        TARGET_BYTES = TARGET_STRIDE * TARGET_HEIGHT,
+        TARGET_BYTES = 512u * 4u * TARGET_HEIGHT,
     };
     const uint32_t table0 = 0x08003000u;
     const uint32_t table2 = 0x08004000u;
@@ -698,9 +765,12 @@ static void test_ta_stream_axis_aligned_atomic_scene(void) {
     const uint32_t target = 0x00810000u;
     const uint32_t object_pa = 0x08010000u;
     const uint32_t target_pa = 0x08080000u;
-    uint32_t stream[76] = {0x10000010u};
+    uint32_t stream[122] = {0x10000010u};
     uint32_t next = test_ta_solid_draw(
         stream, 1u, 10.0f, 20.0f, 14.0f, 23.0f, 0xff0000ffu);
+    uint32_t auxiliary_start = next;
+    next = test_ta_auxiliary_block(stream, next, false);
+    next = test_ta_auxiliary_block(stream, next, true);
     static const uint32_t state[14] = {
         0xa01b001cu, 0u, 0u, 0u, 0u, 0u, 0u,
         0u, 0u, 0xa01d001du, 0u, 0u, 0u, 0x3f800000u,
@@ -803,6 +873,32 @@ static void test_ta_stream_axis_aligned_atomic_scene(void) {
               S5L_MBX_3D_ACCEPT_TA_STREAM,
           "small-stride TA scene did not complete with exact telemetry");
 
+    /* A captured temporary surface has a 352-pixel stride and matching
+     * 352x480 clip. Keep this bounded above the phone framebuffer width
+     * without teaching the legacy fixed-width object decoders a new shape. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP, 0x015f0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBYCLIP, 0x01df0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTRIDE, 352u);
+    uint32_t wide_guard = target + (20u * 352u + 351u) * 4u;
+    test_gpu_write32(&m, wide_guard, 0xff123456u);
+    test_ta_run_stream(&m, stream, next);
+    CHECK(test_gpu_read32(
+              &m, target + (20u * 352u + 10u) * 4u) == 0xff0000ffu &&
+          test_gpu_read32(
+              &m, target + (30u * 352u + 20u) * 4u) == 0xff00ff00u,
+          "wide-stride TA scene did not use its framebuffer stride");
+    CHECK(test_gpu_read32(&m, wide_guard) == 0xff123456u,
+          "wide-stride TA scene changed a pixel outside its draws");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu &&
+          m.mbx_telemetry.candidates_3d == 3u &&
+          m.mbx_telemetry.completed_3d == 3u &&
+          m.mbx_telemetry.rejected_3d == 0u &&
+          m.mbx_telemetry.pixels_3d == 48u &&
+          m.mbx_telemetry.accepted_3d_history[2].kind ==
+              S5L_MBX_3D_ACCEPT_TA_STREAM,
+          "wide-stride TA scene did not complete with exact telemetry");
+
     /* A malformed second draw must reject the complete scene without leaking
      * the earlier valid draw into guest RAM. This is the critical difference
      * between a diagnostic approximation and a transactional renderer. */
@@ -824,8 +920,8 @@ static void test_ta_stream_axis_aligned_atomic_scene(void) {
               &m, target + 20u * TARGET_STRIDE + 10u * 4u) == 0xff102030u,
           "rejected TA scene committed its earlier valid draw");
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
-          m.mbx_telemetry.candidates_3d == 3u &&
-          m.mbx_telemetry.completed_3d == 2u &&
+          m.mbx_telemetry.candidates_3d == 4u &&
+          m.mbx_telemetry.completed_3d == 3u &&
           m.mbx_telemetry.rejected_3d == 1u,
           "rejected TA scene raised completion or corrupted telemetry");
     const s5l_mbx_3d_rejection_witness_t *ta_reject =
@@ -841,6 +937,26 @@ static void test_ta_stream_axis_aligned_atomic_scene(void) {
           ta_reject->ta_window_words[
               ta_reject->ta_window_valid_words - 1u] == stream[next - 1u],
           "TA rejection witness lost reason, parser cursor, or stream window");
+
+    /* A lookalike auxiliary packet may not be skipped. Reject the complete
+     * scene and retain the already-present target marker. */
+    stream[second_start + 4u] ^= 1u;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    test_gpu_write32(&m,
+        target + 20u * TARGET_STRIDE + 10u * 4u, 0xff405060u);
+    stream[auxiliary_start + 20u] ^= 1u;
+    test_ta_run_stream(&m, stream, next);
+    CHECK(test_gpu_read32(
+              &m, target + 20u * TARGET_STRIDE + 10u * 4u) == 0xff405060u,
+          "malformed TA auxiliary packet committed an earlier draw");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
+          m.mbx_telemetry.candidates_3d == 5u &&
+          m.mbx_telemetry.completed_3d == 3u &&
+          m.mbx_telemetry.rejected_3d == 2u &&
+          m.mbx_telemetry.rejected_3d_history[1].ta_failure_word ==
+              auxiliary_start,
+          "malformed TA auxiliary packet completed or lost its cursor");
+    stream[auxiliary_start + 20u] ^= 1u;
 
     s5l8900_free(&m);
 }
@@ -908,7 +1024,7 @@ static void test_ta_stream_orthographic_affine_texture(void) {
     uint32_t mismatches = 0u;
     for (uint32_t py = 10u; py < 14u; py++) {
         for (uint32_t px = 6u; px < 10u; px++) {
-            float uf, vf;
+            float uf = 0.0f, vf = 0.0f;
             struct test_bilinear_axis sx, sy;
             bool covered = test_affine_pixel(
                 &transform, px, py, &uf, &vf);
@@ -949,6 +1065,125 @@ static void test_ta_stream_orthographic_affine_texture(void) {
           m.mbx_telemetry.completed_3d == 1u &&
           m.mbx_telemetry.rejected_3d == 1u,
           "bad orthographic transform completed or corrupted telemetry");
+    s5l8900_free(&m);
+}
+
+static void test_ta_stream_perspective_texture(void) {
+    enum {
+        WIDTH = 64u,
+        HEIGHT = 32u,
+        TARGET_BYTES = WIDTH * HEIGHT * 4u,
+        SOURCE_STRIDE = 64u,
+        SOURCE_HEIGHT = 32u,
+    };
+    const uint32_t table0 = 0x08002000u;
+    const uint32_t table2 = 0x08003000u;
+    const uint32_t object = 0x00100000u;
+    const uint32_t region = 0x00040000u;
+    const uint32_t source = 0x00820000u;
+    const uint32_t target = 0x00840000u;
+    const uint32_t colour = 0xff808080u;
+    uint32_t stream[64] = {0x10000010u};
+    uint32_t next = test_ta_global_transform(
+        stream, 1u, WIDTH, HEIGHT, 0.0f, 0.0f);
+    uint32_t draw_start = next;
+    const float x[4] = {24.0f, 24.0f, 8.0f, 8.0f};
+    const float y[4] = {4.0f, 12.0f, 4.0f, 12.0f};
+    const float z[4] = {0.0f, 0.0f, -1.0f, -1.0f};
+    const float reciprocal_w[4] = {1.0f, 1.0f, 2.0f, 2.0f};
+    const float u[4] = {8.0f, 8.0f, 0.0f, 0.0f};
+    const float v[4] = {0.0f, 8.0f, 0.0f, 8.0f};
+    uint32_t source_word = 0x8e040000u |
+        ((source >> 7) & 0x0003ffffu);
+    next = test_ta_projective_draw(
+        stream, next, 0xa1218000u, source_word, 0x86084610u,
+        x, y, z, reciprocal_w, u, v, colour);
+    stream[next++] = 0xf0000000u;
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
+          "perspective TA machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART0, table0);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    test_map_gpu_page(&m, table0, object, 0x08010000u);
+    test_map_gpu_page(&m, table2, source, 0x08030000u);
+    for (uint32_t page = 0u; page < TARGET_BYTES; page += 0x1000u)
+        test_map_gpu_page(&m, table2, target + page, 0x08040000u + page);
+    for (uint32_t row = 0u; row < SOURCE_HEIGHT; row++)
+        for (uint32_t column = 0u; column < SOURCE_STRIDE / 4u; column++)
+            test_gpu_write32(&m, source + row * SOURCE_STRIDE + column * 4u,
+                             test_sprite_source_pixel(column, row));
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_DB, object);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_REGION, region);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RGNBASE, region);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_OBJBASE, object);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_PIXSAMP, 0x00020007u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBCTL, 6u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP, 0x003f0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBYCLIP, 0x001f0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTART, target);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTRIDE, WIDTH);
+    test_ta_run_stream(&m, stream, next);
+
+    struct test_affine_transform transform = {
+        8.0f, 4.0f, 16.0f, 0.0f, 0.0f, 8.0f, 128.0f,
+    };
+    uint32_t mismatches = 0u;
+    for (uint32_t py = 4u; py < 12u; py++) {
+        for (uint32_t px = 8u; px < 24u; px++) {
+            float uf = 0.0f, vf = 0.0f;
+            struct test_bilinear_axis sx, sy;
+            bool covered = test_affine_pixel(
+                &transform, px, py, &uf, &vf);
+            float denominator = (1.0f - uf) * 2.0f + uf;
+            float perspective_u = uf / denominator;
+            bool sampled = covered &&
+                test_bilinear_coordinate(
+                    perspective_u * 8.0f, SOURCE_STRIDE / 4u, &sx) &&
+                test_bilinear_coordinate(
+                    vf * 8.0f, SOURCE_HEIGHT, &sy);
+            uint32_t expected = sampled
+                ? test_modulate_vertex_colour(
+                    test_bilinear_sprite_pixel(&sx, &sy), colour)
+                : 0u;
+            mismatches += test_gpu_read32(
+                &m, target + (py * WIDTH + px) * 4u) != expected;
+        }
+    }
+    CHECK(mismatches == 0u,
+          "%u perspective-correct TA pixels mismatched", mismatches);
+    CHECK(test_gpu_read32(&m, target + (4u * WIDTH + 7u) * 4u) == 0u &&
+          test_gpu_read32(&m, target + (4u * WIDTH + 24u) * 4u) == 0u &&
+          test_gpu_read32(&m, target + (12u * WIDTH + 8u) * 4u) == 0u,
+          "perspective TA draw changed an outside guard");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu &&
+          m.mbx_telemetry.candidates_3d == 1u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 0u &&
+          m.mbx_telemetry.pixels_3d == 128u,
+          "perspective TA telemetry is not exact");
+
+    /* A missing reciprocal-W term rejects atomically rather than quietly
+     * falling back to affine interpolation. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    uint32_t marker = target + (4u * WIDTH + 8u) * 4u;
+    test_gpu_write32(&m, marker, 0xff102030u);
+    uint32_t left_bottom_q = draw_start + 26u;
+    uint32_t saved_q = stream[left_bottom_q];
+    stream[left_bottom_q] = 0u;
+    test_ta_run_stream(&m, stream, next);
+    CHECK(test_gpu_read32(&m, marker) == 0xff102030u,
+          "bad perspective terms committed a TA scene");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
+          m.mbx_telemetry.candidates_3d == 2u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 1u &&
+          m.mbx_telemetry.rejected_3d_history[0].ta_failure_word ==
+              draw_start,
+          "bad perspective terms completed or lost their parser cursor");
+    stream[left_bottom_q] = saved_q;
     s5l8900_free(&m);
 }
 
@@ -6280,6 +6515,7 @@ int main(void) {
     test_ta_submission_completion();
     test_ta_stream_axis_aligned_atomic_scene();
     test_ta_stream_orthographic_affine_texture();
+    test_ta_stream_perspective_texture();
     test_ta_stream_immediate_state_reuse_and_alias_bounds();
     test_premultiplied_2d_clock_form();
     test_opaque_global_alpha_2d_form();
