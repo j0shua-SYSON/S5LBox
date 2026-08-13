@@ -4736,9 +4736,11 @@ static void mbx_capture_3d_rejection(
 
     /* The PIO command stream is the only authoritative witness when the
      * object database contains staged TA words rather than a legacy object
-     * list. Retain a bounded window around the parser cursor before the guest
-     * reuses that allocation. A missing cursor deliberately captures the
-     * header instead; diagnostics must never change completion semantics. */
+     * list. Retain a bounded window forward from the parser cursor before the
+     * guest reuses that allocation. A draw cursor names its header, so spending
+     * the fixed budget on preceding state can cut off the fourth vertex -- the
+     * exact evidence needed to decode a new layout. A missing cursor still
+     * captures the stream header; diagnostics never change completion. */
     if (witness->ta_word_count > 0u &&
         witness->ta_word_count <= MBX_TA_CAPTURE_MAX_WORDS &&
         witness->object != 0u && (witness->object & 3u) == 0u &&
@@ -4746,10 +4748,9 @@ static void mbx_capture_3d_rejection(
             m->reg[S5L_MBX_TA_OBJECT_DATABASE / 4u]) {
         uint32_t start = 0u;
         if (witness->ta_failure_word != UINT32_MAX) {
-            uint32_t anchor = witness->ta_failure_word;
-            if (anchor >= witness->ta_word_count)
-                anchor = witness->ta_word_count - 1u;
-            start = anchor > 16u ? anchor - 16u : 0u;
+            start = witness->ta_failure_word;
+            if (start >= witness->ta_word_count)
+                start = witness->ta_word_count - 1u;
         }
         witness->ta_window_start_word = start;
         uint32_t available = witness->ta_word_count - start;

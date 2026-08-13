@@ -830,7 +830,7 @@ static void test_ta_stream_axis_aligned_atomic_scene(void) {
           "rejected TA scene raised completion or corrupted telemetry");
     const s5l_mbx_3d_rejection_witness_t *ta_reject =
         &m.mbx_telemetry.rejected_3d_history[0];
-    uint32_t expected_window_start = second_start - 16u;
+    uint32_t expected_window_start = second_start;
     CHECK(ta_reject->sequence == 1u &&
           ta_reject->ta_reason_hash != 0u &&
           ta_reject->ta_word_count == next &&
@@ -838,7 +838,6 @@ static void test_ta_stream_axis_aligned_atomic_scene(void) {
           ta_reject->ta_window_start_word == expected_window_start &&
           ta_reject->ta_window_valid_words == next - expected_window_start &&
           ta_reject->ta_window_words[0] == stream[expected_window_start] &&
-          ta_reject->ta_window_words[16] == stream[second_start] &&
           ta_reject->ta_window_words[
               ta_reject->ta_window_valid_words - 1u] == stream[next - 1u],
           "TA rejection witness lost reason, parser cursor, or stream window");
