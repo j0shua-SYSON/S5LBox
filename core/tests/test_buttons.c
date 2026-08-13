@@ -890,6 +890,69 @@ static void test_the_board_drives_inputs_and_the_guest_cannot(void) {
               "an out-of-range drive wrapped into port %u", g);
 }
 
+/* Auto-Lock uses OOCSHDWN bit 1, while a full guest shutdown uses bit 0.
+ * The two states briefly collapsed into one predicate and physical Power taps
+ * stopped waking every Auto-Locked guest. Keep the exact hibernation command,
+ * the non-wake FIFO case, and the retained reset in one regression. */
+static void test_power_wakes_hibernation_through_retained_reset(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, S5L8900_SDRAM_BASE, 1u << 16),
+          "machine init failed");
+    uint64_t host_now_ns = UINT64_C(1000000000);
+    CHECK(s5l8900_set_active_host_clock(
+              &m, active_clock_now_probe, &host_now_ns),
+          "could not install active clock for hibernation-wake test");
+    arm_all(&m);
+    arm_pmu_irq(&m);
+
+    m.pmu.regs[PCF50635_OOCSHDWN] =
+        PCF50635_OOCSHDWN_GO_HIBERNATE;
+    m.pmu.written[PCF50635_OOCSHDWN] = 1u;
+    m.cpu.r[0] = 0x22222222u;
+    m.cpu.r[15] = 0xc0061eb0u;
+    m.cpu.cpsr = ARM_MODE_USR;
+    m.cpu.cp15.sctlr = 0x00c5187du;
+    m.cpu.cp15.ttbr0 = 0x23455000u;
+    m.cpu.cycles = UINT64_C(18667762932);
+    m.wfi_pace_yield = true;
+    m.active_clock_last_host_ns = 99u;
+    m.active_clock_guest_ticks_since_sync = 88u;
+    m.active_clock_fraction = 77u;
+    m.active_clock_anchor_valid = true;
+
+    CHECK(s5l_pcf50635_in_hibernation(&m.pmu) &&
+          !s5l_pcf50635_in_standby(&m.pmu),
+          "Auto-Lock command was not classified only as hibernation");
+
+    CHECK(s5l8900_set_button(&m, S5L_BUTTON_MENU, true) &&
+          s5l8900_set_button(&m, S5L_BUTTON_MENU, false),
+          "sleeping Home transitions were allowed to block the Power FIFO");
+    CHECK(!s5l_buttons_held(&m.buttons, S5L_BUTTON_MENU) &&
+          !s5l_gpioic_pending(&m.gpioic, s5l_button_line(S5L_BUTTON_MENU)) &&
+          m.cpu.r[15] == 0xc0061eb0u,
+          "sleeping Home reached hardware or changed the sleeping CPU");
+
+    CHECK(s5l8900_set_button(&m, S5L_BUTTON_HOLD, true),
+          "Power did not wake the hibernating machine");
+    CHECK(!s5l_pcf50635_in_hibernation(&m.pmu) &&
+          !s5l_pcf50635_in_standby(&m.pmu) &&
+          (m.pmu.regs[PCF50635_INT2] & PCF50635_INT2_ONKEYR) != 0u,
+          "hibernation wake did not clear power state and latch ONKEY");
+    CHECK(m.cpu.r[15] == S5L8900_SDRAM_BASE && m.cpu.r[0] == 0u &&
+          m.cpu.cp15.sctlr == 0u && m.cpu.cp15.ttbr0 == 0u,
+          "hibernation wake did not enter the retained reset vector cleanly");
+    CHECK(m.cpu.cycles == UINT64_C(18667762932),
+          "hibernation wake restarted the retired-instruction timeline");
+    CHECK(!m.wfi_pace_yield && !m.active_clock_anchor_valid &&
+          m.active_clock_input_guard && m.active_clock_input_guards == 1u,
+          "hibernation wake retained stale clock state or omitted its guard");
+    CHECK(s5l_buttons_held(&m.buttons, S5L_BUTTON_HOLD) &&
+          m.buttons.sets == 3u && m.buttons.edges == 1u,
+          "hibernation wake did not retain exactly one Power press edge");
+
+    s5l8900_free(&m);
+}
+
 static void test_power_wakes_standby_through_retained_reset(void) {
     s5l8900_t m;
     CHECK(s5l8900_init(&m, S5L8900_SDRAM_BASE, 1u << 16),
@@ -1216,6 +1279,7 @@ int main(void) {
     test_level_lines_relatch_on_every_input();
     test_an_undriven_level_line_never_asserts();
     test_the_board_drives_inputs_and_the_guest_cannot();
+    test_power_wakes_hibernation_through_retained_reset();
     test_power_wakes_standby_through_retained_reset();
     test_restore_wakes_standby_without_a_button();
     test_snapshot_carries_the_switches();

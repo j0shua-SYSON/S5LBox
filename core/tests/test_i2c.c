@@ -315,13 +315,15 @@ static void test_pmu_rtc_and_tick_overflow(void) {
           "RTC advanced past its representable century");
 }
 
-static void test_pmu_standby_wake_event_is_one_shot(void) {
+static void test_pmu_power_state_wake_event_is_one_shot(void) {
     s5l_i2c_t bus;
     s5l_pcf50635_t pmu;
     setup_pmu(&bus, &pmu);
 
     CHECK(!s5l_pcf50635_in_standby(&pmu),
           "reset PMU claimed the application processor was in standby");
+    CHECK(!s5l_pcf50635_in_hibernation(&pmu),
+          "reset PMU claimed the application processor was hibernating");
     CHECK(!s5l_pcf50635_irq(&pmu) && !s5l_pcf50635_irq(NULL),
           "reset or NULL PMU asserted INT_N");
 
@@ -336,21 +338,26 @@ static void test_pmu_standby_wake_event_is_one_shot(void) {
     CHECK(pmu.unknown_reads == unknown,
           "known interrupt-mask registers were counted as unknown");
 
-    /* Bit 1 is reserved on the period PCF50633-family register map. The old
-     * model called it GOHIB, which made a real iPhone OS 3 shutdown (0x01)
-     * invisible and treated the reserved bit as power state instead. Keep an
-     * explicit negative control so that one-bit error cannot return. */
-    uint8_t command = 0x02u;
+    /* iPhone OS uses two distinct commands here. GO_HIBERNATE is the ordinary
+     * Auto-Lock/system-sleep path whose retained reset trampoline resumes in
+     * place. GO_STANDBY is a full power-off; the app cold-boots that state on
+     * reopen. Neither bit may be used as a synonym for the other. */
+    uint8_t command =
+        (uint8_t)(0x80u | PCF50635_OOCSHDWN_GO_HIBERNATE);
     drive_write(&bus, PCF50635_I2C_ADDR, PCF50635_OOCSHDWN,
                 &command, 1u);
     CHECK(!s5l_pcf50635_in_standby(&pmu),
-          "reserved OOCSHDWN bit 1 was treated as standby");
+          "OOCSHDWN.GO_HIBERNATE was treated as full standby");
+    CHECK(s5l_pcf50635_in_hibernation(&pmu),
+          "OOCSHDWN.GO_HIBERNATE did not enter hibernation");
 
     command = (uint8_t)(0x80u | PCF50635_OOCSHDWN_GO_STANDBY);
     drive_write(&bus, PCF50635_I2C_ADDR, PCF50635_OOCSHDWN,
                 &command, 1u);
     CHECK(s5l_pcf50635_in_standby(&pmu),
           "OOCSHDWN.GO_STANDBY did not enter standby");
+    CHECK(!s5l_pcf50635_in_hibernation(&pmu),
+          "OOCSHDWN.GO_STANDBY was treated as hibernation");
 
     uint8_t mask = PCF50635_INT2_ONKEYR;
     drive_write(&bus, PCF50635_I2C_ADDR, PCF50635_INT2MASK, &mask, 1u);
@@ -358,6 +365,8 @@ static void test_pmu_standby_wake_event_is_one_shot(void) {
     s5l_pcf50635_wake_onkey(&pmu);
     CHECK(!s5l_pcf50635_in_standby(&pmu),
           "ONKEY wake left GO_STANDBY asserted");
+    CHECK(!s5l_pcf50635_in_hibernation(&pmu),
+          "ONKEY wake left GO_HIBERNATE asserted");
     CHECK(pmu.regs[PCF50635_OOCSHDWN] == 0x80u,
           "ONKEY wake discarded unrelated OOCSHDWN bits: %02x",
           pmu.regs[PCF50635_OOCSHDWN]);
@@ -392,6 +401,7 @@ static void test_pmu_standby_wake_event_is_one_shot(void) {
           "PMU wake event did not clear on read");
 
     CHECK(!s5l_pcf50635_in_standby(NULL), "NULL PMU entered standby");
+    CHECK(!s5l_pcf50635_in_hibernation(NULL), "NULL PMU hibernated");
     s5l_pcf50635_wake_onkey(NULL);
 }
 
@@ -610,7 +620,7 @@ int main(void) {
     test_unknown_slave_naks_and_w1c_is_selective();
     test_pmu_multibyte_pointer_and_wrap();
     test_pmu_rtc_and_tick_overflow();
-    test_pmu_standby_wake_event_is_one_shot();
+    test_pmu_power_state_wake_event_is_one_shot();
     test_unknown_pmu_registers_are_visible_and_bounded();
     test_machine_routes_widths_windows_and_irqs();
     test_malformed_runtime_state_cannot_index_callbacks();

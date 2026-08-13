@@ -208,6 +208,12 @@ bool s5l_pcf50635_in_standby(const s5l_pcf50635_t *pmu) {
             PCF50635_OOCSHDWN_GO_STANDBY) != 0u;
 }
 
+bool s5l_pcf50635_in_hibernation(const s5l_pcf50635_t *pmu) {
+    return pmu && pmu->written[PCF50635_OOCSHDWN] &&
+           (pmu->regs[PCF50635_OOCSHDWN] &
+            PCF50635_OOCSHDWN_GO_HIBERNATE) != 0u;
+}
+
 void s5l_pcf50635_wake_onkey(s5l_pcf50635_t *pmu) {
     if (!pmu) return;
 
@@ -217,8 +223,10 @@ void s5l_pcf50635_wake_onkey(s5l_pcf50635_t *pmu) {
     pmu->regs[PCF50635_INT2] |= PCF50635_INT2_ONKEYR;
 
     /* OOCSHDWN is a command. Once ONKEY has powered the AP back up, keeping
-     * GO_STANDBY asserted would make every later Power press look like another
-     * hardware wake and reset the running CPU. Preserve unrelated bits. */
+     * either power-state bit asserted would make every later Power press look
+     * like another hardware wake and reset the running CPU. Preserve all
+     * unrelated bits. */
     pmu->regs[PCF50635_OOCSHDWN] &=
-        (uint8_t)~PCF50635_OOCSHDWN_GO_STANDBY;
+        (uint8_t)~(PCF50635_OOCSHDWN_GO_STANDBY |
+                   PCF50635_OOCSHDWN_GO_HIBERNATE);
 }
