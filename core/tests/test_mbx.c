@@ -688,9 +688,10 @@ static uint32_t test_ta_projective_draw(
 }
 
 static uint32_t test_ta_auxiliary_block(uint32_t *stream, uint32_t start,
-                                        bool rectangle) {
+                                        uint32_t control,
+                                        uint32_t vertices) {
     stream[start] = 0x10000073u;
-    stream[start + 1u] = rectangle ? 0x22207f80u : 0x22206f80u;
+    stream[start + 1u] = control;
     stream[start + 2u] = 0xe0000000u;
     stream[start + 3u] = 0u;
     stream[start + 4u] = 3u;
@@ -704,9 +705,8 @@ static uint32_t test_ta_auxiliary_block(uint32_t *stream, uint32_t start,
         {0.0f, 20.0f}, {0.0f, 480.0f},
         {320.0f, 20.0f}, {320.0f, 480.0f},
     };
-    uint32_t vertices = rectangle ? 4u : 3u;
     for (uint32_t vertex = 0u; vertex < vertices; vertex++) {
-        const float *point = rectangle ? quad[vertex] : triangle[vertex];
+        const float *point = vertices == 4u ? quad[vertex] : triangle[vertex];
         uint32_t base = start + 8u + vertex * 4u;
         stream[base] = 0u;
         stream[base + 1u] = test_float_word(point[0]);
@@ -765,12 +765,17 @@ static void test_ta_stream_axis_aligned_atomic_scene(void) {
     const uint32_t target = 0x00810000u;
     const uint32_t object_pa = 0x08010000u;
     const uint32_t target_pa = 0x08080000u;
-    uint32_t stream[122] = {0x10000010u};
+    uint32_t stream[143] = {0x10000010u};
     uint32_t next = test_ta_solid_draw(
         stream, 1u, 10.0f, 20.0f, 14.0f, 23.0f, 0xff0000ffu);
     uint32_t auxiliary_start = next;
-    next = test_ta_auxiliary_block(stream, next, false);
-    next = test_ta_auxiliary_block(stream, next, true);
+    next = test_ta_auxiliary_block(
+        stream, next, 0x22206f80u, 3u);
+    uint32_t auxiliary_7f_triangle_start = next;
+    next = test_ta_auxiliary_block(
+        stream, next, 0x22207f80u, 3u);
+    next = test_ta_auxiliary_block(
+        stream, next, 0x22207f80u, 4u);
     static const uint32_t state[14] = {
         0xa01b001cu, 0u, 0u, 0u, 0u, 0u, 0u,
         0u, 0u, 0xa01d001du, 0u, 0u, 0u, 0x3f800000u,
@@ -958,6 +963,26 @@ static void test_ta_stream_axis_aligned_atomic_scene(void) {
           "malformed TA auxiliary packet completed or lost its cursor");
     stream[auxiliary_start + 20u] ^= 1u;
 
+    /* The measured 0x22207f80 triangle is distinguished from its four-vertex
+     * form by the terminator at word 20. Corrupting that boundary must not
+     * make the following state block look like a fourth vertex. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    test_gpu_write32(&m,
+        target + 20u * TARGET_STRIDE + 10u * 4u, 0xff708090u);
+    stream[auxiliary_7f_triangle_start + 20u] ^= 1u;
+    test_ta_run_stream(&m, stream, next);
+    CHECK(test_gpu_read32(
+              &m, target + 20u * TARGET_STRIDE + 10u * 4u) == 0xff708090u,
+          "malformed 7f-triangle TA auxiliary packet committed a draw");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
+          m.mbx_telemetry.candidates_3d == 6u &&
+          m.mbx_telemetry.completed_3d == 3u &&
+          m.mbx_telemetry.rejected_3d == 3u &&
+          m.mbx_telemetry.rejected_3d_history[2].ta_failure_word ==
+              auxiliary_7f_triangle_start,
+          "malformed 7f-triangle auxiliary completed or lost its cursor");
+    stream[auxiliary_7f_triangle_start + 20u] ^= 1u;
+
     s5l8900_free(&m);
 }
 
@@ -978,6 +1003,7 @@ static void test_ta_stream_orthographic_affine_texture(void) {
     uint32_t stream[64] = {0x10000010u};
     uint32_t next = test_ta_global_transform(
         stream, 1u, WIDTH, HEIGHT, -10.0f, -20.0f);
+    uint32_t draw_start = next;
     const float x[4] = {20.0f, 16.0f, 20.0f, 16.0f};
     const float y[4] = {34.0f, 34.0f, 30.0f, 30.0f};
     const float u[4] = {4.0f, 4.0f, 0.0f, 0.0f};
@@ -985,7 +1011,7 @@ static void test_ta_stream_orthographic_affine_texture(void) {
     uint32_t source_word = 0x8e040000u |
         ((source >> 7) & 0x0003ffffu);
     next = test_ta_textured_draw(
-        stream, next, 0xa1418000u, source_word, 0xd6087610u,
+        stream, next, 0xa1418000u, source_word, 0xd6087e10u,
         x, y, u, v, 0xffffffffu);
     stream[next++] = 0xf0000000u;
 
@@ -1051,19 +1077,36 @@ static void test_ta_stream_orthographic_affine_texture(void) {
               S5L_MBX_3D_ACCEPT_TA_STREAM,
           "orthographic affine TA telemetry is not exact");
 
+    /* The captured Weather sampler differs by one bounded state field. It is
+     * accepted exactly; a one-bit lookalike still rejects transactionally. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    uint32_t marker_address = target + (10u * WIDTH + 6u) * 4u;
+    test_gpu_write32(&m, marker_address, 0xff102030u);
+    stream[draw_start + 3u] ^= 1u;
+    test_ta_run_stream(&m, stream, next);
+    CHECK(test_gpu_read32(&m, marker_address) == 0xff102030u,
+          "unknown Weather-sampler lookalike committed a TA scene");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
+          m.mbx_telemetry.candidates_3d == 2u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 1u &&
+          m.mbx_telemetry.rejected_3d_history[0].ta_failure_word ==
+              draw_start,
+          "unknown Weather-sampler lookalike completed or lost its cursor");
+    stream[draw_start + 3u] ^= 1u;
+
     /* A transform that no longer encodes 2/height is not a second affine
      * family. The earlier valid draw must remain untouched on rejection. */
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
-    uint32_t marker_address = target + (10u * WIDTH + 6u) * 4u;
     test_gpu_write32(&m, marker_address, 0xff102030u);
     stream[7] ^= 1u;
     test_ta_run_stream(&m, stream, next);
     CHECK(test_gpu_read32(&m, marker_address) == 0xff102030u,
           "bad orthographic transform committed a TA scene");
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
-          m.mbx_telemetry.candidates_3d == 2u &&
+          m.mbx_telemetry.candidates_3d == 3u &&
           m.mbx_telemetry.completed_3d == 1u &&
-          m.mbx_telemetry.rejected_3d == 1u,
+          m.mbx_telemetry.rejected_3d == 2u,
           "bad orthographic transform completed or corrupted telemetry");
     s5l8900_free(&m);
 }

@@ -3785,7 +3785,8 @@ static void mbx_ta_rejection_at(
 }
 
 static bool mbx_ta_sampler(uint32_t value) {
-    return value == 0xd6087610u || value == 0x86084610u ||
+    return value == 0xd6087610u || value == 0xd6087e10u ||
+           value == 0x86084610u ||
            value == 0x86081e10u;
 }
 
@@ -4215,11 +4216,12 @@ static bool mbx_ta_state_block(const uint32_t *words, uint32_t count,
            first <= 1.0f && second <= 1.0f;
 }
 
-/* Weather submits two measured non-colour primitives between ordinary
- * textured draws. The same packet family also occurs in the pre-draw region,
- * where the TA parser already treats it as setup rather than framebuffer
- * work. Recognize only the two captured controls and their tightly bounded
- * finite vertex grammar when they occur between draws. */
+/* Weather submits measured non-colour primitives between ordinary textured
+ * draws. The same packet family also occurs in the pre-draw region, where the
+ * TA parser already treats it as setup rather than framebuffer work. The
+ * 0x22207f80 control has been captured with both three and four vertices;
+ * 0x22206f80 has only been captured with three. Recognize only those bounded
+ * finite forms when they occur between draws. */
 static uint32_t mbx_ta_auxiliary_block(const uint32_t *words,
                                        uint32_t count, uint32_t start) {
     if (start > count || count - start < 21u ||
@@ -4231,8 +4233,14 @@ static uint32_t mbx_ta_auxiliary_block(const uint32_t *words,
         words[start + 7u] != 0xb00e4000u)
         return 0u;
 
-    uint32_t vertices = words[start + 1u] == 0x22206f80u ? 3u :
-                        words[start + 1u] == 0x22207f80u ? 4u : 0u;
+    uint32_t vertices = 0u;
+    if (words[start + 1u] == 0x22206f80u) {
+        vertices = 3u;
+    } else if (words[start + 1u] == 0x22207f80u) {
+        /* The terminator cannot alias a valid fourth vertex: every measured
+         * auxiliary vertex begins with zero. */
+        vertices = words[start + 20u] == 3u ? 3u : 4u;
+    }
     uint32_t length = 8u + vertices * 4u + 1u;
     if (!vertices || count - start < length ||
         words[start + length - 1u] != 3u)
