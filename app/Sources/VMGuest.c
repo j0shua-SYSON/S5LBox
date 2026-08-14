@@ -176,22 +176,26 @@ VM_ASSERT_MBX_TARGET_OFFSET(last_kind);
 
 _Static_assert(S5L_POWER_TRACE_HISTORY == VM_POWER_TRACE_HISTORY,
                "core/app Power trace history counts differ");
-_Static_assert(S5L_POWER_TRACE_EVENT_STATE == VM_POWER_TRACE_EVENT_STATE &&
-                   S5L_POWER_TRACE_EVENT_HOST_PRESS ==
-                       VM_POWER_TRACE_EVENT_HOST_PRESS &&
-                   S5L_POWER_TRACE_EVENT_HOST_RELEASE ==
-                       VM_POWER_TRACE_EVENT_HOST_RELEASE &&
-                   S5L_POWER_TRACE_EVENT_HOST_REFUSED ==
-                       VM_POWER_TRACE_EVENT_HOST_REFUSED &&
-                   S5L_POWER_TRACE_EVENT_RELEASE_WAIT ==
-                       VM_POWER_TRACE_EVENT_RELEASE_WAIT &&
-                   S5L_POWER_TRACE_EVENT_WAKE_BEGIN ==
-                       VM_POWER_TRACE_EVENT_WAKE_BEGIN &&
-                   S5L_POWER_TRACE_EVENT_WAKE_RESET ==
-                       VM_POWER_TRACE_EVENT_WAKE_RESET &&
-                   S5L_POWER_TRACE_EVENT_WAKE_FAILED ==
-                       VM_POWER_TRACE_EVENT_WAKE_FAILED,
-               "core/app Power trace event values differ");
+#define VM_ASSERT_POWER_TRACE_EVENT(core_, app_) \
+    _Static_assert((unsigned)(core_) == (unsigned)(app_), \
+                   "core/app Power trace event values differ")
+VM_ASSERT_POWER_TRACE_EVENT(S5L_POWER_TRACE_EVENT_STATE,
+                            VM_POWER_TRACE_EVENT_STATE);
+VM_ASSERT_POWER_TRACE_EVENT(S5L_POWER_TRACE_EVENT_HOST_PRESS,
+                            VM_POWER_TRACE_EVENT_HOST_PRESS);
+VM_ASSERT_POWER_TRACE_EVENT(S5L_POWER_TRACE_EVENT_HOST_RELEASE,
+                            VM_POWER_TRACE_EVENT_HOST_RELEASE);
+VM_ASSERT_POWER_TRACE_EVENT(S5L_POWER_TRACE_EVENT_HOST_REFUSED,
+                            VM_POWER_TRACE_EVENT_HOST_REFUSED);
+VM_ASSERT_POWER_TRACE_EVENT(S5L_POWER_TRACE_EVENT_RELEASE_WAIT,
+                            VM_POWER_TRACE_EVENT_RELEASE_WAIT);
+VM_ASSERT_POWER_TRACE_EVENT(S5L_POWER_TRACE_EVENT_WAKE_BEGIN,
+                            VM_POWER_TRACE_EVENT_WAKE_BEGIN);
+VM_ASSERT_POWER_TRACE_EVENT(S5L_POWER_TRACE_EVENT_WAKE_RESET,
+                            VM_POWER_TRACE_EVENT_WAKE_RESET);
+VM_ASSERT_POWER_TRACE_EVENT(S5L_POWER_TRACE_EVENT_WAKE_FAILED,
+                            VM_POWER_TRACE_EVENT_WAKE_FAILED);
+#undef VM_ASSERT_POWER_TRACE_EVENT
 _Static_assert(sizeof(s5l_power_trace_entry_t) ==
                    sizeof(vm_power_trace_entry_t),
                "core/app Power trace entry layouts differ");
