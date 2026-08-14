@@ -3915,11 +3915,13 @@ static enum mbx_ta_parse_result mbx_ta_parse_vertices(
         bool empty_v = !(draw->v0 < draw->v1);
         if (empty_u || empty_v) {
             /* Weather emits paired, zero-area edge primitives while rebuilding
-             * its front and back pages. They establish texture state for the
-             * marker-2 primitive that follows but rasterize no samples. Accept
-             * only one collapsed orthographic axis whose destination and UV
-             * endpoints agree exactly; an arbitrary empty texture remains a
-             * hard rejection and the scene stays transactional. */
+             * its front and back pages. They can establish texture state for a
+             * marker-2 primitive or finish a chain at marker 3, but rasterize no
+             * samples. Accept only one collapsed orthographic axis whose
+             * destination and UV endpoints agree exactly; an arbitrary empty
+             * texture remains a hard rejection and the scene stays
+             * transactional. The scene-level nonzero-pixel check below still
+             * rejects streams made entirely from empty primitives. */
             draw->x0 = draw->x1 = x[0];
             draw->y0 = draw->y1 = y[0];
             for (uint32_t i = 1u; i < 4u; i++) {
@@ -3931,8 +3933,8 @@ static enum mbx_ta_parse_result mbx_ta_parse_vertices(
             bool empty_x = !(draw->x0 < draw->x1);
             bool empty_y = !(draw->y0 < draw->y1);
             uint32_t pitch_pixels = draw->source_stride / 4u;
-            if (empty_u == empty_v || words[boundary] != 2u ||
-                !orthographic || empty_x != empty_u || empty_y != empty_v ||
+            if (empty_u == empty_v || !orthographic ||
+                empty_x != empty_u || empty_y != empty_v ||
                 !pitch_pixels || draw->u1 > (float)pitch_pixels ||
                 draw->u1 > (float)draw->texture_width ||
                 draw->v1 > (float)draw->texture_height) {

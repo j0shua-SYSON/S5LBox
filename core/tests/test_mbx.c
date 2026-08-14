@@ -1247,6 +1247,12 @@ static void test_ta_stream_weather_marker2_quads(void) {
     const float bottom_v[4] = {334.0f, 460.0f, 334.0f, 460.0f};
     next = test_ta_textured_primitive(
         stream, next, bottom_x, bottom_y, bottom_u, bottom_v,
+        0xffffffffu, 2u);
+    /* The same measured zero-area edge may also be the final primitive under
+     * this texture state. This is the exact form reached after decoding the
+     * first physical Weather rejection. */
+    next = test_ta_textured_primitive(
+        stream, next, edge_x, edge_y, edge_u, edge_v,
         0xffffffffu, 3u);
     uint32_t final_boundary = next - 1u;
 
@@ -1263,8 +1269,8 @@ static void test_ta_stream_weather_marker2_quads(void) {
         stream, next, 269.0f, 114.0f, 310.0f, 132.0f,
         0xffff0000u, 3u);
     stream[next++] = 0xf0000000u;
-    CHECK(next == 286u,
-          "Weather marker-2 fixture has %u words, expected 286", next);
+    CHECK(next == 319u,
+          "Weather marker-2 fixture has %u words, expected 319", next);
 
     s5l8900_t m;
     CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
@@ -1374,6 +1380,24 @@ static void test_ta_stream_weather_marker2_quads(void) {
     stream[final_boundary] = 3u;
     CHECK(draw_start == 18u,
           "Weather marker-2 fixture moved its measured draw header");
+
+    /* A valid zero-area primitive is still not a complete render by itself.
+     * It may preserve or terminate measured state, but cannot manufacture a
+     * completion event or touch guest RAM without any covered pixels. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    test_gpu_write32(&m, edge_guard, 0xff708090u);
+    uint32_t empty_stream[48] = {0x10000010u};
+    uint32_t empty_next = test_ta_textured_draw(
+        empty_stream, 1u, 0xa6618000u, source_word, 0xd6087610u,
+        edge_x, edge_y, edge_u, edge_v, 0xffffffffu);
+    empty_stream[empty_next++] = 0xf0000000u;
+    test_ta_run_stream(&m, empty_stream, empty_next);
+    CHECK(test_gpu_read32(&m, edge_guard) == 0xff708090u &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
+          m.mbx_telemetry.candidates_3d == 4u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 3u,
+          "all-empty TA stream committed pixels or raised completion");
     s5l8900_free(&m);
 }
 
