@@ -497,6 +497,8 @@ static void test_device_state_round_trips(void) {
     CHECK(s5l8900_set_active_host_clock(
               b, snapshot_active_now_probe, &active_clock_context),
           "could not install destination active-clock policy");
+    CHECK(s5l8900_set_active_clock_work_budget(b, 4u),
+          "could not install destination active-clock work budget");
     b->active_clock_updates = 401u;
     b->active_clock_added_ticks = 402u;
     b->active_clock_clamps = 403u;
@@ -550,6 +552,7 @@ static void test_device_state_round_trips(void) {
           "snapshot restore changed WFI host policy/evidence or retained yield");
     CHECK(b->active_host_now == snapshot_active_now_probe &&
           b->active_host_now_ctx == &active_clock_context &&
+          b->active_clock_max_ticks_per_retirement == 4u &&
           b->active_clock_updates == 401u &&
           b->active_clock_added_ticks == 402u &&
           b->active_clock_clamps == 403u &&

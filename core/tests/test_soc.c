@@ -508,6 +508,9 @@ static void test_active_host_clock_is_optional_bounded_and_fail_closed(void) {
     CHECK(!s5l8900_set_active_host_clock(NULL, active_clock_probe_now,
                                          &probe),
           "NULL machine accepted active clock");
+    CHECK(s5l8900_set_active_clock_work_budget(
+              &active, S5L8900_ACTIVE_CLOCK_MAX_WORK_TICKS),
+          "could not remove the work cap from the wall-clock oracle");
     CHECK(s5l8900_set_active_host_clock(
               &active, active_clock_probe_now, &probe),
           "could not enable active host clock");
@@ -597,6 +600,9 @@ static void test_active_host_clock_is_optional_bounded_and_fail_closed(void) {
         .now_ns = UINT64_C(2000000000), .fail_on_call = 2u,
         .succeeds = true
     };
+    CHECK(s5l8900_set_active_clock_work_budget(
+              &mid_batch_failure, S5L8900_ACTIVE_CLOCK_MAX_WORK_TICKS),
+          "could not remove the mid-batch oracle's work cap");
     CHECK(s5l8900_set_active_host_clock(
               &mid_batch_failure, active_clock_probe_now, &failing),
           "could not enable mid-batch failure oracle");
@@ -619,6 +625,19 @@ static void test_active_host_clock_is_optional_bounded_and_fail_closed(void) {
     s5l8900_t work_bounded;
     CHECK(s5l8900_init(&work_bounded, 0, 1u << 20),
           "work-bounded active-clock machine init failed");
+    CHECK(work_bounded.active_clock_max_ticks_per_retirement ==
+              S5L8900_ACTIVE_CLOCK_DEFAULT_WORK_TICKS,
+          "active clock did not start at the conservative work budget");
+    CHECK(!s5l8900_set_active_clock_work_budget(NULL, 8u) &&
+          !s5l8900_set_active_clock_work_budget(&work_bounded, 0u) &&
+          !s5l8900_set_active_clock_work_budget(
+              &work_bounded, S5L8900_ACTIVE_CLOCK_MAX_WORK_TICKS + 1u) &&
+          work_bounded.active_clock_max_ticks_per_retirement ==
+              S5L8900_ACTIVE_CLOCK_DEFAULT_WORK_TICKS,
+          "invalid active-clock work budget changed the machine");
+    CHECK(s5l8900_set_active_clock_work_budget(&work_bounded, 8u) &&
+          work_bounded.active_clock_max_ticks_per_retirement == 8u,
+          "could not select the bounded physical-calibration budget");
     s5l8900_load(&work_bounded, 0, program, sizeof program);
     work_bounded.cpu_hz = work_bounded.tb_hz = 1000000u;
     work_bounded.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I | ARM_CPSR_F;
@@ -658,7 +677,9 @@ static void test_active_host_clock_does_not_double_count_paced_wfi(void) {
     m.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I | ARM_CPSR_F;
 
     active_clock_probe_t probe = { .succeeds = true };
-    CHECK(s5l8900_set_active_host_clock(
+    CHECK(s5l8900_set_active_clock_work_budget(
+              &m, S5L8900_ACTIVE_CLOCK_MAX_WORK_TICKS) &&
+          s5l8900_set_active_host_clock(
               &m, active_clock_probe_now, &probe) &&
           s5l8900_set_wfi_host_pacing(
               &m, active_clock_probe_sleep, &probe),
@@ -695,7 +716,9 @@ static void test_active_host_clock_shields_only_pathological_input_work(void) {
     active_clock_probe_t probe = {
         .now_ns = UINT64_C(1000000000), .succeeds = true
     };
-    CHECK(s5l8900_set_active_host_clock(
+    CHECK(s5l8900_set_active_clock_work_budget(
+              &m, S5L8900_ACTIVE_CLOCK_MAX_WORK_TICKS) &&
+          s5l8900_set_active_host_clock(
               &m, active_clock_probe_now, &probe) &&
           s5l8900_set_wfi_host_pacing(
               &m, active_clock_probe_sleep, &probe),
@@ -922,7 +945,9 @@ static void test_active_host_clock_preserves_only_bounded_wfi_oversleep(void) {
     active_clock_probe_t ordinary_probe = {
         .sleep_overshoot_ns = UINT64_C(2000000), .succeeds = true
     };
-    CHECK(s5l8900_set_active_host_clock(
+    CHECK(s5l8900_set_active_clock_work_budget(
+              &ordinary, S5L8900_ACTIVE_CLOCK_MAX_WORK_TICKS) &&
+          s5l8900_set_active_host_clock(
               &ordinary, active_clock_probe_now, &ordinary_probe) &&
           s5l8900_set_wfi_host_pacing(
               &ordinary, active_clock_probe_sleep, &ordinary_probe),
@@ -960,7 +985,9 @@ static void test_active_host_clock_preserves_only_bounded_wfi_oversleep(void) {
     active_clock_probe_t suspended_probe = {
         .sleep_overshoot_ns = UINT64_C(92000000), .succeeds = true
     };
-    CHECK(s5l8900_set_active_host_clock(
+    CHECK(s5l8900_set_active_clock_work_budget(
+              &suspended, S5L8900_ACTIVE_CLOCK_MAX_WORK_TICKS) &&
+          s5l8900_set_active_host_clock(
               &suspended, active_clock_probe_now, &suspended_probe) &&
           s5l8900_set_wfi_host_pacing(
               &suspended, active_clock_probe_sleep, &suspended_probe),
@@ -997,7 +1024,9 @@ static void test_active_host_clock_refreshes_devices_without_oversampling(void) 
     m.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I | ARM_CPSR_F;
 
     active_clock_probe_t probe = { .succeeds = true };
-    CHECK(s5l8900_set_active_host_clock(
+    CHECK(s5l8900_set_active_clock_work_budget(
+              &m, S5L8900_ACTIVE_CLOCK_MAX_WORK_TICKS) &&
+          s5l8900_set_active_host_clock(
               &m, active_clock_probe_now, &probe),
           "could not enable device-boundary clock oracle");
     arm_status_t st = ARM_OK;

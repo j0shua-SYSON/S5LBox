@@ -130,6 +130,11 @@ extern "C" {
  * it did before that optional product policy. Ordinary machines never contain
  * this file; it is diagnostic host policy, not guest state. */
 #define VM_FW_BOOT_ACTIVE_CLOCK_OFF_FILE "clock.active-host-off"
+/* Optional decimal 1..64 same-binary calibration budget for active guest
+ * time. Absent/empty keeps the conservative product default. This is a
+ * diagnostic host-policy file beside the existing active-clock-off control;
+ * it is neither guest state nor a stock-iPhone dependency. */
+#define VM_FW_BOOT_ACTIVE_CLOCK_BUDGET_FILE "clock.active-work-budget"
 
 /* How much free space rootfs_work_create() adds to the volume. The stock
  * rootfs ships with ZERO free blocks, so without this launchd can create

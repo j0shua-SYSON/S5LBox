@@ -655,6 +655,8 @@ static void w32(void *c, uint32_t a, uint32_t v) { bus_write(c, a, v, 4); }
 static void w16(void *c, uint32_t a, uint16_t v) { bus_write(c, a, v, 2); }
 static void w8 (void *c, uint32_t a, uint8_t  v) { bus_write(c, a, v, 1); }
 
+static void active_clock_reset_anchor(s5l8900_t *m);
+
 bool s5l8900_set_direct_ram_writes(s5l8900_t *m, bool enabled) {
     if (!m) return false;
     if (enabled &&
@@ -721,6 +723,16 @@ bool s5l8900_set_active_host_clock(s5l8900_t *m,
     m->active_clock_input_guard_host_valid = false;
     m->active_clock_deadline_shield = false;
     if (now) m->active_host_now = now;
+    return true;
+}
+
+bool s5l8900_set_active_clock_work_budget(s5l8900_t *m,
+                                          uint32_t ticks_per_retirement) {
+    if (!m || ticks_per_retirement == 0u ||
+        ticks_per_retirement > S5L8900_ACTIVE_CLOCK_MAX_WORK_TICKS)
+        return false;
+    m->active_clock_max_ticks_per_retirement = ticks_per_retirement;
+    active_clock_reset_anchor(m);
     return true;
 }
 
@@ -1248,6 +1260,8 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
     m->ram_size = ram_size;
     m->cpu_hz   = S5L8900_CPU_HZ;
     m->tb_hz    = S5L8900_TB_HZ;
+    m->active_clock_max_ticks_per_retirement =
+        S5L8900_ACTIVE_CLOCK_DEFAULT_WORK_TICKS;
 
     s5l_uart_reset(&m->uart0);
     s5l_uart_reset(&m->uart4);
@@ -2240,7 +2254,7 @@ static bool active_host_clock_sync(s5l8900_t *m,
      * actually emulated. */
     uint64_t retirement_cap =
         (uint64_t)fallback_ticks *
-        S5L8900_ACTIVE_CLOCK_MAX_TICKS_PER_RETIREMENT;
+        m->active_clock_max_ticks_per_retirement;
     if (added_ticks > retirement_cap) {
         added_ticks = retirement_cap;
         clamp = true;

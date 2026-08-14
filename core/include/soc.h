@@ -3909,13 +3909,15 @@ typedef void (*s5l_uart4_host_service_fn)(void *ctx, unsigned retired);
  * burst. During active execution the clock is sampled much more frequently. */
 #define S5L8900_ACTIVE_CLOCK_MAX_STEP_NS UINT64_C(8000000)
 /* Active wall time may not outrun the CPU work that the host actually retired.
- * The interpreter has no cycle model, so the old deterministic path uses the
- * deliberately conservative floor of one CPU tick per instruction.  The
- * interactive clock may credit up to this many ticks per retirement: enough
- * to represent ordinary ARM11 pipeline and memory latency, but bounded so a
- * slow host cannot manufacture a permanent queue of already-expired guest
- * deadlines.  Paced WFI ticks are accounted separately and remain real-time. */
-#define S5L8900_ACTIVE_CLOCK_MAX_TICKS_PER_RETIREMENT 8u
+ * The interpreter has no cycle model, so one CPU tick per instruction is the
+ * conservative, already-proven product default. An A9 replay at budget 8
+ * reached SpringBoard, then accepted a Weather tap but produced no further
+ * MBX work after another 766 million retirements; 8 is therefore a test point,
+ * not a shippable assumption. A bounded same-binary control may raise the
+ * budget during calibration, but never beyond the defensive ceiling below.
+ * Paced WFI ticks are accounted separately and remain real-time. */
+#define S5L8900_ACTIVE_CLOCK_DEFAULT_WORK_TICKS 1u
+#define S5L8900_ACTIVE_CLOCK_MAX_WORK_TICKS     64u
 /* Accepted input normally keeps the active host clock: that is what gives UI
  * timers real-time cadence. Only a foreground interval that is still not
  * quiescent after this much host time is pathological enough to protect from
@@ -4199,6 +4201,10 @@ typedef struct {
     bool                   active_clock_input_guard;
     bool                   active_clock_input_guard_host_valid;
     bool                   active_clock_deadline_shield;
+    /* Live host policy, deliberately placed in the padding before the next
+     * uint64_t so adding the calibration control does not change the machine
+     * layout or the snapshot format. */
+    uint32_t               active_clock_max_ticks_per_retirement;
 
     /* Bounded, expiring Power lifecycle evidence. Host diagnostics only:
      * snapshots preserve the destination process's live trace just as they do
@@ -4443,6 +4449,13 @@ bool s5l8900_set_wfi_host_pacing(s5l8900_t *m,
  */
 bool s5l8900_set_active_host_clock(s5l8900_t *m,
                                    s5l_active_host_now_fn now, void *ctx);
+
+/* Set the maximum active guest CPU ticks credited per retired instruction.
+ * This is live host policy and is not serialized. Values outside 1..64 are
+ * rejected without changing the machine. Changing it discards the old host
+ * anchor so elapsed time sampled under one budget cannot enter another. */
+bool s5l8900_set_active_clock_work_budget(s5l8900_t *m,
+                                          uint32_t ticks_per_retirement);
 
 /*
  * Attach or detach uart4's host peer. Attaching requires both callbacks; the

@@ -158,11 +158,11 @@ targets:
           # time. Pace only autonomous idle intervals and yield every 8 ms;
           # active CPU execution and generic core harnesses remain unthrottled.
           - S5LBOX_IOS_WFI_REALTIME_PACING=1
-          # Keep animations and active timer cadence tied to monotonic host
-          # time. Accepted input starts a guard but does not slow normal work;
-          # only a still-busy pathological transition reaches the core's
-          # deadline shield before Auto-Lock can overtake it. A long paced WFI
-          # ends that shield and anchors host time afresh.
+          # Use monotonic host time as an upper bound for active guest time,
+          # while the core's retired-work budget prevents a slow phone from
+          # accumulating deadlines faster than XNU can service them. Paced
+          # WFI remains real-time. A machine-local diagnostic control can
+          # raise the conservative work budget for same-binary calibration.
           - S5LBOX_IOS_ACTIVE_REALTIME_CLOCK=1
         # Stated rather than inherited: the Objective-C sources are written for
         # ARC, and would leak (or double-free) under manual retain/release.

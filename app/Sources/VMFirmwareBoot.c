@@ -146,6 +146,59 @@ static uint8_t *slurp(const char *path, size_t *out_size) {
     return buffer;
 }
 
+#if defined(S5LBOX_IOS_ACTIVE_REALTIME_CLOCK)
+/* Parse the tiny same-binary calibration control without accepting signs,
+ * overflow, suffixes or locale-specific whitespace. Empty/absent means the
+ * conservative product default; malformed nonempty input fails the boot so a
+ * physical result can never be attributed to a budget that was not applied. */
+static bool read_active_clock_budget_control(const char *path,
+                                             uint32_t *budget,
+                                             bool *controlled) {
+    if (!path || !budget || !controlled) return false;
+    *budget = S5L8900_ACTIVE_CLOCK_DEFAULT_WORK_TICKS;
+    *controlled = false;
+
+    uint64_t file_bytes = file_size(path);
+    if (file_bytes == 0u) return true;
+    if (file_bytes > 32u) return false;
+
+    size_t size = 0u;
+    uint8_t *bytes = slurp(path, &size);
+    if (!bytes || size == 0u) {
+        free(bytes);
+        return false;
+    }
+
+    size_t i = 0u;
+    while (i < size && (bytes[i] == ' ' || bytes[i] == '\t' ||
+                        bytes[i] == '\r' || bytes[i] == '\n'))
+        i++;
+    bool have_digit = false;
+    uint32_t value = 0u;
+    while (i < size && bytes[i] >= '0' && bytes[i] <= '9') {
+        have_digit = true;
+        unsigned digit = (unsigned)(bytes[i] - '0');
+        if (value > (S5L8900_ACTIVE_CLOCK_MAX_WORK_TICKS - digit) / 10u) {
+            free(bytes);
+            return false;
+        }
+        value = value * 10u + digit;
+        i++;
+    }
+    while (i < size && (bytes[i] == ' ' || bytes[i] == '\t' ||
+                        bytes[i] == '\r' || bytes[i] == '\n'))
+        i++;
+    bool valid = have_digit && i == size && value > 0u &&
+                 value <= S5L8900_ACTIVE_CLOCK_MAX_WORK_TICKS;
+    free(bytes);
+    if (!valid) return false;
+
+    *budget = value;
+    *controlled = true;
+    return true;
+}
+#endif
+
 static void set_detail(char *out, size_t capacity, const char *text) {
     if (!out || !capacity) return;
     (void)snprintf(out, capacity, "%s", text ? text : "");
@@ -702,6 +755,9 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     bool compact_privileged_window_refill = false;
     bool compact_pc_profile = false;
     bool active_clock_off = false;
+    bool active_clock_budget_control = false;
+    uint32_t active_clock_work_budget =
+        S5L8900_ACTIVE_CLOCK_DEFAULT_WORK_TICKS;
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     /*
      * One signed binary supplies both halves of the physical A/B.  The marker
@@ -863,8 +919,35 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         return false;
     }
     active_clock_off = file_size(active_clock_off_path) > 0u;
+    char active_clock_budget_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    if (!join_path(active_clock_budget_path, sizeof active_clock_budget_path,
+                   paths->work, VM_FW_BOOT_ACTIVE_CLOCK_BUDGET_FILE)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The active-clock work-budget path is too long to use.");
+        set_detail(report->summary, sizeof report->summary, "path too long");
+        return false;
+    }
+    if (!read_active_clock_budget_control(
+            active_clock_budget_path, &active_clock_work_budget,
+            &active_clock_budget_control)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The active-clock work budget must contain one decimal "
+                   "integer from 1 through 64.");
+        set_detail(report->summary, sizeof report->summary,
+                   "invalid active-clock work budget");
+        return false;
+    }
+    if (active_clock_off && active_clock_budget_control) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The active-clock-off and work-budget controls conflict.");
+        set_detail(report->summary, sizeof report->summary,
+                   "conflicting active-clock controls");
+        return false;
+    }
 #else
     (void)active_clock_off;
+    (void)active_clock_budget_control;
+    (void)active_clock_work_budget;
 #endif
 
     vm_firmware_boot_state_t state;
@@ -1112,11 +1195,22 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     /*
      * Arm this after restore so the first host sample anchors the restored
      * guest instant. The portable default remains deterministic; this product
-     * policy makes active timer/display deadlines follow monotonic wall time
-     * instead of interpreter throughput. Failure is explicit because silently
-     * reverting would recreate the device-dependent navigation cadence this
-     * build is intended to measure.
+     * policy treats monotonic wall time as an upper bound, then limits it by
+     * retired work so timer/display deadlines cannot overwhelm a slow host.
+     * Failure is explicit because silently reverting would recreate the
+     * device-dependent navigation cadence this build is intended to measure.
      */
+    if (!active_clock_off &&
+        !s5l8900_set_active_clock_work_budget(
+            machine, active_clock_work_budget)) {
+        (void)file_block_close(boot->media);
+        set_detail(report->detail, sizeof report->detail,
+                   "The interactive guest clock rejected its bounded work "
+                   "budget.");
+        set_detail(report->summary, sizeof report->summary,
+                   "active clock budget unavailable");
+        return false;
+    }
     if (!active_clock_off &&
         !s5l8900_set_active_host_clock(
             machine, vm_firmware_active_now, NULL)) {
@@ -1247,27 +1341,38 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         engine_mode = "static graph";
 #endif
     }
+    char active_clock_budget_suffix[48] = {0};
+    if (active_clock_budget_control)
+        (void)snprintf(active_clock_budget_suffix,
+                       sizeof active_clock_budget_suffix,
+                       ", active-clock-budget-%u control",
+                       active_clock_work_budget);
     if (restored) {
         (void)snprintf(report->summary, sizeof report->summary,
-                       "iPhone OS 3.1.3 restored at %.1f M insn (%s%s%s%s)",
+                       "iPhone OS 3.1.3 restored at %.1f M insn "
+                       "(%s%s%s%s%s)",
                        (double)machine->cpu.cycles / 1000000.0, engine_mode,
                        compact_window_cache ? ", window-cache experiment" : "",
                        compact_pc_profile ? ", compact-PC profile" : "",
-                       active_clock_off ? ", active-clock-off control" : "");
+                       active_clock_off ? ", active-clock-off control" : "",
+                       active_clock_budget_suffix);
     } else if (fresh_boot_after_poweroff) {
         (void)snprintf(report->summary, sizeof report->summary,
                        "iPhone OS 3.1.3 fresh boot after powered-off "
-                       "checkpoint (%s%s%s%s)", engine_mode,
+                       "checkpoint (%s%s%s%s%s)", engine_mode,
                        compact_window_cache ? ", window-cache experiment" : "",
                        compact_pc_profile ? ", compact-PC profile" : "",
-                       active_clock_off ? ", active-clock-off control" : "");
+                       active_clock_off ? ", active-clock-off control" : "",
+                       active_clock_budget_suffix);
     } else {
         (void)snprintf(report->summary, sizeof report->summary,
-                       "iPhone OS 3.1.3 kernel, root on /dev/md0 (%s%s%s%s)",
+                       "iPhone OS 3.1.3 kernel, root on /dev/md0 "
+                       "(%s%s%s%s%s)",
                        engine_mode,
                        compact_window_cache ? ", window-cache experiment" : "",
                        compact_pc_profile ? ", compact-PC profile" : "",
-                       active_clock_off ? ", active-clock-off control" : "");
+                       active_clock_off ? ", active-clock-off control" : "",
+                       active_clock_budget_suffix);
     }
 #endif
     if (ppp_provisioned) {
