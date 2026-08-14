@@ -1706,6 +1706,66 @@ void     s5l_buttons_apply(const s5l_buttons_t *b, s5l_gpio_t *gpio,
 bool     s5l_buttons_set(s5l_buttons_t *b, s5l_gpio_t *gpio, s5l_gpioic_t *ic,
                          unsigned which, bool pressed);
 
+/* ------------------------------------------------ Power lifecycle trace ---
+ * A bounded host-only witness for the retained-reset sleep/wake path. It is
+ * armed only around a Power transition, records changes to the two relevant
+ * GPIOIC lines, PMU wake/shutdown latches and CLCD power state, then expires
+ * after a short guest-time window. Nothing here is guest-visible or part of a
+ * snapshot; it exists so a physical wake that immediately sleeps again can be
+ * attributed to the exact hardware state transition instead of guessed at.
+ */
+#define S5L_POWER_TRACE_HISTORY 32u
+
+typedef enum {
+    S5L_POWER_TRACE_EVENT_STATE = 0,
+    S5L_POWER_TRACE_EVENT_HOST_PRESS,
+    S5L_POWER_TRACE_EVENT_HOST_RELEASE,
+    S5L_POWER_TRACE_EVENT_HOST_REFUSED,
+    S5L_POWER_TRACE_EVENT_RELEASE_WAIT,
+    S5L_POWER_TRACE_EVENT_WAKE_BEGIN,
+    S5L_POWER_TRACE_EVENT_WAKE_RESET,
+    S5L_POWER_TRACE_EVENT_WAKE_FAILED
+} s5l_power_trace_event_t;
+
+#define S5L_POWER_TRACE_CHANGE_BUTTONS   0x0001u
+#define S5L_POWER_TRACE_CHANGE_SHUTDOWN  0x0002u
+#define S5L_POWER_TRACE_CHANGE_INT2      0x0004u
+#define S5L_POWER_TRACE_CHANGE_INT2MASK  0x0008u
+#define S5L_POWER_TRACE_CHANGE_POWER_GPIO 0x0010u
+#define S5L_POWER_TRACE_CHANGE_PMU_GPIO   0x0020u
+#define S5L_POWER_TRACE_CHANGE_CLCD       0x0040u
+#define S5L_POWER_TRACE_CHANGE_CPU_LINES  0x0080u
+#define S5L_POWER_TRACE_CHANGE_ALL        0x00ffu
+
+/* GPIO byte flags used by both the Power line (45) and PMU INT_N (85). */
+#define S5L_POWER_TRACE_GPIO_RAW         0x01u
+#define S5L_POWER_TRACE_GPIO_PENDING     0x02u
+#define S5L_POWER_TRACE_GPIO_ENABLED     0x04u
+#define S5L_POWER_TRACE_GPIO_LEVEL_TYPE  0x08u
+#define S5L_POWER_TRACE_GPIO_ASSERT_HIGH 0x10u
+#define S5L_POWER_TRACE_GPIO_DRIVEN      0x20u
+
+#define S5L_POWER_TRACE_CLCD_SCANNING    0x01u
+#define S5L_POWER_TRACE_CLCD_RUNNING     0x02u
+#define S5L_POWER_TRACE_CPU_IRQ          0x01u
+#define S5L_POWER_TRACE_CPU_FIQ          0x02u
+
+typedef struct {
+    uint64_t sequence;
+    uint64_t cpu_cycles;
+    uint32_t cpu_pc;
+    uint16_t changes;
+    uint8_t  event;
+    uint8_t  buttons_pressed;
+    uint8_t  pmu_shutdown;
+    uint8_t  pmu_int2;
+    uint8_t  pmu_int2_mask;
+    uint8_t  power_gpio;
+    uint8_t  pmu_gpio;
+    uint8_t  clcd;
+    uint8_t  cpu_lines;
+} s5l_power_trace_entry_t;
+
 /* ---------------------------------------------------- CLCD display controller ---
  * The path to pixels. See core/src/soc/clcd.c for the evidence behind every
  * register below; the short version is that AppleH1CLCD's own code was read out
@@ -4133,6 +4193,13 @@ typedef struct {
     bool                   active_clock_input_guard;
     bool                   active_clock_input_guard_host_valid;
     bool                   active_clock_deadline_shield;
+
+    /* Bounded, expiring Power lifecycle evidence. Host diagnostics only:
+     * snapshots preserve the destination process's live trace just as they do
+     * the MBX and active-clock counters above. */
+    uint64_t               power_trace_sequence;
+    uint64_t               power_trace_ticks_left;
+    s5l_power_trace_entry_t power_trace[S5L_POWER_TRACE_HISTORY];
 
     /*
      * uart4's optional host peer. Host wiring, never guest state: snapshot

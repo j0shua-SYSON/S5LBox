@@ -204,10 +204,13 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * counters and transient guard/shield flags. Snapshot restore preserves the
  * counters but clears all transient clock policy beside the old host anchor;
  * none is guest state or part of snap_mach().
+ * 127896 adds the Power lifecycle trace sequence/window (16) and thirty-two
+ * fixed 32-byte host-only observations (1024). Like the MBX witnesses, this is
+ * bounded diagnostic evidence and is deliberately absent from snap_mach().
  * SNAPSHOT_VERSION and the bytes on disk therefore do not move. The size below
  * must be read from the compiler's emitted `.space`, not inferred from source
  * padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         126856, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         127896, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */

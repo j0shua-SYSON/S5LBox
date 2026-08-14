@@ -135,6 +135,20 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
     return (double)(lastNS - firstNS) / 1.0e9;
 }
 
+static const char *VMDevicePowerTraceEventName(uint8_t event) {
+    switch ((vm_power_trace_event_t)event) {
+        case VM_POWER_TRACE_EVENT_STATE:        return "state";
+        case VM_POWER_TRACE_EVENT_HOST_PRESS:   return "host_press";
+        case VM_POWER_TRACE_EVENT_HOST_RELEASE: return "host_release";
+        case VM_POWER_TRACE_EVENT_HOST_REFUSED: return "host_refused";
+        case VM_POWER_TRACE_EVENT_RELEASE_WAIT: return "release_wait";
+        case VM_POWER_TRACE_EVENT_WAKE_BEGIN:   return "wake_begin";
+        case VM_POWER_TRACE_EVENT_WAKE_RESET:   return "wake_reset";
+        case VM_POWER_TRACE_EVENT_WAKE_FAILED:  return "wake_failed";
+    }
+    return "unknown";
+}
+
 @interface VMDeviceAutomation () <UINavigationControllerDelegate>
 - (void)attachToEmulator:(EmulatorViewController *)emulator;
 - (void)driveTouchPlan;
@@ -582,6 +596,45 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
                 compact_pc_profile_fallback),
             (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_exit)];
 #undef VM_EXEC_DELTA
+
+        /* Compact but lossless field order for each ring entry:
+         * event/cycles/pc/changes/buttons/ooc/int2/int2mask/gpio45/gpio85/
+         * clcd/cpu-lines. Sequence is the field suffix. */
+        uint64_t powerTraceCount = last->power_trace_sequence;
+        if (powerTraceCount > VM_POWER_TRACE_HISTORY)
+            powerTraceCount = VM_POWER_TRACE_HISTORY;
+        uint64_t powerTraceStart = powerTraceCount
+            ? last->power_trace_sequence - powerTraceCount + 1u : 0u;
+        NSMutableString *powerTrace = [NSMutableString stringWithFormat:
+            @",power_trace_sequence=%llu,power_trace_ticks_left=%llu,"
+             "power_trace_window=%llu",
+            (unsigned long long)last->power_trace_sequence,
+            (unsigned long long)last->power_trace_ticks_left,
+            (unsigned long long)powerTraceCount];
+        for (uint64_t offset = 0u; offset < powerTraceCount; offset++) {
+            uint64_t sequence = powerTraceStart + offset;
+            const vm_power_trace_entry_t *entry = &last->power_trace[
+                (sequence - 1u) % VM_POWER_TRACE_HISTORY];
+            if (entry->sequence != sequence) continue;
+            [powerTrace appendFormat:
+                @",power_trace_%llu=%s/%llu/%08x/%04x/%02x/%02x/%02x/"
+                 "%02x/%02x/%02x/%02x/%02x",
+                (unsigned long long)sequence,
+                VMDevicePowerTraceEventName(entry->event),
+                (unsigned long long)entry->cpu_cycles,
+                entry->cpu_pc,
+                (unsigned)entry->changes,
+                (unsigned)entry->buttons_pressed,
+                (unsigned)entry->pmu_shutdown,
+                (unsigned)entry->pmu_int2,
+                (unsigned)entry->pmu_int2_mask,
+                (unsigned)entry->power_gpio,
+                (unsigned)entry->pmu_gpio,
+                (unsigned)entry->clcd,
+                (unsigned)entry->cpu_lines];
+        }
+        execution = [execution stringByAppendingString:powerTrace];
+
         uint64_t firstReject = first->mbx_3d_rejected;
         uint64_t lastReject = last->mbx_3d_rejected;
         uint64_t rejectDelta = lastReject >= firstReject

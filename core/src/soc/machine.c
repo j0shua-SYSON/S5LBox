@@ -1632,12 +1632,130 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
     s5l8900_refresh(m, tb);
 }
 
+#define S5L_POWER_TRACE_SECONDS UINT64_C(30)
+
+typedef enum {
+    POWER_TRACE_RECORD_FORCE = 0,
+    POWER_TRACE_RECORD_CHANGE,
+    POWER_TRACE_RECORD_EVENT_OR_CHANGE
+} power_trace_record_mode_t;
+
+static uint8_t power_trace_gpio(const s5l_gpioic_t *gpioic,
+                                unsigned line) {
+    if (!gpioic || line >= S5L_GPIOIC_LINES) return 0u;
+    unsigned group = line >> 5;
+    uint32_t bit = UINT32_C(1) << (line & 31u);
+    uint8_t flags = 0u;
+    if (gpioic->raw[group] & bit) flags |= S5L_POWER_TRACE_GPIO_RAW;
+    if (gpioic->stat[group] & bit) flags |= S5L_POWER_TRACE_GPIO_PENDING;
+    if (gpioic->en[group] & bit) flags |= S5L_POWER_TRACE_GPIO_ENABLED;
+    if (gpioic->type[group] & bit) flags |= S5L_POWER_TRACE_GPIO_LEVEL_TYPE;
+    if (gpioic->level[group] & bit)
+        flags |= S5L_POWER_TRACE_GPIO_ASSERT_HIGH;
+    if (gpioic->driven[group] & bit) flags |= S5L_POWER_TRACE_GPIO_DRIVEN;
+    return flags;
+}
+
+static s5l_power_trace_entry_t power_trace_capture(const s5l8900_t *m) {
+    s5l_power_trace_entry_t entry;
+    memset(&entry, 0, sizeof entry);
+    if (!m) return entry;
+
+    entry.cpu_cycles = m->cpu.cycles;
+    entry.cpu_pc = m->cpu.r[15];
+    entry.buttons_pressed = m->buttons.pressed;
+    entry.pmu_shutdown = m->pmu.regs[PCF50635_OOCSHDWN];
+    entry.pmu_int2 = m->pmu.regs[PCF50635_INT2];
+    entry.pmu_int2_mask = m->pmu.regs[PCF50635_INT2MASK];
+    entry.power_gpio = power_trace_gpio(
+        &m->gpioic, s5l_button_line(S5L_BUTTON_HOLD));
+    entry.pmu_gpio = power_trace_gpio(&m->gpioic, S5L_GPIOIC_LINE_PMU);
+    if (m->clcd.scanning) entry.clcd |= S5L_POWER_TRACE_CLCD_SCANNING;
+    if (s5l_clcd_running(&m->clcd))
+        entry.clcd |= S5L_POWER_TRACE_CLCD_RUNNING;
+    if (m->cpu.irq_line) entry.cpu_lines |= S5L_POWER_TRACE_CPU_IRQ;
+    if (m->cpu.fiq_line) entry.cpu_lines |= S5L_POWER_TRACE_CPU_FIQ;
+    return entry;
+}
+
+static uint16_t power_trace_changes(
+        const s5l_power_trace_entry_t *entry,
+        const s5l_power_trace_entry_t *before) {
+    if (!entry || !before) return S5L_POWER_TRACE_CHANGE_ALL;
+    uint16_t changes = 0u;
+    if (entry->buttons_pressed != before->buttons_pressed)
+        changes |= S5L_POWER_TRACE_CHANGE_BUTTONS;
+    if (entry->pmu_shutdown != before->pmu_shutdown)
+        changes |= S5L_POWER_TRACE_CHANGE_SHUTDOWN;
+    if (entry->pmu_int2 != before->pmu_int2)
+        changes |= S5L_POWER_TRACE_CHANGE_INT2;
+    if (entry->pmu_int2_mask != before->pmu_int2_mask)
+        changes |= S5L_POWER_TRACE_CHANGE_INT2MASK;
+    if (entry->power_gpio != before->power_gpio)
+        changes |= S5L_POWER_TRACE_CHANGE_POWER_GPIO;
+    if (entry->pmu_gpio != before->pmu_gpio)
+        changes |= S5L_POWER_TRACE_CHANGE_PMU_GPIO;
+    if (entry->clcd != before->clcd)
+        changes |= S5L_POWER_TRACE_CHANGE_CLCD;
+    if (entry->cpu_lines != before->cpu_lines)
+        changes |= S5L_POWER_TRACE_CHANGE_CPU_LINES;
+    return changes;
+}
+
+static const s5l_power_trace_entry_t *power_trace_last(
+        const s5l8900_t *m) {
+    if (!m || !m->power_trace_sequence) return NULL;
+    uint64_t index = (m->power_trace_sequence - UINT64_C(1)) %
+                     S5L_POWER_TRACE_HISTORY;
+    const s5l_power_trace_entry_t *entry = &m->power_trace[index];
+    return entry->sequence == m->power_trace_sequence ? entry : NULL;
+}
+
+static void power_trace_record(s5l8900_t *m, s5l_power_trace_event_t event,
+                               power_trace_record_mode_t mode) {
+    if (!m || !m->power_trace_ticks_left) return;
+
+    const s5l_power_trace_entry_t *before = power_trace_last(m);
+    s5l_power_trace_entry_t entry = power_trace_capture(m);
+    entry.changes = power_trace_changes(&entry, before);
+    entry.event = (uint8_t)event;
+
+    if (mode == POWER_TRACE_RECORD_CHANGE && entry.changes == 0u) return;
+    if (mode == POWER_TRACE_RECORD_EVENT_OR_CHANGE &&
+        entry.changes == 0u && before && before->event == entry.event) return;
+
+    uint64_t sequence = m->power_trace_sequence == UINT64_MAX
+        ? UINT64_MAX : m->power_trace_sequence + UINT64_C(1);
+    entry.sequence = sequence;
+    m->power_trace[(sequence - UINT64_C(1)) % S5L_POWER_TRACE_HISTORY] = entry;
+    m->power_trace_sequence = sequence;
+}
+
+static void power_trace_arm(s5l8900_t *m) {
+    if (!m) return;
+    uint64_t hz = m->tb_hz ? m->tb_hz : S5L8900_TB_HZ;
+    m->power_trace_ticks_left = hz * S5L_POWER_TRACE_SECONDS;
+}
+
+static void power_trace_observe(s5l8900_t *m, uint32_t elapsed_tb) {
+    if (!m || !m->power_trace_ticks_left) return;
+    power_trace_record(m, S5L_POWER_TRACE_EVENT_STATE,
+                       POWER_TRACE_RECORD_CHANGE);
+    if ((uint64_t)elapsed_tb >= m->power_trace_ticks_left)
+        m->power_trace_ticks_left = 0u;
+    else
+        m->power_trace_ticks_left -= elapsed_tb;
+}
+
 static bool wake_from_pmu_power_state(s5l8900_t *m) {
     /* XNU copied its reset trampoline to the first retained DRAM page before
      * writing OOCSHDWN, then entered an intentional infinite branch. ONKEY
      * powers the ARM core back up from reset; it is not an IRQ capable of
      * escaping that branch. This machine has no low-address DRAM alias, so the
      * hardware reset vector is represented by the actual DRAM base. */
+    power_trace_arm(m);
+    power_trace_record(m, S5L_POWER_TRACE_EVENT_WAKE_BEGIN,
+                       POWER_TRACE_RECORD_FORCE);
     s5l_pcf50635_wake_onkey(&m->pmu);
 
     uint64_t cycles = m->cpu.cycles;
@@ -1661,6 +1779,8 @@ static bool wake_from_pmu_power_state(s5l8900_t *m) {
     m->active_clock_deadline_shield = false;
     m->level_dirty = true;
     s5l8900_tick(m, 0u);
+    power_trace_record(m, S5L_POWER_TRACE_EVENT_WAKE_RESET,
+                       POWER_TRACE_RECORD_FORCE);
     return true;
 }
 
@@ -1688,6 +1808,9 @@ bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
             s5l_buttons_held(&m->buttons, S5L_BUTTON_HOLD) &&
             (m->pmu.regs[PCF50635_INT2] & PCF50635_INT2_ONKEYR) != 0u) {
             m->buttons.refused++;
+            power_trace_arm(m);
+            power_trace_record(m, S5L_POWER_TRACE_EVENT_RELEASE_WAIT,
+                               POWER_TRACE_RECORD_EVENT_OR_CHANGE);
             return false;
         }
         uint64_t edges_before = m->buttons.edges;
@@ -1699,6 +1822,17 @@ bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
             if (m->buttons.edges != edges_before)
                 active_clock_begin_input_guard(m);
             s5l8900_tick(m, 0u);
+            if (which == S5L_BUTTON_HOLD) {
+                power_trace_arm(m);
+                power_trace_record(
+                    m, pressed ? S5L_POWER_TRACE_EVENT_HOST_PRESS
+                               : S5L_POWER_TRACE_EVENT_HOST_RELEASE,
+                    POWER_TRACE_RECORD_FORCE);
+            }
+        } else if (which == S5L_BUTTON_HOLD) {
+            power_trace_arm(m);
+            power_trace_record(m, S5L_POWER_TRACE_EVENT_HOST_REFUSED,
+                               POWER_TRACE_RECORD_EVENT_OR_CHANGE);
         }
         return accepted;
     }
@@ -1714,8 +1848,17 @@ bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
      * and consume it, but do not pretend it reached a GPIO pin or interrupt. */
     if (which != S5L_BUTTON_HOLD || !pressed) {
         m->buttons.sets++;
+        if (which == S5L_BUTTON_HOLD) {
+            power_trace_arm(m);
+            power_trace_record(m, S5L_POWER_TRACE_EVENT_HOST_RELEASE,
+                               POWER_TRACE_RECORD_FORCE);
+        }
         return true;
     }
+
+    power_trace_arm(m);
+    power_trace_record(m, S5L_POWER_TRACE_EVENT_HOST_PRESS,
+                       POWER_TRACE_RECORD_FORCE);
 
     /* AppleM68Buttons' setPowerState path reads function-wake_button_hold and
      * dispatches a Power press when PMU STAT says ONKEY. Leaving the same edge
@@ -1738,7 +1881,12 @@ bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
     bool woke = in_hibernation
         ? s5l8900_wake_from_hibernation(m)
         : s5l8900_wake_from_standby(m);
-    if (woke) active_clock_begin_input_guard(m);
+    if (woke) {
+        active_clock_begin_input_guard(m);
+    } else {
+        power_trace_record(m, S5L_POWER_TRACE_EVENT_WAKE_FAILED,
+                           POWER_TRACE_RECORD_FORCE);
+    }
     return woke;
 }
 
@@ -1893,6 +2041,7 @@ static void s5l8900_refresh(s5l8900_t *m, uint32_t tb) {
      * word carries. Recording what the refresh started from would leave the
      * next call convinced a host had moved it. */
     m->ext_seen = ext_inputs(m);
+    power_trace_observe(m, tb);
 }
 
 /* No execution path may defer the device graph across the first timebase edge

@@ -174,6 +174,46 @@ VM_ASSERT_MBX_TARGET_OFFSET(target_mapping_span);
 VM_ASSERT_MBX_TARGET_OFFSET(last_kind);
 #undef VM_ASSERT_MBX_TARGET_OFFSET
 
+_Static_assert(S5L_POWER_TRACE_HISTORY == VM_POWER_TRACE_HISTORY,
+               "core/app Power trace history counts differ");
+_Static_assert(S5L_POWER_TRACE_EVENT_STATE == VM_POWER_TRACE_EVENT_STATE &&
+                   S5L_POWER_TRACE_EVENT_HOST_PRESS ==
+                       VM_POWER_TRACE_EVENT_HOST_PRESS &&
+                   S5L_POWER_TRACE_EVENT_HOST_RELEASE ==
+                       VM_POWER_TRACE_EVENT_HOST_RELEASE &&
+                   S5L_POWER_TRACE_EVENT_HOST_REFUSED ==
+                       VM_POWER_TRACE_EVENT_HOST_REFUSED &&
+                   S5L_POWER_TRACE_EVENT_RELEASE_WAIT ==
+                       VM_POWER_TRACE_EVENT_RELEASE_WAIT &&
+                   S5L_POWER_TRACE_EVENT_WAKE_BEGIN ==
+                       VM_POWER_TRACE_EVENT_WAKE_BEGIN &&
+                   S5L_POWER_TRACE_EVENT_WAKE_RESET ==
+                       VM_POWER_TRACE_EVENT_WAKE_RESET &&
+                   S5L_POWER_TRACE_EVENT_WAKE_FAILED ==
+                       VM_POWER_TRACE_EVENT_WAKE_FAILED,
+               "core/app Power trace event values differ");
+_Static_assert(sizeof(s5l_power_trace_entry_t) ==
+                   sizeof(vm_power_trace_entry_t),
+               "core/app Power trace entry layouts differ");
+#define VM_ASSERT_POWER_TRACE_OFFSET(field_) \
+    _Static_assert(offsetof(s5l_power_trace_entry_t, field_) == \
+                       offsetof(vm_power_trace_entry_t, field_), \
+                   "core/app Power trace entry offsets differ")
+VM_ASSERT_POWER_TRACE_OFFSET(sequence);
+VM_ASSERT_POWER_TRACE_OFFSET(cpu_cycles);
+VM_ASSERT_POWER_TRACE_OFFSET(cpu_pc);
+VM_ASSERT_POWER_TRACE_OFFSET(changes);
+VM_ASSERT_POWER_TRACE_OFFSET(event);
+VM_ASSERT_POWER_TRACE_OFFSET(buttons_pressed);
+VM_ASSERT_POWER_TRACE_OFFSET(pmu_shutdown);
+VM_ASSERT_POWER_TRACE_OFFSET(pmu_int2);
+VM_ASSERT_POWER_TRACE_OFFSET(pmu_int2_mask);
+VM_ASSERT_POWER_TRACE_OFFSET(power_gpio);
+VM_ASSERT_POWER_TRACE_OFFSET(pmu_gpio);
+VM_ASSERT_POWER_TRACE_OFFSET(clcd);
+VM_ASSERT_POWER_TRACE_OFFSET(cpu_lines);
+#undef VM_ASSERT_POWER_TRACE_OFFSET
+
 /* ---------------------------------------------------------- encodings --- */
 
 /* Condition codes (bits 31:28). */
@@ -415,6 +455,10 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
             execution.wfi_paced_partial_advances =
                 m->wfi_paced_partial_advances;
             execution.wfi_paced_failures = m->wfi_paced_failures;
+            execution.power_trace_sequence = m->power_trace_sequence;
+            execution.power_trace_ticks_left = m->power_trace_ticks_left;
+            memcpy(execution.power_trace, m->power_trace,
+                   sizeof execution.power_trace);
             s5l_static_a64_compact_pc_profile_t pc_profile;
             s5l8900_static_a64_compact_raw_pc_profile(m, &pc_profile);
             execution.compact_pc_profile_polls = pc_profile.polls;

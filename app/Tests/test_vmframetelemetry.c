@@ -120,6 +120,25 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.wfi_paced_wait_ns = base + 83u;
     value.wfi_paced_partial_advances = base + 84u;
     value.wfi_paced_failures = base + 85u;
+    value.power_trace_sequence = base + 106u;
+    value.power_trace_ticks_left = base + 107u;
+    {
+        vm_power_trace_entry_t *entry = &value.power_trace[
+            (value.power_trace_sequence - 1u) % VM_POWER_TRACE_HISTORY];
+        entry->sequence = value.power_trace_sequence;
+        entry->cpu_cycles = base + 108u;
+        entry->cpu_pc = UINT32_C(0xc0061eb0) + (uint32_t)base;
+        entry->changes = (uint16_t)(base + 109u);
+        entry->event = VM_POWER_TRACE_EVENT_WAKE_RESET;
+        entry->buttons_pressed = (uint8_t)(base + 110u);
+        entry->pmu_shutdown = (uint8_t)(base + 111u);
+        entry->pmu_int2 = (uint8_t)(base + 112u);
+        entry->pmu_int2_mask = (uint8_t)(base + 113u);
+        entry->power_gpio = (uint8_t)(base + 114u);
+        entry->pmu_gpio = (uint8_t)(base + 115u);
+        entry->clcd = (uint8_t)(base + 116u);
+        entry->cpu_lines = (uint8_t)(base + 117u);
+    }
     value.compact_privileged_window_refills = base + 38u;
     value.compact_privileged_boundary_retired = base + 39u;
     value.compact_window_cache_hits = base + 40u;
@@ -399,6 +418,21 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.wfi_paced_wait_ns == 2083u &&
            state.execution_last.wfi_paced_partial_advances == 2084u &&
            state.execution_last.wfi_paced_failures == 2085u &&
+           state.execution_last.power_trace_sequence == 2106u &&
+           state.execution_last.power_trace_ticks_left == 2107u &&
+           state.execution_last.power_trace[
+               (2106u - 1u) % VM_POWER_TRACE_HISTORY].sequence == 2106u &&
+           state.execution_last.power_trace[
+               (2106u - 1u) % VM_POWER_TRACE_HISTORY].cpu_cycles == 2108u &&
+           state.execution_last.power_trace[
+               (2106u - 1u) % VM_POWER_TRACE_HISTORY].cpu_pc ==
+               UINT32_C(0xc0061eb0) + 2000u &&
+           state.execution_last.power_trace[
+               (2106u - 1u) % VM_POWER_TRACE_HISTORY].event ==
+               VM_POWER_TRACE_EVENT_WAKE_RESET &&
+           state.execution_last.power_trace[
+               (2106u - 1u) % VM_POWER_TRACE_HISTORY].cpu_lines ==
+               (uint8_t)(2000u + 117u) &&
            state.execution_last.compact_privileged_window_refills == 2038u &&
            state.execution_last.compact_privileged_boundary_retired == 2039u &&
            state.execution_last.compact_window_cache_hits == 2040u &&

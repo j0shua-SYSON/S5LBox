@@ -205,6 +205,7 @@ static bool vm_execution_telemetry_not_before(
            VM_EXEC_NOT_BEFORE(wfi_paced_wait_ns) &&
            VM_EXEC_NOT_BEFORE(wfi_paced_partial_advances) &&
            VM_EXEC_NOT_BEFORE(wfi_paced_failures) &&
+           VM_EXEC_NOT_BEFORE(power_trace_sequence) &&
            VM_EXEC_NOT_BEFORE(compact_privileged_window_refills) &&
            VM_EXEC_NOT_BEFORE(compact_privileged_boundary_retired) &&
            VM_EXEC_NOT_BEFORE(compact_window_cache_hits) &&

@@ -890,6 +890,21 @@ static void test_the_board_drives_inputs_and_the_guest_cannot(void) {
               "an out-of-range drive wrapped into port %u", g);
 }
 
+static const s5l_power_trace_entry_t *last_power_trace_event(
+        const s5l8900_t *m, s5l_power_trace_event_t event) {
+    if (!m || !m->power_trace_sequence) return NULL;
+    uint64_t count = m->power_trace_sequence;
+    if (count > S5L_POWER_TRACE_HISTORY) count = S5L_POWER_TRACE_HISTORY;
+    for (uint64_t offset = 0u; offset < count; offset++) {
+        uint64_t sequence = m->power_trace_sequence - offset;
+        const s5l_power_trace_entry_t *entry = &m->power_trace[
+            (sequence - 1u) % S5L_POWER_TRACE_HISTORY];
+        if (entry->sequence == sequence && entry->event == (uint8_t)event)
+            return entry;
+    }
+    return NULL;
+}
+
 /* Auto-Lock uses OOCSHDWN bit 1, while a full guest shutdown uses bit 0.
  * The two states briefly collapsed into one predicate and physical Power taps
  * stopped waking every Auto-Locked guest. Keep the exact hibernation command,
@@ -949,6 +964,30 @@ static void test_power_wakes_hibernation_through_retained_reset(void) {
     CHECK(s5l_buttons_held(&m.buttons, S5L_BUTTON_HOLD) &&
           m.buttons.sets == 3u && m.buttons.edges == 1u,
           "hibernation wake did not retain exactly one Power press edge");
+
+    const s5l_power_trace_entry_t *press = last_power_trace_event(
+        &m, S5L_POWER_TRACE_EVENT_HOST_PRESS);
+    const s5l_power_trace_entry_t *begin = last_power_trace_event(
+        &m, S5L_POWER_TRACE_EVENT_WAKE_BEGIN);
+    const s5l_power_trace_entry_t *reset = last_power_trace_event(
+        &m, S5L_POWER_TRACE_EVENT_WAKE_RESET);
+    CHECK(m.power_trace_sequence >= 4u && press && begin && reset,
+          "Power wake trace omitted a lifecycle boundary (sequence=%llu)",
+          (unsigned long long)m.power_trace_sequence);
+    CHECK(begin &&
+          (begin->pmu_shutdown & PCF50635_OOCSHDWN_GO_HIBERNATE) != 0u &&
+          (begin->buttons_pressed & (1u << S5L_BUTTON_HOLD)) != 0u &&
+          (begin->power_gpio & S5L_POWER_TRACE_GPIO_RAW) != 0u &&
+          (begin->power_gpio & S5L_POWER_TRACE_GPIO_PENDING) == 0u,
+          "wake-begin trace did not retain the consumed held Power edge");
+    CHECK(reset &&
+          (reset->pmu_shutdown &
+           (PCF50635_OOCSHDWN_GO_STANDBY |
+            PCF50635_OOCSHDWN_GO_HIBERNATE)) == 0u &&
+          (reset->pmu_int2 & PCF50635_INT2_ONKEYR) != 0u &&
+          (reset->pmu_gpio & S5L_POWER_TRACE_GPIO_RAW) == 0u &&
+          (reset->pmu_gpio & S5L_POWER_TRACE_GPIO_PENDING) != 0u,
+          "wake-reset trace did not capture ONKEY and active-low PMU INT_N");
 
     s5l8900_free(&m);
 }
@@ -1042,6 +1081,8 @@ static void test_power_wakes_standby_through_retained_reset(void) {
 
     CHECK(!s5l8900_set_button(&m, S5L_BUTTON_HOLD, false),
           "Power release overtook the guest's PMU wake-reason read");
+    CHECK(last_power_trace_event(&m, S5L_POWER_TRACE_EVENT_RELEASE_WAIT),
+          "deferred post-wake release was absent from the Power trace");
     m.pmu.regs[PCF50635_INT2] = 0u; /* the clear-on-read tested in test_i2c */
     m.level_dirty = true;            /* a real I2C read dirties the machine */
     s5l8900_tick(&m, 0u);
@@ -1071,6 +1112,8 @@ static void test_power_wakes_standby_through_retained_reset(void) {
           (unsigned long long)m.buttons.sets,
           (unsigned long long)m.buttons.edges,
           (unsigned long long)m.buttons.refused);
+    CHECK(last_power_trace_event(&m, S5L_POWER_TRACE_EVENT_HOST_RELEASE),
+          "accepted post-wake release was absent from the Power trace");
     s5l8900_free(&m);
 }
 

@@ -80,6 +80,34 @@ typedef struct {
 #define VM_MBX_3D_ACCEPT_HISTORY 16u
 #define VM_MBX_3D_ACCEPT_RECORD_WORDS 8u
 #define VM_MBX_3D_TARGET_LEDGER 8u
+#define VM_POWER_TRACE_HISTORY 32u
+
+typedef enum {
+    VM_POWER_TRACE_EVENT_STATE = 0,
+    VM_POWER_TRACE_EVENT_HOST_PRESS,
+    VM_POWER_TRACE_EVENT_HOST_RELEASE,
+    VM_POWER_TRACE_EVENT_HOST_REFUSED,
+    VM_POWER_TRACE_EVENT_RELEASE_WAIT,
+    VM_POWER_TRACE_EVENT_WAKE_BEGIN,
+    VM_POWER_TRACE_EVENT_WAKE_RESET,
+    VM_POWER_TRACE_EVENT_WAKE_FAILED
+} vm_power_trace_event_t;
+
+typedef struct {
+    uint64_t sequence;
+    uint64_t cpu_cycles;
+    uint32_t cpu_pc;
+    uint16_t changes;
+    uint8_t  event;
+    uint8_t  buttons_pressed;
+    uint8_t  pmu_shutdown;
+    uint8_t  pmu_int2;
+    uint8_t  pmu_int2_mask;
+    uint8_t  power_gpio;
+    uint8_t  pmu_gpio;
+    uint8_t  clcd;
+    uint8_t  cpu_lines;
+} vm_power_trace_entry_t;
 
 typedef struct {
     uint64_t sequence;
@@ -204,6 +232,9 @@ typedef struct {
     uint64_t wfi_paced_wait_ns;
     uint64_t wfi_paced_partial_advances;
     uint64_t wfi_paced_failures;
+    uint64_t power_trace_sequence;
+    uint64_t power_trace_ticks_left;
+    vm_power_trace_entry_t power_trace[VM_POWER_TRACE_HISTORY];
     uint64_t compact_privileged_window_refills;
     uint64_t compact_privileged_boundary_retired;
     uint64_t compact_window_cache_hits;
