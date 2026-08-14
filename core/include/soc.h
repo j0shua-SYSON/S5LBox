@@ -3909,20 +3909,22 @@ typedef void (*s5l_uart4_host_service_fn)(void *ctx, unsigned retired);
  * burst. During active execution the clock is sampled much more frequently. */
 #define S5L8900_ACTIVE_CLOCK_MAX_STEP_NS UINT64_C(8000000)
 /* Active wall time may not outrun the CPU work that the host actually retired.
- * The interpreter has no cycle model, so one CPU tick per instruction is the
- * conservative, already-proven product default. An A9 replay at budget 8
- * reached SpringBoard, then accepted a Weather tap but produced no further
- * MBX work after another 766 million retirements; 8 is therefore a test point,
- * not a shippable assumption. A bounded same-binary control may raise the
- * budget during calibration, but never beyond the defensive ceiling below.
- * Paced WFI ticks are accounted separately and remain real-time. */
-#define S5L8900_ACTIVE_CLOCK_DEFAULT_WORK_TICKS 1u
+ * The interpreter has no cycle model, so this is an empirical safety bound,
+ * not a claim that every ARM11 instruction costs four cycles. A physical A9
+ * replay at budget 4 survived Weather and its info view, Voice Memos' list,
+ * Safari tabs, Spotlight typing, pause/resume, backgrounding and snapshot
+ * restore. Budget 5 rendered Weather but then retired another 680 million
+ * instructions without new display work; 6 and 8 failed still earlier. Four
+ * is therefore the fastest measured-safe product default. A bounded same-
+ * binary control may vary it during calibration, but never beyond the
+ * defensive ceiling below. Paced WFI remains real-time. */
+#define S5L8900_ACTIVE_CLOCK_DEFAULT_WORK_TICKS 4u
 #define S5L8900_ACTIVE_CLOCK_MAX_WORK_TICKS     64u
 /* Accepted input normally keeps the active host clock: that is what gives UI
  * timers real-time cadence. Only a foreground interval that is still not
  * quiescent after this much host time is pathological enough to protect from
  * guest deadlines by falling back to instruction-clocked execution. */
-#define S5L8900_ACTIVE_CLOCK_INPUT_SHIELD_NS UINT64_C(3600000000000)
+#define S5L8900_ACTIVE_CLOCK_INPUT_SHIELD_NS UINT64_C(15000000000)
 /* Before a deadline shield is needed, a wait this far from its next modeled
  * wake is a strong quiescence witness.  After the shield has engaged, any real
  * WFI yield ends it: the protected CPU-bound interval has actually stopped,

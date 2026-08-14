@@ -149,7 +149,7 @@ static uint8_t *slurp(const char *path, size_t *out_size) {
 #if defined(S5LBOX_IOS_ACTIVE_REALTIME_CLOCK)
 /* Parse the tiny same-binary calibration control without accepting signs,
  * overflow, suffixes or locale-specific whitespace. Empty/absent means the
- * conservative product default; malformed nonempty input fails the boot so a
+ * measured-safe product default; malformed nonempty input fails the boot so a
  * physical result can never be attributed to a budget that was not applied. */
 static bool read_active_clock_budget_control(const char *path,
                                              uint32_t *budget,

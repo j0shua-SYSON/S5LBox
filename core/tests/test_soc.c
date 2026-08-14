@@ -627,7 +627,7 @@ static void test_active_host_clock_is_optional_bounded_and_fail_closed(void) {
           "work-bounded active-clock machine init failed");
     CHECK(work_bounded.active_clock_max_ticks_per_retirement ==
               S5L8900_ACTIVE_CLOCK_DEFAULT_WORK_TICKS,
-          "active clock did not start at the conservative work budget");
+          "active clock did not start at the product work budget");
     CHECK(!s5l8900_set_active_clock_work_budget(NULL, 8u) &&
           !s5l8900_set_active_clock_work_budget(&work_bounded, 0u) &&
           !s5l8900_set_active_clock_work_budget(
