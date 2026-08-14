@@ -1153,6 +1153,148 @@ static void test_ta_stream_orthographic_affine_texture(void) {
     s5l8900_free(&m);
 }
 
+static void test_ta_stream_voice_memos_near_unity_rotation(void) {
+    enum {
+        WIDTH = 320u,
+        HEIGHT = 480u,
+        TARGET_BYTES = WIDTH * HEIGHT * 4u,
+        SOURCE_STRIDE = 64u,
+        SOURCE_HEIGHT = 128u,
+    };
+    const uint32_t table0 = 0x08002000u;
+    const uint32_t table2 = 0x08003000u;
+    const uint32_t object = 0x00100000u;
+    const uint32_t region = 0x00040000u;
+    const uint32_t source = 0x009e7000u;
+    const uint32_t target = 0x00840000u;
+    const uint32_t source_pa = 0x08020000u;
+    const uint32_t target_pa = 0x08040000u;
+
+    /* Exact rejected tail captured while Voice Memos opened its list.  The
+     * four vertices encode an orthogonal 11x71 sprite rotated -46.1 degrees
+     * and uniformly scaled to about 0.999875. */
+    static const uint32_t captured_tail[54] = {
+        0x100001efu, 0x36622e80u, 0xe01fffffu, 0xa1418000u,
+        0x8e053ce0u, 0xd6087610u, 0xa5418000u, 0x0e314320u,
+        0x76084e10u, 0x00002504u, 0x00000000u, 0x42c00000u,
+        0x42c00000u, 0x42400000u, 0x42400000u, 0x3f000000u,
+        0x3f000000u, 0x3727c5acu, 0x48020000u, 0xf0020044u,
+        0x00000000u, 0x42e152dau, 0x43d5e7cdu, 0x00000000u,
+        0x3f800000u, 0xffffffffu, 0x41280000u, 0x00000000u,
+        0x00000000u, 0x4323d036u, 0x43ee84ceu, 0x00000000u,
+        0x3f800000u, 0xffffffffu, 0x41280000u, 0x428d0000u,
+        0x00000000u, 0x42d21201u, 0x43d9de30u, 0x00000000u,
+        0x3f800000u, 0xffffffffu, 0x00000000u, 0x00000000u,
+        0x00000000u, 0x431c2fcau, 0x43f27b31u, 0x00000000u,
+        0x3f800000u, 0xffffffffu, 0x00000000u, 0x428d0000u,
+        0x00000003u, 0xf0000000u,
+    };
+    uint32_t stream[72] = {0x10000010u};
+    uint32_t next = test_ta_global_transform(
+        stream, 1u, WIDTH, HEIGHT, 0.0f, 0.0f);
+    uint32_t draw_start = next;
+    memcpy(&stream[next], captured_tail, sizeof captured_tail);
+    next += (uint32_t)(sizeof captured_tail / sizeof captured_tail[0]);
+    CHECK(next == sizeof stream / sizeof stream[0],
+          "Voice Memos TA witness has %u words, expected %u", next,
+          (unsigned)(sizeof stream / sizeof stream[0]));
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
+          "Voice Memos affine TA machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART0, table0);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    test_map_gpu_page(&m, table0, object, 0x08010000u);
+    for (uint32_t page = 0u; page < SOURCE_STRIDE * SOURCE_HEIGHT;
+         page += 0x1000u)
+        test_map_gpu_page(&m, table2, source + page, source_pa + page);
+    for (uint32_t page = 0u; page < TARGET_BYTES; page += 0x1000u)
+        test_map_gpu_page(&m, table2, target + page, target_pa + page);
+    for (uint32_t row = 0u; row < SOURCE_HEIGHT; row++)
+        for (uint32_t column = 0u; column < SOURCE_STRIDE / 4u; column++)
+            test_gpu_write32(&m, source + row * SOURCE_STRIDE + column * 4u,
+                             test_sprite_source_pixel(column, row));
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_DB, object);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_REGION, region);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RGNBASE, region);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_OBJBASE, object);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_PIXSAMP, 0x00020007u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBCTL, 6u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP, 0x013f0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBYCLIP, 0x01df0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTART, target);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTRIDE, WIDTH);
+    test_ta_run_stream(&m, stream, next);
+
+    const float x[4] = {
+        test_float_value(0x42e152dau), test_float_value(0x4323d036u),
+        test_float_value(0x42d21201u), test_float_value(0x431c2fcau),
+    };
+    const float y[4] = {
+        test_float_value(0x43d5e7cdu), test_float_value(0x43ee84ceu),
+        test_float_value(0x43d9de30u), test_float_value(0x43f27b31u),
+    };
+    struct test_affine_transform transform = {
+        x[2], y[2], x[0] - x[2], y[0] - y[2],
+        x[3] - x[2], y[3] - y[2], 0.0f,
+    };
+    transform.determinant = transform.u_x * transform.v_y -
+                            transform.u_y * transform.v_x;
+    uint32_t mismatches = 0u;
+    uint32_t expected_pixels = 0u;
+    for (uint32_t py = 428u; py < HEIGHT; py++) {
+        for (uint32_t px = 105u; px < 164u; px++) {
+            float uf = 0.0f, vf = 0.0f;
+            struct test_bilinear_axis sx, sy;
+            bool covered = test_affine_pixel(
+                &transform, px, py, &uf, &vf);
+            bool sampled = covered &&
+                test_bilinear_coordinate(
+                    uf * 10.5f, SOURCE_STRIDE / 4u, &sx) &&
+                test_bilinear_coordinate(vf * 70.5f, SOURCE_HEIGHT, &sy);
+            uint32_t expected = sampled
+                ? test_bilinear_sprite_pixel(&sx, &sy) : 0u;
+            if (sampled) expected_pixels++;
+            mismatches += test_gpu_read32(
+                &m, target + (py * WIDTH + px) * 4u) != expected;
+        }
+    }
+    CHECK(mismatches == 0u,
+          "%u Voice Memos near-unity TA pixels mismatched", mismatches);
+    CHECK(test_gpu_read32(&m, target + (428u * WIDTH + 104u) * 4u) == 0u &&
+          test_gpu_read32(&m, target + (428u * WIDTH + 164u) * 4u) == 0u &&
+          test_gpu_read32(&m, target + (427u * WIDTH + 110u) * 4u) == 0u,
+          "Voice Memos near-unity TA draw changed an outside guard");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu &&
+          m.mbx_telemetry.candidates_3d == 1u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 0u &&
+          m.mbx_telemetry.pixels_3d == expected_pixels,
+          "Voice Memos near-unity TA telemetry is not exact");
+
+    /* A one-pixel expansion is no longer the captured near-unity family.  It
+     * must reject before replacing an already-present destination marker. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    uint32_t marker = target + (456u * WIDTH + 135u) * 4u;
+    test_gpu_write32(&m, marker, 0xff102030u);
+    stream[draw_start + 21u] = test_float_word(
+        test_float_value(stream[draw_start + 21u]) + 1.0f);
+    stream[draw_start + 29u] = test_float_word(
+        test_float_value(stream[draw_start + 29u]) + 1.0f);
+    test_ta_run_stream(&m, stream, next);
+    CHECK(test_gpu_read32(&m, marker) == 0xff102030u,
+          "out-of-family affine scale committed a Voice Memos TA scene");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
+          m.mbx_telemetry.candidates_3d == 2u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 1u &&
+          m.mbx_telemetry.rejected_3d_history[0].ta_failure_word == draw_start,
+          "out-of-family affine scale completed or lost its parser cursor");
+    s5l8900_free(&m);
+}
+
 static void test_ta_stream_weather_marker2_quads(void) {
     enum {
         WIDTH = 320u,
@@ -6926,6 +7068,7 @@ int main(void) {
     test_ta_submission_completion();
     test_ta_stream_axis_aligned_atomic_scene();
     test_ta_stream_orthographic_affine_texture();
+    test_ta_stream_voice_memos_near_unity_rotation();
     test_ta_stream_weather_marker2_quads();
     test_ta_stream_perspective_texture();
     test_ta_stream_immediate_state_reuse_and_alias_bounds();

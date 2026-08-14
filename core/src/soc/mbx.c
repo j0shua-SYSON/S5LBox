@@ -4117,15 +4117,31 @@ static enum mbx_ta_parse_result mbx_ta_parse_vertices(
     if (u_error < 0.0f) u_error = -u_error;
     if (v_error < 0.0f) v_error = -v_error;
     if (det_error < 0.0f) det_error = -det_error;
-    float tolerance = ((float)source_width + (float)source_height) * epsilon;
-    bool rigid_unity = u_error <= tolerance && v_error <= tolerance &&
-                       dot <= tolerance && det_error <= tolerance;
+    /* Voice Memos' measured list transition rotates an 11x71 filtered sprite
+     * with a uniform scale of about 0.999875.  Its squared long axis therefore
+     * differs from 71^2 by more than the old linear absolute tolerance even
+     * though the transform is orthogonal, area preserving to 0.03%, and safely
+     * handled by the inverse-affine sampler below.  Compare like-dimensional
+     * metrics with a relative 1/1024 bound instead.  This admits that captured
+     * near-unity similarity transform, but still rejects material scale,
+     * anisotropy, shear, reversed winding, and arbitrary affine geometry. */
+    float u_tolerance = expected_u2 * epsilon;
+    float v_tolerance = expected_v2 * epsilon;
+    float det_tolerance = expected_det * epsilon;
+    float balance_error = u2 * expected_v2 - v2 * expected_u2;
+    if (balance_error < 0.0f) balance_error = -balance_error;
+    float balance_tolerance = expected_u2 * expected_v2 * epsilon;
+    bool near_unity_similarity =
+        u_error <= u_tolerance && v_error <= v_tolerance &&
+        dot <= det_tolerance && det_error <= det_tolerance &&
+        balance_error <= balance_tolerance;
     if (source_width > MBX_TA_MAX_WIDTH || source_height > 480u) {
         if (why) *why = "TA affine source extent exceeds its bounded limits";
         return MBX_TA_DRAW_BAD;
     }
-    if (!draw->perspective && !rigid_unity) {
-        if (why) *why = "TA affine draw is not the measured rigid unity transform";
+    if (!draw->perspective && !near_unity_similarity) {
+        if (why) *why =
+            "TA affine draw is not the measured near-unity similarity transform";
         return MBX_TA_DRAW_BAD;
     }
 
