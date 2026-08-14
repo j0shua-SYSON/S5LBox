@@ -4748,9 +4748,19 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
         if (why) *why = "staged TA stream does not belong to this render";
         return false;
     }
+    /* The shipped MBXGLEngine maps GL_DITHER onto FBCTL bit 3: glEnable at
+     * 0x000212b0 sets context bit 0, glDisable at 0x00020edc clears it, and
+     * _PrepareToDraw at 0x000036bc..0x000036e0 copies that state to FBCTL.
+     * _GLESInitRegs still supplies the same BGRA8 base value 6. The software
+     * TA path already resolves fragments to that 8-bit target, so retain the
+     * requested dither bit as a known no-op rather than rejecting a valid
+     * OpenGL ES scene. No other FBCTL bits or base formats are admitted. */
+    uint32_t framebuffer_control = m->reg[S5L_MBX_FBCTL / 4u];
+    bool bgra8_control = framebuffer_control == 0x00000006u ||
+                         framebuffer_control == 0x0000000eu;
     if ((object & 3u) || (target & 3u) ||
         m->reg[S5L_MBX_3DPIXSAMP / 4u] != 0x00020007u ||
-        m->reg[S5L_MBX_FBCTL / 4u] != 0x00000006u) {
+        !bgra8_control) {
         if (why) *why = "TA render registers are outside the measured BGRA8 form";
         return false;
     }

@@ -1221,7 +1221,10 @@ static void test_ta_stream_voice_memos_near_unity_rotation(void) {
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_RGNBASE, region);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_OBJBASE, object);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_PIXSAMP, 0x00020007u);
-    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBCTL, 6u);
+    /* MBXGLEngine's default GL_DITHER state adds bit 3 to the same BGRA8
+     * framebuffer control. This exact producer-side form must render without
+     * admitting any otherwise unknown framebuffer mode. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBCTL, 14u);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP, 0x013f0000u);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBYCLIP, 0x01df0000u);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTART, target);
@@ -1292,6 +1295,23 @@ static void test_ta_stream_voice_memos_near_unity_rotation(void) {
           m.mbx_telemetry.rejected_3d == 1u &&
           m.mbx_telemetry.rejected_3d_history[0].ta_failure_word == draw_start,
           "out-of-family affine scale completed or lost its parser cursor");
+
+    /* Restore the valid scene and prove that only the producer's dither bit
+     * was added to the gate. A different FBCTL bit must still reject before
+     * the target is touched or a completion is raised. */
+    stream[draw_start + 21u] = test_float_word(x[1]);
+    stream[draw_start + 29u] = test_float_word(x[3]);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBCTL, 0x16u);
+    test_gpu_write32(&m, marker, 0xff405060u);
+    test_ta_run_stream(&m, stream, next);
+    CHECK(test_gpu_read32(&m, marker) == 0xff405060u &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
+          m.mbx_telemetry.candidates_3d == 3u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 2u &&
+          m.mbx_telemetry.rejected_3d_history[1].framebuffer_control == 0x16u &&
+          m.mbx_telemetry.rejected_3d_history[1].ta_failure_word == UINT32_MAX,
+          "unknown TA framebuffer control completed or touched the target");
     s5l8900_free(&m);
 }
 
