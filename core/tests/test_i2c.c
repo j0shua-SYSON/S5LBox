@@ -359,7 +359,10 @@ static void test_pmu_power_state_wake_event_is_one_shot(void) {
     CHECK(!s5l_pcf50635_in_hibernation(&pmu),
           "OOCSHDWN.GO_STANDBY was treated as hibernation");
 
-    uint8_t mask = PCF50635_INT2_ONKEYR;
+    CHECK(PCF50635_INT2_ONKEYR == 0x01u &&
+          PCF50635_INT2_WAKE_BUTTON_HOLD == 0x04u,
+          "Power wake selector drifted from the shipped PMU STAT function");
+    uint8_t mask = PCF50635_INT2_WAKE_BUTTON_HOLD;
     drive_write(&bus, PCF50635_I2C_ADDR, PCF50635_INT2MASK, &mask, 1u);
     uint64_t guest_writes = pmu.reg_writes;
     s5l_pcf50635_wake_onkey(&pmu);
@@ -384,7 +387,8 @@ static void test_pmu_power_state_wake_event_is_one_shot(void) {
     uint8_t events[5] = {0};
     drive_read(&bus, PCF50635_I2C_ADDR, PCF50635_INT1,
                events, sizeof events);
-    CHECK(events[0] == 0u && events[1] == PCF50635_INT2_ONKEYR &&
+    CHECK(events[0] == 0u &&
+          events[1] == PCF50635_INT2_WAKE_BUTTON_HOLD &&
           events[2] == 0u && events[3] == 0u && events[4] == 0u,
           "wake bank was %02x %02x %02x %02x %02x",
           events[0], events[1], events[2], events[3], events[4]);

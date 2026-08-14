@@ -1523,9 +1523,12 @@ bool     s5l_gpio_watch(s5l_gpio_t *g, uint16_t pin, void *ctx,
  * involved only through `function-wake_button_hold`, a 'STAT' function on
  * /arm-io/i2c0/pmu that AppleM68Buttons resolves once at start (0xc065a6a4,
  * stored at this+0x90+4i) and reads only in its power-state path (0xc065a0c8)
- * to answer "did this button wake us". It is NOT the ordinary press/release
- * path. The machine-level s5l8900_set_button() wrapper models it only while
- * the PMU has put the application processor into standby.
+ * to answer "did this button wake us". The exact STAT implementation at
+ * 0xc0635dec reads the driver's INT2 shadow at PMU-object byte 0x78, shifts it
+ * right by two, and returns bit zero. Thus this device-tree selector tests
+ * INT2.EXTON1R (0x04), not the adjacent ONKEYR event (0x01). It is NOT the
+ * ordinary press/release path. The machine-level s5l8900_set_button() wrapper
+ * models it only while the PMU has put the application processor into standby.
  *
  * WHICH LEVEL IS "PRESSED". This is the number that had to be right, because a
  * wrong one reads as a button held down forever. Two independently decoded
@@ -2164,6 +2167,8 @@ bool     s5l_i2c_irq(const s5l_i2c_t *bus);
 #define PCF50635_INT5MASK 0x0bu
 #define PCF50635_OOCSHDWN 0x0cu
 #define PCF50635_INT2_ONKEYR 0x01u
+#define PCF50635_INT2_EXTON1R 0x04u
+#define PCF50635_INT2_WAKE_BUTTON_HOLD PCF50635_INT2_EXTON1R
 #define PCF50635_OOCSHDWN_GO_STANDBY 0x01u
 #define PCF50635_OOCSHDWN_GO_HIBERNATE 0x02u
 #define PCF50635_RTCSC    0x59u

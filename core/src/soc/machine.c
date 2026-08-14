@@ -1811,7 +1811,8 @@ bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
          * ordinary GPIO debounce path below. */
         if (which == S5L_BUTTON_HOLD && !pressed &&
             s5l_buttons_held(&m->buttons, S5L_BUTTON_HOLD) &&
-            (m->pmu.regs[PCF50635_INT2] & PCF50635_INT2_ONKEYR) != 0u) {
+            (m->pmu.regs[PCF50635_INT2] &
+             PCF50635_INT2_WAKE_BUTTON_HOLD) != 0u) {
             m->buttons.refused++;
             power_trace_arm(m);
             power_trace_record(m, S5L_POWER_TRACE_EVENT_RELEASE_WAIT,

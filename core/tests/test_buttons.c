@@ -951,8 +951,9 @@ static void test_power_wakes_hibernation_through_retained_reset(void) {
           "Power did not wake the hibernating machine");
     CHECK(!s5l_pcf50635_in_hibernation(&m.pmu) &&
           !s5l_pcf50635_in_standby(&m.pmu) &&
-          (m.pmu.regs[PCF50635_INT2] & PCF50635_INT2_ONKEYR) != 0u,
-          "hibernation wake did not clear power state and latch ONKEY");
+          (m.pmu.regs[PCF50635_INT2] &
+           PCF50635_INT2_WAKE_BUTTON_HOLD) != 0u,
+          "hibernation wake did not clear power state and latch its wake event");
     CHECK(m.cpu.r[15] == S5L8900_SDRAM_BASE && m.cpu.r[0] == 0u &&
           m.cpu.cp15.sctlr == 0u && m.cpu.cp15.ttbr0 == 0u,
           "hibernation wake did not enter the retained reset vector cleanly");
@@ -984,10 +985,10 @@ static void test_power_wakes_hibernation_through_retained_reset(void) {
           (reset->pmu_shutdown &
            (PCF50635_OOCSHDWN_GO_STANDBY |
             PCF50635_OOCSHDWN_GO_HIBERNATE)) == 0u &&
-          (reset->pmu_int2 & PCF50635_INT2_ONKEYR) != 0u &&
+          (reset->pmu_int2 & PCF50635_INT2_WAKE_BUTTON_HOLD) != 0u &&
           (reset->pmu_gpio & S5L_POWER_TRACE_GPIO_RAW) == 0u &&
           (reset->pmu_gpio & S5L_POWER_TRACE_GPIO_PENDING) != 0u,
-          "wake-reset trace did not capture ONKEY and active-low PMU INT_N");
+          "wake-reset trace did not capture EXTON1R and active-low PMU INT_N");
 
     /* CPU interrupt lines are useful context on a Power entry, but periodic
      * IRQ/FIQ traffic must not evict the lifecycle events from the short ring.
@@ -1055,8 +1056,9 @@ static void test_power_wakes_standby_through_retained_reset(void) {
     CHECK(s5l8900_set_button(&m, S5L_BUTTON_HOLD, true),
           "Power did not wake the standby machine");
     CHECK(!s5l_pcf50635_in_standby(&m.pmu) &&
-          (m.pmu.regs[PCF50635_INT2] & PCF50635_INT2_ONKEYR) != 0u,
-          "Power wake did not latch the PMU ONKEY reason");
+          (m.pmu.regs[PCF50635_INT2] &
+           PCF50635_INT2_WAKE_BUTTON_HOLD) != 0u,
+          "Power wake did not latch the PMU wake-button reason");
     CHECK(!s5l_gpioic_line(&m.gpioic, S5L_GPIOIC_LINE_PMU) &&
           s5l_gpioic_pending(&m.gpioic, S5L_GPIOIC_LINE_PMU) &&
           m.cpu.irq_line,
@@ -1179,8 +1181,9 @@ static void test_restore_wakes_standby_without_a_button(void) {
     CHECK(s5l8900_wake_from_standby(&m),
           "restored PMU standby state did not wake");
     CHECK(!s5l_pcf50635_in_standby(&m.pmu) &&
-          (m.pmu.regs[PCF50635_INT2] & PCF50635_INT2_ONKEYR) != 0u,
-          "restore wake did not latch the PMU ONKEY reason");
+          (m.pmu.regs[PCF50635_INT2] &
+           PCF50635_INT2_WAKE_BUTTON_HOLD) != 0u,
+          "restore wake did not latch the PMU wake-button reason");
     CHECK(m.cpu.r[15] == S5L8900_SDRAM_BASE && m.cpu.r[0] == 0u &&
           m.cpu.cp15.sctlr == 0u && m.cpu.cp15.ttbr0 == 0u,
           "restore wake did not enter the retained-RAM reset vector cleanly");

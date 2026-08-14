@@ -120,7 +120,7 @@ static uint8_t reg_read(s5l_pcf50635_t *pmu, uint8_t reg) {
     if (is_rtc(reg)) return rtc_byte(pmu, reg);
     /* INT1..INT5 are hardware event latches, not persistent configuration.
      * The PCF50633-family interface clears them as the host reads them. The
-     * iPhone1,2 device tree's `STAT, 0x100` wake function selects INT2 bit 0,
+     * iPhone1,2 device tree's `STAT, 0x100` wake function selects INT2 bit 2,
      * so retaining that byte forever would report every later resume as a
      * Power wake too. They are known registers even when all five are zero. */
     if (is_event_latch(reg)) {
@@ -218,9 +218,12 @@ void s5l_pcf50635_wake_onkey(s5l_pcf50635_t *pmu) {
     if (!pmu) return;
 
     /* Hardware, not an I2C master, raises this event; do not count a guest
-     * register write. AppleM68Buttons later obtains bit 8 from its PMU `STAT`
-     * platform function, which is INT2 bit 0 in the five-byte event bank. */
-    pmu->regs[PCF50635_INT2] |= PCF50635_INT2_ONKEYR;
+     * register write. AppleM68Buttons later invokes PMU `STAT, 0x100`. The
+     * shipped PMU driver's implementation at 0xc0635dec returns bit 2 of its
+     * INT2 shadow for that selector: EXTON1R, the external-on input labelled
+     * "buttons" by the same driver. ONKEYR bit 0 is a different event and did
+     * not make AppleM68Buttons recognise a retained-reset wake. */
+    pmu->regs[PCF50635_INT2] |= PCF50635_INT2_WAKE_BUTTON_HOLD;
 
     /* OOCSHDWN is a command. Once ONKEY has powered the AP back up, keeping
      * either power-state bit asserted would make every later Power press look
