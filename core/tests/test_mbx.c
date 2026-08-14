@@ -525,7 +525,7 @@ static bool test_affine_pixel(const struct test_affine_transform *transform,
                               uint32_t x, uint32_t y,
                               float *u_fraction, float *v_fraction) {
     if (!transform || !u_fraction || !v_fraction ||
-        transform->determinant <= 0.0f)
+        transform->determinant == 0.0f)
         return false;
     float dx = (float)x + 0.5f - transform->origin_x;
     float dy = (float)y + 0.5f - transform->origin_y;
@@ -1498,6 +1498,84 @@ static void test_ta_stream_perspective_texture(void) {
           m.mbx_telemetry.pixels_3d == 128u,
           "perspective TA telemetry is not exact");
 
+    /* Weather's return page flip presents the same bounded perspective form
+     * with its U axis reversed. Exercise the signed inverse independently and
+     * require the mirrored samples rather than accepting it as a blind no-op. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    for (uint32_t py = 0u; py < HEIGHT; py++)
+        for (uint32_t px = 0u; px < WIDTH; px++)
+            test_gpu_write32(&m, target + (py * WIDTH + px) * 4u, 0u);
+    const float reversed_x[4] = {8.0f, 8.0f, 24.0f, 24.0f};
+    uint32_t reversed_stream[64] = {0x10000010u};
+    uint32_t reversed_next = test_ta_global_transform(
+        reversed_stream, 1u, WIDTH, HEIGHT, 0.0f, 0.0f);
+    reversed_next = test_ta_projective_draw(
+        reversed_stream, reversed_next, 0xa1218000u, source_word,
+        0x86084610u, reversed_x, y, z, reciprocal_w, u, v, colour);
+    reversed_stream[reversed_next++] = 0xf0000000u;
+    test_ta_run_stream(&m, reversed_stream, reversed_next);
+
+    struct test_affine_transform reversed_transform = {
+        24.0f, 4.0f, -16.0f, 0.0f, 0.0f, 8.0f, -128.0f,
+    };
+    uint32_t reversed_mismatches = 0u;
+    for (uint32_t py = 4u; py < 12u; py++) {
+        for (uint32_t px = 8u; px < 24u; px++) {
+            float uf = 0.0f, vf = 0.0f;
+            struct test_bilinear_axis sx, sy;
+            bool covered = test_affine_pixel(
+                &reversed_transform, px, py, &uf, &vf);
+            float denominator = (1.0f - uf) * 2.0f + uf;
+            float perspective_u = uf / denominator;
+            bool sampled = covered &&
+                test_bilinear_coordinate(
+                    perspective_u * 8.0f, SOURCE_STRIDE / 4u, &sx) &&
+                test_bilinear_coordinate(
+                    vf * 8.0f, SOURCE_HEIGHT, &sy);
+            uint32_t expected = sampled
+                ? test_modulate_vertex_colour(
+                    test_bilinear_sprite_pixel(&sx, &sy), colour)
+                : 0u;
+            reversed_mismatches += test_gpu_read32(
+                &m, target + (py * WIDTH + px) * 4u) != expected;
+        }
+    }
+    CHECK(reversed_mismatches == 0u,
+          "%u reversed perspective TA pixels mismatched",
+          reversed_mismatches);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu &&
+          m.mbx_telemetry.candidates_3d == 2u &&
+          m.mbx_telemetry.completed_3d == 2u &&
+          m.mbx_telemetry.rejected_3d == 0u &&
+          m.mbx_telemetry.pixels_3d == 256u,
+          "reversed perspective TA telemetry is not exact");
+
+    /* Negative winding is measured only for the perspective page face. The
+     * same geometry with ordinary orthographic depth remains unsupported and
+     * must reject before changing an already-present target marker. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    uint32_t reverse_marker = target + (4u * WIDTH + 8u) * 4u;
+    test_gpu_write32(&m, reverse_marker, 0xff304050u);
+    const float flat_z[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    const float flat_w[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    uint32_t flat_stream[64] = {0x10000010u};
+    uint32_t flat_next = test_ta_global_transform(
+        flat_stream, 1u, WIDTH, HEIGHT, 0.0f, 0.0f);
+    uint32_t flat_draw_start = flat_next;
+    flat_next = test_ta_projective_draw(
+        flat_stream, flat_next, 0xa1218000u, source_word,
+        0x86084610u, reversed_x, y, flat_z, flat_w, u, v, colour);
+    flat_stream[flat_next++] = 0xf0000000u;
+    test_ta_run_stream(&m, flat_stream, flat_next);
+    CHECK(test_gpu_read32(&m, reverse_marker) == 0xff304050u &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
+          m.mbx_telemetry.candidates_3d == 3u &&
+          m.mbx_telemetry.completed_3d == 2u &&
+          m.mbx_telemetry.rejected_3d == 1u &&
+          m.mbx_telemetry.rejected_3d_history[0].ta_failure_word ==
+              flat_draw_start,
+          "reversed orthographic TA draw committed or raised completion");
+
     /* A missing reciprocal-W term rejects atomically rather than quietly
      * falling back to affine interpolation. */
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
@@ -1510,10 +1588,10 @@ static void test_ta_stream_perspective_texture(void) {
     CHECK(test_gpu_read32(&m, marker) == 0xff102030u,
           "bad perspective terms committed a TA scene");
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
-          m.mbx_telemetry.candidates_3d == 2u &&
-          m.mbx_telemetry.completed_3d == 1u &&
-          m.mbx_telemetry.rejected_3d == 1u &&
-          m.mbx_telemetry.rejected_3d_history[0].ta_failure_word ==
+          m.mbx_telemetry.candidates_3d == 4u &&
+          m.mbx_telemetry.completed_3d == 2u &&
+          m.mbx_telemetry.rejected_3d == 2u &&
+          m.mbx_telemetry.rejected_3d_history[1].ta_failure_word ==
               draw_start,
           "bad perspective terms completed or lost their parser cursor");
     stream[left_bottom_q] = saved_q;

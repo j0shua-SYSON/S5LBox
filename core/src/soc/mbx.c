@@ -2384,7 +2384,7 @@ static bool mbx_affine_pixel(const struct mbx_affine_transform *transform,
                              uint32_t x, uint32_t y,
                              float *u_fraction, float *v_fraction) {
     if (!transform || !u_fraction || !v_fraction ||
-        transform->determinant <= 0.0f)
+        transform->determinant == 0.0f)
         return false;
     float dx = (float)x + 0.5f - transform->origin_x;
     float dy = (float)y + 0.5f - transform->origin_y;
@@ -4077,7 +4077,15 @@ static enum mbx_ta_parse_result mbx_ta_parse_vertices(
     draw->transform.determinant =
         draw->transform.u_x * draw->transform.v_y -
         draw->transform.u_y * draw->transform.v_x;
-    if (draw->transform.determinant <= 0.0f) {
+    float determinant_magnitude = draw->transform.determinant < 0.0f
+        ? -draw->transform.determinant : draw->transform.determinant;
+    /* Weather's page flip exposes the back face as a measured perspective
+     * quad, so its U axis has negative winding while the reciprocal-W sides
+     * remain valid. The inverse affine equations work for either winding.
+     * Keep reversed orthographic geometry rejected and require a determinant
+     * comfortably above zero before any division or staging. */
+    if (determinant_magnitude <= epsilon ||
+        (draw->transform.determinant < 0.0f && !draw->perspective)) {
         if (why) *why = "TA affine draw is degenerate or reversed";
         return MBX_TA_DRAW_BAD;
     }
@@ -4104,7 +4112,7 @@ static enum mbx_ta_parse_result mbx_ta_parse_vertices(
     float expected_det = (float)source_width * (float)source_height;
     float u_error = u2 - expected_u2;
     float v_error = v2 - expected_v2;
-    float det_error = draw->transform.determinant - expected_det;
+    float det_error = determinant_magnitude - expected_det;
     if (dot < 0.0f) dot = -dot;
     if (u_error < 0.0f) u_error = -u_error;
     if (v_error < 0.0f) v_error = -v_error;
