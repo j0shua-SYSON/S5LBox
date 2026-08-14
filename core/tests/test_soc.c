@@ -612,6 +612,37 @@ static void test_active_host_clock_is_optional_bounded_and_fail_closed(void) {
           (unsigned long long)mid_batch_failure.active_clock_failures,
           failing.now_calls);
     s5l8900_free(&mid_batch_failure);
+
+    /* A continuously busy guest cannot be credited more active clock than its
+     * retired work can support.  This interval is below the ordinary 8 ms host
+     * clamp (1,000 ticks) but above ten retirements' 8-tick budget (80). */
+    s5l8900_t work_bounded;
+    CHECK(s5l8900_init(&work_bounded, 0, 1u << 20),
+          "work-bounded active-clock machine init failed");
+    s5l8900_load(&work_bounded, 0, program, sizeof program);
+    work_bounded.cpu_hz = work_bounded.tb_hz = 1000000u;
+    work_bounded.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I | ARM_CPSR_F;
+    active_clock_probe_t bounded_probe = {
+        .now_ns = UINT64_C(3000000000), .succeeds = true
+    };
+    CHECK(s5l8900_set_active_host_clock(
+              &work_bounded, active_clock_probe_now, &bounded_probe),
+          "could not enable work-bounded active clock");
+    ran = s5l8900_run(&work_bounded, 1u, &st);
+    CHECK(st == ARM_OK && ran == 1u && work_bounded.timer.ticks == 0u,
+          "work-bounded setup manufactured guest time");
+    bounded_probe.now_ns += UINT64_C(1000000);
+    ran = s5l8900_run(&work_bounded, 10u, &st);
+    CHECK(st == ARM_OK && ran == 10u &&
+          work_bounded.timer.ticks == 80u &&
+          work_bounded.active_clock_added_ticks == 80u &&
+          work_bounded.active_clock_clamps == 1u,
+          "active clock outran retired work: status=%d ran=%u ticks=%llu "
+          "added=%llu clamps=%llu",
+          (int)st, ran, (unsigned long long)work_bounded.timer.ticks,
+          (unsigned long long)work_bounded.active_clock_added_ticks,
+          (unsigned long long)work_bounded.active_clock_clamps);
+    s5l8900_free(&work_bounded);
 }
 
 static void test_active_host_clock_does_not_double_count_paced_wfi(void) {

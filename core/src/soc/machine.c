@@ -2228,8 +2228,25 @@ static bool active_host_clock_sync(s5l8900_t *m,
     if (clamp) {
         added_ticks = max_added_ticks;
         due_fraction = max_fraction;
-        active_clock_counter_add(&m->active_clock_clamps, 1u);
     }
+
+    /* Wall time is an upper bound, not permission to run the guest clock ahead
+     * of the work this host completed.  Without this second bound a 20 Minsn/s
+     * phone was credited 412 million CPU ticks each host second; timer
+     * deadlines then arrived faster than XNU could service them and foreground
+     * navigation never reached its next wait.  Discard excess elapsed time
+     * instead of queuing debt: a later WFI supplies genuine idle time at wall
+     * cadence, while sustained CPU work advances only as quickly as it is
+     * actually emulated. */
+    uint64_t retirement_cap =
+        (uint64_t)fallback_ticks *
+        S5L8900_ACTIVE_CLOCK_MAX_TICKS_PER_RETIREMENT;
+    if (added_ticks > retirement_cap) {
+        added_ticks = retirement_cap;
+        clamp = true;
+    }
+    if (clamp)
+        active_clock_counter_add(&m->active_clock_clamps, 1u);
     m->active_clock_fraction = due_fraction;
 
     active_clock_counter_add(&m->active_clock_updates, 1u);
@@ -2345,8 +2362,19 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
      * Only a wait reached during THIS bounded slice may shorten it. */
     m->wfi_pace_yield = false;
     if (max_steps && m->active_host_now &&
-        !m->active_clock_deadline_shield)
-        active_clock = active_host_clock_sync(m, 0u);
+        !m->active_clock_deadline_shield) {
+        if (!m->active_clock_anchor_valid) {
+            active_clock = active_host_clock_sync(m, 0u);
+        } else {
+            /* Do not consume elapsed host time at a run boundary that has no
+             * retired work to bound it.  The first periodic or forced sync in
+             * this slice will pair that interval with the instructions that
+             * were actually completed.  A zero refresh still exposes input
+             * and device levels before the first retirement. */
+            active_clock = true;
+            s5l8900_tick(m, 0u);
+        }
+    }
     while (n < max_steps) {
         if (pre_step_target_matches(m, m->cpu.r[15])) {
             m->pre_step_matches++;

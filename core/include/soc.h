@@ -3908,6 +3908,14 @@ typedef void (*s5l_uart4_host_service_fn)(void *ctx, unsigned retired);
  * debugger stop or starved frontend interval still cannot arrive in one
  * burst. During active execution the clock is sampled much more frequently. */
 #define S5L8900_ACTIVE_CLOCK_MAX_STEP_NS UINT64_C(8000000)
+/* Active wall time may not outrun the CPU work that the host actually retired.
+ * The interpreter has no cycle model, so the old deterministic path uses the
+ * deliberately conservative floor of one CPU tick per instruction.  The
+ * interactive clock may credit up to this many ticks per retirement: enough
+ * to represent ordinary ARM11 pipeline and memory latency, but bounded so a
+ * slow host cannot manufacture a permanent queue of already-expired guest
+ * deadlines.  Paced WFI ticks are accounted separately and remain real-time. */
+#define S5L8900_ACTIVE_CLOCK_MAX_TICKS_PER_RETIREMENT 8u
 /* Accepted input normally keeps the active host clock: that is what gives UI
  * timers real-time cadence. Only a foreground interval that is still not
  * quiescent after this much host time is pathological enough to protect from
