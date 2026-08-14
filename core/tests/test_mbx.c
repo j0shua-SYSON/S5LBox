@@ -626,6 +626,28 @@ static uint32_t test_ta_solid_continuation(
     return start + 27u;
 }
 
+static uint32_t test_ta_solid_primitive(
+        uint32_t *stream, uint32_t start,
+        float x0, float y0, float x1, float y1, uint32_t colour,
+        uint32_t boundary) {
+    static const uint8_t corners[4][2] = {
+        {1u, 0u}, {1u, 1u}, {0u, 0u}, {0u, 1u},
+    };
+    for (uint32_t vertex = 0u; vertex < 4u; vertex++) {
+        uint32_t base = start + vertex * 6u;
+        stream[base] = 0u;
+        stream[base + 1u] = test_float_word(
+            corners[vertex][0] ? x1 : x0);
+        stream[base + 2u] = test_float_word(
+            corners[vertex][1] ? y1 : y0);
+        stream[base + 3u] = 0u;
+        stream[base + 4u] = 0x3f800000u;
+        stream[base + 5u] = colour;
+    }
+    stream[start + 24u] = boundary;
+    return start + 25u;
+}
+
 static uint32_t test_ta_textured_vertices(
         uint32_t *stream, uint32_t start,
         const float x[4], const float y[4],
@@ -1154,7 +1176,7 @@ static void test_ta_stream_weather_marker2_quads(void) {
     const uint32_t right_colour = 0xffff0000u;
     const uint32_t bottom_colour = 0xff808080u;
 
-    uint32_t stream[192] = {0x10000010u};
+    uint32_t stream[320] = {0x10000010u};
     uint32_t next = test_ta_global_transform(
         stream, 1u, WIDTH, HEIGHT, 0.0f, 0.0f);
     uint32_t draw_start = next;
@@ -1183,6 +1205,18 @@ static void test_ta_stream_weather_marker2_quads(void) {
     stream[next++] = 0x3727c5acu;
     stream[next++] = 0x48020000u;
     stream[next++] = 0xf0020044u;
+
+    /* The live Weather page flip begins with this measured zero-width edge.
+     * It carries a valid texture state forward to the following marker-2
+     * primitive but covers no samples of its own. */
+    uint32_t degenerate_start = next;
+    const float edge_x[4] = {161.0f, 161.0f, 161.0f, 161.0f};
+    const float edge_y[4] = {345.0f, 389.0f, 345.0f, 389.0f};
+    const float edge_u[4] = {10.75f, 10.75f, 10.75f, 10.75f};
+    const float edge_v[4] = {0.0f, 44.0f, 0.0f, 44.0f};
+    next = test_ta_textured_primitive(
+        stream, next, edge_x, edge_y, edge_u, edge_v,
+        0xffffffffu, 2u);
 
     const float top_x[4] = {320.0f, 320.0f, 0.0f, 0.0f};
     const float top_y[4] = {20.0f, 74.0f, 20.0f, 74.0f};
@@ -1215,9 +1249,22 @@ static void test_ta_stream_weather_marker2_quads(void) {
         stream, next, bottom_x, bottom_y, bottom_u, bottom_v,
         0xffffffffu, 3u);
     uint32_t final_boundary = next - 1u;
+
+    /* A second live Weather submit chains solid rectangles with marker 2. The
+     * rejected witness begins at the immediate 0x48020000 continuation below;
+     * the next rectangle begins directly after its marker with no new raster
+     * control. */
+    next = test_ta_solid_draw(
+        stream, next, 100.0f, 200.0f, 102.0f, 202.0f, 0xff0000ffu);
+    next = test_ta_solid_continuation(
+        stream, next, 10.0f, 114.0f, 52.0f, 132.0f, 0xff00ff00u);
+    stream[next - 1u] = 2u;
+    next = test_ta_solid_primitive(
+        stream, next, 269.0f, 114.0f, 310.0f, 132.0f,
+        0xffff0000u, 3u);
     stream[next++] = 0xf0000000u;
-    CHECK(next == 171u,
-          "Weather marker-2 fixture has %u words, expected 171", next);
+    CHECK(next == 286u,
+          "Weather marker-2 fixture has %u words, expected 286", next);
 
     s5l8900_t m;
     CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
@@ -1260,7 +1307,9 @@ static void test_ta_stream_weather_marker2_quads(void) {
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTRIDE, WIDTH);
 
     uint32_t centre = target + (200u * WIDTH + 160u) * 4u;
+    uint32_t edge_guard = target + (350u * WIDTH + 161u) * 4u;
     test_gpu_write32(&m, centre, 0xff112233u);
+    test_gpu_write32(&m, edge_guard, 0xff223344u);
     test_ta_run_stream(&m, stream, next);
     CHECK(test_gpu_read32(&m, target + (30u * WIDTH + 100u) * 4u) ==
               top_colour &&
@@ -1269,16 +1318,42 @@ static void test_ta_stream_weather_marker2_quads(void) {
           test_gpu_read32(&m, target + (100u * WIDTH + 315u) * 4u) ==
               right_colour &&
           test_gpu_read32(&m, target + (400u * WIDTH + 100u) * 4u) ==
-              bottom_colour,
+              bottom_colour &&
+          test_gpu_read32(&m, target + (200u * WIDTH + 100u) * 4u) ==
+              0xff0000ffu &&
+          test_gpu_read32(&m, target + (114u * WIDTH + 10u) * 4u) ==
+              0xff00ff00u &&
+          test_gpu_read32(&m, target + (114u * WIDTH + 269u) * 4u) ==
+              0xffff0000u,
           "Weather marker-2 quads did not render all four measured regions");
-    CHECK(test_gpu_read32(&m, centre) == 0xff112233u,
-          "Weather marker-2 quads changed their central hole");
+    CHECK(test_gpu_read32(&m, centre) == 0xff112233u &&
+          test_gpu_read32(&m, edge_guard) == 0xff223344u,
+          "Weather marker-2 quads changed their central hole or empty edge");
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu &&
           m.mbx_telemetry.candidates_3d == 1u &&
           m.mbx_telemetry.completed_3d == 1u &&
           m.mbx_telemetry.rejected_3d == 0u &&
-          m.mbx_telemetry.pixels_3d == 63200u,
+          m.mbx_telemetry.pixels_3d == 64698u,
           "Weather marker-2 scene did not complete with exact telemetry");
+
+    /* Collapsed UVs are not a blanket pass. Giving the measured empty edge a
+     * nonempty destination axis must reject the entire scene atomically. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    test_gpu_write32(&m, edge_guard, 0xff405060u);
+    uint32_t bad_edge_x = degenerate_start + 2u * 8u + 1u;
+    uint32_t saved_edge_x = stream[bad_edge_x];
+    stream[bad_edge_x] = test_float_word(162.0f);
+    test_ta_run_stream(&m, stream, next);
+    CHECK(test_gpu_read32(&m, edge_guard) == 0xff405060u,
+          "malformed empty Weather edge committed an earlier draw");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
+          m.mbx_telemetry.candidates_3d == 2u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 1u &&
+          m.mbx_telemetry.rejected_3d_history[0].ta_failure_word ==
+              draw_start,
+          "malformed empty Weather edge completed or lost its parser cursor");
+    stream[bad_edge_x] = saved_edge_x;
 
     /* Marker 2 promises another complete quad. A truncated promise rejects
      * the whole scene before an earlier quad reaches guest RAM. */
@@ -1290,10 +1365,10 @@ static void test_ta_stream_weather_marker2_quads(void) {
     CHECK(test_gpu_read32(&m, atomic_guard) == 0xff102030u,
           "truncated marker-2 chain committed an earlier quad");
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
-          m.mbx_telemetry.candidates_3d == 2u &&
+          m.mbx_telemetry.candidates_3d == 3u &&
           m.mbx_telemetry.completed_3d == 1u &&
-          m.mbx_telemetry.rejected_3d == 1u &&
-          m.mbx_telemetry.rejected_3d_history[0].ta_failure_word ==
+          m.mbx_telemetry.rejected_3d == 2u &&
+          m.mbx_telemetry.rejected_3d_history[1].ta_failure_word ==
               final_boundary,
           "truncated marker-2 chain completed or lost its parser cursor");
     stream[final_boundary] = 3u;

@@ -3757,6 +3757,7 @@ struct mbx_ta_draw {
     bool filtered;
     bool affine;
     bool perspective;
+    bool empty;
     uint32_t source;
     uint32_t source_stride;
     uint32_t texture_width;
@@ -3838,16 +3839,15 @@ static enum mbx_ta_parse_result mbx_ta_parse_vertices(
     uint32_t boundary = control + 1u + 4u * stride;
     if (boundary >= count ||
         (words[boundary] != 0x00000002u &&
-         words[boundary] != 0x00000003u) ||
-        (words[boundary] == 0x00000002u && stride != 8u)) {
+         words[boundary] != 0x00000003u)) {
         if (why) *why = "TA draw has an unknown vertex boundary";
         return MBX_TA_DRAW_BAD;
     }
 
-    /* Weather's measured textured packet uses marker 2 between four-vertex
-     * quads and marker 3 after the last one. Keep the cursor on marker 2 so
-     * the next parser step must validate another complete quad before any
-     * framebuffer write; marker 3 is consumed as the final boundary. */
+    /* UIKit's measured packet families use marker 2 between four-vertex
+     * primitives and marker 3 after the last one. Keep the cursor on marker 2
+     * so the next parser step must validate another complete primitive before
+     * any framebuffer write; marker 3 is consumed as the final boundary. */
     draw->next_word = boundary + (words[boundary] == 3u ? 1u : 0u);
     draw->textured = stride == 8u;
     float x[4], y[4], z[4], reciprocal_w[4];
@@ -3902,9 +3902,78 @@ static enum mbx_ta_parse_result mbx_ta_parse_vertices(
             if (v[i] < draw->v0) draw->v0 = v[i];
             if (v[i] > draw->v1) draw->v1 = v[i];
         }
-        if (!(draw->u0 < draw->u1) || !(draw->v0 < draw->v1)) {
-            if (why) *why = "TA draw has an empty texture rectangle";
+        uint32_t blue = colour & 0xffu;
+        uint32_t green = (colour >> 8) & 0xffu;
+        uint32_t red = (colour >> 16) & 0xffu;
+        uint32_t alpha = colour >> 24;
+        if (blue != green || green != red || red > alpha) {
+            if (why) *why = "TA draw uses nonuniform vertex modulation";
             return MBX_TA_DRAW_BAD;
+        }
+
+        bool empty_u = !(draw->u0 < draw->u1);
+        bool empty_v = !(draw->v0 < draw->v1);
+        if (empty_u || empty_v) {
+            /* Weather emits paired, zero-area edge primitives while rebuilding
+             * its front and back pages. They establish texture state for the
+             * marker-2 primitive that follows but rasterize no samples. Accept
+             * only one collapsed orthographic axis whose destination and UV
+             * endpoints agree exactly; an arbitrary empty texture remains a
+             * hard rejection and the scene stays transactional. */
+            draw->x0 = draw->x1 = x[0];
+            draw->y0 = draw->y1 = y[0];
+            for (uint32_t i = 1u; i < 4u; i++) {
+                if (x[i] < draw->x0) draw->x0 = x[i];
+                if (x[i] > draw->x1) draw->x1 = x[i];
+                if (y[i] < draw->y0) draw->y0 = y[i];
+                if (y[i] > draw->y1) draw->y1 = y[i];
+            }
+            bool empty_x = !(draw->x0 < draw->x1);
+            bool empty_y = !(draw->y0 < draw->y1);
+            uint32_t pitch_pixels = draw->source_stride / 4u;
+            if (empty_u == empty_v || words[boundary] != 2u ||
+                !orthographic || empty_x != empty_u || empty_y != empty_v ||
+                !pitch_pixels || draw->u1 > (float)pitch_pixels ||
+                draw->u1 > (float)draw->texture_width ||
+                draw->v1 > (float)draw->texture_height) {
+                if (why) *why =
+                    "TA draw has an unsupported empty texture primitive";
+                return MBX_TA_DRAW_BAD;
+            }
+            uint32_t seen_endpoints = 0u;
+            uint32_t endpoint_counts[4] = {0u, 0u, 0u, 0u};
+            for (uint32_t i = 0u; i < 4u; i++) {
+                if ((x[i] != draw->x0 && x[i] != draw->x1) ||
+                    (y[i] != draw->y0 && y[i] != draw->y1) ||
+                    (u[i] != draw->u0 && u[i] != draw->u1) ||
+                    (v[i] != draw->v0 && v[i] != draw->v1) ||
+                    (!empty_x &&
+                     ((x[i] == draw->x1) != (u[i] == draw->u1))) ||
+                    (!empty_y &&
+                     ((y[i] == draw->y1) != (v[i] == draw->v1)))) {
+                    if (why) *why =
+                        "TA draw has an unsupported empty texture primitive";
+                    return MBX_TA_DRAW_BAD;
+                }
+                uint32_t endpoint =
+                    (!empty_x && x[i] == draw->x1 ? 1u : 0u) |
+                    (!empty_y && y[i] == draw->y1 ? 2u : 0u);
+                seen_endpoints |= 1u << endpoint;
+                endpoint_counts[endpoint]++;
+            }
+            uint32_t expected_endpoints = empty_x ? 0x05u : 0x03u;
+            if (seen_endpoints != expected_endpoints ||
+                (empty_x
+                    ? endpoint_counts[0u] != 2u ||
+                      endpoint_counts[2u] != 2u
+                    : endpoint_counts[0u] != 2u ||
+                      endpoint_counts[1u] != 2u)) {
+                if (why) *why =
+                    "TA draw has an unsupported empty texture primitive";
+                return MBX_TA_DRAW_BAD;
+            }
+            draw->empty = true;
+            return MBX_TA_DRAW_OK;
         }
         uint32_t seen_corners = 0u;
         for (uint32_t i = 0u; i < 4u; i++) {
@@ -3924,14 +3993,6 @@ static enum mbx_ta_parse_result mbx_ta_parse_vertices(
         }
         if (seen_corners != 0x0fu) {
             if (why) *why = "TA draw does not contain four texture corners";
-            return MBX_TA_DRAW_BAD;
-        }
-        uint32_t blue = colour & 0xffu;
-        uint32_t green = (colour >> 8) & 0xffu;
-        uint32_t red = (colour >> 16) & 0xffu;
-        uint32_t alpha = colour >> 24;
-        if (blue != green || green != red || red > alpha) {
-            if (why) *why = "TA draw uses nonuniform vertex modulation";
             return MBX_TA_DRAW_BAD;
         }
     } else {
@@ -4149,31 +4210,34 @@ static enum mbx_ta_parse_result mbx_ta_parse_continuation(
                                  origin_x, origin_y, draw, why);
 }
 
-/* Weather batches four textured quads under one pipeline state. A marker-2
- * word replaces the ordinary final marker between quads; the following word
- * is the first vertex, not a new raster control. Only the immediately
- * preceding measured texture state is eligible for reuse. */
+/* UIKit batches both solid and textured quads under one pipeline state. A
+ * marker-2 word replaces the ordinary final marker between primitives; the
+ * following word is the first vertex, not a new raster control. Only the
+ * immediately preceding measured pipeline is eligible for reuse. */
 static enum mbx_ta_parse_result mbx_ta_parse_primitive_continuation(
         const uint32_t *words, uint32_t count, uint32_t start,
         float origin_x, float origin_y, const struct mbx_ta_draw *previous,
         struct mbx_ta_draw *draw, const char **why) {
     if (start >= count || words[start] != 0x00000002u)
         return MBX_TA_NOT_DRAW;
-    if (!previous || !previous->textured) {
+    if (!previous) {
         if (why) *why =
-            "TA marker-2 continuation has no preceding textured draw";
+            "TA marker-2 continuation has no preceding measured draw";
         return MBX_TA_DRAW_BAD;
     }
 
+    uint32_t stride = previous->textured ? 8u : 6u;
     memset(draw, 0, sizeof *draw);
     draw->start_word = start;
-    draw->textured = true;
-    draw->filtered = previous->filtered;
-    draw->source = previous->source;
-    draw->source_stride = previous->source_stride;
-    draw->texture_width = previous->texture_width;
-    draw->texture_height = previous->texture_height;
-    return mbx_ta_parse_vertices(words, count, start, 8u,
+    draw->textured = previous->textured;
+    if (draw->textured) {
+        draw->filtered = previous->filtered;
+        draw->source = previous->source;
+        draw->source_stride = previous->source_stride;
+        draw->texture_width = previous->texture_width;
+        draw->texture_height = previous->texture_height;
+    }
+    return mbx_ta_parse_vertices(words, count, start, stride,
                                  origin_x, origin_y, draw, why);
 }
 
@@ -4332,6 +4396,7 @@ static bool mbx_ta_apply_draw(
         if (why) *why = "TA draw destination coordinates overflow";
         return false;
     }
+    if (draw->empty) return true;
     int32_t raster_left = mbx_3d_ceil_to_i32(draw->x0 - 0.5f);
     int32_t raster_top = mbx_3d_ceil_to_i32(draw->y0 - 0.5f);
     int32_t raster_right = mbx_3d_ceil_to_i32(draw->x1 - 0.5f);
