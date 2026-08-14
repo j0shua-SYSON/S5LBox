@@ -2160,10 +2160,6 @@ bool     s5l_i2c_irq(const s5l_i2c_t *bus);
 #define PCF50635_INT2_ONKEYR 0x01u
 #define PCF50635_INT2_EXTON1R 0x04u
 #define PCF50635_INT2_WAKE_BUTTON_HOLD PCF50635_INT2_EXTON1R
-/* The PMU wake source and AppleM68Buttons' separate STAT selector. A physical
- * Power wake has to expose both observations to their distinct consumers. */
-#define PCF50635_INT2_POWER_WAKE \
-    (PCF50635_INT2_ONKEYR | PCF50635_INT2_WAKE_BUTTON_HOLD)
 #define PCF50635_OOCSHDWN_GO_STANDBY 0x01u
 #define PCF50635_OOCSHDWN_GO_HIBERNATE 0x02u
 #define PCF50635_RTCSC    0x59u
@@ -4337,14 +4333,16 @@ bool s5l8900_wake_from_hibernation(s5l8900_t *m);
  * the GPIO button model above and refresh interrupt levels before returning.
  *
  * When the guest has commanded PMU hibernation or standby, only a Power press
- * is a wake source. It latches ONKEYR, which represents the PMU power source,
- * and EXTON1R, which the shipped AppleM68Buttons STAT function actually tests,
- * then resets the ARM core into XNU's retained-RAM reset vector. The same
- * switch remains an ordinary GPIO level transition: the GPIO controller must
- * service and auto-flip that line so the later release is observable. Other
- * button transitions are consumed without reaching the powered-down
- * application processor, so one stale Home event cannot permanently block a
- * later Power event in a FIFO.
+ * is a wake source. The host transition itself represents ONKEY powering the
+ * application processor; the guest event bank latches EXTON1R, which the
+ * shipped AppleM68Buttons STAT function actually tests, then the ARM core
+ * resets into XNU's retained-RAM vector. Publishing ONKEYR as an additional
+ * guest event made the physical guest wake and immediately hibernate again.
+ * The same switch remains an ordinary GPIO level transition: the GPIO
+ * controller must service and auto-flip that line so the later release is
+ * observable. Other button transitions are consumed without reaching the
+ * powered-down application processor, so one stale Home event cannot
+ * permanently block a later Power event in a FIFO.
  */
 bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed);
 

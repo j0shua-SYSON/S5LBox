@@ -217,13 +217,17 @@ bool s5l_pcf50635_in_hibernation(const s5l_pcf50635_t *pmu) {
 void s5l_pcf50635_wake_onkey(s5l_pcf50635_t *pmu) {
     if (!pmu) return;
 
-    /* Hardware, not an I2C master, raises these events; do not count a guest
-     * register write. ONKEYR records the PMU source that powers the AP. The
-     * shipped PMU driver's `STAT, 0x100` implementation at 0xc0635dec instead
-     * returns INT2 bit 2, EXTON1R, which AppleM68Buttons uses to recognise the
-     * wake button during setPowerState. Reporting only either bit leaves one
-     * of those two guest consumers without its physical Power-wake reason. */
-    pmu->regs[PCF50635_INT2] |= PCF50635_INT2_POWER_WAKE;
+    /* Hardware, not an I2C master, raises this event; do not count a guest
+     * register write. The call itself models ONKEY powering the AP by clearing
+     * OOCSHDWN below and driving the retained reset in machine.c. The shipped
+     * PMU driver's `STAT, 0x100` implementation at 0xc0635dec returns INT2 bit
+     * 2, EXTON1R, which AppleM68Buttons uses to recognise the wake button.
+     *
+     * Do not also publish ONKEYR in the event bank. Physical replay of that
+     * combination reached SpringBoard, then the guest turned CLCD off and
+     * wrote GO_HIBERNATE again. EXTON1R plus the real GPIO edge is the one
+     * remaining distinct transaction, not a claim of success until replay. */
+    pmu->regs[PCF50635_INT2] |= PCF50635_INT2_WAKE_BUTTON_HOLD;
 
     /* OOCSHDWN is a command. Once ONKEY has powered the AP back up, keeping
      * either power-state bit asserted would make every later Power press look
