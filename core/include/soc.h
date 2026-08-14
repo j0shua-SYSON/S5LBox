@@ -3912,7 +3912,7 @@ typedef void (*s5l_uart4_host_service_fn)(void *ctx, unsigned retired);
  * timers real-time cadence. Only a foreground interval that is still not
  * quiescent after this much host time is pathological enough to protect from
  * guest deadlines by falling back to instruction-clocked execution. */
-#define S5L8900_ACTIVE_CLOCK_INPUT_SHIELD_NS UINT64_C(15000000000)
+#define S5L8900_ACTIVE_CLOCK_INPUT_SHIELD_NS UINT64_C(3600000000000)
 /* Before a deadline shield is needed, a wait this far from its next modeled
  * wake is a strong quiescence witness.  After the shield has engaged, any real
  * WFI yield ends it: the protected CPU-bound interval has actually stopped,
