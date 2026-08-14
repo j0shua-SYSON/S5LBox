@@ -1371,15 +1371,6 @@ void     s5l_gpioic_write(s5l_gpioic_t *g, uint32_t off, uint32_t val);
  * auto-flip line is after every single interrupt.
  */
 void     s5l_gpioic_set_line(s5l_gpioic_t *g, unsigned line, bool level);
-/*
- * Consume one already-reported transition on an AUTO-FLIP level line while
- * retaining its electrical level. The PMU Power-wake path uses this after it
- * reports the same physical edge through STAT: no duplicate GPIO interrupt is
- * left pending, and the opposite level is selected so the later release is
- * still observable. Refuses an invalid or non-level line.
- */
-bool     s5l_gpioic_consume_autoflip_level(s5l_gpioic_t *g, unsigned line,
-                                           bool level);
 /* Is that line currently being driven? Mirrors set_line for tests. */
 bool     s5l_gpioic_line(const s5l_gpioic_t *g, unsigned line);
 /* Is that line's pending bit latched? Mirrors the INTSTAT read for tests and
@@ -2169,6 +2160,10 @@ bool     s5l_i2c_irq(const s5l_i2c_t *bus);
 #define PCF50635_INT2_ONKEYR 0x01u
 #define PCF50635_INT2_EXTON1R 0x04u
 #define PCF50635_INT2_WAKE_BUTTON_HOLD PCF50635_INT2_EXTON1R
+/* The PMU wake source and AppleM68Buttons' separate STAT selector. A physical
+ * Power wake has to expose both observations to their distinct consumers. */
+#define PCF50635_INT2_POWER_WAKE \
+    (PCF50635_INT2_ONKEYR | PCF50635_INT2_WAKE_BUTTON_HOLD)
 #define PCF50635_OOCSHDWN_GO_STANDBY 0x01u
 #define PCF50635_OOCSHDWN_GO_HIBERNATE 0x02u
 #define PCF50635_RTCSC    0x59u
@@ -4342,13 +4337,14 @@ bool s5l8900_wake_from_hibernation(s5l8900_t *m);
  * the GPIO button model above and refresh interrupt levels before returning.
  *
  * When the guest has commanded PMU hibernation or standby, only a Power press
- * is a wake source. It latches the PMU ONKEY rising event and resets the ARM
- * core into the retained-RAM reset vector prepared by XNU. AppleM68Buttons
- * turns that PMU reason into the Power press itself, so the GPIO controller
- * consumes the same wake edge while retaining the held wire and arms its
- * auto-flipped polarity for the later release. Other button transitions are
- * consumed without reaching the powered-down application processor, so one
- * stale Home event cannot permanently block a later Power event in a FIFO.
+ * is a wake source. It latches ONKEYR, which represents the PMU power source,
+ * and EXTON1R, which the shipped AppleM68Buttons STAT function actually tests,
+ * then resets the ARM core into XNU's retained-RAM reset vector. The same
+ * switch remains an ordinary GPIO level transition: the GPIO controller must
+ * service and auto-flip that line so the later release is observable. Other
+ * button transitions are consumed without reaching the powered-down
+ * application processor, so one stale Home event cannot permanently block a
+ * later Power event in a FIFO.
  */
 bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed);
 

@@ -952,7 +952,7 @@ static void test_power_wakes_hibernation_through_retained_reset(void) {
     CHECK(!s5l_pcf50635_in_hibernation(&m.pmu) &&
           !s5l_pcf50635_in_standby(&m.pmu) &&
           (m.pmu.regs[PCF50635_INT2] &
-           PCF50635_INT2_WAKE_BUTTON_HOLD) != 0u,
+           PCF50635_INT2_POWER_WAKE) == PCF50635_INT2_POWER_WAKE,
           "hibernation wake did not clear power state and latch its wake event");
     CHECK(m.cpu.r[15] == S5L8900_SDRAM_BASE && m.cpu.r[0] == 0u &&
           m.cpu.cp15.sctlr == 0u && m.cpu.cp15.ttbr0 == 0u,
@@ -963,8 +963,10 @@ static void test_power_wakes_hibernation_through_retained_reset(void) {
           m.active_clock_input_guard && m.active_clock_input_guards == 1u,
           "hibernation wake retained stale clock state or omitted its guard");
     CHECK(s5l_buttons_held(&m.buttons, S5L_BUTTON_HOLD) &&
+          s5l_gpioic_pending(&m.gpioic,
+                             s5l_button_line(S5L_BUTTON_HOLD)) &&
           m.buttons.sets == 3u && m.buttons.edges == 1u,
-          "hibernation wake did not retain exactly one Power press edge");
+          "hibernation wake did not retain one pending Power GPIO edge");
 
     const s5l_power_trace_entry_t *press = last_power_trace_event(
         &m, S5L_POWER_TRACE_EVENT_HOST_PRESS);
@@ -979,16 +981,18 @@ static void test_power_wakes_hibernation_through_retained_reset(void) {
           (begin->pmu_shutdown & PCF50635_OOCSHDWN_GO_HIBERNATE) != 0u &&
           (begin->buttons_pressed & (1u << S5L_BUTTON_HOLD)) != 0u &&
           (begin->power_gpio & S5L_POWER_TRACE_GPIO_RAW) != 0u &&
-          (begin->power_gpio & S5L_POWER_TRACE_GPIO_PENDING) == 0u,
-          "wake-begin trace did not retain the consumed held Power edge");
+          (begin->power_gpio & S5L_POWER_TRACE_GPIO_PENDING) != 0u,
+          "wake-begin trace did not retain the real pending Power edge");
     CHECK(reset &&
           (reset->pmu_shutdown &
            (PCF50635_OOCSHDWN_GO_STANDBY |
             PCF50635_OOCSHDWN_GO_HIBERNATE)) == 0u &&
-          (reset->pmu_int2 & PCF50635_INT2_WAKE_BUTTON_HOLD) != 0u &&
+          (reset->pmu_int2 & PCF50635_INT2_POWER_WAKE) ==
+              PCF50635_INT2_POWER_WAKE &&
+          (reset->power_gpio & S5L_POWER_TRACE_GPIO_PENDING) != 0u &&
           (reset->pmu_gpio & S5L_POWER_TRACE_GPIO_RAW) == 0u &&
           (reset->pmu_gpio & S5L_POWER_TRACE_GPIO_PENDING) != 0u,
-          "wake-reset trace did not capture EXTON1R and active-low PMU INT_N");
+          "wake-reset trace did not capture both PMU reasons and GPIO edges");
 
     /* CPU interrupt lines are useful context on a Power entry, but periodic
      * IRQ/FIQ traffic must not evict the lifecycle events from the short ring.
@@ -1057,7 +1061,7 @@ static void test_power_wakes_standby_through_retained_reset(void) {
           "Power did not wake the standby machine");
     CHECK(!s5l_pcf50635_in_standby(&m.pmu) &&
           (m.pmu.regs[PCF50635_INT2] &
-           PCF50635_INT2_WAKE_BUTTON_HOLD) != 0u,
+           PCF50635_INT2_POWER_WAKE) == PCF50635_INT2_POWER_WAKE,
           "Power wake did not latch the PMU wake-button reason");
     CHECK(!s5l_gpioic_line(&m.gpioic, S5L_GPIOIC_LINE_PMU) &&
           s5l_gpioic_pending(&m.gpioic, S5L_GPIOIC_LINE_PMU) &&
@@ -1092,11 +1096,11 @@ static void test_power_wakes_standby_through_retained_reset(void) {
     unsigned hold_group = hold_line >> 5;
     CHECK(s5l_buttons_held(&m.buttons, S5L_BUTTON_HOLD) &&
           s5l_gpioic_line(&m.gpioic, hold_line) &&
-          !s5l_gpioic_pending(&m.gpioic, hold_line) &&
-          (m.gpioic.level[hold_group] & hold_bit) == 0u &&
+          s5l_gpioic_pending(&m.gpioic, hold_line) &&
+          (m.gpioic.level[hold_group] & hold_bit) != 0u &&
           s5l_gpio_pin(&m.gpio, s5l_button_pin(S5L_BUTTON_HOLD)) ==
               s5l_button_level(S5L_BUTTON_HOLD, true),
-          "PMU wake did not consume its GPIO edge and retain the held wire");
+          "Power wake did not retain its pending GPIO press and held wire");
 
     CHECK(!s5l8900_set_button(&m, S5L_BUTTON_HOLD, false),
           "Power release overtook the guest's PMU wake-reason read");
@@ -1114,6 +1118,12 @@ static void test_power_wakes_standby_through_retained_reset(void) {
     CHECK(!s5l_gpioic_pending(&m.gpioic, S5L_GPIOIC_LINE_PMU) &&
           !m.cpu.irq_line,
           "acknowledging deasserted PMU INT_N left the CPU interrupted");
+    CHECK(guest_services(&m, hold_line),
+          "guest could not service the retained Power wake edge");
+    s5l8900_tick(&m, 0u);
+    CHECK(!s5l_gpioic_pending(&m.gpioic, hold_line) &&
+          (m.gpioic.level[hold_group] & hold_bit) == 0u,
+          "servicing the wake press did not arm the Power release level");
     CHECK(s5l8900_set_button(&m, S5L_BUTTON_HOLD, false),
           "queued Power release was not drainable after the PMU read");
     CHECK(s5l_gpioic_pending(&m.gpioic, hold_line),

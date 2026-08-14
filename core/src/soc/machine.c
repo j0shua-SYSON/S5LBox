@@ -1866,22 +1866,19 @@ bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
     power_trace_record(m, S5L_POWER_TRACE_EVENT_HOST_PRESS,
                        POWER_TRACE_RECORD_FORCE);
 
-    /* AppleM68Buttons' setPowerState path reads function-wake_button_hold and
-     * dispatches a Power press when PMU STAT says ONKEY. Leaving the same edge
-     * pending on GPIO line 45 dispatches a second press after debounce; the
-     * real-device reproduction went straight back to _ml_arm_sleep. Retain
-     * the held electrical level without that duplicate edge, and select the
-     * line's auto-flipped release polarity. The app's queued release is then
-     * one ordinary, guest-visible GPIO transition. */
+    /* The Power switch has two independent guest-visible paths: PMU wake
+     * status and GPIO line 45. The earlier consumed-edge model treated the PMU
+     * status as if it had also serviced the GPIO controller; it had been built
+     * while STAT was mapped to ONKEYR, although the exact shipped STAT method
+     * checks EXTON1R. AppleM68Buttons' own state bitfield suppresses a GPIO
+     * dispatch that repeats its PMU-derived pressed state, but GPIOIC still
+     * needs to service and auto-flip the real line before it can catch release.
+     * Preserve that physical transition across the retained reset. */
     m->buttons.sets++;
-    if (!s5l_buttons_held(&m->buttons, S5L_BUTTON_HOLD) &&
-        s5l_gpioic_consume_autoflip_level(
-            &m->gpioic, s5l_button_line(S5L_BUTTON_HOLD),
-            s5l_button_level(S5L_BUTTON_HOLD, true))) {
+    if (!s5l_buttons_held(&m->buttons, S5L_BUTTON_HOLD)) {
         m->buttons.pressed |= (uint8_t)(1u << S5L_BUTTON_HOLD);
         m->buttons.edges++;
-        s5l_gpio_drive(&m->gpio, s5l_button_pin(S5L_BUTTON_HOLD),
-                       s5l_button_level(S5L_BUTTON_HOLD, true));
+        s5l_buttons_apply(&m->buttons, &m->gpio, &m->gpioic);
     }
 
     bool woke = in_hibernation

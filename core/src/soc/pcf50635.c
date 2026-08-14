@@ -217,13 +217,13 @@ bool s5l_pcf50635_in_hibernation(const s5l_pcf50635_t *pmu) {
 void s5l_pcf50635_wake_onkey(s5l_pcf50635_t *pmu) {
     if (!pmu) return;
 
-    /* Hardware, not an I2C master, raises this event; do not count a guest
-     * register write. AppleM68Buttons later invokes PMU `STAT, 0x100`. The
-     * shipped PMU driver's implementation at 0xc0635dec returns bit 2 of its
-     * INT2 shadow for that selector: EXTON1R, the external-on input labelled
-     * "buttons" by the same driver. ONKEYR bit 0 is a different event and did
-     * not make AppleM68Buttons recognise a retained-reset wake. */
-    pmu->regs[PCF50635_INT2] |= PCF50635_INT2_WAKE_BUTTON_HOLD;
+    /* Hardware, not an I2C master, raises these events; do not count a guest
+     * register write. ONKEYR records the PMU source that powers the AP. The
+     * shipped PMU driver's `STAT, 0x100` implementation at 0xc0635dec instead
+     * returns INT2 bit 2, EXTON1R, which AppleM68Buttons uses to recognise the
+     * wake button during setPowerState. Reporting only either bit leaves one
+     * of those two guest consumers without its physical Power-wake reason. */
+    pmu->regs[PCF50635_INT2] |= PCF50635_INT2_POWER_WAKE;
 
     /* OOCSHDWN is a command. Once ONKEY has powered the AP back up, keeping
      * either power-state bit asserted would make every later Power press look
