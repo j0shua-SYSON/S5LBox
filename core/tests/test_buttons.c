@@ -989,6 +989,23 @@ static void test_power_wakes_hibernation_through_retained_reset(void) {
           (reset->pmu_gpio & S5L_POWER_TRACE_GPIO_PENDING) != 0u,
           "wake-reset trace did not capture ONKEY and active-low PMU INT_N");
 
+    /* CPU interrupt lines are useful context on a Power entry, but periodic
+     * IRQ/FIQ traffic must not evict the lifecycle events from the short ring.
+     * VIC1 line 3 is otherwise unused in this test and changes no captured
+     * Power/PMU/GPIO/CLCD state. */
+    uint64_t trace_before_irq_noise = m.power_trace_sequence;
+    s5l_vic_write(&m.vic[1], VIC_INTSELECT, 1u << 3);
+    s5l_vic_write(&m.vic[1], VIC_INTENABLE, 1u << 3);
+    s5l_vic_write(&m.vic[1], VIC_SOFTINT, 1u << 3);
+    s5l8900_tick(&m, 0u);
+    CHECK(m.cpu.fiq_line,
+          "synthetic FIQ did not reach the CPU for trace-noise regression");
+    s5l_vic_write(&m.vic[1], VIC_SOFTINTCLEAR, 1u << 3);
+    s5l8900_tick(&m, 0u);
+    CHECK(!m.cpu.fiq_line &&
+          m.power_trace_sequence == trace_before_irq_noise,
+          "CPU-line-only transitions evicted Power lifecycle trace entries");
+
     s5l8900_free(&m);
 }
 

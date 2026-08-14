@@ -1720,7 +1720,12 @@ static void power_trace_record(s5l8900_t *m, s5l_power_trace_event_t event,
     entry.changes = power_trace_changes(&entry, before);
     entry.event = (uint8_t)event;
 
-    if (mode == POWER_TRACE_RECORD_CHANGE && entry.changes == 0u) return;
+    /* IRQ/FIQ are retained as context on every useful entry, but are not a
+     * useful trigger by themselves.  The sleeping kernel can pulse them many
+     * times per millisecond; recording each pulse overwrites the bounded ring
+     * before a physical-device frontend can publish the wake boundary. */
+    if (mode == POWER_TRACE_RECORD_CHANGE &&
+        (entry.changes & ~S5L_POWER_TRACE_CHANGE_CPU_LINES) == 0u) return;
     if (mode == POWER_TRACE_RECORD_EVENT_OR_CHANGE &&
         entry.changes == 0u && before && before->event == entry.event) return;
 
