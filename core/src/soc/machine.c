@@ -1133,15 +1133,20 @@ static bool machine_wait_for_interrupt(void *ctx) {
             return false;
         }
 
-        /* Do not mistake a display or animation timer for completed foreground
-         * work. A next wake at least one modeled second away is a much stronger
-         * idle witness; only that can retire the interaction guard and any
-         * deadline shield it had to engage. */
+        /* Before the deadline, do not mistake a display or animation timer for
+         * completed foreground work: a next wake at least one modeled second
+         * away is the strong idle witness.  Once the deadline shield has
+         * engaged, however, this WFI is itself the missing witness.  The guest
+         * has stopped the CPU-bound work the shield existed to protect and is
+         * willingly waiting for a device edge.  Keeping instruction time after
+         * that yield made the shield permanent on real iPhone OS 3 workloads,
+         * whose ordinary housekeeping timers never leave a one-second gap. */
         uint64_t quiescent_ticks =
             (uint64_t)m->cpu_hz *
             S5L8900_ACTIVE_CLOCK_QUIESCENT_WFI_SECONDS;
         if (m->active_clock_input_guard &&
-            cpu_ticks >= quiescent_ticks)
+            (m->active_clock_deadline_shield ||
+             cpu_ticks >= quiescent_ticks))
             active_clock_quiesce_input_guard(m);
 
         uint64_t slice_ticks =

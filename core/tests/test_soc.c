@@ -797,8 +797,10 @@ static void test_active_host_clock_shields_only_pathological_input_work(void) {
     m.level_dirty = true;
     s5l8900_tick(&m, 0u);
 
-    /* A 16 ms modeled wait can be an animation/display boundary. WFI pacing
-     * advances only its first 8 ms slice and must retain the shield. */
+    /* A 16 ms modeled wait can be an animation/display boundary.  Before the
+     * deadline that would not be a strong idle witness, but after the shield
+     * has engaged the WFI itself proves the protected CPU-bound work yielded.
+     * Clear the shield before pacing the first 8 ms slice. */
     s5l8900_load(&m, m.cpu.r[15], &wfi, sizeof wfi);
     m.timer.t4_count = m.timer.t4_value = 16u;
     m.timer.t4_state = TIMER4_STATE_START;
@@ -808,18 +810,29 @@ static void test_active_host_clock_shields_only_pathological_input_work(void) {
     CHECK(st == ARM_OK && ran == 1u &&
           probe.sleep_calls == sleeps_before + 1u &&
           probe.last_sleep_ns == UINT64_C(8000000) &&
-          m.active_clock_input_guard &&
-          m.active_clock_deadline_shield &&
-          m.active_clock_input_guard_quiesces == 0u,
-          "short animation-like WFI cleared deadline protection: status=%d "
+          !m.active_clock_input_guard &&
+          !m.active_clock_input_guard_host_valid &&
+          !m.active_clock_deadline_shield &&
+          m.active_clock_input_guard_quiesces == 1u,
+          "post-shield WFI did not restore active time: status=%d "
           "ran=%u sleeps=%u guard=%d shield=%d quiesces=%llu",
           (int)st, ran, probe.sleep_calls,
           (int)m.active_clock_input_guard,
           (int)m.active_clock_deadline_shield,
           (unsigned long long)m.active_clock_input_guard_quiesces);
 
-    /* A next modeled wake at least one second away is the strong idle witness.
-     * It clears both transients before pacing the same bounded 8 ms host slice. */
+    /* Keep the original pre-shield rule covered independently.  A fresh touch
+     * interval has not reached its deadline; only a next modeled wake at least
+     * one second away may clear it. */
+    m.mtz2.atn = false;
+    s5l8900_tick(&m, 0u);
+    m.mtz2.atn = true;
+    s5l8900_tick(&m, 0u);
+    CHECK(m.active_clock_input_guard &&
+          !m.active_clock_deadline_shield &&
+          m.active_clock_input_guards == 4u,
+          "fresh touch did not start the pre-shield idle-witness case");
+
     s5l8900_load(&m, m.cpu.r[15], &wfi, sizeof wfi);
     m.timer.t4_count = m.timer.t4_value = 1000u;
     m.timer.t4_state = TIMER4_STATE_START;
@@ -829,8 +842,8 @@ static void test_active_host_clock_shields_only_pathological_input_work(void) {
           !m.active_clock_input_guard &&
           !m.active_clock_input_guard_host_valid &&
           !m.active_clock_deadline_shield &&
-          m.active_clock_input_guard_quiesces == 1u &&
-          !m.active_clock_anchor_valid,
+          m.active_clock_input_guard_quiesces == 2u &&
+          m.active_clock_anchor_valid,
           "long paced WFI did not quiesce the guarded interval: status=%d "
           "ran=%u sleeps=%u guard=%d shield=%d quiesces=%llu anchor=%d",
           (int)st, ran, probe.sleep_calls,
@@ -842,7 +855,7 @@ static void test_active_host_clock_shields_only_pathological_input_work(void) {
     uint32_t nop = 0xe1a00000u;
     uint64_t ticks_at_quiescence = m.timer.ticks;
     s5l8900_load(&m, m.cpu.r[15], &nop, sizeof nop);
-    ran = s5l8900_run(&m, 1u, &st); /* fresh anchor, no catch-up */
+    ran = s5l8900_run(&m, 1u, &st); /* stationary anchor, no catch-up */
     CHECK(st == ARM_OK && ran == 1u &&
           m.timer.ticks == ticks_at_quiescence &&
           m.active_clock_anchor_valid,

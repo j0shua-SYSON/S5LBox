@@ -3913,9 +3913,11 @@ typedef void (*s5l_uart4_host_service_fn)(void *ctx, unsigned retired);
  * quiescent after this much host time is pathological enough to protect from
  * guest deadlines by falling back to instruction-clocked execution. */
 #define S5L8900_ACTIVE_CLOCK_INPUT_SHIELD_NS UINT64_C(15000000000)
-/* A wait this far from its next modeled wake is a strong quiescence witness.
- * Short display/animation waits must not end deadline protection midway
- * through the transition that required it. */
+/* Before a deadline shield is needed, a wait this far from its next modeled
+ * wake is a strong quiescence witness.  After the shield has engaged, any real
+ * WFI yield ends it: the protected CPU-bound interval has actually stopped,
+ * even when ordinary housekeeping leaves the next wake less than a second
+ * away. */
 #define S5L8900_ACTIVE_CLOCK_QUIESCENT_WFI_SECONDS UINT64_C(1)
 /* Keep engine/interpreter retirement groups small for input and MMIO checks,
  * but do not turn every such boundary into an expensive host clock call. At
