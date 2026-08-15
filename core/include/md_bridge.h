@@ -20,6 +20,7 @@
 
 #define MD_BRIDGE_PAGE_SIZE UINT32_C(4096)
 #define MD_BRIDGE_MAX_TRANSFER MD_BRIDGE_PAGE_SIZE
+#define MD_BRIDGE_WRITE_TRACE_HISTORY UINT32_C(512)
 
 typedef enum {
     MD_BRIDGE_DIRECTION_NONE = 0,
@@ -74,6 +75,25 @@ typedef struct {
     uint64_t bytes_written;
     uint64_t failures;
 } md_bridge_stats_t;
+
+/*
+ * A bounded observation of completed strategy writes. This is deliberately
+ * process-local diagnostic state, not machine state: it does not enter a
+ * checkpoint or change the bridge ABI. Entries are published only after the
+ * backend accepted every byte, in monotonically increasing sequence order.
+ */
+typedef struct {
+    uint64_t sequence;
+    uint64_t media_offset;
+    uint64_t content_hash;
+    uint32_t length;
+} md_bridge_write_trace_entry_t;
+
+typedef struct {
+    uint64_t sequence;
+    uint32_t count;
+    md_bridge_write_trace_entry_t entries[MD_BRIDGE_WRITE_TRACE_HISTORY];
+} md_bridge_write_trace_snapshot_t;
 
 /* Stable, machine-readable reasons for a recognized service failure. */
 typedef enum {
@@ -143,6 +163,12 @@ typedef struct {
 bool md_bridge_config_valid(const md_bridge_config_t *config);
 
 void md_bridge_init(md_bridge_t *bridge, const md_bridge_config_t *config);
+
+/* The snapshot is safe to take from a frontend thread while the single-CPU
+ * machine thread is completing writes. A bridge initialization starts a new
+ * trace generation so one machine cannot inherit another machine's history. */
+void md_bridge_write_trace_reset(void);
+void md_bridge_write_trace_snapshot(md_bridge_write_trace_snapshot_t *out);
 
 /*
  * Suitable directly as arm_privileged_svc_handler_t.  Success, ERROR, and

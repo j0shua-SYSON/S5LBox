@@ -1232,6 +1232,59 @@ static void test_exact_patched_thumb_pair(void) {
           "MOV r8,r8 padding changed registers, flags, or other CPU state");
 }
 
+static void test_completed_write_trace(void) {
+    fixture_t fixture;
+    md_bridge_write_trace_snapshot_t trace;
+
+    fixture_init(&fixture);
+    md_bridge_write_trace_snapshot(&trace);
+    CHECK(trace.sequence == 0u && trace.count == 0u,
+          "new bridge retained another machine's write trace");
+
+    fixture.ram.bytes[TEST_GUEST + 0u] = 1u;
+    fixture.ram.bytes[TEST_GUEST + 1u] = 2u;
+    fixture.ram.bytes[TEST_GUEST + 2u] = 3u;
+    fixture.ram.bytes[TEST_GUEST + 3u] = 4u;
+    set_request(&fixture, MD_BRIDGE_DIRECTION_WRITE, TEST_GUEST,
+                TEST_TOKEN + 0x120u, 4u);
+    CHECK(invoke(&fixture, MD_BRIDGE_DIRECTION_WRITE) == ARM_SVC_HANDLED,
+          "trace fixture write failed");
+    md_bridge_write_trace_snapshot(&trace);
+    CHECK(trace.sequence == 1u && trace.count == 1u &&
+          trace.entries[0].sequence == 1u &&
+          trace.entries[0].media_offset == 0x120u &&
+          trace.entries[0].length == 4u &&
+          trace.entries[0].content_hash == UINT64_C(0xbe7a5e775165785d),
+          "completed write trace lost its exact offset, length, or bytes");
+
+    fixture.fake_block.write.mode = FAKE_ERROR;
+    set_request(&fixture, MD_BRIDGE_DIRECTION_WRITE, TEST_GUEST,
+                TEST_TOKEN + 0x124u, 4u);
+    CHECK(invoke(&fixture, MD_BRIDGE_DIRECTION_WRITE) == ARM_SVC_ERROR,
+          "failed trace fixture write was accepted");
+    md_bridge_write_trace_snapshot(&trace);
+    CHECK(trace.sequence == 1u && trace.count == 1u,
+          "failed backend write entered the completed-write trace");
+
+    fixture_init(&fixture);
+    memset(fixture.ram.bytes + TEST_GUEST, 0x5a, 4u);
+    for (uint32_t i = 0u; i <= MD_BRIDGE_WRITE_TRACE_HISTORY; i++) {
+        set_request(&fixture, MD_BRIDGE_DIRECTION_WRITE, TEST_GUEST,
+                    TEST_TOKEN + (uint64_t)i * 4u, 4u);
+        CHECK(invoke(&fixture, MD_BRIDGE_DIRECTION_WRITE) == ARM_SVC_HANDLED,
+              "write-trace wrap fixture failed at %u", i);
+    }
+    md_bridge_write_trace_snapshot(&trace);
+    CHECK(trace.sequence == MD_BRIDGE_WRITE_TRACE_HISTORY + 1u &&
+          trace.count == MD_BRIDGE_WRITE_TRACE_HISTORY &&
+          trace.entries[0].sequence == 2u &&
+          trace.entries[trace.count - 1u].sequence ==
+              MD_BRIDGE_WRITE_TRACE_HISTORY + 1u,
+          "write-trace ring did not retain the newest bounded window");
+
+    md_bridge_write_trace_snapshot(NULL);
+}
+
 static void test_error_strings_and_nulls(void) {
     fixture_t fixture;
 
@@ -1278,6 +1331,7 @@ int main(void) {
     test_saturating_statistics();
     test_arm_step_success_and_error();
     test_exact_patched_thumb_pair();
+    test_completed_write_trace();
     test_error_strings_and_nulls();
     printf("\n%u passed, %u failed\n", g_passes, g_failures);
     return g_failures == 0u ? 0 : 1;

@@ -14,9 +14,83 @@
 
 #include <limits.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #define MD_BRIDGE_ADDRESS_SPACE_SIZE (UINT64_C(1) << 32)
+
+typedef struct {
+    uint64_t sequence;
+    md_bridge_write_trace_entry_t entries[MD_BRIDGE_WRITE_TRACE_HISTORY];
+} md_bridge_write_trace_state_t;
+
+static atomic_flag md_bridge_write_trace_lock = ATOMIC_FLAG_INIT;
+static md_bridge_write_trace_state_t md_bridge_write_trace;
+
+static void write_trace_lock(void) {
+    while (atomic_flag_test_and_set_explicit(
+               &md_bridge_write_trace_lock, memory_order_acquire)) {
+    }
+}
+
+static void write_trace_unlock(void) {
+    atomic_flag_clear_explicit(&md_bridge_write_trace_lock,
+                               memory_order_release);
+}
+
+void md_bridge_write_trace_reset(void) {
+    write_trace_lock();
+    memset(&md_bridge_write_trace, 0, sizeof md_bridge_write_trace);
+    write_trace_unlock();
+}
+
+void md_bridge_write_trace_snapshot(md_bridge_write_trace_snapshot_t *out) {
+    if (!out) return;
+    memset(out, 0, sizeof *out);
+
+    write_trace_lock();
+    out->sequence = md_bridge_write_trace.sequence;
+    uint64_t count = out->sequence;
+    if (count > MD_BRIDGE_WRITE_TRACE_HISTORY)
+        count = MD_BRIDGE_WRITE_TRACE_HISTORY;
+    out->count = (uint32_t)count;
+    uint64_t first = count ? out->sequence - count + 1u : 0u;
+    for (uint64_t i = 0u; i < count; i++) {
+        uint64_t sequence = first + i;
+        const md_bridge_write_trace_entry_t *entry =
+            &md_bridge_write_trace.entries[
+                (sequence - 1u) % MD_BRIDGE_WRITE_TRACE_HISTORY];
+        if (entry->sequence == sequence)
+            out->entries[i] = *entry;
+    }
+    write_trace_unlock();
+}
+
+static uint64_t write_trace_hash(const uint8_t *bytes, uint32_t length) {
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (uint32_t i = 0u; i < length; i++) {
+        hash ^= bytes[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static void write_trace_record(uint64_t media_offset, const uint8_t *bytes,
+                               uint32_t length) {
+    md_bridge_write_trace_entry_t entry = {0};
+    entry.media_offset = media_offset;
+    entry.content_hash = write_trace_hash(bytes, length);
+    entry.length = length;
+
+    write_trace_lock();
+    uint64_t sequence = md_bridge_write_trace.sequence;
+    if (sequence != UINT64_MAX) sequence++;
+    entry.sequence = sequence;
+    md_bridge_write_trace.entries[
+        (sequence - 1u) % MD_BRIDGE_WRITE_TRACE_HISTORY] = entry;
+    md_bridge_write_trace.sequence = sequence;
+    write_trace_unlock();
+}
 
 static uint64_t add_saturating_u64(uint64_t a, uint64_t b) {
     return UINT64_MAX - a < b ? UINT64_MAX : a + b;
@@ -132,6 +206,7 @@ void md_bridge_init(md_bridge_t *bridge, const md_bridge_config_t *config) {
     *bridge = (md_bridge_t){0};
     if (config != NULL)
         bridge->config = saved_config;
+    md_bridge_write_trace_reset();
 }
 
 arm_svc_result_t md_bridge_handle_svc(void *context, arm_cpu_t *cpu,
@@ -283,6 +358,7 @@ arm_svc_result_t md_bridge_handle_svc(void *context, arm_cpu_t *cpu,
         increment_saturating_u64(&bridge->stats.successful_writes);
         bridge->stats.bytes_written =
             add_saturating_u64(bridge->stats.bytes_written, length);
+        write_trace_record(media_offset, bridge->scratch, length);
     }
 
     return ARM_SVC_HANDLED;

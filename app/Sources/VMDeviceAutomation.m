@@ -9,6 +9,8 @@
 #import "VMFrameTelemetry.h"
 #import "VMInstanceListViewController.h"
 
+#include "md_bridge.h"
+
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
 
@@ -909,6 +911,25 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
         (double)state.layer_max_change_gap_ns / 1.0e6,
         layerLastAttemptAgoSeconds, layerLastChangeAgoSeconds,
         execution];
+
+    md_bridge_write_trace_snapshot_t writeTrace;
+    md_bridge_write_trace_snapshot(&writeTrace);
+    if (writeTrace.count) {
+        NSMutableString *writes = [NSMutableString stringWithFormat:
+            @",md_write_trace_sequence=%llu,md_write_trace_count=%u",
+            (unsigned long long)writeTrace.sequence, writeTrace.count];
+        for (uint32_t i = 0u; i < writeTrace.count; i++) {
+            const md_bridge_write_trace_entry_t *entry =
+                &writeTrace.entries[i];
+            if (!entry->sequence) continue;
+            [writes appendFormat:@",md_write_%llu=%016llx:%u:%016llx",
+                (unsigned long long)entry->sequence,
+                (unsigned long long)entry->media_offset,
+                entry->length,
+                (unsigned long long)entry->content_hash];
+        }
+        value = [value stringByAppendingString:writes];
+    }
     if ([screen isKindOfClass:[UIView class]])
         screen.accessibilityValue = value;
     telemetryLabel.text = value;
