@@ -1,11 +1,24 @@
 /* See VMGuestInstallBuild.h. Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "VMGuestInstallBuild.h"
 
+#include "VMResumeCheckpoint.h"
 #include "VMSnapshotStore.h"
+#include "bringup.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+
+#if defined(S5LBOX_GUEST_INSTALL_TESTING)
+/* The policy test needs the real snapshot format and PMU state, not 128 MiB
+ * of otherwise irrelevant zero RAM on every CI platform. Product builds never
+ * define this test flag and always verify the hardware's exact geometry. */
+#define BUILD_CHECKPOINT_RAM_BASE S5L_BRINGUP_PHYS_BASE
+#define BUILD_CHECKPOINT_RAM_SIZE UINT32_C(0x00100000)
+#else
+#define BUILD_CHECKPOINT_RAM_BASE S5L_BRINGUP_PHYS_BASE
+#define BUILD_CHECKPOINT_RAM_SIZE S5L_BRINGUP_RAM_SIZE
+#endif
 
 typedef struct {
     vm_guest_install_build_progress_t callback;
@@ -187,6 +200,62 @@ static vm_guest_install_build_status_t build_rootfs_refusal(
     return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
 }
 
+static bool build_rootfs_is_unclean(rootfs_work_status_t status,
+                                    const rootfs_work_result_t *rootfs) {
+    return status == ROOTFS_WORK_HFS_INVALID && rootfs &&
+           strstr(rootfs->detail, "not cleanly unmounted") != NULL;
+}
+
+static bool build_authorize_unclean_source(
+    const char *work_directory, uint64_t live_size,
+    bool *allow_unclean_source,
+    vm_guest_install_build_result_t *result) {
+    if (!allow_unclean_source) return false;
+    if (*allow_unclean_source) return true;
+    char checkpoint_detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+    vm_resume_checkpoint_state_t checkpoint =
+        vm_resume_checkpoint_probe_state(
+            work_directory, live_size, BUILD_CHECKPOINT_RAM_BASE,
+            BUILD_CHECKPOINT_RAM_SIZE, checkpoint_detail,
+            sizeof checkpoint_detail);
+    if (checkpoint != VM_RESUME_CHECKPOINT_POWERED_OFF) return false;
+    *allow_unclean_source = true;
+    if (result) result->powered_off_checkpoint_witnessed = true;
+    return true;
+}
+
+static rootfs_work_status_t build_probe_file_repair(
+    const char *work_directory, const char *live, uint64_t live_size,
+    const rootfs_work_file_repair_t *repair,
+    rootfs_work_file_repair_state_t *state,
+    bool *allow_unclean_source,
+    vm_guest_install_build_result_t *result,
+    rootfs_work_result_t *probe) {
+    rootfs_work_status_t status = rootfs_work_probe_file_repair_ex(
+        live, repair, allow_unclean_source && *allow_unclean_source,
+        state, probe);
+    if (!build_rootfs_is_unclean(status, probe) ||
+        !build_authorize_unclean_source(
+            work_directory, live_size, allow_unclean_source, result))
+        return status;
+    return rootfs_work_probe_file_repair_ex(
+        live, repair, true, state, probe);
+}
+
+static rootfs_work_status_t build_validate_source(
+    const char *work_directory, const char *live, uint64_t live_size,
+    bool *allow_unclean_source,
+    vm_guest_install_build_result_t *result,
+    rootfs_work_result_t *preflight) {
+    rootfs_work_status_t status = rootfs_work_validate_source_ex(
+        live, allow_unclean_source && *allow_unclean_source, preflight);
+    if (!build_rootfs_is_unclean(status, preflight) ||
+        !build_authorize_unclean_source(
+            work_directory, live_size, allow_unclean_source, result))
+        return status;
+    return rootfs_work_validate_source_ex(live, true, preflight);
+}
+
 static vm_guest_install_build_status_t build_maintain_install(
     const char *work_directory,
     const vm_guest_install_result_t *install,
@@ -236,14 +305,16 @@ static vm_guest_install_build_status_t build_maintain_install(
     bool repair_needed = false;
     bool source_needed = false;
     bool source_preflighted = false;
+    bool allow_unclean_source = false;
     char transaction_detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
 
     if (privilege->committed) {
         if (result) result->cydia_privileges_verified = true;
     } else {
         rootfs_work_result_t probe;
-        rootfs_work_status_t probe_status = rootfs_work_probe_file_repair(
-            live, &repair, &repair_state, &probe);
+        rootfs_work_status_t probe_status = build_probe_file_repair(
+            work_directory, live, live_size, &repair, &repair_state,
+            &allow_unclean_source, result, &probe);
         if (result) result->rootfs = probe;
         if (probe_status != ROOTFS_WORK_OK)
             return build_rootfs_refusal(probe_status, &probe,
@@ -280,8 +351,9 @@ static vm_guest_install_build_status_t build_maintain_install(
         rootfs_work_file_repair_state_t source_state =
             ROOTFS_WORK_FILE_REPAIR_MISSING;
         rootfs_work_result_t probe;
-        rootfs_work_status_t probe_status = rootfs_work_probe_file_repair(
-            live, &source_probe, &source_state, &probe);
+        rootfs_work_status_t probe_status = build_probe_file_repair(
+            work_directory, live, live_size, &source_probe, &source_state,
+            &allow_unclean_source, result, &probe);
         if (result) result->rootfs = probe;
         if (probe_status != ROOTFS_WORK_OK)
             return build_rootfs_refusal(probe_status, &probe,
@@ -323,8 +395,9 @@ static vm_guest_install_build_status_t build_maintain_install(
     if (snapshot_gate != VM_GUEST_INSTALL_BUILD_OK) return snapshot_gate;
     if (!source_preflighted) {
         rootfs_work_result_t preflight;
-        rootfs_work_status_t preflight_status =
-            rootfs_work_validate_source(live, &preflight);
+        rootfs_work_status_t preflight_status = build_validate_source(
+            work_directory, live, live_size, &allow_unclean_source,
+            result, &preflight);
         if (result) result->rootfs = preflight;
         if (preflight_status != ROOTFS_WORK_OK)
             return build_rootfs_refusal(preflight_status, &preflight,
@@ -381,6 +454,7 @@ static vm_guest_install_build_status_t build_maintain_install(
     rootfs_work_options_t options;
     memset(&options, 0, sizeof options);
     options.preserve_fstab = true;
+    options.allow_unclean_source = allow_unclean_source;
     if (grow_storage)
         options.minimum_volume_bytes = VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES;
     if (repair_needed) {

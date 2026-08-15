@@ -577,6 +577,7 @@ add_executable(test_vmguestinstallbuild
     ../app/Tests/test_vmguestinstallbuild.c
     ../app/Sources/VMGuestInstallBuild.c
     ../app/Sources/VMGuestInstall.c
+    ../app/Sources/VMResumeCheckpoint.c
     ../app/Sources/VMGuestRootfsPlan.c
     ../app/Sources/VMGuestPackageManifest.c
     ../app/Sources/VMDebArchive.c
@@ -1168,7 +1169,8 @@ endif()
 # gains the real HFS writer here once that standalone library exists. Its disk
 # case remains opt-in; ordinary CI still authors only tiny in-memory fixtures.
 target_link_libraries(test_vmguestrootfsplan PRIVATE host_rootfs_work)
-target_link_libraries(test_vmguestinstallbuild PRIVATE host_rootfs_work)
+target_link_libraries(test_vmguestinstallbuild PRIVATE
+    host_rootfs_work emucore)
 
 add_executable(test_rootfs_work tests/test_rootfs_work.c)
 target_link_libraries(test_rootfs_work PRIVATE host_rootfs_work)

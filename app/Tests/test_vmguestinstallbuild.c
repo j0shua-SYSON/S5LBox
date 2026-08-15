@@ -4,7 +4,11 @@
 #endif
 #include "VMGuestInstallBuild.h"
 
+#include "VMFirmwareBoot.h"
+#include "VMResumeCheckpoint.h"
 #include "VMSnapshotStore.h"
+#include "bringup.h"
+#include "soc.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -27,6 +31,7 @@
 #define HFS_FIXTURE_BITMAP_OFFSET (4u * HFS_FIXTURE_BLOCK_SIZE)
 #define HFS_VOLUME_HEADER_OFFSET 1024u
 #define HFS_VOLUME_HEADER_SIZE 512u
+#define CHECKPOINT_TEST_RAM_SIZE UINT32_C(0x00100000)
 
 static unsigned checks;
 static unsigned failures;
@@ -196,6 +201,45 @@ static bool read_hfs_geometry(const char *path, uint32_t *block_size,
     return true;
 }
 
+static bool read_hfs_attributes(const char *path, uint32_t *attributes) {
+    if (attributes) *attributes = 0u;
+    if (!path || !attributes) return false;
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    uint8_t bytes[4];
+    bool ok = fseek(file, (long)(HFS_VOLUME_HEADER_OFFSET + 4u), SEEK_SET) == 0 &&
+              fread(bytes, 1u, sizeof bytes, file) == sizeof bytes;
+    if (fclose(file) != 0) ok = false;
+    if (!ok) return false;
+    *attributes = read_be32(bytes);
+    return true;
+}
+
+static bool save_automatic_checkpoint(bool powered_off, uint64_t media_size,
+                                      char *detail,
+                                      size_t detail_capacity) {
+    s5l8900_t machine;
+    if (!s5l8900_init(&machine, S5L_BRINGUP_PHYS_BASE,
+                      CHECKPOINT_TEST_RAM_SIZE))
+        return false;
+    machine.cpu.r[15] = S5L_BRINGUP_PHYS_BASE;
+    if (powered_off) {
+        machine.pmu.written[PCF50635_OOCSHDWN] = 1u;
+        machine.pmu.regs[PCF50635_OOCSHDWN] =
+            PCF50635_OOCSHDWN_GO_STANDBY;
+    }
+    external_md_sidecar_t sidecar;
+    memset(&sidecar, 0, sizeof sidecar);
+    sidecar.magic = EXTERNAL_MD_SIDECAR_MAGIC;
+    sidecar.version = EXTERNAL_MD_SIDECAR_VERSION;
+    sidecar.media_size = media_size;
+    sidecar.image_bytes = media_size;
+    bool saved = vm_resume_checkpoint_save(
+        &machine, &sidecar, FIXTURE_DIR, detail, detail_capacity);
+    s5l8900_free(&machine);
+    return saved;
+}
+
 static bool resize_sparse(const char *path, uint64_t size) {
 #ifdef _WIN32
     HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
@@ -283,6 +327,10 @@ static void clear_fixture(void) {
         VM_GUEST_SOURCES_MARKER_TMP,
         VM_GUEST_SOURCES_JOURNAL_FILE,
         VM_GUEST_SOURCES_JOURNAL_TMP,
+        VM_FW_BOOT_STATE_FILE,
+        VM_FW_BOOT_STATE_MD_FILE,
+        VM_FW_BOOT_STATE_TMP,
+        VM_FW_BOOT_STATE_MD_TMP,
         VM_GUEST_INSTALL_RESUME_ONCE_FILE,
         VM_GUEST_INSTALL_RESUME_ONCE_TMP
     };
@@ -580,6 +628,103 @@ static void test_dirty_existing_install_refuses_before_stage(void) {
               "dirty refusal left maintenance artifact %s",
               MAINTENANCE_LEAVES[i]);
     }
+}
+
+static void test_powered_off_checkpoint_allows_only_dirty_bit(void) {
+    clear_fixture();
+    CHECK(make_directory(FIXTURE_DIR),
+          "could not create checkpoint-gate fixture");
+    char live[VM_GUEST_INSTALL_PATH_CAPACITY];
+    char next[VM_GUEST_INSTALL_PATH_CAPACITY];
+    char marker[VM_GUEST_INSTALL_PATH_CAPACITY];
+    char state[VM_GUEST_INSTALL_PATH_CAPACITY];
+    CHECK(join_path(live, sizeof live, FIXTURE_DIR,
+                    VM_GUEST_INSTALL_LIVE_FILE) &&
+          join_path(marker, sizeof marker, FIXTURE_DIR,
+                    VM_FW_BOOT_RESTORE_ONCE_FILE) &&
+          join_path(state, sizeof state, FIXTURE_DIR,
+                    VM_FW_BOOT_STATE_FILE) &&
+          write_bytes(live, "old-rootfs"),
+          "could not seed checkpoint-gate fixture");
+
+    vm_guest_install_result_t transaction;
+    char detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+    CHECK(vm_guest_install_prepare_stage(FIXTURE_DIR, &transaction,
+                                         detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK &&
+          vm_guest_install_stage_image_path(next, sizeof next, FIXTURE_DIR) &&
+          write_bytes(next, "installed-rootfs"),
+          "could not prepare checkpoint-gate fixture: %s", detail);
+    uint8_t digest[VM_GUEST_INSTALL_SHA256_SIZE];
+    fill_digest(digest);
+    CHECK(vm_guest_install_publish(FIXTURE_DIR, digest, &transaction,
+                                   detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_privilege_confirm(FIXTURE_DIR, digest, &transaction,
+                                     detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_sources_confirm(FIXTURE_DIR, digest, &transaction,
+                                   detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed,
+          "could not commit checkpoint-gate fixture: %s", detail);
+
+    uint8_t fixture[HFS_FIXTURE_SIZE];
+    make_dirty_hfs_fixture(fixture);
+    CHECK(write_buffer(live, fixture, sizeof fixture),
+          "could not write checkpoint-gate HFS fixture");
+    CHECK(save_automatic_checkpoint(false, HFS_FIXTURE_SIZE,
+                                    detail, sizeof detail),
+          "could not save running checkpoint: %s", detail);
+
+    progress_log_t progress;
+    memset(&progress, 0, sizeof progress);
+    vm_guest_install_build_result_t result;
+    vm_guest_install_build_status_t status =
+        vm_guest_install_build_from_directory(
+            FIXTURE_DIR, NULL, capture_progress, &progress,
+            &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_ERR_STORAGE_NOT_CLEAN &&
+          !result.powered_off_checkpoint_witnessed &&
+          !result.storage_upgraded && !progress.staging_seen &&
+          exists(marker),
+          "running checkpoint authorized dirty maintenance: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+
+    CHECK(save_automatic_checkpoint(true, HFS_FIXTURE_SIZE,
+                                    detail, sizeof detail),
+          "could not save powered-off checkpoint: %s", detail);
+    memset(&progress, 0, sizeof progress);
+    status = vm_guest_install_build_from_directory(
+        FIXTURE_DIR, NULL, capture_progress, &progress,
+        &result, detail, sizeof detail);
+    uint32_t attributes = 0u;
+    CHECK(status == VM_GUEST_INSTALL_BUILD_OK &&
+          result.powered_off_checkpoint_witnessed &&
+          result.storage_upgraded && result.storage_transaction.committed &&
+          result.rootfs.published && result.rootfs.source_unclean_accepted &&
+          progress.staging_seen &&
+          file_size_or_zero(live) >=
+              VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES &&
+          read_hfs_attributes(live, &attributes) &&
+          (attributes & (1u << 8)) == 0u &&
+          (attributes & (1u << 11)) == 0u &&
+          !exists(marker) && exists(state),
+          "powered-off checkpoint did not publish the preserved-dirty clone: %s / %s (attrs=0x%08x)",
+          vm_guest_install_build_status_text(status), detail, attributes);
+
+    uint64_t upgraded_size = file_size_or_zero(live);
+    memset(&progress, 0, sizeof progress);
+    vm_guest_install_build_result_t retry;
+    status = vm_guest_install_build_from_directory(
+        FIXTURE_DIR, NULL, capture_progress, &progress,
+        &retry, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
+          !retry.powered_off_checkpoint_witnessed &&
+          !retry.storage_upgraded && !progress.staging_seen &&
+          retry.rootfs.final_size == 0u &&
+          file_size_or_zero(live) == upgraded_size && !exists(marker),
+          "checkpoint-gated maintenance retry was not idempotent: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
 }
 
 static void test_real_build_when_supplied(void) {
@@ -991,6 +1136,7 @@ int main(void) {
     test_existing_install_is_idempotent();
     test_committed_maintenance_cleanup_blocks_new_transaction();
     test_dirty_existing_install_refuses_before_stage();
+    test_powered_off_checkpoint_allows_only_dirty_bit();
     test_real_storage_upgrade_when_supplied();
     test_real_privilege_repair_when_supplied();
     test_real_build_when_supplied();

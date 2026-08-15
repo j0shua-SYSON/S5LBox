@@ -11,6 +11,7 @@
 #include "VMFirmwareBoot.h"
 #include "VMResumeCheckpoint.h"
 #include "snapshot.h"
+#include "soc.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -133,6 +134,18 @@ int main(void) {
     CHECK(file_bytes(bridge_partial) == 0u, "bridge partial survived success");
     CHECK(file_bytes(marker_partial) == 0u, "marker partial survived success");
 
+    uint64_t running_state_bytes = file_bytes(state);
+    uint64_t running_bridge_bytes = file_bytes(bridge);
+    uint64_t running_marker_bytes = file_bytes(marker);
+    CHECK(vm_resume_checkpoint_probe_state(
+              FIXTURE_DIR, sidecar.media_size, 0u, TEST_RAM_SIZE,
+              detail, sizeof detail) == VM_RESUME_CHECKPOINT_RUNNING,
+          "running checkpoint probe failed: %s", detail);
+    CHECK(file_bytes(state) == running_state_bytes &&
+          file_bytes(bridge) == running_bridge_bytes &&
+          file_bytes(marker) == running_marker_bytes,
+          "running checkpoint probe consumed or changed its transaction");
+
     snapshot_status_t loaded = snapshot_load(&restored, state);
     CHECK(loaded == SNAP_OK, "saved state did not load: %s",
           snapshot_strerror(loaded));
@@ -163,6 +176,41 @@ int main(void) {
           "replacement state did not load");
     CHECK(restored.cpu.r[0] == 0x2468ace0u,
           "replacement left the first checkpoint installed");
+
+    source.pmu.written[PCF50635_OOCSHDWN] = 1u;
+    source.pmu.regs[PCF50635_OOCSHDWN] =
+        PCF50635_OOCSHDWN_GO_STANDBY;
+    CHECK(vm_resume_checkpoint_save(&source, &sidecar, FIXTURE_DIR,
+                                    detail, sizeof detail),
+          "powered-off save failed: %s", detail);
+    uint64_t powered_state_bytes = file_bytes(state);
+    uint64_t powered_bridge_bytes = file_bytes(bridge);
+    uint64_t powered_marker_bytes = file_bytes(marker);
+    CHECK(vm_resume_checkpoint_probe_state(
+              FIXTURE_DIR, sidecar.media_size, 0u, TEST_RAM_SIZE,
+              detail, sizeof detail) == VM_RESUME_CHECKPOINT_POWERED_OFF,
+          "powered-off checkpoint probe failed: %s", detail);
+    CHECK(file_bytes(state) == powered_state_bytes &&
+          file_bytes(bridge) == powered_bridge_bytes &&
+          file_bytes(marker) == powered_marker_bytes,
+          "powered-off checkpoint probe consumed or changed its transaction");
+    CHECK(vm_resume_checkpoint_probe_state(
+              FIXTURE_DIR, sidecar.media_size + 1u, 0u, TEST_RAM_SIZE,
+              NULL, 0u) == VM_RESUME_CHECKPOINT_INVALID,
+          "wrong-disk checkpoint was accepted without a detail buffer");
+    CHECK(write_marker(), "could not tamper with the restore marker");
+    CHECK(vm_resume_checkpoint_probe_state(
+              FIXTURE_DIR, sidecar.media_size, 0u, TEST_RAM_SIZE,
+              detail, sizeof detail) == VM_RESUME_CHECKPOINT_INVALID,
+          "inexact restore marker was accepted: %s", detail);
+    CHECK(remove(marker) == 0, "could not remove restore marker");
+    CHECK(vm_resume_checkpoint_probe_state(
+              FIXTURE_DIR, sidecar.media_size, 0u, TEST_RAM_SIZE,
+              detail, sizeof detail) == VM_RESUME_CHECKPOINT_ABSENT,
+          "missing restore marker was not absent: %s", detail);
+    CHECK(vm_resume_checkpoint_save(&source, &sidecar, FIXTURE_DIR,
+                                    detail, sizeof detail),
+          "could not restore a valid powered-off transaction: %s", detail);
 
     /* The transaction invalidates the request BEFORE writing. Make snapshot
      * validation fail after that point and prove startup has no marker with

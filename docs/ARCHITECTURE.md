@@ -232,10 +232,21 @@ Before either maintenance transaction becomes durable, a read-only pass
 validates the source HFS geometry, allocation bitmap, primary/alternate volume
 headers, clean-unmount bit, and host-file identity. A normal emulator checkpoint
 captures a mounted, legitimately dirty unjournaled filesystem and is therefore
-not an acceptable migration source. The user must complete the guest's own
-power-off sequence first. The app deliberately refuses before staging instead
-of guessing a host-side filesystem repair; the full validation is repeated while
-the clone is made to retain the race gate.
+not an acceptable migration source. The default rule remains strict.
+
+Physical iPhone OS 3.1.3 testing also found a narrower case the clean bit alone
+cannot represent: the guest printed `reboot(RB_HALT)`, entered
+`OOCSHDWN.GO_STANDBY`, and the emulator flushed the backing file, but the current
+primary HFSX header still lacked `kHFSVolumeUnmountedBit`. Maintenance may bypass
+only that missing bit when the exact non-empty one-shot marker, external-media
+sidecar and checksummed snapshot all validate for the current disk size and
+hardware RAM geometry, and the snapshot itself proves PMU standby. An absent,
+running, corrupt, wrong-size or wrong-geometry checkpoint still refuses before
+staging. Every other HFS check is repeated during the clone, and the dirty bit
+is preserved so normal guest boot/fsck, not the host transformer, owns any
+filesystem recovery. The sidecar records disk size rather than a disk digest;
+this gate relies on the app-owned transaction ordering and does not claim to
+authenticate out-of-band edits in a jailbroken container.
 
 The Cydia repair is not a general host-side `chmod`. It resolves only
 `/Applications/Cydia.app/Cydia_`, requires the pinned 320,704-byte data fork and
@@ -275,7 +286,9 @@ produce a defensible wake path.
 Firmware restore therefore loads and validates the snapshot and external-media
 sidecar long enough to identify `GO_STANDBY`, then destroys the powered-off
 machine, creates a new one, reapplies the already validated engine controls, and
-runs normal kernel bring-up against the same clean work image. The one-shot
+runs normal kernel bring-up against the same structurally validated work image.
+The image is often clean after guest shutdown, but that bit is no longer assumed
+to be reliable across every iPhone OS 3.1.3 shutdown. The one-shot
 marker is consumed only after the post-boot hooks succeed. Ordinary running
 checkpoints bypass this fallback and retain exact CPU/RAM restore semantics.
 Physical validation of `9f3d107` cold-booted a powered-off 2 GiB machine to real

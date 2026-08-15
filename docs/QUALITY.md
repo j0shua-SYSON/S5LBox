@@ -1283,3 +1283,51 @@ is a cold kernel boot and can take substantially longer than ordinary resume.
 The frontend also still lacks a distinct powered-off status: until the user
 leaves or presses Power, a shut-down guest is represented by a running engine.
 This patch fixes reopen behavior, not that larger UI-state model.
+
+## 2026-08-15: powered-off dirty-HFS maintenance witness
+
+A later retained-machine run disproved the assumption that every complete
+iPhone OS 3.1.3 shutdown leaves the primary HFS header clean. The guest was
+powered off through its own long-press/slide UI and printed its orderly shutdown
+through `reboot(RB_HALT)` before entering PMU `GO_STANDBY`. S5LBox then flushed
+the disk bridge and atomically saved the automatic checkpoint. Nevertheless,
+the current primary HFSX header on the 2,147,483,648-byte work image had
+attributes `0x00004000`, with `kHFSVolumeUnmountedBit` absent. The alternate
+header carried `0x00000100` but older dates and counters, so it was stale and
+could not be promoted as evidence for the current filesystem. The existing
+maintenance path therefore refused an actually powered-off guest. This does
+not erase the earlier physical run above where both headers did become clean;
+it proves that outcome is not dependable enough to be the sole lifecycle gate.
+
+The implemented correction does not mark the disk clean and does not turn off
+the generic refusal. `rootfs_work` remains strict unless its caller explicitly
+supplies an independent shutdown witness. The app grants that exception only
+when all of the following agree without consuming them: the exact one-shot
+marker bytes, the complete external-media sidecar and current disk size, a
+checksummed snapshot with the production 128 MiB geometry, and PMU
+`GO_STANDBY`. Only the missing unmounted bit is bypassed. Header agreement,
+geometry, special-fork layout, allocation bitmap, boot-inconsistent/software-
+lock attributes, host-file identity, and any requested catalog/file identity
+checks still fail closed. The cloned volume deliberately retains its dirty bit
+for the guest's next boot/fsck. Publishing a disk replacement removes the old
+one-shot marker, so the powered-off CPU/RAM cannot be restored against the new
+image.
+
+Portable focused evidence is 3/3 tests: the automatic-checkpoint transaction
+passes 36 checks, the installer builder passes 81, and the rootfs transformer
+passes 363. They cover running versus powered-off checkpoints, wrong disk size,
+an inexact or absent marker, a non-consuming probe, default dirty-HFS refusal,
+the witnessed exception, preserved dirty bytes, boot-inconsistent refusal,
+crash-safe publication, marker invalidation, and an idempotent retry. Both the
+normal and warnings-as-errors focused groups pass locally. The complete normal
+suite passes 67/67 and the warnings-as-errors, static/JIT-gated suite passes
+72/72 on the same tree.
+
+Brutal-honesty boundary: this section records the code and portable regression,
+not a successful physical migration. The installed phone build still contains
+the old clean-bit-only refusal. The checkpoint sidecar identifies disk size,
+not a cryptographic digest; normal stock-iPhone sandboxing and S5LBox's own
+transaction ordering prevent an ordinary user from swapping the image between
+save and maintenance, but this is not authentication against out-of-band edits
+inside a jailbroken app container. Exact-SHA hosted CI, installation of its
+artifact, and a retry against the retained powered-off machine remain required.

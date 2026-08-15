@@ -60,6 +60,7 @@ typedef struct {
     bool cydia_privileges_verified;
     bool cydia_sources_added;
     bool cydia_sources_verified;
+    bool powered_off_checkpoint_witnessed;
     size_t historical_snapshots;
     vm_guest_rootfs_stats_t plan;
     rootfs_work_result_t rootfs;
@@ -80,9 +81,13 @@ typedef struct {
  * live HFS image predates the 2 GiB minimum, a separate crash-safe storage
  * transaction clones and grows it while the v1 boot-policy marker remains
  * continuously authoritative. Because a running checkpoint leaves this
- * unjournaled HFS volume legitimately dirty, storage growth requires the guest
- * to have completed its own power-off first; the read-only source preflight
- * refuses before a storage transaction is staged otherwise. A machine already
+ * unjournaled HFS volume legitimately dirty. Physical iPhone OS 3.1.3 testing
+ * proved that even RB_HALT/PMU-standby can leave the primary header's clean bit
+ * unset, so the builder accepts that one case only when the exact automatic
+ * checkpoint independently verifies GO_STANDBY against the same disk size.
+ * Every structural HFS audit still runs and the output remains marked dirty
+ * for the guest's next fsck. A running, absent, corrupt or size-mismatched
+ * checkpoint still refuses before a transaction is staged. A machine already
  * at the minimum is idempotent success with no disk rewrite.
  *
  * A committed older install may also carry Cydia_'s historical root:root 0755

@@ -2178,7 +2178,8 @@ static bool hfs_headers_share_layout(const uint8_t primary[HFS_VH_LEN],
 
 static bool hfs_validate(host_file_t *file, uint64_t file_size,
                          hfs_volume_t *volume, uint8_t *buffer,
-                         size_t buffer_size, rootfs_work_stage_t stage,
+                         size_t buffer_size, bool allow_unclean_source,
+                         rootfs_work_stage_t stage,
                          rootfs_work_result_t *result) {
     uint8_t primary[HFS_VH_LEN];
     uint8_t alternate[HFS_VH_LEN];
@@ -2252,9 +2253,12 @@ static bool hfs_validate(host_file_t *file, uint64_t file_size,
         return false;
     }
     if ((volume->attributes & HFS_ATTR_UNMOUNTED) == 0u) {
-        result_fail(result, ROOTFS_WORK_HFS_INVALID, stage, 0,
-                    "source volume was not cleanly unmounted");
-        return false;
+        if (!allow_unclean_source) {
+            result_fail(result, ROOTFS_WORK_HFS_INVALID, stage, 0,
+                        "source volume was not cleanly unmounted");
+            return false;
+        }
+        result->source_unclean_accepted = true;
     }
     if ((volume->attributes & HFS_ATTR_BOOT_INCONSISTENT) != 0u) {
         result_fail(result, ROOTFS_WORK_HFS_INVALID, stage, 0,
@@ -6730,8 +6734,9 @@ static bool publish(destination_dir_t *destination,
 #endif
 }
 
-rootfs_work_status_t rootfs_work_validate_source(
-    const char *source_path, rootfs_work_result_t *result) {
+rootfs_work_status_t rootfs_work_validate_source_ex(
+    const char *source_path, bool allow_unclean_source,
+    rootfs_work_result_t *result) {
     host_file_t source;
     file_stamp_t source_before;
     file_stamp_t source_after;
@@ -6764,7 +6769,7 @@ rootfs_work_status_t rootfs_work_validate_source(
 #endif
     result->source_size = source_before.size;
     if (!hfs_validate(&source, source_before.size, &source_volume, buffer,
-                      ROOTFS_WORK_MAX_IO_BUFFER,
+                      ROOTFS_WORK_MAX_IO_BUFFER, allow_unclean_source,
                       ROOTFS_WORK_STAGE_SOURCE_VALIDATE, result))
         goto done;
     if (!host_file_stamp(&source, &source_after, &error)) {
@@ -6796,9 +6801,14 @@ done:
     return result->status;
 }
 
-rootfs_work_status_t rootfs_work_probe_file_repair(
+rootfs_work_status_t rootfs_work_validate_source(
+    const char *source_path, rootfs_work_result_t *result) {
+    return rootfs_work_validate_source_ex(source_path, false, result);
+}
+
+rootfs_work_status_t rootfs_work_probe_file_repair_ex(
     const char *source_path, const rootfs_work_file_repair_t *repair,
-    rootfs_work_file_repair_state_t *state,
+    bool allow_unclean_source, rootfs_work_file_repair_state_t *state,
     rootfs_work_result_t *result) {
     host_file_t source;
     file_stamp_t source_before;
@@ -6835,7 +6845,7 @@ rootfs_work_status_t rootfs_work_probe_file_repair(
 #endif
     result->source_size = source_before.size;
     if (!hfs_validate(&source, source_before.size, &source_volume, buffer,
-                      ROOTFS_WORK_MAX_IO_BUFFER,
+                      ROOTFS_WORK_MAX_IO_BUFFER, allow_unclean_source,
                       ROOTFS_WORK_STAGE_SOURCE_VALIDATE, result) ||
         !catalog_open(&catalog, &source, source_before.size, &source_volume,
                       ROOTFS_WORK_DEFAULT_MAC_TIME, result) ||
@@ -6874,6 +6884,14 @@ done:
     }
     free(buffer);
     return result->status;
+}
+
+rootfs_work_status_t rootfs_work_probe_file_repair(
+    const char *source_path, const rootfs_work_file_repair_t *repair,
+    rootfs_work_file_repair_state_t *state,
+    rootfs_work_result_t *result) {
+    return rootfs_work_probe_file_repair_ex(
+        source_path, repair, false, state, result);
 }
 
 rootfs_work_status_t rootfs_work_create(const char *source_path,
@@ -6959,6 +6977,7 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
     }
     if (!hfs_validate(&source, source_before.size, &source_volume, buffer,
                       selected.io_buffer_bytes,
+                      selected.allow_unclean_source,
                       ROOTFS_WORK_STAGE_SOURCE_VALIDATE, result))
         goto done;
     if (!destination_temp_create(&destination, &temporary,
@@ -7019,6 +7038,7 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
     }
     if (!hfs_validate(&temporary, source_before.size, &copied_volume, buffer,
                       selected.io_buffer_bytes,
+                      selected.allow_unclean_source,
                       ROOTFS_WORK_STAGE_COPY_VERIFY, result))
         goto done;
     if (memcmp(&source_volume, &copied_volume, sizeof(source_volume)) != 0) {
@@ -7066,6 +7086,7 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
     if (selected.entry_count != 0u || selected.file_repair_count != 0u) {
         if (!hfs_validate(&temporary, work_size, &grown_volume, buffer,
                           selected.io_buffer_bytes,
+                          selected.allow_unclean_source,
                           ROOTFS_WORK_STAGE_PROVISION_PLAN, result))
             goto done;
         if (!provision_volume(&temporary, work_size, &grown_volume, &selected,
@@ -7074,6 +7095,7 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
     }
     if (!hfs_validate(&temporary, work_size, &final_volume, buffer,
                       selected.io_buffer_bytes,
+                      selected.allow_unclean_source,
                       ROOTFS_WORK_STAGE_FINAL_VALIDATE, result))
         goto done;
     if ((selected.growth_bytes != 0u ||

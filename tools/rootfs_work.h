@@ -411,6 +411,18 @@ typedef struct rootfs_work_options {
      */
     uint64_t minimum_volume_bytes;
 
+    /*
+     * OFF by default, and intentionally not a repair switch. An unjournaled
+     * HFS volume normally has to carry kHFSVolumeUnmountedBit before this
+     * transformer will even copy it. A caller may set this only when it owns
+     * separate, durable proof that the guest completed full power-off and the
+     * backing file was flushed afterwards. All geometry, alternate-header,
+     * allocation-bitmap and catalog checks still run, and the dirty/inconsistent
+     * attributes are preserved in the output so the next guest boot can fsck;
+     * this option never lies by stamping a volume clean.
+     */
+    bool allow_unclean_source;
+
     /* Zero selects ROOTFS_WORK_MAX_IO_BUFFER; otherwise 1..that limit. */
     size_t io_buffer_bytes;
 
@@ -513,6 +525,7 @@ typedef struct rootfs_work_result {
     size_t io_buffer_bytes;
     bool source_sha256_valid;
     bool source_identity_verified;
+    bool source_unclean_accepted;
     bool published;
     bool temporary_left;
     char detail[ROOTFS_WORK_DETAIL_CAPACITY];
@@ -534,6 +547,16 @@ rootfs_work_status_t rootfs_work_validate_source(
     const char *source_path, rootfs_work_result_t *result);
 
 /*
+ * Same read-only validation, with one narrowly scoped exception for a caller
+ * that has already proved a full guest power-off by an independent durable
+ * witness. `allow_unclean_source` bypasses only the missing unmounted bit; it
+ * does not bypass any structural check or modify the source.
+ */
+rootfs_work_status_t rootfs_work_validate_source_ex(
+    const char *source_path, bool allow_unclean_source,
+    rootfs_work_result_t *result);
+
+/*
  * Read-only preflight for one exact file repair. The same HFS validation,
  * catalog audit, path resolution, data-fork identity and BSD metadata checks
  * are repeated by rootfs_work_create(). No destination or temporary file is
@@ -543,6 +566,12 @@ rootfs_work_status_t rootfs_work_validate_source(
 rootfs_work_status_t rootfs_work_probe_file_repair(
     const char *source_path, const rootfs_work_file_repair_t *repair,
     rootfs_work_file_repair_state_t *state,
+    rootfs_work_result_t *result);
+
+/* Exact-file probe counterpart to rootfs_work_validate_source_ex(). */
+rootfs_work_status_t rootfs_work_probe_file_repair_ex(
+    const char *source_path, const rootfs_work_file_repair_t *repair,
+    bool allow_unclean_source, rootfs_work_file_repair_state_t *state,
     rootfs_work_result_t *result);
 
 /*

@@ -38,6 +38,25 @@ bool vm_resume_checkpoint_save(const s5l8900_t *machine,
                                const char *work_directory,
                                char *detail, size_t detail_capacity);
 
+typedef enum {
+    VM_RESUME_CHECKPOINT_ABSENT = 0,
+    VM_RESUME_CHECKPOINT_RUNNING,
+    VM_RESUME_CHECKPOINT_POWERED_OFF,
+    VM_RESUME_CHECKPOINT_INVALID
+} vm_resume_checkpoint_state_t;
+
+/*
+ * Inspect, but never consume, the exact automatic-resume transaction. The
+ * marker bytes, sidecar format/media identity, snapshot checksum/structure and
+ * caller-supplied machine geometry all have to agree before POWERED_OFF can be
+ * returned. Hibernation/Auto-Lock is RUNNING; only PMU GO_STANDBY is the full
+ * shutdown witness guest-disk maintenance may trust.
+ */
+vm_resume_checkpoint_state_t vm_resume_checkpoint_probe_state(
+    const char *work_directory, uint64_t media_size,
+    uint32_t ram_base, uint32_t ram_size,
+    char *detail, size_t detail_capacity);
+
 #ifdef __cplusplus
 }
 #endif

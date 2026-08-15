@@ -17,6 +17,7 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -118,6 +119,133 @@ static bool resume_sync_existing(const char *path) {
     if (close(descriptor) != 0) ok = false;
 #endif
     return ok;
+}
+
+static bool resume_regular_file_size(const char *path, uint64_t *out_size) {
+    if (out_size) *out_size = 0u;
+    if (!path || !*path || !out_size) return false;
+    errno = 0;
+#ifdef _WIN32
+    struct _stat64 st;
+    if (_stat64(path, &st) != 0) return false;
+    if ((st.st_mode & _S_IFREG) == 0 || st.st_size < 0) {
+        errno = EINVAL;
+        return false;
+    }
+#else
+    struct stat st;
+    if (stat(path, &st) != 0) return false;
+    if (!S_ISREG(st.st_mode) || st.st_size < 0) {
+        errno = EINVAL;
+        return false;
+    }
+#endif
+    *out_size = (uint64_t)st.st_size;
+    return true;
+}
+
+static bool resume_read_exact(const char *path, void *bytes, size_t size) {
+    if (!path || !bytes || size == 0u) return false;
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    bool ok = fread(bytes, 1u, size, file) == size;
+    if (fclose(file) != 0) ok = false;
+    return ok;
+}
+
+vm_resume_checkpoint_state_t vm_resume_checkpoint_probe_state(
+    const char *work_directory, uint64_t media_size,
+    uint32_t ram_base, uint32_t ram_size,
+    char *detail, size_t detail_capacity) {
+    static const char request[] = "S5LBox automatic resume 1\n";
+    char state[VM_FW_BOOT_PATH_CAPACITY + VM_RESUME_PATH_EXTRA];
+    char bridge[VM_FW_BOOT_PATH_CAPACITY + VM_RESUME_PATH_EXTRA];
+    char marker[VM_FW_BOOT_PATH_CAPACITY + VM_RESUME_PATH_EXTRA];
+    uint64_t marker_size = 0u;
+    uint64_t state_size = 0u;
+    uint64_t bridge_size = 0u;
+    char marker_bytes[sizeof request - 1u];
+    external_md_sidecar_t sidecar;
+    s5l8900_t machine;
+
+    resume_detail(detail, detail_capacity, "");
+    if (!work_directory || !*work_directory || media_size == 0u ||
+        ram_size == 0u ||
+        !resume_path(state, sizeof state, work_directory,
+                     VM_FW_BOOT_STATE_FILE) ||
+        !resume_path(bridge, sizeof bridge, work_directory,
+                     VM_FW_BOOT_STATE_MD_FILE) ||
+        !resume_path(marker, sizeof marker, work_directory,
+                     VM_FW_BOOT_RESTORE_ONCE_FILE)) {
+        resume_detail(detail, detail_capacity,
+                      "The automatic checkpoint probe is incomplete.");
+        return VM_RESUME_CHECKPOINT_INVALID;
+    }
+
+    if (!resume_regular_file_size(marker, &marker_size)) {
+        if (errno == ENOENT) {
+            resume_detail(detail, detail_capacity,
+                          "No automatic checkpoint is armed.");
+            return VM_RESUME_CHECKPOINT_ABSENT;
+        }
+        resume_detail(detail, detail_capacity,
+                      "The automatic checkpoint marker could not be inspected.");
+        return VM_RESUME_CHECKPOINT_INVALID;
+    }
+    if (marker_size == 0u) {
+        resume_detail(detail, detail_capacity,
+                      "No automatic checkpoint is armed.");
+        return VM_RESUME_CHECKPOINT_ABSENT;
+    }
+    if (marker_size != sizeof request - 1u ||
+        !resume_read_exact(marker, marker_bytes, sizeof marker_bytes) ||
+        memcmp(marker_bytes, request, sizeof marker_bytes) != 0) {
+        resume_detail(detail, detail_capacity,
+                      "The automatic checkpoint marker is not exact.");
+        return VM_RESUME_CHECKPOINT_INVALID;
+    }
+    if (!resume_regular_file_size(state, &state_size) || state_size == 0u ||
+        !resume_regular_file_size(bridge, &bridge_size) ||
+        bridge_size != sizeof sidecar ||
+        !resume_read_exact(bridge, &sidecar, sizeof sidecar)) {
+        resume_detail(detail, detail_capacity,
+                      "The automatic checkpoint payload pair is incomplete.");
+        return VM_RESUME_CHECKPOINT_INVALID;
+    }
+    if (sidecar.magic != EXTERNAL_MD_SIDECAR_MAGIC ||
+        sidecar.version != EXTERNAL_MD_SIDECAR_VERSION ||
+        sidecar.media_size != media_size ||
+        sidecar.image_bytes != media_size) {
+        resume_detail(detail, detail_capacity,
+                      "The automatic checkpoint belongs to a different guest disk.");
+        return VM_RESUME_CHECKPOINT_INVALID;
+    }
+
+    memset(&machine, 0, sizeof machine);
+    if (!s5l8900_init(&machine, ram_base, ram_size)) {
+        resume_detail(detail, detail_capacity,
+                      "Memory for checkpoint verification is unavailable.");
+        return VM_RESUME_CHECKPOINT_INVALID;
+    }
+    snapshot_status_t loaded = snapshot_load(&machine, state);
+    if (loaded != SNAP_OK) {
+        char failure[VM_FW_BOOT_DETAIL_CAPACITY];
+        (void)snprintf(failure, sizeof failure,
+                       "The automatic checkpoint was refused: %s.",
+                       snapshot_strerror(loaded));
+        failure[sizeof failure - 1u] = '\0';
+        resume_detail(detail, detail_capacity, failure);
+        s5l8900_free(&machine);
+        return VM_RESUME_CHECKPOINT_INVALID;
+    }
+    bool powered_off = s5l_pcf50635_in_standby(&machine.pmu);
+    s5l8900_free(&machine);
+    resume_detail(detail, detail_capacity,
+                  powered_off
+                      ? "The automatic checkpoint proves full guest power-off."
+                      : "The automatic checkpoint is a resumable running state.");
+    return powered_off ? VM_RESUME_CHECKPOINT_POWERED_OFF
+                       : VM_RESUME_CHECKPOINT_RUNNING;
 }
 
 bool vm_resume_checkpoint_save(const s5l8900_t *machine,
