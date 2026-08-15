@@ -423,6 +423,24 @@ typedef struct rootfs_work_options {
      */
     bool allow_unclean_source;
 
+    /*
+     * Opt-in, OFF by default, and valid only with allow_unclean_source.  An
+     * unjournaled guest disk can be stopped between the two writes that splice
+     * a B-tree node into a doubly-linked level: the authoritative forward
+     * chain and every index child can be complete while the following node's
+     * redundant bLink still names the old predecessor.
+     *
+     * This does not make catalog corruption generally repairable.  Before one
+     * bLink is changed, the unpublished clone must still pass every node,
+     * forward-chain, global key-order, leaf-record-count, lastLeafNode,
+     * index-child-sequence and first-key descent check.  Only the bLink values
+     * that disagree with those independently established forward chains are
+     * rewritten, and the strict audit is repeated after commit.  The immutable
+     * source is never changed.  Callers must gate this with the same durable
+     * powered-off witness required by allow_unclean_source.
+     */
+    bool repair_catalog_backlinks;
+
     /* Zero selects ROOTFS_WORK_MAX_IO_BUFFER; otherwise 1..that limit. */
     size_t io_buffer_bytes;
 
@@ -521,6 +539,10 @@ typedef struct rootfs_work_result {
      */
     uint32_t provision_leaf_splits;
     uint32_t provision_index_splits;
+    /* Populated only after the complete tolerant audit succeeds. */
+    uint32_t catalog_backlinks_repairable;
+    /* Populated only after those repairs are committed and strictly re-read. */
+    uint32_t catalog_backlinks_repaired;
     uint8_t source_sha256[IOS3_SHA256_DIGEST_SIZE];
     size_t io_buffer_bytes;
     bool source_sha256_valid;
@@ -572,6 +594,19 @@ rootfs_work_status_t rootfs_work_probe_file_repair(
 rootfs_work_status_t rootfs_work_probe_file_repair_ex(
     const char *source_path, const rootfs_work_file_repair_t *repair,
     bool allow_unclean_source, rootfs_work_file_repair_state_t *state,
+    rootfs_work_result_t *result);
+
+/*
+ * Powered-off recovery preflight.  This is still read-only: when
+ * allow_catalog_backlink_recovery is true it accepts only the deterministic
+ * stale-bLink shape described by repair_catalog_backlinks and reports the
+ * count in catalog_backlinks_repairable.  It never changes the source.  The
+ * recovery flag is invalid unless allow_unclean_source is also true.
+ */
+rootfs_work_status_t rootfs_work_probe_file_repair_policy(
+    const char *source_path, const rootfs_work_file_repair_t *repair,
+    bool allow_unclean_source, bool allow_catalog_backlink_recovery,
+    rootfs_work_file_repair_state_t *state,
     rootfs_work_result_t *result);
 
 /*

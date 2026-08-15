@@ -1323,11 +1323,63 @@ normal and warnings-as-errors focused groups pass locally. The complete normal
 suite passes 67/67 and the warnings-as-errors, static/JIT-gated suite passes
 72/72 on the same tree.
 
-Brutal-honesty boundary: this section records the code and portable regression,
-not a successful physical migration. The installed phone build still contains
-the old clean-bit-only refusal. The checkpoint sidecar identifies disk size,
-not a cryptographic digest; normal stock-iPhone sandboxing and S5LBox's own
-transaction ordering prevent an ordinary user from swapping the image between
-save and maintenance, but this is not authentication against out-of-band edits
-inside a jailbroken app container. Exact-SHA hosted CI, installation of its
-artifact, and a retry against the retained powered-off machine remain required.
+Brutal-honesty boundary at that stage: this section recorded code and portable
+regression, not a successful physical migration. The checkpoint sidecar
+identifies disk size, not a cryptographic digest; normal stock-iPhone sandboxing
+and S5LBox's own transaction ordering prevent an ordinary user from swapping
+the image between save and maintenance, but this is not authentication against
+out-of-band edits inside a jailbroken app container. Exact-SHA CI, installation,
+and the retained-machine retry were still required. The next section records
+that retry: it passed this gate and exposed a separate catalog failure.
+
+## 2026-08-15: clone-only catalog backlink recovery
+
+The exact `78d8859` physical retry proved that the powered-off dirty-volume
+gate worked: maintenance passed the former missing-clean-bit refusal. It then
+stopped at a deeper catalog invariant before staging:
+
+```text
+leaf 781 has bLink 1469, but the chain reached it from 1270
+```
+
+The 2,147,483,648-byte live image, checkpoint, sidecar, and exact one-shot
+marker retained their sizes and timestamps. No source, stage, journal, backup,
+or replacement artifact appeared. Existing rollback copies remain retained.
+The primary HFSX header still reports attributes `0x00004000`. Its catalog is
+8,183,808 bytes: 1,998 4 KiB nodes in two inline extents. Node 781 is a readable
+level-1 leaf with `fLink=1475`, `bLink=1469`, and nine records; the observed
+forward walk reaches it from node 1270.
+
+That shape is consistent with node 1270 having been inserted between 1469 and
+781 while the redundant following bLink retained its old value. It is **not**
+proof of which writer was interrupted. The current general split writer has
+been byte-for-byte unchanged since `510faf5`, and its payload-scale regression
+checks both link directions after 665 leaf and 58 index splits. A torn guest
+metadata update during an earlier abrupt stop and an interrupted older host
+transaction are both more credible than the disproved cache-pointer theory,
+but neither cause is claimed as established.
+
+The implemented recovery is deliberately smaller than fsck and is off by
+default. It is valid only alongside the independently validated powered-off
+checkpoint exception. A read-only preflight may tolerate bLink disagreement
+only after the forward leaf/index chains, node allocation map, node bodies,
+global leaf-key order, leaf count, last-leaf header, exact index-child sequence,
+and every non-root node's first-key descent all validate. Creation repeats that
+audit against the unpublished clone, changes only the bLinks whose predecessors
+the forward chains proved, commits maintenance, and then reruns the original
+strict audit from disk. The immutable live source is never modified. Recovery
+still refuses a broken forward chain, wrong index child, wrong first-key route,
+unallocated node, malformed record, count mismatch, or any other HFS failure.
+
+Portable evidence is green. The catalog suite now passes 895 checks, including
+default refusal, missing-authority refusal, read-only recovery probing, source
+immutability, exact backlink correction, strict readback, and the three broader
+corruption refusals above. The installer builder passes 81 checks. Complete
+normal and warnings-as-errors/static/JIT-gated suites pass 67/67 and 72/72.
+
+Brutal-honesty boundary: no physical image has yet passed this new tolerant
+audit, no catalog backlink has yet been repaired on a device, and the BigBoss,
+PreferenceLoader, WinterBoard, theme, and respring transaction remains
+unverified. Exact-SHA hosted CI, installation of that artifact, full retained-
+catalog audit, transactional migration, and post-migration Cydia testing are
+still required.

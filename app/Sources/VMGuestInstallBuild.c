@@ -231,15 +231,15 @@ static rootfs_work_status_t build_probe_file_repair(
     bool *allow_unclean_source,
     vm_guest_install_build_result_t *result,
     rootfs_work_result_t *probe) {
-    rootfs_work_status_t status = rootfs_work_probe_file_repair_ex(
-        live, repair, allow_unclean_source && *allow_unclean_source,
-        state, probe);
+    bool authorized = allow_unclean_source && *allow_unclean_source;
+    rootfs_work_status_t status = rootfs_work_probe_file_repair_policy(
+        live, repair, authorized, authorized, state, probe);
     if (!build_rootfs_is_unclean(status, probe) ||
         !build_authorize_unclean_source(
             work_directory, live_size, allow_unclean_source, result))
         return status;
-    return rootfs_work_probe_file_repair_ex(
-        live, repair, true, state, probe);
+    return rootfs_work_probe_file_repair_policy(
+        live, repair, true, true, state, probe);
 }
 
 static rootfs_work_status_t build_validate_source(
@@ -455,6 +455,8 @@ static vm_guest_install_build_status_t build_maintain_install(
     memset(&options, 0, sizeof options);
     options.preserve_fstab = true;
     options.allow_unclean_source = allow_unclean_source;
+    options.repair_catalog_backlinks =
+        allow_unclean_source && (repair_needed || source_needed);
     if (grow_storage)
         options.minimum_volume_bytes = VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES;
     if (repair_needed) {

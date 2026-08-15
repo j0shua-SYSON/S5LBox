@@ -1653,6 +1653,25 @@ static int run_repair_existing_image(
     return 1;
 }
 
+static int run_catalog_backlink_recovery(
+    run_t *run, const fixture_t *fx, const char *tag,
+    int allow_unclean_source, int repair_catalog_backlinks) {
+    memset(run, 0, sizeof(*run));
+    if (!make_path(run->source, sizeof(run->source), tag) ||
+        !make_path(run->destination, sizeof(run->destination), tag) ||
+        !write_file(run->source, fx->image, FX_SIZE))
+        return 0;
+    run->options.preserve_fstab = true;
+    run->options.allow_unclean_source = allow_unclean_source != 0;
+    run->options.repair_catalog_backlinks =
+        repair_catalog_backlinks != 0;
+    run->status = rootfs_work_create(run->source, run->destination,
+                                     &run->options, &run->result);
+    if (run->status == ROOTFS_WORK_OK)
+        run->output = read_file(run->destination, &run->output_size);
+    return 1;
+}
+
 static int run_provision(run_t *run, const fixture_t *fx, const char *tag,
                          const rootfs_work_entry_t *entries, size_t count,
                          uint64_t growth) {
@@ -2887,6 +2906,233 @@ static void test_broken_catalog_is_never_absence(void) {
             }
             free(fx);
         }
+    }
+}
+
+/*
+ * The only catalog recovery this transformer permits.
+ *
+ * A non-journaled HFS volume can be stopped after an insertion has written
+ * old.fLink -> fresh and the index has learned about fresh, but before the
+ * following node's redundant bLink is changed from old to fresh.  The forward
+ * leaf chain, global key order, header counts and index child sequence then
+ * determine one unambiguous predecessor.  A powered-off caller may authorize
+ * fixing that bLink in the unpublished clone; the immutable source remains
+ * byte-identical and the published result must pass the ordinary strict audit.
+ *
+ * The negative cases are load-bearing.  Breaking the forward chain, the index
+ * mapping or the first-key descent is not a "similar enough" recovery.  Each
+ * remains CATALOG_CORRUPT even when the recovery option is present.
+ */
+static void test_powered_off_clone_repairs_only_catalog_backlinks(void) {
+    rootfs_work_entry_t entry;
+    run_t run;
+
+    /* Default behavior is still a strict refusal. */
+    {
+        fixture_t *fx = fx_create_depth2(0);
+
+        if (!fx) {
+            CHECK(0, "depth-2 backlink fixture allocation failed");
+            return;
+        }
+        put_be32(fx_node(fx, 2u) + 4, 7u);
+        entry_directory(&entry, "/gamma", 0u);
+        if (run_provision(&run, fx, "blinkstrict", &entry, 1u, 0u)) {
+            expect_refusal(&run, fx,
+                           ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                           "stale leaf bLink without recovery authority");
+            run_release(&run);
+        }
+        free(fx);
+    }
+
+    /* The repair switch cannot be detached from the caller's powered-off
+     * authorization. */
+    {
+        fixture_t *fx = fx_create_depth2(0);
+
+        if (!fx) {
+            CHECK(0, "unauthorized backlink fixture allocation failed");
+            return;
+        }
+        put_be32(fx_node(fx, 2u) + 4, 7u);
+        if (run_catalog_backlink_recovery(&run, fx, "blinkunauth", 0, 1)) {
+            uint8_t *source_after = NULL;
+            size_t source_size = 0;
+
+            CHECK(run.status == ROOTFS_WORK_INVALID_ARGUMENT &&
+                  run.result.stage == ROOTFS_WORK_STAGE_ARGUMENTS,
+                  "unauthorized recovery returned %s at %s (%s)",
+                  rootfs_work_status_name(run.status),
+                  rootfs_work_stage_name(run.result.stage),
+                  run.result.detail);
+            CHECK(!run.result.published && !path_exists(run.destination),
+                  "unauthorized recovery published a destination");
+            source_after = read_file(run.source, &source_size);
+            CHECK(source_after && source_size == FX_SIZE &&
+                  memcmp(source_after, fx->image, FX_SIZE) == 0,
+                  "unauthorized recovery changed its source");
+            free(source_after);
+            run_release(&run);
+        }
+        free(fx);
+    }
+
+    /* Exact recoverable shape: one stale bLink and nothing else. */
+    {
+        fixture_t *fx = fx_create_depth2(0);
+
+        if (!fx) {
+            CHECK(0, "recoverable backlink fixture allocation failed");
+            return;
+        }
+        put_be32(fx_node(fx, 2u) + 4, 7u);
+        if (run_catalog_backlink_recovery(&run, fx, "blinkrepair", 1, 1)) {
+            rootfs_work_file_repair_t probe_repair;
+            rootfs_work_file_repair_state_t probe_state =
+                ROOTFS_WORK_FILE_REPAIR_MISSING;
+            rootfs_work_result_t probe_result;
+            uint8_t *source_after = NULL;
+            size_t source_size = 0;
+
+            CHECK(run.status == ROOTFS_WORK_OK && run.result.published,
+                  "authorized recovery returned %s at %s (%s)",
+                  rootfs_work_status_name(run.status),
+                  rootfs_work_stage_name(run.result.stage),
+                  run.result.detail);
+            CHECK(run.result.catalog_backlinks_repairable == 1u &&
+                  run.result.catalog_backlinks_repaired == 1u,
+                  "authorized recovery reported %u repairable and %u repaired "
+                  "backlinks", run.result.catalog_backlinks_repairable,
+                  run.result.catalog_backlinks_repaired);
+            memset(&probe_repair, 0, sizeof probe_repair);
+            probe_repair.path = "/beta/note.txt";
+            probe_repair.expected_size = 5u;
+            CHECK(ios3_sha256((const uint8_t *)"note\n", 5u,
+                              probe_repair.expected_sha256),
+                  "could not hash the recovery probe identity");
+            probe_repair.expected_permissions = 0644u;
+            probe_repair.desired_permissions = 0644u;
+            CHECK(rootfs_work_probe_file_repair_ex(
+                      run.source, &probe_repair, true, &probe_state,
+                      &probe_result) ==
+                      ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                  "ordinary repair probe accepted a stale bLink: %s (%s)",
+                  rootfs_work_status_name(probe_result.status),
+                  probe_result.detail);
+            probe_state = ROOTFS_WORK_FILE_REPAIR_MISSING;
+            CHECK(rootfs_work_probe_file_repair_policy(
+                      run.source, &probe_repair, true, true, &probe_state,
+                      &probe_result) == ROOTFS_WORK_OK &&
+                  probe_state == ROOTFS_WORK_FILE_REPAIR_SATISFIED &&
+                  probe_result.catalog_backlinks_repairable == 1u &&
+                  probe_result.catalog_backlinks_repaired == 0u,
+                  "powered-off read-only probe returned %s, state %u, "
+                  "repairable=%u repaired=%u (%s)",
+                  rootfs_work_status_name(probe_result.status),
+                  (unsigned)probe_state,
+                  probe_result.catalog_backlinks_repairable,
+                  probe_result.catalog_backlinks_repaired,
+                  probe_result.detail);
+            source_after = read_file(run.source, &source_size);
+            CHECK(source_after && source_size == FX_SIZE &&
+                  memcmp(source_after, fx->image, FX_SIZE) == 0,
+                  "clone recovery changed the immutable source");
+            free(source_after);
+            if (run.output) {
+                tr_volume_t vol;
+
+                if (tr_open(run.output, run.output_size, &vol)) {
+                    uint32_t chain[FX_MAX_RECORDS];
+                    int links_ok = 0;
+                    uint32_t nodes = tr_level_chain(
+                        &vol, vol.first_leaf, chain,
+                        sizeof(chain) / sizeof(chain[0]), &links_ok);
+
+                    CHECK(nodes == 2u && links_ok && chain[0] == 1u &&
+                          chain[1] == 2u && tr_blink(&vol, 2u) == 1u,
+                          "recovered leaf chain is %u nodes, links_ok=%d, "
+                          "second bLink=%u", nodes, links_ok,
+                          tr_blink(&vol, 2u));
+                    tr_close(&vol);
+                } else {
+                    CHECK(0, "the recovered image could not be opened");
+                }
+            }
+            run_release(&run);
+        }
+        free(fx);
+    }
+
+    /* A broken forward chain provides no authoritative predecessor. */
+    {
+        fixture_t *fx = fx_create_depth2(0);
+
+        if (!fx) {
+            CHECK(0, "forward-chain fixture allocation failed");
+            return;
+        }
+        put_be32(fx_node(fx, 1u), 0u);
+        put_be32(fx_node(fx, 2u) + 4, 7u);
+        if (run_catalog_backlink_recovery(&run, fx, "blinkflink", 1, 1)) {
+            expect_refusal(&run, fx,
+                           ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                           "backlink recovery with a broken forward chain");
+            run_release(&run);
+        }
+        free(fx);
+    }
+
+    /* A root that maps the second leaf to the wrong child is not repairable. */
+    {
+        fixture_t *fx = fx_create_depth2(0);
+
+        if (!fx) {
+            CHECK(0, "index-mapping fixture allocation failed");
+            return;
+        }
+        {
+            uint8_t *root = fx_node(fx, 3u);
+            uint16_t offset = get_be16(root + FX_NODE_SIZE - 4u);
+            uint16_t key_bytes = (uint16_t)(2u + get_be16(root + offset));
+
+            if ((key_bytes & 1u) != 0u) key_bytes++;
+            put_be32(root + offset + key_bytes, 1u);
+        }
+        put_be32(fx_node(fx, 2u) + 4, 7u);
+        if (run_catalog_backlink_recovery(&run, fx, "blinkindex", 1, 1)) {
+            expect_refusal(&run, fx,
+                           ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                           "backlink recovery with a wrong index child");
+            run_release(&run);
+        }
+        free(fx);
+    }
+
+    /* A changed first key that no longer descends to its own leaf is likewise
+     * broader tree damage, even though the node layout remains readable. */
+    {
+        fixture_t *fx = fx_create_depth2(0);
+
+        if (!fx) {
+            CHECK(0, "first-key fixture allocation failed");
+            return;
+        }
+        {
+            uint8_t *leaf = fx_node(fx, 2u);
+            uint16_t offset = get_be16(leaf + FX_NODE_SIZE - 2u);
+
+            put_be32(leaf + offset + 2u, 1u);
+        }
+        put_be32(fx_node(fx, 2u) + 4, 7u);
+        if (run_catalog_backlink_recovery(&run, fx, "blinkkey", 1, 1)) {
+            expect_refusal(&run, fx,
+                           ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                           "backlink recovery with a wrong first key");
+            run_release(&run);
+        }
+        free(fx);
     }
 }
 
@@ -5098,6 +5344,7 @@ int main(void) {
     test_full_leaf_is_refused_not_split();
     test_out_of_space_is_refused();
     test_broken_catalog_is_never_absence();
+    test_powered_off_clone_repairs_only_catalog_backlinks();
     test_unsupported_catalogs_are_refused();
     test_index_descent_and_leaf_head();
     test_rightmost_leaf_split();

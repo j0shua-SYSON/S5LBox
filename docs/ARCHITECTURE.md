@@ -248,6 +248,21 @@ filesystem recovery. The sidecar records disk size rather than a disk digest;
 this gate relies on the app-owned transaction ordering and does not claim to
 authenticate out-of-band edits in a jailbroken container.
 
+That shutdown witness also gates one narrower catalog recovery. The retained
+unjournaled volume reached maintenance with a complete forward leaf chain and
+index mapping, but one following leaf still named the predecessor from before a
+node had been spliced into that chain. Generic catalog handling remains strict.
+Only a witnessed powered-off maintenance clone may treat bLinks as recoverable,
+and even then only after the forward chains terminate at the header's named
+last nodes, every visited node is allocated and structurally valid, leaf keys
+are globally ascending, leaf records match the header count, every index level
+names exactly the chain below it, and each non-root node's first key descends
+back to that node. Those checks independently determine each predecessor. The
+clone rewrites only disagreeing bLinks, commits the requested maintenance, and
+then repeats the ordinary strict audit from disk. A broken fLink, key route,
+index child, node map, record count, node body, or header remains corruption and
+publishes nothing. The live source is never repaired in place.
+
 The Cydia repair is not a general host-side `chmod`. It resolves only
 `/Applications/Cydia.app/Cydia_`, requires the pinned 320,704-byte data fork and
 its exact SHA-256, and accepts only root:root `0755` as the legacy tuple or

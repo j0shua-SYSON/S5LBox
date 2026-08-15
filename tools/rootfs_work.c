@@ -3365,6 +3365,75 @@ static void catalog_node_dirty(catalog_ctx_t *ctx, uint32_t index) {
     }
 }
 
+static bool catalog_node_map_used(const catalog_ctx_t *ctx, uint32_t index) {
+    size_t byte = (size_t)(index >> 3);
+
+    return index < ctx->total_nodes && byte < ctx->map_bytes &&
+           (ctx->node_map[byte] &
+            (uint8_t)(1u << (7u - (index & 7u)))) != 0u;
+}
+
+static bool catalog_audit_used_node(const catalog_ctx_t *ctx, uint32_t index,
+                                    uint16_t level,
+                                    rootfs_work_stage_t stage,
+                                    rootfs_work_result_t *result) {
+    if (catalog_node_map_used(ctx, index))
+        return true;
+    result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                "the level-%u chain reaches node %u, but the catalog map "
+                "calls it free", level, index);
+    return false;
+}
+
+/* Forward declaration for the recovery audit's independent first-key route
+ * proof. The implementation remains beside the split writer below. */
+static bool catalog_node_parent(catalog_ctx_t *ctx, uint32_t node,
+                                uint16_t node_level, uint32_t *parent,
+                                uint16_t *position,
+                                rootfs_work_stage_t stage,
+                                rootfs_work_result_t *result);
+
+/*
+ * A bLink is recoverable only after the caller has independently established
+ * the node's predecessor by walking the authoritative fLink chain. In repair
+ * mode `node` is a stable cache buffer; the write therefore remains an
+ * in-memory plan until catalog_commit() publishes the unpublished clone.
+ */
+static bool catalog_audit_backlink(catalog_ctx_t *ctx, uint8_t *node,
+                                   uint32_t node_index, uint32_t predecessor,
+                                   uint16_t level, bool permit_recovery,
+                                   bool repair, uint32_t *mismatches,
+                                   rootfs_work_stage_t stage,
+                                   rootfs_work_result_t *result) {
+    uint32_t actual = read_be32(node + 4);
+
+    if (actual == predecessor)
+        return true;
+    if (!permit_recovery) {
+        if (level == 1u)
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                        stage, 0, "leaf %u has bLink %u, but the chain reached "
+                        "it from %u", node_index, actual, predecessor);
+        else
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                        stage, 0, "index node %u at level %u has bLink %u, "
+                        "but the chain reached it from %u", node_index, level,
+                        actual, predecessor);
+        return false;
+    }
+    if (*mismatches == UINT32_MAX) {
+        result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage, 0,
+                    "catalog backlink recovery count overflowed");
+        return false;
+    }
+    (*mismatches)++;
+    if (repair) {
+        write_be32(node + 4, predecessor);
+        catalog_node_dirty(ctx, node_index);
+    }
+    return true;
+}
+
 /*
  * Descend from rootNode to the leaf that owns `parent`/`name`.  On a clean
  * return *leaf is the leaf node, *position is either the matching record or
@@ -3466,6 +3535,9 @@ static bool catalog_search(catalog_ctx_t *ctx, uint32_t parent,
 static bool catalog_audit_index_levels(catalog_ctx_t *ctx,
                                        const uint32_t *leaf_chain,
                                        uint32_t leaf_count,
+                                       bool permit_backlink_recovery,
+                                       bool repair_backlinks,
+                                       uint32_t *backlink_mismatches,
                                        rootfs_work_stage_t stage,
                                        rootfs_work_result_t *result) {
     uint32_t *chain = NULL;
@@ -3517,8 +3589,11 @@ static bool catalog_audit_index_levels(catalog_ctx_t *ctx,
         uint32_t cursor = 0;
 
         while (node_index != 0u) {
+            uint8_t *node = ctx->scratch;
             uint16_t count;
             uint16_t record;
+            uint32_t routed_parent = 0;
+            uint16_t routed_position = 0;
 
             if (nodes >= ctx->total_nodes) {
                 result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
@@ -3526,27 +3601,37 @@ static bool catalog_audit_index_levels(catalog_ctx_t *ctx,
                             "within %u nodes", level, ctx->total_nodes);
                 goto done;
             }
-            if (!catalog_node_read_raw(ctx, node_index, ctx->scratch, stage,
-                                       result))
+            if (permit_backlink_recovery) {
+                if (!catalog_node_load(ctx, node_index, &node, stage, result))
+                    goto done;
+            } else if (!catalog_node_read_raw(ctx, node_index, ctx->scratch,
+                                              stage, result)) {
                 goto done;
-            if (!catalog_node_check(ctx, ctx->scratch, node_index,
+            }
+            if (!catalog_node_check(ctx, node, node_index,
                                     HFS_BT_INDEX_NODE, (uint8_t)level, stage,
                                     result))
                 goto done;
-            if (read_be32(ctx->scratch + 4) != previous) {
-                result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
-                            stage, 0, "index node %u at level %u has bLink %u, "
-                            "but the chain reached it from %u", node_index,
-                            level, read_be32(ctx->scratch + 4), previous);
+            if (!catalog_audit_used_node(ctx, node_index, level, stage,
+                                         result) ||
+                !catalog_audit_backlink(
+                    ctx, node, node_index, previous, level,
+                    permit_backlink_recovery, repair_backlinks,
+                    backlink_mismatches, stage, result))
+                goto done;
+            if (permit_backlink_recovery && node_index != ctx->root_node &&
+                (!catalog_node_parent(ctx, node_index, level, &routed_parent,
+                                      &routed_position, stage, result) ||
+                 routed_parent == 0u)) {
                 goto done;
             }
-            count = catalog_record_count(ctx->scratch);
+            count = catalog_record_count(node);
             for (record = 0; record < count; record++) {
-                uint16_t offset = catalog_slot(ctx->scratch, ctx->node_size,
+                uint16_t offset = catalog_slot(node, ctx->node_size,
                                                record);
                 uint32_t child =
-                    read_be32(ctx->scratch + offset +
-                              catalog_record_data_offset(ctx->scratch + offset));
+                    read_be32(node + offset +
+                              catalog_record_data_offset(node + offset));
 
                 if (cursor >= below_count || child != below[cursor]) {
                     result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
@@ -3560,7 +3645,7 @@ static bool catalog_audit_index_levels(catalog_ctx_t *ctx,
             }
             chain[nodes++] = node_index;
             previous = node_index;
-            node_index = read_be32(ctx->scratch);
+            node_index = read_be32(node);
         }
         if (cursor != below_count) {
             result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
@@ -3593,6 +3678,9 @@ done:
  * verified and not just its bottom row.
  */
 static bool catalog_audit(catalog_ctx_t *ctx, uint32_t expect_records,
+                          bool permit_backlink_recovery,
+                          bool repair_backlinks,
+                          uint32_t *backlink_mismatches,
                           rootfs_work_stage_t stage,
                           rootfs_work_result_t *result) {
     uint32_t node_index = ctx->first_leaf;
@@ -3605,8 +3693,14 @@ static bool catalog_audit(catalog_ctx_t *ctx, uint32_t expect_records,
     uint32_t final_node = 0;
     uint32_t previous_node = 0;
     uint32_t *leaf_chain = NULL;
+    uint32_t observed_backlink_mismatches = 0;
     bool okay = false;
 
+    if (repair_backlinks && !permit_backlink_recovery) {
+        result_fail(result, ROOTFS_WORK_INVALID_ARGUMENT, stage, 0,
+                    "catalog backlink repair requires its recovery audit");
+        return false;
+    }
     if (ctx->first_leaf == 0u || ctx->first_leaf >= ctx->total_nodes) {
         result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
                     "B-tree header firstLeafNode %u is not a node of %u",
@@ -3622,8 +3716,11 @@ static bool catalog_audit(catalog_ctx_t *ctx, uint32_t expect_records,
         return false;
     }
     while (node_index != 0u) {
+        uint8_t *node = ctx->scratch;
         uint16_t count;
         uint16_t record_index;
+        uint32_t routed_parent = 0;
+        uint16_t routed_position = 0;
 
         if (visited >= ctx->total_nodes) {
             result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
@@ -3631,25 +3728,35 @@ static bool catalog_audit(catalog_ctx_t *ctx, uint32_t expect_records,
                         ctx->total_nodes);
             goto done;
         }
-        if (!catalog_node_read_raw(ctx, node_index, ctx->scratch, stage,
-                                   result))
-            goto done;
-        if (!catalog_node_check(ctx, ctx->scratch, node_index,
-                                HFS_BT_LEAF_NODE, 1u, stage, result))
-            goto done;
-        if (read_be32(ctx->scratch + 4) != previous_node) {
-            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
-                        "leaf %u has bLink %u, but the chain reached it from %u",
-                        node_index, read_be32(ctx->scratch + 4), previous_node);
+        if (permit_backlink_recovery) {
+            if (!catalog_node_load(ctx, node_index, &node, stage, result))
+                goto done;
+        } else if (!catalog_node_read_raw(ctx, node_index, ctx->scratch,
+                                          stage, result)) {
             goto done;
         }
-        count = catalog_record_count(ctx->scratch);
+        if (!catalog_node_check(ctx, node, node_index,
+                                HFS_BT_LEAF_NODE, 1u, stage, result))
+            goto done;
+        if (!catalog_audit_used_node(ctx, node_index, 1u, stage, result) ||
+            !catalog_audit_backlink(
+                ctx, node, node_index, previous_node, 1u,
+                permit_backlink_recovery, repair_backlinks,
+                &observed_backlink_mismatches, stage, result))
+            goto done;
+        if (permit_backlink_recovery && node_index != ctx->root_node &&
+            (!catalog_node_parent(ctx, node_index, 1u, &routed_parent,
+                                  &routed_position, stage, result) ||
+             routed_parent == 0u)) {
+            goto done;
+        }
+        count = catalog_record_count(node);
         for (record_index = 0; record_index < count; record_index++) {
-            uint16_t offset = catalog_slot(ctx->scratch, ctx->node_size,
+            uint16_t offset = catalog_slot(node, ctx->node_size,
                                            record_index);
-            uint16_t end = catalog_slot(ctx->scratch, ctx->node_size,
+            uint16_t end = catalog_slot(node, ctx->node_size,
                                         (uint16_t)(record_index + 1u));
-            const uint8_t *record = ctx->scratch + offset;
+            const uint8_t *record = node + offset;
             uint16_t length = read_be16(record + 6);
             uint16_t unit;
 
@@ -3678,7 +3785,7 @@ static bool catalog_audit(catalog_ctx_t *ctx, uint32_t expect_records,
         leaf_chain[visited++] = node_index;
         final_node = node_index;
         previous_node = node_index;
-        node_index = read_be32(ctx->scratch);
+        node_index = read_be32(node);
     }
     if (final_node != ctx->last_leaf) {
         result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
@@ -3692,7 +3799,11 @@ static bool catalog_audit(catalog_ctx_t *ctx, uint32_t expect_records,
                     records, expect_records);
         goto done;
     }
-    okay = catalog_audit_index_levels(ctx, leaf_chain, visited, stage, result);
+    okay = catalog_audit_index_levels(
+        ctx, leaf_chain, visited, permit_backlink_recovery, repair_backlinks,
+        &observed_backlink_mismatches, stage, result);
+    if (okay && backlink_mismatches)
+        *backlink_mismatches = observed_backlink_mismatches;
 
 done:
     free(leaf_chain);
@@ -6195,6 +6306,7 @@ static bool provision_volume(host_file_t *file, uint64_t file_size,
     catalog_ctx_t ctx;
     catalog_content_t *contents = NULL;
     uint32_t before_records;
+    uint32_t backlink_repairs = 0;
     size_t index;
     bool okay = false;
 
@@ -6236,9 +6348,13 @@ static bool provision_volume(host_file_t *file, uint64_t file_size,
     before_records = ctx.leaf_records;
     /* Refuse a catalog whose header and content disagree BEFORE planning,
      * so a lookup can never answer "absent" out of a tree it cannot walk. */
-    if (!catalog_audit(&ctx, before_records, ROOTFS_WORK_STAGE_PROVISION_PLAN,
-                       result))
+    if (!catalog_audit(&ctx, before_records,
+                       options->repair_catalog_backlinks,
+                       options->repair_catalog_backlinks,
+                       &backlink_repairs,
+                       ROOTFS_WORK_STAGE_PROVISION_PLAN, result))
         goto done;
+    result->catalog_backlinks_repairable = backlink_repairs;
     if (options->entry_count != 0u) {
         contents = (catalog_content_t *)calloc(options->entry_count,
                                                sizeof(*contents));
@@ -6274,9 +6390,10 @@ static bool provision_volume(host_file_t *file, uint64_t file_size,
      * state with the writer: if the commit produced anything the leaf chain
      * or the header cannot account for, it is caught here and the work image
      * is destroyed unpublished. */
-    if (!catalog_audit(&ctx, ctx.leaf_records,
+    if (!catalog_audit(&ctx, ctx.leaf_records, false, false, NULL,
                        ROOTFS_WORK_STAGE_PROVISION_WRITE, result))
         goto done;
+    result->catalog_backlinks_repaired = backlink_repairs;
     okay = true;
 
 done:
@@ -6806,9 +6923,10 @@ rootfs_work_status_t rootfs_work_validate_source(
     return rootfs_work_validate_source_ex(source_path, false, result);
 }
 
-rootfs_work_status_t rootfs_work_probe_file_repair_ex(
+rootfs_work_status_t rootfs_work_probe_file_repair_policy(
     const char *source_path, const rootfs_work_file_repair_t *repair,
-    bool allow_unclean_source, rootfs_work_file_repair_state_t *state,
+    bool allow_unclean_source, bool allow_catalog_backlink_recovery,
+    rootfs_work_file_repair_state_t *state,
     rootfs_work_result_t *result) {
     host_file_t source;
     file_stamp_t source_before;
@@ -6816,6 +6934,7 @@ rootfs_work_status_t rootfs_work_probe_file_repair_ex(
     hfs_volume_t source_volume;
     catalog_ctx_t catalog;
     uint8_t *buffer = NULL;
+    uint32_t backlink_mismatches = 0;
     int error = 0;
 
     if (!result)
@@ -6828,6 +6947,11 @@ rootfs_work_status_t rootfs_work_probe_file_repair_ex(
         return result_fail(result, ROOTFS_WORK_INVALID_ARGUMENT,
                            ROOTFS_WORK_STAGE_ARGUMENTS, 0,
                            "a source, one file repair and its state are required");
+    if (allow_catalog_backlink_recovery && !allow_unclean_source)
+        return result_fail(result, ROOTFS_WORK_INVALID_ARGUMENT,
+                           ROOTFS_WORK_STAGE_ARGUMENTS, 0,
+                           "catalog backlink recovery requires an authorized "
+                           "unclean source");
 
     buffer = (uint8_t *)malloc(ROOTFS_WORK_MAX_IO_BUFFER);
     if (!buffer)
@@ -6850,9 +6974,12 @@ rootfs_work_status_t rootfs_work_probe_file_repair_ex(
         !catalog_open(&catalog, &source, source_before.size, &source_volume,
                       ROOTFS_WORK_DEFAULT_MAC_TIME, result) ||
         !catalog_audit(&catalog, catalog.leaf_records,
+                       allow_catalog_backlink_recovery, false,
+                       &backlink_mismatches,
                        ROOTFS_WORK_STAGE_PROVISION_PLAN, result) ||
         !catalog_file_repair(&catalog, repair, false, state, result))
         goto done;
+    result->catalog_backlinks_repairable = backlink_mismatches;
     if (!host_file_stamp(&source, &source_after, &error)) {
         result_fail(result, ROOTFS_WORK_SOURCE_CHANGED,
                     ROOTFS_WORK_STAGE_SOURCE_VALIDATE, error,
@@ -6884,6 +7011,14 @@ done:
     }
     free(buffer);
     return result->status;
+}
+
+rootfs_work_status_t rootfs_work_probe_file_repair_ex(
+    const char *source_path, const rootfs_work_file_repair_t *repair,
+    bool allow_unclean_source, rootfs_work_file_repair_state_t *state,
+    rootfs_work_result_t *result) {
+    return rootfs_work_probe_file_repair_policy(
+        source_path, repair, allow_unclean_source, false, state, result);
 }
 
 rootfs_work_status_t rootfs_work_probe_file_repair(
@@ -6930,6 +7065,12 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
                            ROOTFS_WORK_STAGE_ARGUMENTS, 0,
                            "preserve_fstab and fstab_line are mutually "
                            "exclusive");
+    if (selected.repair_catalog_backlinks &&
+        !selected.allow_unclean_source)
+        return result_fail(result, ROOTFS_WORK_INVALID_ARGUMENT,
+                           ROOTFS_WORK_STAGE_ARGUMENTS, 0,
+                           "catalog backlink repair requires an authorized "
+                           "unclean source");
     if (!selected.preserve_fstab && !selected.fstab_line)
         selected.fstab_line = ROOTFS_WORK_DEFAULT_FSTAB;
     if (selected.io_buffer_bytes == 0u)
@@ -7083,7 +7224,8 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
      * volume's freeBlocks = 0 becomes a measured ROOTFS_WORK_PROVISION_NO_SPACE
      * refusal rather than an assumption about what the caller did.
      */
-    if (selected.entry_count != 0u || selected.file_repair_count != 0u) {
+    if (selected.entry_count != 0u || selected.file_repair_count != 0u ||
+        selected.repair_catalog_backlinks) {
         if (!hfs_validate(&temporary, work_size, &grown_volume, buffer,
                           selected.io_buffer_bytes,
                           selected.allow_unclean_source,
