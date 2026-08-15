@@ -16,7 +16,9 @@
 #define PLAN_PATH_CAPACITY 1400u
 
 static const char CYDIA_SOURCE_LIST[] =
-    "deb http://apt.saurik.com/cydia/ ./\n";
+    VM_GUEST_ROOTFS_SAURIK_SOURCE_LINE;
+static const char BIGBOSS_SOURCE_LIST[] =
+    VM_GUEST_ROOTFS_BIGBOSS_SOURCE_LINE;
 
 static const char INSTALL_PLIST[] =
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
@@ -392,10 +394,13 @@ static bool plan_add_runtime_entries(
                        detail, detail_capacity) ||
         !plan_add_file(plan, "/private/var/lib/dpkg/available", NULL, 0u, 0644u,
                        detail, detail_capacity) ||
-        !plan_add_file(plan,
-                       "/private/etc/apt/sources.list.d/saurik.list",
+        !plan_add_file(plan, VM_GUEST_ROOTFS_SAURIK_SOURCE_PATH,
                        (const uint8_t *)CYDIA_SOURCE_LIST,
                        sizeof CYDIA_SOURCE_LIST - 1u, 0644u,
+                       detail, detail_capacity) ||
+        !plan_add_file(plan, VM_GUEST_ROOTFS_BIGBOSS_SOURCE_PATH,
+                       (const uint8_t *)BIGBOSS_SOURCE_LIST,
+                       sizeof BIGBOSS_SOURCE_LIST - 1u, 0644u,
                        detail, detail_capacity))
         return false;
 
@@ -428,14 +433,19 @@ static bool plan_compute_manifest(vm_guest_rootfs_plan_t *plan,
                                   size_t input_count) {
     ios3_sha256_context_t context;
     if (!ios3_sha256_init(&context) ||
-        !plan_hash_text(&context, "s5lbox-guest-rootfs-plan 3\n") ||
+        !plan_hash_text(&context, "s5lbox-guest-rootfs-plan 4\n") ||
         !plan_hash_text(&context,
                         "aliases /etc=/private/etc /var=/private/var\n") ||
         !plan_hash_text(
             &context,
-            "source /private/etc/apt/sources.list.d/saurik.list\n") ||
+            "source " VM_GUEST_ROOTFS_SAURIK_SOURCE_PATH "\n") ||
         !ios3_sha256_update(&context, CYDIA_SOURCE_LIST,
-                            sizeof CYDIA_SOURCE_LIST - 1u))
+                            sizeof CYDIA_SOURCE_LIST - 1u) ||
+        !plan_hash_text(
+            &context,
+            "source " VM_GUEST_ROOTFS_BIGBOSS_SOURCE_PATH "\n") ||
+        !ios3_sha256_update(&context, BIGBOSS_SOURCE_LIST,
+                            sizeof BIGBOSS_SOURCE_LIST - 1u))
         return false;
     for (size_t i = 0u; i < input_count; i++) {
         const vm_guest_package_t *package = inputs[i].package;

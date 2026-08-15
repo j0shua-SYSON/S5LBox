@@ -217,23 +217,33 @@ static void VMGuestInstallBuildProgress(
 
 - (void)completeInstallAlreadyPresent:(BOOL)alreadyPresent
                        storageUpgraded:(BOOL)storageUpgraded
-               cydiaPrivilegesRepaired:(BOOL)cydiaPrivilegesRepaired {
+               cydiaPrivilegesRepaired:(BOOL)cydiaPrivilegesRepaired
+                    cydiaSourcesAdded:(BOOL)cydiaSourcesAdded {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (self->_finished) return;
         self->_finished = YES;
         [self endBackgroundTime];
         [self->_progressBar setProgress:1.0f animated:YES];
         self->_headline.text = cydiaPrivilegesRepaired ? @"Cydia repaired"
+                              : (cydiaSourcesAdded ? @"Cydia repositories ready"
                               : (storageUpgraded ? @"Storage upgraded"
                               : (alreadyPresent ? @"Jailbreak already installed"
-                                                : @"Jailbreak ready"));
-        self->_detail.text = cydiaPrivilegesRepaired
+                                                : @"Jailbreak ready")));
+        self->_detail.text = cydiaPrivilegesRepaired && cydiaSourcesAdded
+            ? (storageUpgraded
+                ? @"Starting iPhone OS with a 2 GiB guest disk. Cydia's executable permissions were repaired and the period-compatible BigBoss repository was added without removing existing data."
+                : @"Starting iPhone OS. Cydia's executable permissions were repaired and the period-compatible BigBoss repository was added without removing guest data.")
+            : (cydiaSourcesAdded
+                ? (storageUpgraded
+                    ? @"Starting iPhone OS with a 2 GiB guest disk. The period-compatible BigBoss repository was added and existing Cydia data was preserved."
+                    : @"Starting iPhone OS. The period-compatible BigBoss repository was added without replacing existing APT configuration.")
+            : (cydiaPrivilegesRepaired
             ? (storageUpgraded
                 ? @"Starting iPhone OS with a 2 GiB guest disk. The exact legacy Cydia executable permissions were repaired and existing data was preserved."
                 : @"Starting iPhone OS. The exact legacy Cydia executable permissions were repaired; no guest data was removed.")
             : (storageUpgraded
                 ? @"Starting iPhone OS with a 2 GiB guest disk. Existing Cydia data was preserved."
-                : @"Starting iPhone OS. The first boot finishes package configuration inside the guest.");
+                : @"Starting iPhone OS. The first boot finishes package configuration inside the guest.")));
         void (^ready)(void) = [self.readyHandler copy];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                      (int64_t)(0.8 * NSEC_PER_SEC)),
@@ -268,7 +278,8 @@ static void VMGuestInstallBuildProgress(
             [self_ completeInstallAlreadyPresent:YES
                                  storageUpgraded:result.storage_upgraded
                          cydiaPrivilegesRepaired:
-                             result.cydia_privileges_repaired];
+                             result.cydia_privileges_repaired
+                              cydiaSourcesAdded:result.cydia_sources_added];
             return;
         }
         if (status != VM_GUEST_INSTALL_BUILD_ERR_ARGUMENT) {
@@ -333,7 +344,8 @@ static void VMGuestInstallBuildProgress(
         [self_ completeInstallAlreadyPresent:result.already_installed
                              storageUpgraded:result.storage_upgraded
                      cydiaPrivilegesRepaired:
-                         result.cydia_privileges_repaired];
+                         result.cydia_privileges_repaired
+                          cydiaSourcesAdded:result.cydia_sources_added];
     });
 }
 

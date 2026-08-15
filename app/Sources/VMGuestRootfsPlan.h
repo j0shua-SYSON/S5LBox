@@ -34,6 +34,18 @@ extern "C" {
 #define VM_GUEST_ROOTFS_LAUNCHD_PLIST \
     "/System/Library/LaunchDaemons/com.j0shua.s5lbox.guest-install.plist"
 
+/* Period-compatible APT sources owned by the guest installer. Keep each
+ * source in its own file so a later migration can add a missing repository
+ * without replacing user-managed APT configuration. */
+#define VM_GUEST_ROOTFS_SAURIK_SOURCE_PATH \
+    "/private/etc/apt/sources.list.d/saurik.list"
+#define VM_GUEST_ROOTFS_SAURIK_SOURCE_LINE \
+    "deb http://apt.saurik.com/cydia/ ./\n"
+#define VM_GUEST_ROOTFS_BIGBOSS_SOURCE_PATH \
+    "/private/etc/apt/sources.list.d/s5lbox-bigboss.list"
+#define VM_GUEST_ROOTFS_BIGBOSS_SOURCE_LINE \
+    "deb http://apt.thebigboss.org/repofiles/cydia/ stable main\n"
+
 typedef enum {
     VM_GUEST_ROOTFS_OK = 0,
     VM_GUEST_ROOTFS_ERR_ARGUMENT,

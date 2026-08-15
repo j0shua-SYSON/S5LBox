@@ -510,7 +510,7 @@ titleForFooterInSection:(NSInteger)section {
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         } else if (indexPath.row == VMGeneralRowJailbreak) {
-            cell.textLabel.text = @"Jailbreak…";
+            cell.textLabel.text = @"Jailbreak";
             cell.accessibilityIdentifier = @"s5lbox.settings.jailbreak";
             cell.detailTextLabel.text = self.guestInstallRequest
                 ? @"Install Cydia, or repair and expand a compatible older guest"

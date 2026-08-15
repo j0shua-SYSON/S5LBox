@@ -58,12 +58,15 @@ typedef struct {
     bool storage_upgraded;
     bool cydia_privileges_repaired;
     bool cydia_privileges_verified;
+    bool cydia_sources_added;
+    bool cydia_sources_verified;
     size_t historical_snapshots;
     vm_guest_rootfs_stats_t plan;
     rootfs_work_result_t rootfs;
     vm_guest_install_result_t transaction;
     vm_guest_install_result_t storage_transaction;
     vm_guest_install_result_t privilege_transaction;
+    vm_guest_install_result_t sources_transaction;
     uint8_t manifest_sha256[VM_GUEST_INSTALL_SHA256_SIZE];
 } vm_guest_install_build_result_t;
 
@@ -88,6 +91,12 @@ typedef struct {
  * repair is applied to an unpublished clone under its own versioned recovery
  * journal (or folded into the same clone when storage also needs growth).
  * Different bytes or a third metadata tuple are refused, never normalized.
+ *
+ * The same maintenance pass also ensures the installer-owned BigBoss source
+ * file exists as exact root:root 0644 data. A missing file is created in the
+ * unpublished clone; an unexpected existing file is refused rather than
+ * overwritten. Its independent marker makes retries idempotent for guests
+ * installed by older rootfs plans.
  */
 vm_guest_install_build_status_t
 vm_guest_install_build_from_directory(

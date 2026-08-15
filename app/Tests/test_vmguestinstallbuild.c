@@ -256,6 +256,11 @@ static void clear_fixture(void) {
     (void)join_path(next, sizeof next, stage, VM_GUEST_INSTALL_NEXT_FILE);
     (void)remove(next);
     (void)remove_directory(stage);
+    (void)join_path(stage, sizeof stage, FIXTURE_DIR,
+                    VM_GUEST_SOURCES_STAGE_DIRECTORY);
+    (void)join_path(next, sizeof next, stage, VM_GUEST_INSTALL_NEXT_FILE);
+    (void)remove(next);
+    (void)remove_directory(stage);
     static const char *const LEAVES[] = {
         VM_GUEST_INSTALL_LIVE_FILE,
         VM_GUEST_INSTALL_BACKUP_FILE,
@@ -273,6 +278,11 @@ static void clear_fixture(void) {
         VM_GUEST_PRIVILEGE_MARKER_TMP,
         VM_GUEST_PRIVILEGE_JOURNAL_FILE,
         VM_GUEST_PRIVILEGE_JOURNAL_TMP,
+        VM_GUEST_SOURCES_BACKUP_FILE,
+        VM_GUEST_SOURCES_MARKER_FILE,
+        VM_GUEST_SOURCES_MARKER_TMP,
+        VM_GUEST_SOURCES_JOURNAL_FILE,
+        VM_GUEST_SOURCES_JOURNAL_TMP,
         VM_GUEST_INSTALL_RESUME_ONCE_FILE,
         VM_GUEST_INSTALL_RESUME_ONCE_TMP
     };
@@ -402,6 +412,11 @@ static void test_existing_install_is_idempotent(void) {
               VM_GUEST_INSTALL_OK && transaction.committed,
           "could not seed an already-completed privilege migration: %s",
           detail);
+    CHECK(vm_guest_sources_confirm(FIXTURE_DIR, digest, &transaction,
+                                   detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed,
+          "could not seed an already-completed source migration: %s",
+          detail);
     CHECK(resize_sparse(live, VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES),
           "could not make the committed fixture represent a 2 GiB disk");
 
@@ -447,6 +462,9 @@ static void test_committed_maintenance_cleanup_blocks_new_transaction(void) {
               VM_GUEST_INSTALL_OK && transaction.committed &&
           vm_guest_privilege_confirm(FIXTURE_DIR, digest, &transaction,
                                      detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_sources_confirm(FIXTURE_DIR, digest, &transaction,
+                                   detail, sizeof detail) ==
               VM_GUEST_INSTALL_OK && transaction.committed &&
           resize_sparse(live, VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES),
           "could not commit cleanup-residue fixture: %s", detail);
@@ -878,9 +896,16 @@ static void test_real_privilege_repair_when_supplied(void) {
           result.storage_upgraded == expect_storage_growth &&
           result.cydia_privileges_repaired &&
           result.cydia_privileges_verified &&
+          result.cydia_sources_added &&
+          result.cydia_sources_verified &&
           result.rootfs.file_repairs_applied == 1u &&
-          result.privilege_transaction.committed,
-          "real Cydia privilege repair refused or did not apply: %s / %s",
+          result.rootfs.provision_entries >= 1u &&
+          result.rootfs.provision_entries +
+                  result.rootfs.provision_reused_entries ==
+              3u &&
+          result.privilege_transaction.committed &&
+          result.sources_transaction.committed,
+          "combined Cydia repair/source migration refused or did not apply: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     uint64_t after = file_size_or_zero(live);
     CHECK(after == (expect_storage_growth
@@ -910,6 +935,28 @@ static void test_real_privilege_repair_when_supplied(void) {
               rootfs_work_status_name(probe.status),
               rootfs_work_stage_name(probe.stage), probe.detail);
     }
+    static const uint8_t expected_source[] =
+        VM_GUEST_ROOTFS_BIGBOSS_SOURCE_LINE;
+    rootfs_work_file_repair_t source_probe;
+    memset(&source_probe, 0, sizeof source_probe);
+    source_probe.path = VM_GUEST_ROOTFS_BIGBOSS_SOURCE_PATH;
+    source_probe.expected_size = sizeof expected_source - 1u;
+    source_probe.expected_permissions = 0644u;
+    source_probe.desired_permissions = 0644u;
+    rootfs_work_file_repair_state_t source_state =
+        ROOTFS_WORK_FILE_REPAIR_MISSING;
+    rootfs_work_result_t source_result;
+    memset(&source_result, 0, sizeof source_result);
+    CHECK(ios3_sha256(expected_source, sizeof expected_source - 1u,
+                      source_probe.expected_sha256) &&
+          rootfs_work_probe_file_repair(
+              live, &source_probe, &source_state, &source_result) ==
+              ROOTFS_WORK_OK &&
+          source_state == ROOTFS_WORK_FILE_REPAIR_SATISFIED,
+          "published BigBoss source is not exact root:root 0644 data: %s at %s (%s)",
+          rootfs_work_status_name(source_result.status),
+          rootfs_work_stage_name(source_result.stage),
+          source_result.detail);
     vm_guest_install_result_t privilege;
     CHECK(vm_guest_privilege_recover(machine, &privilege,
                                      detail, sizeof detail) ==
@@ -924,7 +971,8 @@ static void test_real_privilege_repair_when_supplied(void) {
         &retry, detail, sizeof detail);
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
           !retry.storage_upgraded && !retry.cydia_privileges_repaired &&
-          retry.cydia_privileges_verified && retry.rootfs.final_size == 0u,
+          retry.cydia_privileges_verified && !retry.cydia_sources_added &&
+          retry.cydia_sources_verified && retry.rootfs.final_size == 0u,
           "real privilege-repair retry rewrote the disk: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     printf("real-cydia-privilege-repair before=%llu after=%llu applied=%u\n",

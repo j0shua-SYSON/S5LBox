@@ -700,16 +700,17 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         return false;
     }
 
-    /* Capacity and Cydia-metadata maintenance have disjoint journals but
-     * replace the same live image. Their recovery layer inspects which one
-     * currently owns that pathname and runs it first; a fixed order is wrong
-     * once either transaction can be interrupted between the two renames. */
+    /* Capacity, Cydia metadata, and repository maintenance have disjoint
+     * journals but replace the same live image. Their recovery layer inspects
+     * which one currently owns that pathname and runs it first; a fixed order
+     * is wrong once any transaction can stop between the two renames. */
     vm_guest_install_result_t guest_privilege;
     vm_guest_install_result_t guest_storage;
+    vm_guest_install_result_t guest_sources;
     char guest_maintenance_detail[VM_FW_BOOT_DETAIL_CAPACITY] = {0};
     vm_guest_install_status_t guest_maintenance_status =
         vm_guest_maintenance_recover(paths->work, &guest_privilege,
-                                     &guest_storage,
+                                     &guest_storage, &guest_sources,
                                      guest_maintenance_detail,
                                      sizeof guest_maintenance_detail);
     if (guest_maintenance_status != VM_GUEST_INSTALL_OK) {

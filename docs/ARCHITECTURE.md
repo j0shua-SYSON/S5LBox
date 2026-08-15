@@ -247,13 +247,18 @@ CNID, extents, dates, Finder metadata, and resource fork remain untouched. A
 separate marker records this migration because disk capacity and executable
 privileges are independent version axes.
 
-Fresh guest plans also seed the official period-compatible flat APT source at
-`/private/etc/apt/sources.list.d/saurik.list`. The file is root:root `0644` and
-its exact bytes participate in the plan digest. It is intentionally part of
-new-image provisioning, not an in-place rewrite of arbitrary existing APT
-configuration. The source uses HTTP because the pinned iPhone OS 3-era APT
-stack cannot negotiate a modern HTTPS endpoint; host PPP/NAT remains the
-transport boundary.
+Fresh guest plans seed two period-compatible APT sources as exact root:root
+`0644` files: Saurik's flat archive in `saurik.list` and BigBoss's `stable main`
+distribution in the installer-owned `s5lbox-bigboss.list`. Both paths and byte
+strings participate in the plan digest. Older committed guests receive only the
+missing installer-owned BigBoss file through the same unpublished-clone and
+atomic-replacement machinery used by storage and Cydia-permission maintenance.
+The migration explicitly creates or reuses the two APT parent directories,
+refuses a non-directory parent or unexpected existing file, and publishes an
+independent recovery marker. It never rewrites arbitrary user APT files. Both
+sources use HTTP because the pinned iPhone OS 3-era APT stack cannot negotiate
+the available modern HTTPS endpoints; host PPP/NAT remains the transport
+boundary.
 
 `OOCSHDWN.GO_STANDBY` is full guest power-off, not an ordinary suspend point.
 The quiesced CPU deliberately loops, so restoring its CPU/RAM and preserving the

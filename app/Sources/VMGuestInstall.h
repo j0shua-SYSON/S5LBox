@@ -47,6 +47,14 @@ extern "C" {
 #define VM_GUEST_PRIVILEGE_MARKER_TMP      "guest.cydia-privileges-v1.partial"
 #define VM_GUEST_PRIVILEGE_JOURNAL_FILE    "guest.cydia-privileges-v1.transaction"
 #define VM_GUEST_PRIVILEGE_JOURNAL_TMP     "guest.cydia-privileges-v1.transaction.partial"
+/* A fourth namespace adds the installer-owned, period-compatible repository
+ * file to already-committed guests. It never overwrites user APT data. */
+#define VM_GUEST_SOURCES_BACKUP_FILE     "rootfs-work.pre-cydia-sources-v1"
+#define VM_GUEST_SOURCES_STAGE_DIRECTORY "guest.cydia-sources-v1.stage"
+#define VM_GUEST_SOURCES_MARKER_FILE     "guest.cydia-sources-v1"
+#define VM_GUEST_SOURCES_MARKER_TMP      "guest.cydia-sources-v1.partial"
+#define VM_GUEST_SOURCES_JOURNAL_FILE    "guest.cydia-sources-v1.transaction"
+#define VM_GUEST_SOURCES_JOURNAL_TMP     "guest.cydia-sources-v1.transaction.partial"
 /* A filesystem replacement can never resume a CPU/RAM image captured against
  * the old disk. The transaction removes only this one-shot authority; inert
  * checkpoint payloads are harmless and can be replaced by the next save. */
@@ -168,7 +176,33 @@ vm_guest_privilege_recover(const char *work_directory,
                            vm_guest_install_result_t *result,
                            char *detail, size_t detail_capacity);
 
-/* Recover both maintenance namespaces in the only safe dynamic order. If one
+/* Crash-safe replacement and marker-only confirmation for the installer-owned
+ * Cydia source file. The file's exact bytes and metadata are probed before
+ * either operation; arbitrary existing APT configuration is never rewritten. */
+bool vm_guest_sources_stage_image_path(char *out, size_t capacity,
+                                       const char *work_directory);
+vm_guest_install_status_t
+vm_guest_sources_prepare_stage(const char *work_directory,
+                               vm_guest_install_result_t *result,
+                               char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_sources_recover(const char *work_directory,
+                         vm_guest_install_result_t *result,
+                         char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_sources_publish(const char *work_directory,
+                         const uint8_t manifest_sha256[
+                             VM_GUEST_INSTALL_SHA256_SIZE],
+                         vm_guest_install_result_t *result,
+                         char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_sources_confirm(const char *work_directory,
+                         const uint8_t manifest_sha256[
+                             VM_GUEST_INSTALL_SHA256_SIZE],
+                         vm_guest_install_result_t *result,
+                         char *detail, size_t detail_capacity);
+
+/* Recover all maintenance namespaces in the only safe dynamic order. If one
  * journal/backup currently owns the shared live pathname, it runs first; two
  * simultaneously active maintenance transactions are contradictory. Call
  * this before ordinary install recovery and before opening the live disk. */
@@ -176,6 +210,7 @@ vm_guest_install_status_t
 vm_guest_maintenance_recover(const char *work_directory,
                              vm_guest_install_result_t *privilege_result,
                              vm_guest_install_result_t *storage_result,
+                             vm_guest_install_result_t *sources_result,
                              char *detail, size_t detail_capacity);
 vm_guest_install_status_t
 vm_guest_privilege_publish(const char *work_directory,

@@ -306,9 +306,13 @@ static void test_complete_synthetic_plan(void) {
     const rootfs_work_entry_t *source_directory =
         find_entry(plan, "/private/etc/apt/sources.list.d");
     const rootfs_work_entry_t *cydia_source =
-        find_entry(plan, "/private/etc/apt/sources.list.d/saurik.list");
+        find_entry(plan, VM_GUEST_ROOTFS_SAURIK_SOURCE_PATH);
+    const rootfs_work_entry_t *bigboss_source =
+        find_entry(plan, VM_GUEST_ROOTFS_BIGBOSS_SOURCE_PATH);
     static const char EXPECTED_CYDIA_SOURCE[] =
-        "deb http://apt.saurik.com/cydia/ ./\n";
+        VM_GUEST_ROOTFS_SAURIK_SOURCE_LINE;
+    static const char EXPECTED_BIGBOSS_SOURCE[] =
+        VM_GUEST_ROOTFS_BIGBOSS_SOURCE_LINE;
     CHECK(apt_directory && source_directory &&
           apt_directory->kind == ROOTFS_WORK_ENTRY_DIRECTORY &&
           source_directory->kind == ROOTFS_WORK_ENTRY_DIRECTORY &&
@@ -327,6 +331,17 @@ static void test_complete_synthetic_plan(void) {
           memcmp(cydia_source->content, EXPECTED_CYDIA_SOURCE,
                  sizeof EXPECTED_CYDIA_SOURCE - 1u) == 0,
           "the official period-compatible Cydia source is not exact root:root 0644 data");
+    CHECK(bigboss_source &&
+          bigboss_source->kind == ROOTFS_WORK_ENTRY_FILE &&
+          bigboss_source->permissions == 0644u &&
+          bigboss_source->owner_id == 0u &&
+          bigboss_source->group_id == 0u &&
+          bigboss_source->existing_policy == ROOTFS_WORK_EXISTING_REFUSE &&
+          bigboss_source->content_size ==
+              sizeof EXPECTED_BIGBOSS_SOURCE - 1u &&
+          memcmp(bigboss_source->content, EXPECTED_BIGBOSS_SOURCE,
+                 sizeof EXPECTED_BIGBOSS_SOURCE - 1u) == 0,
+          "the BigBoss distribution source is not exact root:root 0644 data");
 
     char cache_path[ROOTFS_WORK_MAX_PATH];
     int written = snprintf(cache_path, sizeof cache_path, "%s/%s",
@@ -429,10 +444,10 @@ static void test_complete_synthetic_plan(void) {
     CHECK(vm_guest_rootfs_plan_manifest_sha256(plan, digest),
           "plan manifest identity was not produced");
     static const uint8_t EXPECTED[VM_GUEST_PACKAGE_SHA256_SIZE] = {
-        0x06u, 0xc2u, 0xb4u, 0xf2u, 0x6bu, 0x1fu, 0x72u, 0x49u,
-        0x69u, 0x4du, 0x14u, 0xb2u, 0x41u, 0xf7u, 0x0fu, 0x2fu,
-        0xdfu, 0x96u, 0xb0u, 0xd4u, 0x4eu, 0x4au, 0x58u, 0x87u,
-        0x8cu, 0xbau, 0x33u, 0x23u, 0x4bu, 0x7cu, 0xa0u, 0xb9u
+        0x3eu, 0x8au, 0xeeu, 0x43u, 0x4fu, 0x45u, 0x6fu, 0x81u,
+        0x0cu, 0x3au, 0x5bu, 0x32u, 0x82u, 0xdau, 0x3au, 0x5bu,
+        0x9fu, 0xceu, 0x18u, 0xf1u, 0x4au, 0x36u, 0x72u, 0x5au,
+        0x98u, 0xafu, 0x29u, 0xe3u, 0xd6u, 0x76u, 0x4fu, 0x5eu
     };
     CHECK(memcmp(digest, EXPECTED, sizeof digest) == 0,
           "synthetic plan identity changed");

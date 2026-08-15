@@ -1182,6 +1182,49 @@ device, observed through Cydia's completion UI; it is not broad package
 compatibility, a post-run catalog extraction, or proof that applying the five
 bootstrap upgrades is safe. No kernel MAC-policy bypass was added.
 
+## 2026-08-15: dependency repository migration for existing guests
+
+Physical Cydia testing exposed a dependency-source failure rather than a TLS
+failure. The pinned WinterBoard 0.9.3919 package depends on `preferenceloader`;
+the configured Saurik and ios3.party indexes refreshed successfully but did not
+offer that package. BigBoss's distribution index does. The compatible source is
+now represented as exact root:root `0644` data:
+
+```text
+deb http://apt.thebigboss.org/repofiles/cydia/ stable main
+```
+
+Fresh plans include that file in their manifest identity. Already committed
+guests probe only the new installer-owned
+`/private/etc/apt/sources.list.d/s5lbox-bigboss.list`. Missing data is added to
+an unpublished clone; exact data is recorded without rewriting the disk; wrong
+bytes, wrong metadata, a non-directory parent, or a mismatched install identity
+fail closed. Storage growth, the exact Cydia setuid repair, and repository
+addition can share one disk clone. Storage, privilege, and source transactions
+have separate markers and journals, while recovery dynamically resolves the one
+namespace that owns a temporarily missing live image and refuses competing
+owners.
+
+The first real-HFS attempt found an older valid guest with no `/private/etc/apt`
+directory. Creating only the leaf source correctly refused under that missing
+catalog parent and published nothing. The corrected migration explicitly
+create-or-reuses `/private/etc/apt` and `sources.list.d` before the file. A clean
+466,825,216-byte HFS image containing the exact legacy Cydia executable then
+grew to 2,147,483,648 bytes, applied one root:root `06755` repair, added the
+source, independently re-probed the exact source bytes and metadata, recovered
+both committed markers, and completed an immediate idempotent retry without a
+second disk rewrite. The optional real-image builder run passed 526 checks with
+zero failures; the focused transaction, plan, and builder CTest group passed
+3/3. The complete normal suite passed 67/67 and the warnings-as-errors,
+static/JIT-gated suite passed 72/72 on the same tree.
+
+Brutal-honesty boundary: this proves crash-safe disk construction and exact APT
+configuration, not yet a physical BigBoss refresh or a successful
+PreferenceLoader, WinterBoard, theme, and respring transaction. It does not make
+arbitrary modern tweaks compatible with iPhone OS 3. The source is HTTP because
+the legacy client cannot use BigBoss's available HTTPS service; package
+transport therefore does not gain modern TLS protection from this migration.
+
 ## 2026-08-12: official source seed and powered-down checkpoint recovery
 
 Fresh guest rootfs plans now create `/private/etc/apt/sources.list.d/saurik.list`
