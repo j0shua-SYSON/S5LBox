@@ -14,8 +14,13 @@
 
 #include <limits.h>
 #include <stddef.h>
-#include <stdatomic.h>
 #include <string.h>
+
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
+#include <stdatomic.h>
+#endif
 
 #define MD_BRIDGE_ADDRESS_SPACE_SIZE (UINT64_C(1) << 32)
 
@@ -24,18 +29,32 @@ typedef struct {
     md_bridge_write_trace_entry_t entries[MD_BRIDGE_WRITE_TRACE_HISTORY];
 } md_bridge_write_trace_state_t;
 
+#if defined(_MSC_VER)
+static volatile long md_bridge_write_trace_lock;
+#else
 static atomic_flag md_bridge_write_trace_lock = ATOMIC_FLAG_INIT;
+#endif
 static md_bridge_write_trace_state_t md_bridge_write_trace;
 
 static void write_trace_lock(void) {
+#if defined(_MSC_VER)
+    while (_InterlockedCompareExchange(&md_bridge_write_trace_lock,
+                                       1L, 0L) != 0L) {
+    }
+#else
     while (atomic_flag_test_and_set_explicit(
                &md_bridge_write_trace_lock, memory_order_acquire)) {
     }
+#endif
 }
 
 static void write_trace_unlock(void) {
+#if defined(_MSC_VER)
+    (void)_InterlockedExchange(&md_bridge_write_trace_lock, 0L);
+#else
     atomic_flag_clear_explicit(&md_bridge_write_trace_lock,
                                memory_order_release);
+#endif
 }
 
 void md_bridge_write_trace_reset(void) {
