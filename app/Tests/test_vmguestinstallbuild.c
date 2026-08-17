@@ -305,6 +305,11 @@ static void clear_fixture(void) {
     (void)join_path(next, sizeof next, stage, VM_GUEST_INSTALL_NEXT_FILE);
     (void)remove(next);
     (void)remove_directory(stage);
+    (void)join_path(stage, sizeof stage, FIXTURE_DIR,
+                    VM_GUEST_SOURCES_V2_STAGE_DIRECTORY);
+    (void)join_path(next, sizeof next, stage, VM_GUEST_INSTALL_NEXT_FILE);
+    (void)remove(next);
+    (void)remove_directory(stage);
     static const char *const LEAVES[] = {
         VM_GUEST_INSTALL_LIVE_FILE,
         VM_GUEST_INSTALL_BACKUP_FILE,
@@ -327,6 +332,11 @@ static void clear_fixture(void) {
         VM_GUEST_SOURCES_MARKER_TMP,
         VM_GUEST_SOURCES_JOURNAL_FILE,
         VM_GUEST_SOURCES_JOURNAL_TMP,
+        VM_GUEST_SOURCES_V2_BACKUP_FILE,
+        VM_GUEST_SOURCES_V2_MARKER_FILE,
+        VM_GUEST_SOURCES_V2_MARKER_TMP,
+        VM_GUEST_SOURCES_V2_JOURNAL_FILE,
+        VM_GUEST_SOURCES_V2_JOURNAL_TMP,
         VM_FW_BOOT_STATE_FILE,
         VM_FW_BOOT_STATE_MD_FILE,
         VM_FW_BOOT_STATE_TMP,
@@ -465,6 +475,11 @@ static void test_existing_install_is_idempotent(void) {
               VM_GUEST_INSTALL_OK && transaction.committed,
           "could not seed an already-completed source migration: %s",
           detail);
+    CHECK(vm_guest_sources_v2_confirm(FIXTURE_DIR, digest, &transaction,
+                                      detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed,
+          "could not seed an already-completed source-v2 migration: %s",
+          detail);
     CHECK(resize_sparse(live, VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES),
           "could not make the committed fixture represent a 2 GiB disk");
 
@@ -513,6 +528,9 @@ static void test_committed_maintenance_cleanup_blocks_new_transaction(void) {
               VM_GUEST_INSTALL_OK && transaction.committed &&
           vm_guest_sources_confirm(FIXTURE_DIR, digest, &transaction,
                                    detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_sources_v2_confirm(FIXTURE_DIR, digest, &transaction,
+                                      detail, sizeof detail) ==
               VM_GUEST_INSTALL_OK && transaction.committed &&
           resize_sparse(live, VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES),
           "could not commit cleanup-residue fixture: %s", detail);
@@ -617,7 +635,19 @@ static void test_dirty_existing_install_refuses_before_stage(void) {
         VM_GUEST_PRIVILEGE_MARKER_FILE,
         VM_GUEST_PRIVILEGE_MARKER_TMP,
         VM_GUEST_PRIVILEGE_JOURNAL_FILE,
-        VM_GUEST_PRIVILEGE_JOURNAL_TMP
+        VM_GUEST_PRIVILEGE_JOURNAL_TMP,
+        VM_GUEST_SOURCES_BACKUP_FILE,
+        VM_GUEST_SOURCES_STAGE_DIRECTORY,
+        VM_GUEST_SOURCES_MARKER_FILE,
+        VM_GUEST_SOURCES_MARKER_TMP,
+        VM_GUEST_SOURCES_JOURNAL_FILE,
+        VM_GUEST_SOURCES_JOURNAL_TMP,
+        VM_GUEST_SOURCES_V2_BACKUP_FILE,
+        VM_GUEST_SOURCES_V2_STAGE_DIRECTORY,
+        VM_GUEST_SOURCES_V2_MARKER_FILE,
+        VM_GUEST_SOURCES_V2_MARKER_TMP,
+        VM_GUEST_SOURCES_V2_JOURNAL_FILE,
+        VM_GUEST_SOURCES_V2_JOURNAL_TMP
     };
     for (size_t i = 0u;
          i < sizeof MAINTENANCE_LEAVES / sizeof MAINTENANCE_LEAVES[0]; i++) {
@@ -665,6 +695,9 @@ static void test_powered_off_checkpoint_allows_only_dirty_bit(void) {
               VM_GUEST_INSTALL_OK && transaction.committed &&
           vm_guest_sources_confirm(FIXTURE_DIR, digest, &transaction,
                                    detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_sources_v2_confirm(FIXTURE_DIR, digest, &transaction,
+                                      detail, sizeof detail) ==
               VM_GUEST_INSTALL_OK && transaction.committed,
           "could not commit checkpoint-gate fixture: %s", detail);
 
@@ -1044,12 +1077,15 @@ static void test_real_privilege_repair_when_supplied(void) {
           result.cydia_sources_added &&
           result.cydia_sources_verified &&
           result.rootfs.file_repairs_applied == 1u &&
-          result.rootfs.provision_entries >= 1u &&
+          result.rootfs.provision_entries >= 2u &&
           result.rootfs.provision_entries +
-                  result.rootfs.provision_reused_entries ==
-              3u &&
+                  result.rootfs.provision_reused_entries >=
+              8u &&
+          result.rootfs.provision_entries +
+                  result.rootfs.provision_reused_entries <=
+              9u &&
           result.privilege_transaction.committed &&
-          result.sources_transaction.committed,
+          result.sources_v2_transaction.committed,
           "combined Cydia repair/source migration refused or did not apply: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     uint64_t after = file_size_or_zero(live);
@@ -1125,6 +1161,79 @@ static void test_real_privilege_repair_when_supplied(void) {
            result.rootfs.file_repairs_applied);
 }
 
+static void test_real_cache_recovery_when_supplied(void) {
+    const char *machine = getenv("S5LBOX_EXISTING_CACHE_MACHINE_DIR");
+    if (!machine || !*machine) {
+        printf("real-cydia-cache-recovery SKIP (existing machine path unset)\n");
+        return;
+    }
+
+    char live[VM_GUEST_INSTALL_PATH_CAPACITY];
+    CHECK(join_path(live, sizeof live, machine,
+                    VM_GUEST_INSTALL_LIVE_FILE),
+          "real cache-recovery live path overflow");
+    uint64_t before = file_size_or_zero(live);
+    CHECK(before > 0u, "real cache-recovery source has no live disk");
+    if (before == 0u) return;
+    bool expect_storage_growth =
+        before < VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES;
+
+    uint8_t manifest[VM_GUEST_INSTALL_SHA256_SIZE];
+    char detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+    CHECK(vm_guest_install_probe(machine, manifest, detail, sizeof detail) ==
+              VM_GUEST_INSTALL_PROBE_VALID,
+          "real cache-recovery source has no valid install marker: %s",
+          detail);
+
+    progress_log_t progress;
+    memset(&progress, 0, sizeof progress);
+    vm_guest_install_build_result_t result;
+    vm_guest_install_build_status_t status =
+        vm_guest_install_build_from_directory(
+            machine, NULL, capture_progress, &progress,
+            &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_OK && result.already_installed &&
+          result.storage_upgraded == expect_storage_growth &&
+          result.cydia_privileges_verified &&
+          result.cydia_sources_added && result.cydia_sources_verified &&
+          result.rootfs.provision_entries >= 2u &&
+          result.rootfs.provision_entries +
+                  result.rootfs.provision_reused_entries >= 8u &&
+          result.rootfs.provision_entries +
+                  result.rootfs.provision_reused_entries <= 9u &&
+          result.sources_transaction.committed &&
+          result.sources_v2_transaction.committed,
+          "real cache recovery refused or omitted its payload: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+    uint64_t after = file_size_or_zero(live);
+    CHECK(after == (expect_storage_growth
+                        ? VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES : before),
+          "cache recovery published %llu bytes from a %llu-byte source",
+          (unsigned long long)after, (unsigned long long)before);
+
+    vm_guest_install_result_t recovered;
+    CHECK(vm_guest_sources_v2_recover(machine, &recovered,
+                                      detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && recovered.committed &&
+          recovered.has_manifest &&
+          memcmp(recovered.manifest_sha256, manifest, sizeof manifest) == 0,
+          "cache-recovery transaction is not recoverable: %s", detail);
+
+    vm_guest_install_build_result_t retry;
+    status = vm_guest_install_build_from_directory(
+        machine, NULL, capture_progress, &progress,
+        &retry, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
+          !retry.storage_upgraded && !retry.cydia_privileges_repaired &&
+          retry.cydia_privileges_verified && !retry.cydia_sources_added &&
+          retry.cydia_sources_verified && retry.rootfs.final_size == 0u,
+          "cache-recovery retry rewrote the disk: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+    printf("real-cydia-cache-recovery before=%llu after=%llu entries=%u\n",
+           (unsigned long long)before, (unsigned long long)after,
+           result.rootfs.provision_entries);
+}
+
 int main(void) {
     printf("== guest install builder ==\n");
     if (!make_directory(FIXTURE_DIR)) {
@@ -1139,6 +1248,7 @@ int main(void) {
     test_powered_off_checkpoint_allows_only_dirty_bit();
     test_real_storage_upgrade_when_supplied();
     test_real_privilege_repair_when_supplied();
+    test_real_cache_recovery_when_supplied();
     test_real_build_when_supplied();
     clear_fixture();
     (void)remove_directory(FIXTURE_DIR);

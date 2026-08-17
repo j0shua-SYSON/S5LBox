@@ -67,7 +67,10 @@ typedef struct {
     vm_guest_install_result_t transaction;
     vm_guest_install_result_t storage_transaction;
     vm_guest_install_result_t privilege_transaction;
+    /* Historical v1 source transaction, retained for safe upgrade recovery. */
     vm_guest_install_result_t sources_transaction;
+    /* Current repository-cache compatibility transaction. */
+    vm_guest_install_result_t sources_v2_transaction;
     uint8_t manifest_sha256[VM_GUEST_INSTALL_SHA256_SIZE];
 } vm_guest_install_build_result_t;
 

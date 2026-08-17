@@ -55,6 +55,15 @@ extern "C" {
 #define VM_GUEST_SOURCES_MARKER_TMP      "guest.cydia-sources-v1.partial"
 #define VM_GUEST_SOURCES_JOURNAL_FILE    "guest.cydia-sources-v1.transaction"
 #define VM_GUEST_SOURCES_JOURNAL_TMP     "guest.cydia-sources-v1.transaction.partial"
+/* A v2 namespace installs repository-cache recovery without confusing an
+ * interrupted v1 source transaction for the new maintenance payload. Both
+ * namespaces remain recoverable because they share the live disk pathname. */
+#define VM_GUEST_SOURCES_V2_BACKUP_FILE     "rootfs-work.pre-cydia-sources-v2"
+#define VM_GUEST_SOURCES_V2_STAGE_DIRECTORY "guest.cydia-sources-v2.stage"
+#define VM_GUEST_SOURCES_V2_MARKER_FILE     "guest.cydia-sources-v2"
+#define VM_GUEST_SOURCES_V2_MARKER_TMP      "guest.cydia-sources-v2.partial"
+#define VM_GUEST_SOURCES_V2_JOURNAL_FILE    "guest.cydia-sources-v2.transaction"
+#define VM_GUEST_SOURCES_V2_JOURNAL_TMP     "guest.cydia-sources-v2.transaction.partial"
 /* Powered-off filesystem repair is repeatable, so its commit record is only a
  * crash-recovery boundary. It is removed after the backup, journal, and stage
  * are durably cleaned instead of becoming permanent boot policy. */
@@ -210,6 +219,32 @@ vm_guest_sources_confirm(const char *work_directory,
                              VM_GUEST_INSTALL_SHA256_SIZE],
                          vm_guest_install_result_t *result,
                          char *detail, size_t detail_capacity);
+
+/* Version-2 source compatibility migration. The v1 APIs remain live solely
+ * so an upgrade can safely finish or roll back an interrupted older
+ * transaction before v2 touches the shared disk. */
+bool vm_guest_sources_v2_stage_image_path(char *out, size_t capacity,
+                                          const char *work_directory);
+vm_guest_install_status_t
+vm_guest_sources_v2_prepare_stage(const char *work_directory,
+                                  vm_guest_install_result_t *result,
+                                  char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_sources_v2_recover(const char *work_directory,
+                            vm_guest_install_result_t *result,
+                            char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_sources_v2_publish(const char *work_directory,
+                            const uint8_t manifest_sha256[
+                                VM_GUEST_INSTALL_SHA256_SIZE],
+                            vm_guest_install_result_t *result,
+                            char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_sources_v2_confirm(const char *work_directory,
+                            const uint8_t manifest_sha256[
+                                VM_GUEST_INSTALL_SHA256_SIZE],
+                            vm_guest_install_result_t *result,
+                            char *detail, size_t detail_capacity);
 
 /* Crash-safe publication of an unpublished powered-off filesystem repair.
  * prepare_stage() creates an empty same-directory stage after recovering every

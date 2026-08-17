@@ -53,40 +53,119 @@ static void build_cydia_privilege_repair(
 
 static const uint8_t VM_BIGBOSS_SOURCE[] =
     VM_GUEST_ROOTFS_BIGBOSS_SOURCE_LINE;
+/* A short-lived compatibility build wrote this equivalent spelling before
+ * packet-loss evidence disproved the URL rewrite as a remedy. It expands to
+ * the same index URLs in old APT. Accept it on existing test/install media so
+ * cache recovery does not needlessly refuse the disk, but never create it. */
+static const uint8_t VM_BIGBOSS_SOURCE_COMPAT[] =
+    "deb http://apt.thebigboss.org/repofiles/cydia/ "
+    "dists/stable/main/binary-iphoneos-arm/\n";
 
-static bool build_bigboss_source_probe(
-    rootfs_work_file_repair_t *probe) {
-    if (!probe) return false;
+static bool build_bigboss_source_probe_for(
+    rootfs_work_file_repair_t *probe, const uint8_t *content,
+    size_t content_size) {
+    if (!probe || !content || !content_size) return false;
     memset(probe, 0, sizeof *probe);
     probe->path = VM_GUEST_ROOTFS_BIGBOSS_SOURCE_PATH;
-    probe->expected_size = sizeof VM_BIGBOSS_SOURCE - 1u;
-    if (!ios3_sha256(VM_BIGBOSS_SOURCE, sizeof VM_BIGBOSS_SOURCE - 1u,
-                     probe->expected_sha256))
+    probe->expected_size = content_size;
+    if (!ios3_sha256(content, content_size, probe->expected_sha256))
         return false;
     probe->expected_permissions = 0644u;
     probe->desired_permissions = 0644u;
     return true;
 }
 
-enum { VM_BIGBOSS_MIGRATION_ENTRY_COUNT = 3u };
+static bool build_bigboss_source_probe(
+    rootfs_work_file_repair_t *probe) {
+    return build_bigboss_source_probe_for(
+        probe, VM_BIGBOSS_SOURCE, sizeof VM_BIGBOSS_SOURCE - 1u);
+}
 
-static void build_bigboss_source_entries(
-    rootfs_work_entry_t entries[VM_BIGBOSS_MIGRATION_ENTRY_COUNT]) {
+static const uint8_t VM_BIGBOSS_CACHE_CLEANUP[] =
+    "#!/bin/sh\n"
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin\n"
+    "export PATH\n"
+    "state=/private/var/lib/s5lbox\n"
+    "marker=$state/cydia-index-cache-v2.complete\n"
+    "[ -e \"$marker\" ] && exit 0\n"
+    "log=/private/var/log/s5lbox-cydia-index-cache-v2.log\n"
+    "exec >>\"$log\" 2>&1\n"
+    "for cache in /private/var/lib/apt/lists/apt.thebigboss.org_repofiles_cydia_dists_stable_* /private/var/lib/apt/lists/partial/apt.thebigboss.org_repofiles_cydia_dists_stable_*; do\n"
+    "    [ -e \"$cache\" ] || continue\n"
+    "    /bin/rm -f \"$cache\" || exit 1\n"
+    "done\n"
+    "/bin/rm -f /private/var/cache/apt/pkgcache.bin /private/var/cache/apt/srcpkgcache.bin || exit 1\n"
+    ": >\"$marker.partial\" || exit 1\n"
+    "/bin/sync\n"
+    "/bin/mv -f \"$marker.partial\" \"$marker\" || exit 1\n"
+    "/bin/sync\n"
+    "echo 'cached BigBoss package indexes removed for a clean retry'\n"
+    "exit 0\n";
+
+static const uint8_t VM_BIGBOSS_CACHE_CLEANUP_PLIST[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\">\n"
+    "<dict>\n"
+    "  <key>Label</key>\n"
+    "  <string>com.j0shua.s5lbox.cydia-index-cache-v2</string>\n"
+    "  <key>ProgramArguments</key>\n"
+    "  <array>\n"
+    "    <string>/usr/libexec/s5lbox-cydia-index-cache-v2</string>\n"
+    "  </array>\n"
+    "  <key>RunAtLoad</key>\n"
+    "  <true/>\n"
+    "</dict>\n"
+    "</plist>\n";
+
+enum { VM_BIGBOSS_MIGRATION_MAX_ENTRIES = 9u };
+
+static size_t build_bigboss_source_entries(
+    rootfs_work_entry_t entries[VM_BIGBOSS_MIGRATION_MAX_ENTRIES],
+    bool create_source) {
     memset(entries, 0,
-           VM_BIGBOSS_MIGRATION_ENTRY_COUNT * sizeof entries[0]);
-    entries[0].kind = ROOTFS_WORK_ENTRY_DIRECTORY;
-    entries[0].path = "/private/etc/apt";
-    entries[0].permissions = 0755u;
-    entries[0].existing_policy = ROOTFS_WORK_EXISTING_REUSE_DIRECTORY;
-    entries[1].kind = ROOTFS_WORK_ENTRY_DIRECTORY;
-    entries[1].path = "/private/etc/apt/sources.list.d";
-    entries[1].permissions = 0755u;
-    entries[1].existing_policy = ROOTFS_WORK_EXISTING_REUSE_DIRECTORY;
-    entries[2].kind = ROOTFS_WORK_ENTRY_FILE;
-    entries[2].path = VM_GUEST_ROOTFS_BIGBOSS_SOURCE_PATH;
-    entries[2].content = VM_BIGBOSS_SOURCE;
-    entries[2].content_size = sizeof VM_BIGBOSS_SOURCE - 1u;
-    entries[2].permissions = 0644u;
+           VM_BIGBOSS_MIGRATION_MAX_ENTRIES * sizeof entries[0]);
+    static const char *directories[] = {
+        "/private/etc/apt",
+        "/private/etc/apt/sources.list.d",
+        "/private/var/lib/s5lbox",
+        "/private/var/log",
+        "/usr/libexec",
+        "/System/Library/LaunchDaemons"
+    };
+    size_t count = 0u;
+    for (size_t i = 0u; i < sizeof directories / sizeof directories[0]; i++) {
+        entries[count].kind = ROOTFS_WORK_ENTRY_DIRECTORY;
+        entries[count].path = directories[i];
+        entries[count].permissions = 0755u;
+        entries[count].existing_policy =
+            ROOTFS_WORK_EXISTING_REUSE_DIRECTORY;
+        count++;
+    }
+    if (create_source) {
+        entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
+        entries[count].path = VM_GUEST_ROOTFS_BIGBOSS_SOURCE_PATH;
+        entries[count].content = VM_BIGBOSS_SOURCE;
+        entries[count].content_size = sizeof VM_BIGBOSS_SOURCE - 1u;
+        entries[count].permissions = 0644u;
+        count++;
+    }
+    entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
+    entries[count].path = "/usr/libexec/s5lbox-cydia-index-cache-v2";
+    entries[count].content = VM_BIGBOSS_CACHE_CLEANUP;
+    entries[count].content_size = sizeof VM_BIGBOSS_CACHE_CLEANUP - 1u;
+    entries[count].permissions = 0755u;
+    count++;
+    entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
+    entries[count].path =
+        "/System/Library/LaunchDaemons/"
+        "com.j0shua.s5lbox.cydia-index-cache-v2.plist";
+    entries[count].content = VM_BIGBOSS_CACHE_CLEANUP_PLIST;
+    entries[count].content_size =
+        sizeof VM_BIGBOSS_CACHE_CLEANUP_PLIST - 1u;
+    entries[count].permissions = 0644u;
+    count++;
+    return count;
 }
 
 static void build_detail(char *detail, size_t capacity, const char *text) {
@@ -262,14 +341,16 @@ static vm_guest_install_build_status_t build_maintain_install(
     const vm_guest_install_result_t *storage,
     const vm_guest_install_result_t *privilege,
     const vm_guest_install_result_t *sources,
+    const vm_guest_install_result_t *sources_v2,
     vm_guest_install_build_progress_t progress, void *progress_context,
     vm_guest_install_build_result_t *result,
     char *detail, size_t detail_capacity) {
     if (!install || !install->committed || !install->has_manifest ||
-        !storage || !privilege || !sources ||
+        !storage || !privilege || !sources || !sources_v2 ||
         !build_transaction_matches_install(storage, install) ||
         !build_transaction_matches_install(privilege, install) ||
-        !build_transaction_matches_install(sources, install)) {
+        !build_transaction_matches_install(sources, install) ||
+        !build_transaction_matches_install(sources_v2, install)) {
         build_detail(detail, detail_capacity,
                      "A guest-disk maintenance record does not match the committed installation.");
         return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
@@ -277,7 +358,8 @@ static vm_guest_install_build_status_t build_maintain_install(
     if (!install->cleanup_complete ||
         (storage->committed && !storage->cleanup_complete) ||
         (privilege->committed && !privilege->cleanup_complete) ||
-        (sources->committed && !sources->cleanup_complete)) {
+        (sources->committed && !sources->cleanup_complete) ||
+        (sources_v2->committed && !sources_v2->cleanup_complete)) {
         build_detail(detail, detail_capacity,
                      "A committed guest-disk transaction still has cleanup residue; no new maintenance transaction was started.");
         return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
@@ -340,7 +422,8 @@ static vm_guest_install_build_status_t build_maintain_install(
     }
 
     rootfs_work_file_repair_t source_probe;
-    if (sources->committed) {
+    bool source_create = false;
+    if (sources_v2->committed) {
         if (result) result->cydia_sources_verified = true;
     } else {
         if (!build_bigboss_source_probe(&source_probe)) {
@@ -354,34 +437,32 @@ static vm_guest_install_build_status_t build_maintain_install(
         rootfs_work_status_t probe_status = build_probe_file_repair(
             work_directory, live, live_size, &source_probe, &source_state,
             &allow_unclean_source, result, &probe);
+        if (probe_status == ROOTFS_WORK_FILE_REPAIR_MISMATCH &&
+            build_bigboss_source_probe_for(
+                &source_probe, VM_BIGBOSS_SOURCE_COMPAT,
+                sizeof VM_BIGBOSS_SOURCE_COMPAT - 1u)) {
+            source_state = ROOTFS_WORK_FILE_REPAIR_MISSING;
+            probe_status = build_probe_file_repair(
+                work_directory, live, live_size, &source_probe, &source_state,
+                &allow_unclean_source, result, &probe);
+        }
         if (result) result->rootfs = probe;
         if (probe_status != ROOTFS_WORK_OK)
             return build_rootfs_refusal(probe_status, &probe,
                                         detail, detail_capacity);
         source_preflighted = true;
-        if (source_state == ROOTFS_WORK_FILE_REPAIR_MISSING) {
-            source_needed = true;
-        } else if (source_state == ROOTFS_WORK_FILE_REPAIR_SATISFIED) {
-            vm_guest_install_result_t confirmed;
-            vm_guest_install_status_t confirmation =
-                vm_guest_sources_confirm(
-                    work_directory, install->manifest_sha256, &confirmed,
-                    transaction_detail, sizeof transaction_detail);
-            if (result) result->sources_transaction = confirmed;
-            if (confirmation != VM_GUEST_INSTALL_OK ||
-                !confirmed.committed) {
-                build_detail(detail, detail_capacity,
-                             transaction_detail[0]
-                                 ? transaction_detail
-                                 : vm_guest_install_status_text(confirmation));
-                return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
-            }
-            if (result) result->cydia_sources_verified = true;
-        } else {
+        source_create = source_state == ROOTFS_WORK_FILE_REPAIR_MISSING;
+        if (!source_create &&
+            source_state != ROOTFS_WORK_FILE_REPAIR_SATISFIED) {
             build_detail(detail, detail_capacity,
-                         "The exact BigBoss source unexpectedly requested a metadata rewrite.");
+                         "The managed BigBoss source has unexpected metadata or contents.");
             return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
         }
+        /* An already-correct source can coexist with an HTML list cached
+         * after a compressed-index transfer failed. The v2 disk transaction
+         * installs a one-shot cache purge; the source URL itself is unchanged
+         * because changing its spelling does not change APT's fallback URLs. */
+        source_needed = true;
     }
 
     if (!grow_storage && !repair_needed && !source_needed) {
@@ -417,7 +498,7 @@ static vm_guest_install_build_status_t build_maintain_install(
             work_directory, &prepared, transaction_detail,
             sizeof transaction_detail);
     } else {
-        preparation = vm_guest_sources_prepare_stage(
+        preparation = vm_guest_sources_v2_prepare_stage(
             work_directory, &prepared, transaction_detail,
             sizeof transaction_detail);
     }
@@ -440,7 +521,7 @@ static vm_guest_install_build_status_t build_maintain_install(
         stage_ok = vm_guest_privilege_stage_image_path(
             stage, sizeof stage, work_directory);
     } else {
-        stage_ok = vm_guest_sources_stage_image_path(
+        stage_ok = vm_guest_sources_v2_stage_image_path(
             stage, sizeof stage, work_directory);
     }
     if (!stage_ok) {
@@ -464,11 +545,13 @@ static vm_guest_install_build_status_t build_maintain_install(
         options.file_repair_count = 1u;
     }
     rootfs_work_entry_t
-        source_entries[VM_BIGBOSS_MIGRATION_ENTRY_COUNT];
+        source_entries[VM_BIGBOSS_MIGRATION_MAX_ENTRIES];
+    size_t source_entry_count = 0u;
     if (source_needed) {
-        build_bigboss_source_entries(source_entries);
+        source_entry_count = build_bigboss_source_entries(
+            source_entries, source_create);
         options.entries = source_entries;
-        options.entry_count = VM_BIGBOSS_MIGRATION_ENTRY_COUNT;
+        options.entry_count = source_entry_count;
     }
     build_progress_adapter_t adapter = {progress, progress_context};
     options.progress = build_rootfs_progress;
@@ -482,9 +565,9 @@ static vm_guest_install_build_status_t build_maintain_install(
          rootfs.final_size < VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES) ||
         (repair_needed && rootfs.file_repairs_applied != 1u) ||
         (source_needed &&
-         (rootfs.provision_entries < 1u ||
+         (rootfs.provision_entries < 2u ||
           rootfs.provision_entries + rootfs.provision_reused_entries !=
-              VM_BIGBOSS_MIGRATION_ENTRY_COUNT))) {
+              source_entry_count))) {
         if (rootfs_status == ROOTFS_WORK_OK) {
             build_detail(detail, detail_capacity,
                          "The completed guest-disk clone did not contain the requested maintenance result.");
@@ -507,7 +590,7 @@ static vm_guest_install_build_status_t build_maintain_install(
             work_directory, install->manifest_sha256, &published,
             transaction_detail, sizeof transaction_detail);
     } else {
-        publication = vm_guest_sources_publish(
+        publication = vm_guest_sources_v2_publish(
             work_directory, install->manifest_sha256, &published,
             transaction_detail, sizeof transaction_detail);
     }
@@ -516,7 +599,7 @@ static vm_guest_install_build_status_t build_maintain_install(
     } else if (repair_needed) {
         if (result) result->privilege_transaction = published;
     } else if (result) {
-        result->sources_transaction = published;
+        result->sources_v2_transaction = published;
     }
     if (publication != VM_GUEST_INSTALL_OK || !published.committed) {
         build_detail(detail, detail_capacity,
@@ -547,13 +630,29 @@ static vm_guest_install_build_status_t build_maintain_install(
     }
     if (source_needed) {
         if (result) result->cydia_sources_added = true;
-        if (grow_storage || repair_needed) {
+        if (!sources->committed) {
             vm_guest_install_result_t confirmed;
             vm_guest_install_status_t confirmation =
                 vm_guest_sources_confirm(
                     work_directory, install->manifest_sha256, &confirmed,
                     transaction_detail, sizeof transaction_detail);
             if (result) result->sources_transaction = confirmed;
+            if (confirmation != VM_GUEST_INSTALL_OK ||
+                !confirmed.committed) {
+                build_detail(detail, detail_capacity,
+                             transaction_detail[0]
+                                 ? transaction_detail
+                                 : vm_guest_install_status_text(confirmation));
+                return VM_GUEST_INSTALL_BUILD_ERR_PUBLISH;
+            }
+        }
+        if (grow_storage || repair_needed) {
+            vm_guest_install_result_t confirmed;
+            vm_guest_install_status_t confirmation =
+                vm_guest_sources_v2_confirm(
+                    work_directory, install->manifest_sha256, &confirmed,
+                    transaction_detail, sizeof transaction_detail);
+            if (result) result->sources_v2_transaction = confirmed;
             if (confirmation != VM_GUEST_INSTALL_OK ||
                 !confirmed.committed) {
                 build_detail(detail, detail_capacity,
@@ -587,7 +686,7 @@ vm_guest_install_build_from_directory(
     }
 
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 0u, 3u);
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 0u, 4u);
     vm_guest_install_result_t privilege;
     vm_guest_install_result_t storage;
     vm_guest_install_result_t sources;
@@ -609,7 +708,21 @@ vm_guest_install_build_from_directory(
         result->sources_transaction = sources;
     }
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 2u, 3u);
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 2u, 4u);
+    vm_guest_install_result_t sources_v2;
+    maintenance_recovery = vm_guest_sources_v2_recover(
+        work_directory, &sources_v2, transaction_detail,
+        sizeof transaction_detail);
+    if (maintenance_recovery != VM_GUEST_INSTALL_OK) {
+        build_detail(detail, detail_capacity,
+                     transaction_detail[0]
+                         ? transaction_detail
+                         : vm_guest_install_status_text(maintenance_recovery));
+        return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
+    }
+    if (result) result->sources_v2_transaction = sources_v2;
+    build_progress(progress, progress_context,
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 3u, 4u);
     vm_guest_install_result_t recovered;
     vm_guest_install_status_t recovery = vm_guest_install_recover(
         work_directory, &recovered, transaction_detail,
@@ -622,7 +735,7 @@ vm_guest_install_build_from_directory(
     }
     if (result) result->transaction = recovered;
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 3u, 3u);
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 4u, 4u);
     if (recovered.committed) {
         if (result) {
             result->already_installed = true;
@@ -632,9 +745,11 @@ vm_guest_install_build_from_directory(
         }
         return build_maintain_install(
             work_directory, &recovered, &storage, &privilege, &sources,
+            &sources_v2,
             progress, progress_context, result, detail, detail_capacity);
     }
-    if (storage.committed || privilege.committed || sources.committed) {
+    if (storage.committed || privilege.committed || sources.committed ||
+        sources_v2.committed) {
         build_detail(detail, detail_capacity,
                      "A guest-disk maintenance record exists without a committed guest installation.");
         return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
@@ -742,10 +857,23 @@ vm_guest_install_build_from_directory(
         return VM_GUEST_INSTALL_BUILD_ERR_PUBLISH;
     }
     vm_guest_install_result_t sources_confirmed;
-    vm_guest_install_status_t sources_confirmation = vm_guest_sources_confirm(
+    vm_guest_install_status_t sources_confirmation =
+        vm_guest_sources_confirm(
+            work_directory, manifest, &sources_confirmed, transaction_detail,
+            sizeof transaction_detail);
+    if (result) result->sources_transaction = sources_confirmed;
+    if (sources_confirmation != VM_GUEST_INSTALL_OK ||
+        !sources_confirmed.committed) {
+        build_detail(detail, detail_capacity,
+                     transaction_detail[0]
+                         ? transaction_detail
+                         : vm_guest_install_status_text(sources_confirmation));
+        return VM_GUEST_INSTALL_BUILD_ERR_PUBLISH;
+    }
+    sources_confirmation = vm_guest_sources_v2_confirm(
         work_directory, manifest, &sources_confirmed, transaction_detail,
         sizeof transaction_detail);
-    if (result) result->sources_transaction = sources_confirmed;
+    if (result) result->sources_v2_transaction = sources_confirmed;
     if (sources_confirmation != VM_GUEST_INSTALL_OK ||
         !sources_confirmed.committed) {
         build_detail(detail, detail_capacity,

@@ -99,6 +99,14 @@ static bool sources_stage_path_for(char *out, size_t capacity,
            join_path(out, capacity, stage, name);
 }
 
+static bool sources_v2_stage_path_for(char *out, size_t capacity,
+                                      const char *name) {
+    char stage[1400];
+    return path_for(stage, sizeof stage,
+                    VM_GUEST_SOURCES_V2_STAGE_DIRECTORY) &&
+           join_path(out, capacity, stage, name);
+}
+
 static bool recovery_stage_path_for(char *out, size_t capacity,
                                     const char *name) {
     char stage[1400];
@@ -147,6 +155,11 @@ static void remove_fixture_artifacts(void) {
         VM_GUEST_SOURCES_MARKER_TMP,
         VM_GUEST_SOURCES_JOURNAL_FILE,
         VM_GUEST_SOURCES_JOURNAL_TMP,
+        VM_GUEST_SOURCES_V2_BACKUP_FILE,
+        VM_GUEST_SOURCES_V2_MARKER_FILE,
+        VM_GUEST_SOURCES_V2_MARKER_TMP,
+        VM_GUEST_SOURCES_V2_JOURNAL_FILE,
+        VM_GUEST_SOURCES_V2_JOURNAL_TMP,
         VM_GUEST_RECOVERY_BACKUP_FILE,
         VM_GUEST_RECOVERY_MARKER_FILE,
         VM_GUEST_RECOVERY_MARKER_TMP,
@@ -174,6 +187,11 @@ static void remove_fixture_artifacts(void) {
                                VM_GUEST_INSTALL_NEXT_FILE))
         (void)remove(path);
     if (path_for(path, sizeof path, VM_GUEST_SOURCES_STAGE_DIRECTORY))
+        (void)remove_directory(path);
+    if (sources_v2_stage_path_for(path, sizeof path,
+                                  VM_GUEST_INSTALL_NEXT_FILE))
+        (void)remove(path);
+    if (path_for(path, sizeof path, VM_GUEST_SOURCES_V2_STAGE_DIRECTORY))
         (void)remove_directory(path);
     if (recovery_stage_path_for(path, sizeof path,
                                 VM_GUEST_INSTALL_NEXT_FILE))
@@ -743,6 +761,82 @@ static void test_sources_recovery_preserves_install_authority(void) {
     }
 }
 
+static void test_sources_v2_recovery_preserves_install_authority(void) {
+    for (unsigned boundary = 1u; boundary <= 4u; boundary++) {
+        uint8_t digest[VM_GUEST_INSTALL_SHA256_SIZE];
+        fill_digest(digest, 112u);
+        CHECK(prepare_pair(),
+              "could not prepare install before sources-v2 boundary %u",
+              boundary);
+        vm_guest_install_result_t result;
+        char detail[256];
+        CHECK(vm_guest_install_publish(FIXTURE_DIR, digest, &result,
+                                       detail, sizeof detail) ==
+                  VM_GUEST_INSTALL_OK && result.committed,
+              "could not commit install before sources-v2 boundary %u: %s",
+              boundary, detail);
+
+        CHECK(vm_guest_sources_v2_prepare_stage(FIXTURE_DIR, &result,
+                                                detail, sizeof detail) ==
+                  VM_GUEST_INSTALL_OK && !result.committed,
+              "could not prepare sources-v2 boundary %u: %s",
+              boundary, detail);
+        char next[1400];
+        char resume[1400];
+        CHECK(vm_guest_sources_v2_stage_image_path(next, sizeof next,
+                                                   FIXTURE_DIR) &&
+              path_for(resume, sizeof resume,
+                       VM_GUEST_INSTALL_RESUME_ONCE_FILE) &&
+              write_bytes(next, "source-v2-rootfs") &&
+              write_bytes(resume, "resume pre-source-v2 disk\n"),
+              "could not seed sources-v2 boundary %u", boundary);
+
+        vm_guest_install_test_interrupt_after(boundary);
+        vm_guest_install_status_t status = vm_guest_sources_v2_publish(
+            FIXTURE_DIR, digest, &result, detail, sizeof detail);
+        vm_guest_install_test_interrupt_after(0u);
+        CHECK(status == VM_GUEST_INSTALL_ERR_INTERRUPTED,
+              "sources-v2 boundary %u returned %s, not interruption",
+              boundary, vm_guest_install_status_text(status));
+
+        uint8_t install_digest[VM_GUEST_INSTALL_SHA256_SIZE];
+        CHECK(vm_guest_install_probe(FIXTURE_DIR, install_digest,
+                                     detail, sizeof detail) ==
+                  VM_GUEST_INSTALL_PROBE_VALID &&
+              memcmp(install_digest, digest, sizeof install_digest) == 0,
+              "sources-v2 boundary %u removed or changed install authority",
+              boundary);
+
+        vm_guest_install_result_t privilege;
+        vm_guest_install_result_t storage;
+        vm_guest_install_result_t sources;
+        status = vm_guest_maintenance_recover(
+            FIXTURE_DIR, &privilege, &storage, &sources,
+            detail, sizeof detail);
+        CHECK(status == VM_GUEST_INSTALL_OK,
+              "sources-v2 boundary %u did not recover through the shared owner: %s",
+              boundary, detail);
+        status = vm_guest_sources_v2_recover(
+            FIXTURE_DIR, &result, detail, sizeof detail);
+        CHECK(status == VM_GUEST_INSTALL_OK && result.committed &&
+              result.cleanup_complete && result.has_manifest &&
+              memcmp(result.manifest_sha256, digest, sizeof digest) == 0,
+              "sources-v2 boundary %u did not recover to a clean commit: %s",
+              boundary, detail);
+        char live[1400];
+        CHECK(path_for(live, sizeof live, VM_GUEST_INSTALL_LIVE_FILE) &&
+              file_equals(live, "source-v2-rootfs") && !exists(resume),
+              "sources-v2 boundary %u published wrong bytes or kept resume",
+              boundary);
+        status = vm_guest_install_recover(FIXTURE_DIR, &result,
+                                          detail, sizeof detail);
+        CHECK(status == VM_GUEST_INSTALL_OK && result.committed &&
+              memcmp(result.manifest_sha256, digest, sizeof digest) == 0,
+              "install authority failed after sources-v2 boundary %u: %s",
+              boundary, detail);
+    }
+}
+
 static void test_privilege_confirmation_is_marker_only(void) {
     uint8_t digest[VM_GUEST_INSTALL_SHA256_SIZE];
     uint8_t other[VM_GUEST_INSTALL_SHA256_SIZE];
@@ -799,6 +893,22 @@ static void test_privilege_confirmation_is_marker_only(void) {
                                       detail, sizeof detail);
     CHECK(status == VM_GUEST_INSTALL_ERR_STATE,
           "different source identity replaced the committed marker");
+
+    status = vm_guest_sources_v2_confirm(FIXTURE_DIR, digest, &result,
+                                         detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_OK && result.committed &&
+          file_equals(live, "new-rootfs") &&
+          file_equals(resume, "resume current disk\n"),
+          "source-v2 confirmation changed the disk or invalidated resume: %s",
+          detail);
+    status = vm_guest_sources_v2_confirm(FIXTURE_DIR, digest, &result,
+                                         detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_OK && result.committed,
+          "source-v2 confirmation was not idempotent: %s", detail);
+    status = vm_guest_sources_v2_confirm(FIXTURE_DIR, other, &result,
+                                         detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_ERR_STATE,
+          "different source-v2 identity replaced the committed marker");
 }
 
 static void test_maintenance_recovery_chooses_the_active_owner(void) {
@@ -908,6 +1018,27 @@ static void test_maintenance_recovery_refuses_competing_owners(void) {
           file_equals(privilege_journal, "claimed\n") &&
           file_equals(storage_journal, "claimed\n"),
           "journal conflict changed the live disk or either owner record");
+
+    char sources_journal[1400];
+    char sources_v2_journal[1400];
+    remove_fixture_artifacts();
+    CHECK(path_for(live, sizeof live, VM_GUEST_INSTALL_LIVE_FILE) &&
+          path_for(sources_journal, sizeof sources_journal,
+                   VM_GUEST_SOURCES_JOURNAL_FILE) &&
+          path_for(sources_v2_journal, sizeof sources_v2_journal,
+                   VM_GUEST_SOURCES_V2_JOURNAL_FILE) &&
+          write_bytes(live, "original-rootfs") &&
+          write_bytes(sources_journal, "claimed\n") &&
+          write_bytes(sources_v2_journal, "claimed\n"),
+          "could not seed competing source maintenance journals");
+    CHECK(vm_guest_maintenance_recover(FIXTURE_DIR, &privilege, &storage, NULL,
+                                       detail, sizeof detail) ==
+              VM_GUEST_INSTALL_ERR_STATE,
+          "v1 and v2 source journals were guessed through: %s", detail);
+    CHECK(file_equals(live, "original-rootfs") &&
+          file_equals(sources_journal, "claimed\n") &&
+          file_equals(sources_v2_journal, "claimed\n"),
+          "source journal conflict changed the live disk or either owner record");
 
     remove_fixture_artifacts();
     CHECK(path_for(privilege_backup, sizeof privilege_backup,
@@ -1085,6 +1216,13 @@ int main(void) {
           strstr(stage_image, VM_GUEST_SOURCES_STAGE_DIRECTORY) != NULL &&
           strstr(stage_image, VM_GUEST_INSTALL_NEXT_FILE) != NULL,
           "sources stage-image path names the wrong file: %s", stage_image);
+    CHECK(vm_guest_sources_v2_stage_image_path(stage_image,
+                                               sizeof stage_image,
+                                               FIXTURE_DIR) &&
+          strstr(stage_image, VM_GUEST_SOURCES_V2_STAGE_DIRECTORY) != NULL &&
+          strstr(stage_image, VM_GUEST_INSTALL_NEXT_FILE) != NULL,
+          "sources-v2 stage-image path names the wrong file: %s",
+          stage_image);
     CHECK(vm_guest_recovery_stage_image_path(stage_image, sizeof stage_image,
                                              FIXTURE_DIR) &&
           strstr(stage_image, VM_GUEST_RECOVERY_STAGE_DIRECTORY) != NULL &&
@@ -1101,6 +1239,7 @@ int main(void) {
     test_storage_recovery_preserves_install_authority();
     test_privilege_recovery_preserves_install_authority();
     test_sources_recovery_preserves_install_authority();
+    test_sources_v2_recovery_preserves_install_authority();
     test_privilege_confirmation_is_marker_only();
     test_maintenance_recovery_chooses_the_active_owner();
     test_maintenance_recovery_refuses_competing_owners();
