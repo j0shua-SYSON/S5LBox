@@ -1182,6 +1182,52 @@ device, observed through Cydia's completion UI; it is not broad package
 compatibility, a post-run catalog extraction, or proof that applying the five
 bootstrap upgrades is safe. No kernel MAC-policy bypass was added.
 
+## 2026-08-17: legacy APT trust-store repair
+
+The first physical BigBoss refresh after the cache/source migration did not
+terminally stop the CPU. It retired roughly another 5 billion guest
+instructions before cancellation exposed the actual error: APT could not
+access its keyring because `/etc/apt/trusted.gpg` did not exist. The pinned
+`apt7-key_0.7.20.2-1` package is not a key package; its data archive contains
+only `/usr/bin/apt-key`. Static inspection of the matching APT library found a
+single `Apt::GPGV::TrustedKeyring` default of `/etc/apt/trusted.gpg` and no
+`trusted.gpg.d` lookup. Reinstalling `apt7-key`, adding certificates, or
+disabling signature checks would therefore not be a correct repair.
+
+The retained iPhone OS 3 bootstrap contains BigBoss public key fingerprint
+`A9C96A37115894A23B894107694D17D38764B4F4`. Its exact 1,164-byte binary
+keyring has SHA-256
+`0D01DD890722AE15916C7730E89ABA8C41A8CEAEA50293F8BB4AC9D2795FECB5`.
+An independent OpenPGP parse and DSA/SHA-1 verification accepted BigBoss's
+2026-08-17 `Release.gpg` over the exact downloaded `Release` bytes; the
+signature's issuer key ID is `694D17D38764B4F4`, matching that fingerprint.
+
+Fresh rootfs plan identity version 5 now seeds those exact public-key bytes as
+root:root `0644` `/private/etc/apt/trusted.gpg`. Existing installations use a
+separate `guest.apt-trust-v1` journal/marker and an unpublished HFS clone. A
+missing keyring is created; the exact known 5,974-byte historical multi-key
+ring is preserved because it already contains BigBoss; any other existing
+trust store is refused rather than overwritten. A private one-shot launchd
+helper removes only failed BigBoss list/cache files before the next refresh.
+APT signature verification is never disabled.
+
+Portable transaction tests exercise all four durable publication boundaries.
+The focused transaction, rootfs-plan, builder, and firmware-boot group passes
+4/4. The complete normal suite passes 67/67; the warnings-as-errors build with
+the JIT and signed-static engine enabled passes 72/72. A disposable copy of the
+exact retained 2,147,483,648-byte physical-device image then ran the real
+migration and idempotent retry: 2,254 checks, zero failures, three new files,
+unchanged disk geometry, and a committed trust marker. Independent HFS
+extraction read back one 1,164-byte `trusted.gpg` with the exact SHA-256 above.
+
+Brutal-honesty boundary: this proves the key identity, current BigBoss Release
+signature, host-side HFS publication, crash recovery, readback, and retry. It
+does **not yet** prove that the old guest `gpgv` accepts the current signature,
+that a physical Cydia refresh completes, or that a theme installs and resprings.
+BigBoss transport remains HTTP and the repository uses historical DSA/SHA-1;
+signed Release metadata is materially better than unauthenticated APT, but it
+is not modern transport or cryptographic security.
+
 ## 2026-08-15: dependency repository migration for existing guests
 
 Physical Cydia testing exposed a dependency-source failure rather than a TLS

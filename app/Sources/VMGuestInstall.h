@@ -64,6 +64,15 @@ extern "C" {
 #define VM_GUEST_SOURCES_V2_MARKER_TMP      "guest.cydia-sources-v2.partial"
 #define VM_GUEST_SOURCES_V2_JOURNAL_FILE    "guest.cydia-sources-v2.transaction"
 #define VM_GUEST_SOURCES_V2_JOURNAL_TMP     "guest.cydia-sources-v2.transaction.partial"
+/* The legacy APT client requires one explicit trusted.gpg. Keep this repair
+ * independent from source/cache v2 so machines that already committed that
+ * migration still receive the missing public key safely. */
+#define VM_GUEST_APT_TRUST_BACKUP_FILE     "rootfs-work.pre-apt-trust-v1"
+#define VM_GUEST_APT_TRUST_STAGE_DIRECTORY "guest.apt-trust-v1.stage"
+#define VM_GUEST_APT_TRUST_MARKER_FILE     "guest.apt-trust-v1"
+#define VM_GUEST_APT_TRUST_MARKER_TMP      "guest.apt-trust-v1.partial"
+#define VM_GUEST_APT_TRUST_JOURNAL_FILE    "guest.apt-trust-v1.transaction"
+#define VM_GUEST_APT_TRUST_JOURNAL_TMP     "guest.apt-trust-v1.transaction.partial"
 /* Powered-off filesystem repair is repeatable, so its commit record is only a
  * crash-recovery boundary. It is removed after the backup, journal, and stage
  * are durably cleaned instead of becoming permanent boot policy. */
@@ -245,6 +254,32 @@ vm_guest_sources_v2_confirm(const char *work_directory,
                                 VM_GUEST_INSTALL_SHA256_SIZE],
                             vm_guest_install_result_t *result,
                             char *detail, size_t detail_capacity);
+
+/* Versioned legacy-APT trust-store migration. Unknown existing keyrings are
+ * never replaced; callers must prove an accepted keyring before confirming
+ * this marker or publish a complete staged image containing the exact key. */
+bool vm_guest_apt_trust_stage_image_path(char *out, size_t capacity,
+                                         const char *work_directory);
+vm_guest_install_status_t
+vm_guest_apt_trust_prepare_stage(const char *work_directory,
+                                 vm_guest_install_result_t *result,
+                                 char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_apt_trust_recover(const char *work_directory,
+                           vm_guest_install_result_t *result,
+                           char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_apt_trust_publish(const char *work_directory,
+                           const uint8_t manifest_sha256[
+                               VM_GUEST_INSTALL_SHA256_SIZE],
+                           vm_guest_install_result_t *result,
+                           char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_apt_trust_confirm(const char *work_directory,
+                           const uint8_t manifest_sha256[
+                               VM_GUEST_INSTALL_SHA256_SIZE],
+                           vm_guest_install_result_t *result,
+                           char *detail, size_t detail_capacity);
 
 /* Crash-safe publication of an unpublished powered-off filesystem repair.
  * prepare_stage() creates an empty same-directory stage after recovering every

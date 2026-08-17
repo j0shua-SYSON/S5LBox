@@ -889,10 +889,11 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         return false;
     }
 
-    /* Capacity, Cydia metadata, and repository maintenance have disjoint
-     * journals but replace the same live image. Their recovery layer inspects
-     * which one currently owns that pathname and runs it first; a fixed order
-     * is wrong once any transaction can stop between the two renames. */
+    /* Capacity, Cydia metadata, repository, and APT-trust maintenance have
+     * disjoint journals but replace the same live image. Their recovery layer
+     * inspects which one currently owns that pathname and runs it first; a
+     * fixed order is wrong once any transaction can stop between the two
+     * renames. */
     vm_guest_install_result_t guest_privilege;
     vm_guest_install_result_t guest_storage;
     vm_guest_install_result_t guest_sources;

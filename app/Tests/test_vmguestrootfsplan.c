@@ -309,6 +309,8 @@ static void test_complete_synthetic_plan(void) {
         find_entry(plan, VM_GUEST_ROOTFS_SAURIK_SOURCE_PATH);
     const rootfs_work_entry_t *bigboss_source =
         find_entry(plan, VM_GUEST_ROOTFS_BIGBOSS_SOURCE_PATH);
+    const rootfs_work_entry_t *trusted_keyring =
+        find_entry(plan, VM_GUEST_ROOTFS_TRUSTED_KEYRING_PATH);
     static const char EXPECTED_CYDIA_SOURCE[] =
         VM_GUEST_ROOTFS_SAURIK_SOURCE_LINE;
     static const char EXPECTED_BIGBOSS_SOURCE[] =
@@ -342,6 +344,33 @@ static void test_complete_synthetic_plan(void) {
           memcmp(bigboss_source->content, EXPECTED_BIGBOSS_SOURCE,
                  sizeof EXPECTED_BIGBOSS_SOURCE - 1u) == 0,
           "the BigBoss distribution source is not exact root:root 0644 data");
+    size_t expected_keyring_size = 0u;
+    const uint8_t *expected_keyring =
+        vm_guest_rootfs_bigboss_keyring(&expected_keyring_size);
+    uint8_t keyring_digest[IOS3_SHA256_DIGEST_SIZE];
+    static const uint8_t EXPECTED_KEYRING_DIGEST[
+        IOS3_SHA256_DIGEST_SIZE] = {
+        0x0du, 0x01u, 0xddu, 0x89u, 0x07u, 0x22u, 0xaeu, 0x15u,
+        0x91u, 0x6cu, 0x77u, 0x30u, 0xe8u, 0x9au, 0xbau, 0x8cu,
+        0x41u, 0xa8u, 0xceu, 0xaeu, 0xa5u, 0x02u, 0x93u, 0xf8u,
+        0xbbu, 0x4au, 0xc9u, 0xd2u, 0x79u, 0x5fu, 0xecu, 0xb5u
+    };
+    CHECK(expected_keyring && expected_keyring_size == 1164u &&
+          ios3_sha256(expected_keyring, expected_keyring_size,
+                      keyring_digest) &&
+          memcmp(keyring_digest, EXPECTED_KEYRING_DIGEST,
+                 sizeof keyring_digest) == 0,
+          "the embedded BigBoss public key has the wrong identity");
+    CHECK(trusted_keyring &&
+          trusted_keyring->kind == ROOTFS_WORK_ENTRY_FILE &&
+          trusted_keyring->permissions == 0644u &&
+          trusted_keyring->owner_id == 0u &&
+          trusted_keyring->group_id == 0u &&
+          trusted_keyring->existing_policy == ROOTFS_WORK_EXISTING_REFUSE &&
+          trusted_keyring->content_size == expected_keyring_size &&
+          memcmp(trusted_keyring->content, expected_keyring,
+                 expected_keyring_size) == 0,
+          "the legacy APT keyring is not exact root:root 0644 key data");
 
     char cache_path[ROOTFS_WORK_MAX_PATH];
     int written = snprintf(cache_path, sizeof cache_path, "%s/%s",
@@ -444,10 +473,10 @@ static void test_complete_synthetic_plan(void) {
     CHECK(vm_guest_rootfs_plan_manifest_sha256(plan, digest),
           "plan manifest identity was not produced");
     static const uint8_t EXPECTED[VM_GUEST_PACKAGE_SHA256_SIZE] = {
-        0x3eu, 0x8au, 0xeeu, 0x43u, 0x4fu, 0x45u, 0x6fu, 0x81u,
-        0x0cu, 0x3au, 0x5bu, 0x32u, 0x82u, 0xdau, 0x3au, 0x5bu,
-        0x9fu, 0xceu, 0x18u, 0xf1u, 0x4au, 0x36u, 0x72u, 0x5au,
-        0x98u, 0xafu, 0x29u, 0xe3u, 0xd6u, 0x76u, 0x4fu, 0x5eu
+        0x84u, 0x79u, 0x1bu, 0x17u, 0x28u, 0xc3u, 0xc6u, 0x6du,
+        0xb1u, 0x97u, 0xc2u, 0x59u, 0x1bu, 0x9fu, 0x87u, 0x45u,
+        0x67u, 0xb2u, 0x51u, 0x00u, 0x55u, 0x43u, 0x90u, 0x66u,
+        0xf2u, 0xe2u, 0x5du, 0x43u, 0xdfu, 0xefu, 0x1cu, 0x2du
     };
     CHECK(memcmp(digest, EXPECTED, sizeof digest) == 0,
           "synthetic plan identity changed");

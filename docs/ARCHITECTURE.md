@@ -286,6 +286,17 @@ sources use HTTP because the pinned iPhone OS 3-era APT stack cannot negotiate
 the available modern HTTPS endpoints; host PPP/NAT remains the transport
 boundary.
 
+That APT build also hard-codes one `/etc/apt/trusted.gpg`; it does not scan the
+modern `trusted.gpg.d` directory. Rootfs plan identity version 5 therefore
+includes BigBoss's exact legacy public signing key in binary keyring form.
+Already-installed guests use the disjoint `guest.apt-trust-v1` transaction, so
+a machine that committed source/cache v2 still receives the missing key. A
+missing file is created, the exact retained historical multi-key ring is
+preserved, and an unknown existing keyring is refused rather than replaced.
+The dynamic maintenance owner scan includes this journal before firmware opens
+the shared live image. Signature checks remain enabled; the separate one-shot
+guest helper removes only failed BigBoss index caches after publication.
+
 `OOCSHDWN.GO_STANDBY` is full guest power-off, not an ordinary suspend point.
 The quiesced CPU deliberately loops, so restoring its CPU/RAM and preserving the
 instruction timeline only reproduces a black powered-off machine. The retained-

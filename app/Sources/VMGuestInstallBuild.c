@@ -81,6 +81,45 @@ static bool build_bigboss_source_probe(
         probe, VM_BIGBOSS_SOURCE, sizeof VM_BIGBOSS_SOURCE - 1u);
 }
 
+/* This is the exact complete trusted.gpg carried by the retained historical
+ * bootstrap. It already contains the same BigBoss key, so preserve and accept
+ * it without embedding or replacing the unrelated legacy repository keys. */
+static const uint8_t VM_HISTORICAL_APT_TRUST_SHA256[
+    IOS3_SHA256_DIGEST_SIZE] = {
+    0xcfu, 0x37u, 0x73u, 0xdfu, 0x09u, 0x25u, 0x0eu, 0x12u,
+    0xcfu, 0x08u, 0xedu, 0x0fu, 0x15u, 0x73u, 0xf6u, 0x60u,
+    0x56u, 0x13u, 0x2bu, 0xd1u, 0xffu, 0xfeu, 0xc3u, 0x3du,
+    0xc7u, 0x48u, 0xe7u, 0x4bu, 0x9cu, 0x18u, 0x23u, 0xbcu
+};
+
+static bool build_apt_trust_probe_for(
+    rootfs_work_file_repair_t *probe, uint64_t size,
+    const uint8_t digest[IOS3_SHA256_DIGEST_SIZE]) {
+    if (!probe || !digest || size == 0u) return false;
+    memset(probe, 0, sizeof *probe);
+    probe->path = VM_GUEST_ROOTFS_TRUSTED_KEYRING_PATH;
+    probe->expected_size = size;
+    memcpy(probe->expected_sha256, digest, IOS3_SHA256_DIGEST_SIZE);
+    probe->expected_permissions = 0644u;
+    probe->desired_permissions = 0644u;
+    return true;
+}
+
+static bool build_bigboss_keyring_probe(
+    rootfs_work_file_repair_t *probe) {
+    size_t size = 0u;
+    const uint8_t *keyring = vm_guest_rootfs_bigboss_keyring(&size);
+    uint8_t digest[IOS3_SHA256_DIGEST_SIZE];
+    return keyring && size != 0u && ios3_sha256(keyring, size, digest) &&
+           build_apt_trust_probe_for(probe, (uint64_t)size, digest);
+}
+
+static bool build_historical_keyring_probe(
+    rootfs_work_file_repair_t *probe) {
+    return build_apt_trust_probe_for(
+        probe, UINT64_C(5974), VM_HISTORICAL_APT_TRUST_SHA256);
+}
+
 static const uint8_t VM_BIGBOSS_CACHE_CLEANUP[] =
     "#!/bin/sh\n"
     "PATH=/usr/bin:/bin:/usr/sbin:/sbin\n"
@@ -121,10 +160,52 @@ static const uint8_t VM_BIGBOSS_CACHE_CLEANUP_PLIST[] =
     "</dict>\n"
     "</plist>\n";
 
-enum { VM_BIGBOSS_MIGRATION_MAX_ENTRIES = 8u };
+static const uint8_t VM_APT_TRUST_CACHE_CLEANUP[] =
+    "#!/bin/sh\n"
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin\n"
+    "export PATH\n"
+    "state=/private/var/lib/s5lbox\n"
+    "marker=$state/apt-trust-v1.complete\n"
+    "[ -e \"$marker\" ] && exit 0\n"
+    "log=/private/var/log/s5lbox-apt-trust-v1.log\n"
+    "exec >>\"$log\" 2>&1\n"
+    "for cache in /private/var/lib/apt/lists/apt.thebigboss.org_repofiles_cydia_dists_stable_* /private/var/lib/apt/lists/partial/apt.thebigboss.org_repofiles_cydia_dists_stable_*; do\n"
+    "    [ -e \"$cache\" ] || continue\n"
+    "    /bin/rm -f \"$cache\" || exit 1\n"
+    "done\n"
+    "/bin/rm -f /private/var/cache/apt/pkgcache.bin /private/var/cache/apt/srcpkgcache.bin || exit 1\n"
+    ": >\"$marker.partial\" || exit 1\n"
+    "/bin/sync\n"
+    "/bin/mv -f \"$marker.partial\" \"$marker\" || exit 1\n"
+    "/bin/sync\n"
+    "echo 'APT trust installed; cached BigBoss indexes removed'\n"
+    "exit 0\n";
 
-static size_t build_bigboss_source_entries(
-    rootfs_work_entry_t *entries, size_t capacity, bool create_source) {
+#define VM_APT_TRUST_CACHE_CLEANUP_PATH \
+    "/private/var/lib/s5lbox/apt-trust-v1"
+
+static const uint8_t VM_APT_TRUST_CACHE_CLEANUP_PLIST[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\">\n"
+    "<dict>\n"
+    "  <key>Label</key>\n"
+    "  <string>com.j0shua.s5lbox.apt-trust-v1</string>\n"
+    "  <key>ProgramArguments</key>\n"
+    "  <array>\n"
+    "    <string>" VM_APT_TRUST_CACHE_CLEANUP_PATH "</string>\n"
+    "  </array>\n"
+    "  <key>RunAtLoad</key>\n"
+    "  <true/>\n"
+    "</dict>\n"
+    "</plist>\n";
+
+enum { VM_CYDIA_MAINTENANCE_MAX_ENTRIES = 11u };
+
+static size_t build_cydia_maintenance_entries(
+    rootfs_work_entry_t *entries, size_t capacity,
+    bool include_source, bool create_source,
+    bool include_trust, bool create_keyring) {
     static const char *directories[] = {
         "/private/etc/apt",
         "/private/etc/apt/sources.list.d",
@@ -134,7 +215,9 @@ static size_t build_bigboss_source_entries(
     };
     const size_t directory_count =
         sizeof directories / sizeof directories[0];
-    const size_t required = directory_count + 2u + (create_source ? 1u : 0u);
+    const size_t required = directory_count +
+        (include_source ? 2u + (create_source ? 1u : 0u) : 0u) +
+        (include_trust ? 2u + (create_keyring ? 1u : 0u) : 0u);
     if (!entries || capacity < required) return required;
     memset(entries, 0, required * sizeof entries[0]);
     size_t count = 0u;
@@ -146,7 +229,7 @@ static size_t build_bigboss_source_entries(
             ROOTFS_WORK_EXISTING_REUSE_DIRECTORY;
         count++;
     }
-    if (create_source) {
+    if (include_source && create_source) {
         entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
         entries[count].path = VM_GUEST_ROOTFS_BIGBOSS_SOURCE_PATH;
         entries[count].content = VM_BIGBOSS_SOURCE;
@@ -154,31 +237,78 @@ static size_t build_bigboss_source_entries(
         entries[count].permissions = 0644u;
         count++;
     }
-    entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
-    /* Cydia-era bootstraps may stash /usr/libexec behind a symlink. The
-     * provisioner must not replace or traverse that guest-owned object, and
-     * this one-shot helper belongs with the state it manages anyway. */
-    entries[count].path = VM_BIGBOSS_CACHE_CLEANUP_PATH;
-    entries[count].content = VM_BIGBOSS_CACHE_CLEANUP;
-    entries[count].content_size = sizeof VM_BIGBOSS_CACHE_CLEANUP - 1u;
-    entries[count].permissions = 0755u;
-    count++;
-    entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
-    entries[count].path =
-        "/System/Library/LaunchDaemons/"
-        "com.j0shua.s5lbox.cydia-index-cache-v2.plist";
-    entries[count].content = VM_BIGBOSS_CACHE_CLEANUP_PLIST;
-    entries[count].content_size =
-        sizeof VM_BIGBOSS_CACHE_CLEANUP_PLIST - 1u;
-    entries[count].permissions = 0644u;
-    count++;
+    if (include_source) {
+        entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
+        /* Cydia-era bootstraps may stash /usr/libexec behind a symlink. The
+         * helper belongs with the private state it manages. */
+        entries[count].path = VM_BIGBOSS_CACHE_CLEANUP_PATH;
+        entries[count].content = VM_BIGBOSS_CACHE_CLEANUP;
+        entries[count].content_size = sizeof VM_BIGBOSS_CACHE_CLEANUP - 1u;
+        entries[count].permissions = 0755u;
+        count++;
+        entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
+        entries[count].path =
+            "/System/Library/LaunchDaemons/"
+            "com.j0shua.s5lbox.cydia-index-cache-v2.plist";
+        entries[count].content = VM_BIGBOSS_CACHE_CLEANUP_PLIST;
+        entries[count].content_size =
+            sizeof VM_BIGBOSS_CACHE_CLEANUP_PLIST - 1u;
+        entries[count].permissions = 0644u;
+        count++;
+    }
+    if (include_trust && create_keyring) {
+        size_t keyring_size = 0u;
+        const uint8_t *keyring =
+            vm_guest_rootfs_bigboss_keyring(&keyring_size);
+        entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
+        entries[count].path = VM_GUEST_ROOTFS_TRUSTED_KEYRING_PATH;
+        entries[count].content = keyring;
+        entries[count].content_size = keyring_size;
+        entries[count].permissions = 0644u;
+        count++;
+    }
+    if (include_trust) {
+        entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
+        entries[count].path = VM_APT_TRUST_CACHE_CLEANUP_PATH;
+        entries[count].content = VM_APT_TRUST_CACHE_CLEANUP;
+        entries[count].content_size =
+            sizeof VM_APT_TRUST_CACHE_CLEANUP - 1u;
+        entries[count].permissions = 0755u;
+        count++;
+        entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
+        entries[count].path =
+            "/System/Library/LaunchDaemons/"
+            "com.j0shua.s5lbox.apt-trust-v1.plist";
+        entries[count].content = VM_APT_TRUST_CACHE_CLEANUP_PLIST;
+        entries[count].content_size =
+            sizeof VM_APT_TRUST_CACHE_CLEANUP_PLIST - 1u;
+        entries[count].permissions = 0644u;
+        count++;
+    }
     return count;
+}
+
+static size_t build_bigboss_source_entries(
+    rootfs_work_entry_t *entries, size_t capacity, bool create_source) {
+    return build_cydia_maintenance_entries(
+        entries, capacity, true, create_source, false, false);
+}
+
+static size_t build_apt_trust_entries(
+    rootfs_work_entry_t *entries, size_t capacity, bool create_keyring) {
+    return build_cydia_maintenance_entries(
+        entries, capacity, false, false, true, create_keyring);
 }
 
 #if defined(S5LBOX_GUEST_INSTALL_TESTING)
 size_t vm_guest_install_build_test_bigboss_source_entries(
     rootfs_work_entry_t *entries, size_t capacity, bool create_source) {
     return build_bigboss_source_entries(entries, capacity, create_source);
+}
+
+size_t vm_guest_install_build_test_apt_trust_entries(
+    rootfs_work_entry_t *entries, size_t capacity, bool create_keyring) {
+    return build_apt_trust_entries(entries, capacity, create_keyring);
 }
 #endif
 
@@ -554,15 +684,17 @@ static vm_guest_install_build_status_t build_maintain_install(
     const vm_guest_install_result_t *privilege,
     const vm_guest_install_result_t *sources,
     const vm_guest_install_result_t *sources_v2,
+    const vm_guest_install_result_t *apt_trust,
     vm_guest_install_build_progress_t progress, void *progress_context,
     vm_guest_install_build_result_t *result,
     char *detail, size_t detail_capacity) {
     if (!install || !install->committed || !install->has_manifest ||
-        !storage || !privilege || !sources || !sources_v2 ||
+        !storage || !privilege || !sources || !sources_v2 || !apt_trust ||
         !build_transaction_matches_install(storage, install) ||
         !build_transaction_matches_install(privilege, install) ||
         !build_transaction_matches_install(sources, install) ||
-        !build_transaction_matches_install(sources_v2, install)) {
+        !build_transaction_matches_install(sources_v2, install) ||
+        !build_transaction_matches_install(apt_trust, install)) {
         build_detail(detail, detail_capacity,
                      "A guest-disk maintenance record does not match the committed installation.");
         return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
@@ -571,7 +703,8 @@ static vm_guest_install_build_status_t build_maintain_install(
         (storage->committed && !storage->cleanup_complete) ||
         (privilege->committed && !privilege->cleanup_complete) ||
         (sources->committed && !sources->cleanup_complete) ||
-        (sources_v2->committed && !sources_v2->cleanup_complete)) {
+        (sources_v2->committed && !sources_v2->cleanup_complete) ||
+        (apt_trust->committed && !apt_trust->cleanup_complete)) {
         build_detail(detail, detail_capacity,
                      "A committed guest-disk transaction still has cleanup residue; no new maintenance transaction was started.");
         return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
@@ -641,6 +774,8 @@ static vm_guest_install_build_status_t build_maintain_install(
         ROOTFS_WORK_FILE_REPAIR_MISSING;
     bool repair_needed = false;
     bool source_needed = false;
+    bool trust_needed = false;
+    bool trust_create = false;
     bool source_preflighted = false;
     char transaction_detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
 
@@ -719,7 +854,55 @@ static vm_guest_install_build_status_t build_maintain_install(
         source_needed = true;
     }
 
-    if (!grow_storage && !repair_needed && !source_needed) {
+    if (apt_trust->committed) {
+        if (result) result->apt_trust_verified = true;
+    } else {
+        rootfs_work_file_repair_t trust_probe;
+        if (!build_bigboss_keyring_probe(&trust_probe)) {
+            build_detail(detail, detail_capacity,
+                         "The BigBoss public-key identity could not be computed.");
+            return VM_GUEST_INSTALL_BUILD_ERR_MANIFEST;
+        }
+        rootfs_work_file_repair_state_t trust_state =
+            ROOTFS_WORK_FILE_REPAIR_MISSING;
+        rootfs_work_result_t probe;
+        rootfs_work_status_t probe_status = build_probe_file_repair(
+            work_directory, live, live_size, &trust_probe, &trust_state,
+            &allow_unclean_source, result, &probe);
+        if (probe_status == ROOTFS_WORK_FILE_REPAIR_MISMATCH) {
+            if (!build_historical_keyring_probe(&trust_probe)) {
+                build_detail(detail, detail_capacity,
+                             "The historical APT keyring identity could not be prepared.");
+                return VM_GUEST_INSTALL_BUILD_ERR_MANIFEST;
+            }
+            trust_state = ROOTFS_WORK_FILE_REPAIR_MISSING;
+            probe_status = build_probe_file_repair(
+                work_directory, live, live_size, &trust_probe, &trust_state,
+                &allow_unclean_source, result, &probe);
+        }
+        if (result) result->rootfs = probe;
+        if (probe_status == ROOTFS_WORK_FILE_REPAIR_MISMATCH) {
+            build_detail(detail, detail_capacity,
+                         "The existing APT trusted.gpg is not an accepted historical keyring and was not overwritten.");
+            return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
+        }
+        if (probe_status != ROOTFS_WORK_OK)
+            return build_rootfs_refusal(probe_status, &probe,
+                                        detail, detail_capacity);
+        if (trust_state != ROOTFS_WORK_FILE_REPAIR_MISSING &&
+            trust_state != ROOTFS_WORK_FILE_REPAIR_SATISFIED) {
+            build_detail(detail, detail_capacity,
+                         "The APT trusted.gpg has unsupported metadata and was not changed.");
+            return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
+        }
+        source_preflighted = true;
+        trust_create = trust_state == ROOTFS_WORK_FILE_REPAIR_MISSING;
+        /* Even an already-correct keyring gets this versioned transaction:
+         * its one-shot guest helper removes only the failed BigBoss cache. */
+        trust_needed = true;
+    }
+
+    if (!grow_storage && !repair_needed && !source_needed && !trust_needed) {
         build_progress(progress, progress_context,
                        VM_GUEST_INSTALL_BUILD_COMPLETE, 1u, 1u);
         return VM_GUEST_INSTALL_BUILD_OK;
@@ -753,8 +936,12 @@ static vm_guest_install_build_status_t build_maintain_install(
         preparation = vm_guest_privilege_prepare_stage(
             work_directory, &prepared, transaction_detail,
             sizeof transaction_detail);
-    } else {
+    } else if (source_needed) {
         preparation = vm_guest_sources_v2_prepare_stage(
+            work_directory, &prepared, transaction_detail,
+            sizeof transaction_detail);
+    } else {
+        preparation = vm_guest_apt_trust_prepare_stage(
             work_directory, &prepared, transaction_detail,
             sizeof transaction_detail);
     }
@@ -776,8 +963,11 @@ static vm_guest_install_build_status_t build_maintain_install(
     } else if (repair_needed) {
         stage_ok = vm_guest_privilege_stage_image_path(
             stage, sizeof stage, work_directory);
-    } else {
+    } else if (source_needed) {
         stage_ok = vm_guest_sources_v2_stage_image_path(
+            stage, sizeof stage, work_directory);
+    } else {
+        stage_ok = vm_guest_apt_trust_stage_image_path(
             stage, sizeof stage, work_directory);
     }
     if (!stage_ok) {
@@ -793,7 +983,8 @@ static vm_guest_install_build_status_t build_maintain_install(
     options.preserve_fstab = true;
     options.allow_unclean_source = allow_unclean_source;
     options.repair_catalog_backlinks =
-        allow_unclean_source && (repair_needed || source_needed);
+        allow_unclean_source &&
+        (repair_needed || source_needed || trust_needed);
     if (grow_storage)
         options.minimum_volume_bytes = VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES;
     if (repair_needed) {
@@ -801,14 +992,14 @@ static vm_guest_install_build_status_t build_maintain_install(
         options.file_repair_count = 1u;
     }
     rootfs_work_entry_t
-        source_entries[VM_BIGBOSS_MIGRATION_MAX_ENTRIES];
-    size_t source_entry_count = 0u;
-    if (source_needed) {
-        source_entry_count = build_bigboss_source_entries(
-            source_entries, VM_BIGBOSS_MIGRATION_MAX_ENTRIES,
-            source_create);
-        options.entries = source_entries;
-        options.entry_count = source_entry_count;
+        maintenance_entries[VM_CYDIA_MAINTENANCE_MAX_ENTRIES];
+    size_t maintenance_entry_count = 0u;
+    if (source_needed || trust_needed) {
+        maintenance_entry_count = build_cydia_maintenance_entries(
+            maintenance_entries, VM_CYDIA_MAINTENANCE_MAX_ENTRIES,
+            source_needed, source_create, trust_needed, trust_create);
+        options.entries = maintenance_entries;
+        options.entry_count = maintenance_entry_count;
     }
     build_progress_adapter_t adapter = {progress, progress_context};
     options.progress = build_rootfs_progress;
@@ -821,10 +1012,12 @@ static vm_guest_install_build_status_t build_maintain_install(
         (grow_storage &&
          rootfs.final_size < VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES) ||
         (repair_needed && rootfs.file_repairs_applied != 1u) ||
-        (source_needed &&
-         (rootfs.provision_entries < 2u ||
+        ((source_needed || trust_needed) &&
+         (rootfs.provision_entries <
+              2u * ((source_needed ? 1u : 0u) +
+                    (trust_needed ? 1u : 0u)) ||
           rootfs.provision_entries + rootfs.provision_reused_entries !=
-              source_entry_count))) {
+              maintenance_entry_count))) {
         if (rootfs_status == ROOTFS_WORK_OK) {
             build_detail(detail, detail_capacity,
                          "The completed guest-disk clone did not contain the requested maintenance result.");
@@ -846,8 +1039,12 @@ static vm_guest_install_build_status_t build_maintain_install(
         publication = vm_guest_privilege_publish(
             work_directory, install->manifest_sha256, &published,
             transaction_detail, sizeof transaction_detail);
-    } else {
+    } else if (source_needed) {
         publication = vm_guest_sources_v2_publish(
+            work_directory, install->manifest_sha256, &published,
+            transaction_detail, sizeof transaction_detail);
+    } else {
+        publication = vm_guest_apt_trust_publish(
             work_directory, install->manifest_sha256, &published,
             transaction_detail, sizeof transaction_detail);
     }
@@ -855,8 +1052,10 @@ static vm_guest_install_build_status_t build_maintain_install(
         if (result) result->storage_transaction = published;
     } else if (repair_needed) {
         if (result) result->privilege_transaction = published;
-    } else if (result) {
+    } else if (source_needed && result) {
         result->sources_v2_transaction = published;
+    } else if (result) {
+        result->apt_trust_transaction = published;
     }
     if (publication != VM_GUEST_INSTALL_OK || !published.committed) {
         build_detail(detail, detail_capacity,
@@ -921,6 +1120,26 @@ static vm_guest_install_build_status_t build_maintain_install(
         }
         if (result) result->cydia_sources_verified = true;
     }
+    if (trust_needed) {
+        if (result && trust_create) result->apt_trust_installed = true;
+        if (grow_storage || repair_needed || source_needed) {
+            vm_guest_install_result_t confirmed;
+            vm_guest_install_status_t confirmation =
+                vm_guest_apt_trust_confirm(
+                    work_directory, install->manifest_sha256, &confirmed,
+                    transaction_detail, sizeof transaction_detail);
+            if (result) result->apt_trust_transaction = confirmed;
+            if (confirmation != VM_GUEST_INSTALL_OK ||
+                !confirmed.committed) {
+                build_detail(detail, detail_capacity,
+                             transaction_detail[0]
+                                 ? transaction_detail
+                                 : vm_guest_install_status_text(confirmation));
+                return VM_GUEST_INSTALL_BUILD_ERR_PUBLISH;
+            }
+        }
+        if (result) result->apt_trust_verified = true;
+    }
     build_progress(progress, progress_context,
                    VM_GUEST_INSTALL_BUILD_PUBLISHING, 1u, 1u);
     build_progress(progress, progress_context,
@@ -943,7 +1162,7 @@ vm_guest_install_build_from_directory(
     }
 
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 0u, 4u);
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 0u, 5u);
     vm_guest_install_result_t privilege;
     vm_guest_install_result_t storage;
     vm_guest_install_result_t sources;
@@ -965,7 +1184,7 @@ vm_guest_install_build_from_directory(
         result->sources_transaction = sources;
     }
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 2u, 4u);
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 2u, 5u);
     vm_guest_install_result_t sources_v2;
     maintenance_recovery = vm_guest_sources_v2_recover(
         work_directory, &sources_v2, transaction_detail,
@@ -979,7 +1198,21 @@ vm_guest_install_build_from_directory(
     }
     if (result) result->sources_v2_transaction = sources_v2;
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 3u, 4u);
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 3u, 5u);
+    vm_guest_install_result_t apt_trust;
+    maintenance_recovery = vm_guest_apt_trust_recover(
+        work_directory, &apt_trust, transaction_detail,
+        sizeof transaction_detail);
+    if (maintenance_recovery != VM_GUEST_INSTALL_OK) {
+        build_detail(detail, detail_capacity,
+                     transaction_detail[0]
+                         ? transaction_detail
+                         : vm_guest_install_status_text(maintenance_recovery));
+        return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
+    }
+    if (result) result->apt_trust_transaction = apt_trust;
+    build_progress(progress, progress_context,
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 4u, 5u);
     vm_guest_install_result_t recovered;
     vm_guest_install_status_t recovery = vm_guest_install_recover(
         work_directory, &recovered, transaction_detail,
@@ -992,7 +1225,7 @@ vm_guest_install_build_from_directory(
     }
     if (result) result->transaction = recovered;
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 4u, 4u);
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 5u, 5u);
     if (recovered.committed) {
         if (result) {
             result->already_installed = true;
@@ -1002,11 +1235,11 @@ vm_guest_install_build_from_directory(
         }
         return build_maintain_install(
             work_directory, &recovered, &storage, &privilege, &sources,
-            &sources_v2,
+            &sources_v2, &apt_trust,
             progress, progress_context, result, detail, detail_capacity);
     }
     if (storage.committed || privilege.committed || sources.committed ||
-        sources_v2.committed) {
+        sources_v2.committed || apt_trust.committed) {
         build_detail(detail, detail_capacity,
                      "A guest-disk maintenance record exists without a committed guest installation.");
         return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
@@ -1139,7 +1372,25 @@ vm_guest_install_build_from_directory(
                          : vm_guest_install_status_text(sources_confirmation));
         return VM_GUEST_INSTALL_BUILD_ERR_PUBLISH;
     }
-    if (result) result->cydia_sources_verified = true;
+    vm_guest_install_result_t trust_confirmed;
+    vm_guest_install_status_t trust_confirmation =
+        vm_guest_apt_trust_confirm(
+            work_directory, manifest, &trust_confirmed, transaction_detail,
+            sizeof transaction_detail);
+    if (result) result->apt_trust_transaction = trust_confirmed;
+    if (trust_confirmation != VM_GUEST_INSTALL_OK ||
+        !trust_confirmed.committed) {
+        build_detail(detail, detail_capacity,
+                     transaction_detail[0]
+                         ? transaction_detail
+                         : vm_guest_install_status_text(trust_confirmation));
+        return VM_GUEST_INSTALL_BUILD_ERR_PUBLISH;
+    }
+    if (result) {
+        result->cydia_sources_verified = true;
+        result->apt_trust_installed = true;
+        result->apt_trust_verified = true;
+    }
     build_progress(progress, progress_context,
                    VM_GUEST_INSTALL_BUILD_PUBLISHING, 1u, 1u);
     build_progress(progress, progress_context,

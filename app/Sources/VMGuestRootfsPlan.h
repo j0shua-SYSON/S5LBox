@@ -45,6 +45,12 @@ extern "C" {
     "/private/etc/apt/sources.list.d/s5lbox-bigboss.list"
 #define VM_GUEST_ROOTFS_BIGBOSS_SOURCE_LINE \
     "deb http://apt.thebigboss.org/repofiles/cydia/ stable main\n"
+#define VM_GUEST_ROOTFS_TRUSTED_KEYRING_PATH \
+    "/private/etc/apt/trusted.gpg"
+
+/* Exact legacy BigBoss public signing key. The returned storage is static and
+ * remains valid for the process lifetime. */
+const uint8_t *vm_guest_rootfs_bigboss_keyring(size_t *out_size);
 
 typedef enum {
     VM_GUEST_ROOTFS_OK = 0,

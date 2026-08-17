@@ -253,6 +253,25 @@ static bool read_hfs_attributes(const char *path, uint32_t *attributes) {
     return true;
 }
 
+static bool probe_exact_bigboss_keyring(
+    const char *live, rootfs_work_result_t *out) {
+    size_t size = 0u;
+    const uint8_t *keyring = vm_guest_rootfs_bigboss_keyring(&size);
+    rootfs_work_file_repair_t probe;
+    memset(&probe, 0, sizeof probe);
+    probe.path = VM_GUEST_ROOTFS_TRUSTED_KEYRING_PATH;
+    probe.expected_size = (uint64_t)size;
+    probe.expected_permissions = 0644u;
+    probe.desired_permissions = 0644u;
+    rootfs_work_file_repair_state_t state =
+        ROOTFS_WORK_FILE_REPAIR_MISSING;
+    return keyring && size == 1164u &&
+           ios3_sha256(keyring, size, probe.expected_sha256) &&
+           rootfs_work_probe_file_repair(live, &probe, &state, out) ==
+               ROOTFS_WORK_OK &&
+           state == ROOTFS_WORK_FILE_REPAIR_SATISFIED;
+}
+
 static bool save_automatic_checkpoint(bool powered_off, uint64_t media_size,
                                       char *detail,
                                       size_t detail_capacity) {
@@ -349,6 +368,11 @@ static void clear_fixture(void) {
     (void)remove(next);
     (void)remove_directory(stage);
     (void)join_path(stage, sizeof stage, FIXTURE_DIR,
+                    VM_GUEST_APT_TRUST_STAGE_DIRECTORY);
+    (void)join_path(next, sizeof next, stage, VM_GUEST_INSTALL_NEXT_FILE);
+    (void)remove(next);
+    (void)remove_directory(stage);
+    (void)join_path(stage, sizeof stage, FIXTURE_DIR,
                     VM_GUEST_RECOVERY_STAGE_DIRECTORY);
     (void)join_path(next, sizeof next, stage, VM_GUEST_INSTALL_NEXT_FILE);
     (void)remove(next);
@@ -380,6 +404,11 @@ static void clear_fixture(void) {
         VM_GUEST_SOURCES_V2_MARKER_TMP,
         VM_GUEST_SOURCES_V2_JOURNAL_FILE,
         VM_GUEST_SOURCES_V2_JOURNAL_TMP,
+        VM_GUEST_APT_TRUST_BACKUP_FILE,
+        VM_GUEST_APT_TRUST_MARKER_FILE,
+        VM_GUEST_APT_TRUST_MARKER_TMP,
+        VM_GUEST_APT_TRUST_JOURNAL_FILE,
+        VM_GUEST_APT_TRUST_JOURNAL_TMP,
         VM_GUEST_RECOVERY_BACKUP_FILE,
         VM_GUEST_RECOVERY_MARKER_FILE,
         VM_GUEST_RECOVERY_MARKER_TMP,
@@ -577,6 +606,78 @@ static void test_bigboss_cache_plan_avoids_stashed_system_paths(void) {
           count);
 }
 
+static void test_apt_trust_plan_is_exact_and_private(void) {
+    rootfs_work_entry_t entries[8];
+    rootfs_work_entry_t sentinel[7];
+    memset(entries, 0, sizeof entries);
+    memset(sentinel, 0xa5, sizeof sentinel);
+    CHECK(vm_guest_install_build_test_apt_trust_entries(
+              sentinel, 7u, true) == 8u &&
+          ((const unsigned char *)sentinel)[0] == 0xa5u,
+          "a short APT-trust plan buffer was modified");
+    size_t count = vm_guest_install_build_test_apt_trust_entries(
+        entries, 8u, true);
+    CHECK(count == 8u, "APT-trust plan has %zu entries, expected 8", count);
+
+    const rootfs_work_entry_t *keyring_entry = NULL;
+    const rootfs_work_entry_t *helper_entry = NULL;
+    const rootfs_work_entry_t *plist_entry = NULL;
+    for (size_t i = 0u; i < count; i++) {
+        CHECK(entries[i].path != NULL,
+              "APT-trust plan entry %zu has no path", i);
+        if (!entries[i].path) continue;
+        CHECK(strcmp(entries[i].path, "/usr/libexec") != 0 &&
+                  strncmp(entries[i].path, "/usr/libexec/", 13u) != 0,
+              "APT-trust plan depends on a stashed path: %s",
+              entries[i].path);
+        if (strcmp(entries[i].path,
+                   VM_GUEST_ROOTFS_TRUSTED_KEYRING_PATH) == 0)
+            keyring_entry = &entries[i];
+        if (strcmp(entries[i].path,
+                   "/private/var/lib/s5lbox/apt-trust-v1") == 0)
+            helper_entry = &entries[i];
+        if (strcmp(entries[i].path,
+                   "/System/Library/LaunchDaemons/"
+                   "com.j0shua.s5lbox.apt-trust-v1.plist") == 0)
+            plist_entry = &entries[i];
+    }
+    size_t expected_size = 0u;
+    const uint8_t *expected =
+        vm_guest_rootfs_bigboss_keyring(&expected_size);
+    uint8_t digest[IOS3_SHA256_DIGEST_SIZE];
+    static const uint8_t EXPECTED_DIGEST[IOS3_SHA256_DIGEST_SIZE] = {
+        0x0du, 0x01u, 0xddu, 0x89u, 0x07u, 0x22u, 0xaeu, 0x15u,
+        0x91u, 0x6cu, 0x77u, 0x30u, 0xe8u, 0x9au, 0xbau, 0x8cu,
+        0x41u, 0xa8u, 0xceu, 0xaeu, 0xa5u, 0x02u, 0x93u, 0xf8u,
+        0xbbu, 0x4au, 0xc9u, 0xd2u, 0x79u, 0x5fu, 0xecu, 0xb5u
+    };
+    CHECK(keyring_entry && expected && expected_size == 1164u &&
+              keyring_entry->kind == ROOTFS_WORK_ENTRY_FILE &&
+              keyring_entry->permissions == 0644u &&
+              keyring_entry->content_size == expected_size &&
+              memcmp(keyring_entry->content, expected, expected_size) == 0 &&
+              ios3_sha256(keyring_entry->content,
+                          keyring_entry->content_size, digest) &&
+              memcmp(digest, EXPECTED_DIGEST, sizeof digest) == 0,
+          "APT-trust plan does not carry the exact pinned BigBoss key");
+    CHECK(helper_entry && helper_entry->kind == ROOTFS_WORK_ENTRY_FILE &&
+              helper_entry->permissions == 0755u &&
+              helper_entry->content_size != 0u,
+          "APT-trust cache helper is absent from private state");
+    CHECK(plist_entry && plist_entry->kind == ROOTFS_WORK_ENTRY_FILE &&
+              plist_entry->content_size != 0u &&
+              strstr((const char *)plist_entry->content,
+                     "/private/var/lib/s5lbox/apt-trust-v1") != NULL,
+          "APT-trust launchd job does not call the private helper");
+
+    memset(entries, 0, sizeof entries);
+    count = vm_guest_install_build_test_apt_trust_entries(
+        entries, 8u, false);
+    CHECK(count == 7u,
+          "APT-trust plan without key creation has %zu entries, expected 7",
+          count);
+}
+
 static void test_historical_snapshot_gate(void) {
     clear_fixture();
     char live[VM_GUEST_INSTALL_PATH_CAPACITY];
@@ -660,6 +761,11 @@ static void test_existing_install_is_idempotent(void) {
               VM_GUEST_INSTALL_OK && transaction.committed,
           "could not seed an already-completed source-v2 migration: %s",
           detail);
+    CHECK(vm_guest_apt_trust_confirm(FIXTURE_DIR, digest, &transaction,
+                                     detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed,
+          "could not seed an already-completed APT-trust migration: %s",
+          detail);
     CHECK(resize_sparse(live, VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES),
           "could not make the committed fixture represent a 2 GiB disk");
 
@@ -714,6 +820,9 @@ static void test_snapshot_blocks_free_count_recovery(void) {
               VM_GUEST_INSTALL_OK && transaction.committed &&
           vm_guest_sources_v2_confirm(FIXTURE_DIR, digest, &transaction,
                                       detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_apt_trust_confirm(FIXTURE_DIR, digest, &transaction,
+                                     detail, sizeof detail) ==
               VM_GUEST_INSTALL_OK && transaction.committed,
           "could not commit free-count snapshot fixture: %s", detail);
 
@@ -809,6 +918,9 @@ static void test_committed_maintenance_cleanup_blocks_new_transaction(void) {
               VM_GUEST_INSTALL_OK && transaction.committed &&
           vm_guest_sources_v2_confirm(FIXTURE_DIR, digest, &transaction,
                                       detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_apt_trust_confirm(FIXTURE_DIR, digest, &transaction,
+                                     detail, sizeof detail) ==
               VM_GUEST_INSTALL_OK && transaction.committed &&
           resize_sparse(live, VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES),
           "could not commit cleanup-residue fixture: %s", detail);
@@ -926,6 +1038,12 @@ static void test_dirty_existing_install_refuses_before_stage(void) {
         VM_GUEST_SOURCES_V2_MARKER_TMP,
         VM_GUEST_SOURCES_V2_JOURNAL_FILE,
         VM_GUEST_SOURCES_V2_JOURNAL_TMP,
+        VM_GUEST_APT_TRUST_BACKUP_FILE,
+        VM_GUEST_APT_TRUST_STAGE_DIRECTORY,
+        VM_GUEST_APT_TRUST_MARKER_FILE,
+        VM_GUEST_APT_TRUST_MARKER_TMP,
+        VM_GUEST_APT_TRUST_JOURNAL_FILE,
+        VM_GUEST_APT_TRUST_JOURNAL_TMP,
         VM_GUEST_RECOVERY_BACKUP_FILE,
         VM_GUEST_RECOVERY_STAGE_DIRECTORY,
         VM_GUEST_RECOVERY_MARKER_FILE,
@@ -982,6 +1100,9 @@ static void test_powered_off_checkpoint_allows_only_dirty_bit(void) {
               VM_GUEST_INSTALL_OK && transaction.committed &&
           vm_guest_sources_v2_confirm(FIXTURE_DIR, digest, &transaction,
                                       detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_apt_trust_confirm(FIXTURE_DIR, digest, &transaction,
+                                     detail, sizeof detail) ==
               VM_GUEST_INSTALL_OK && transaction.committed,
           "could not commit checkpoint-gate fixture: %s", detail);
 
@@ -1360,17 +1481,20 @@ static void test_real_privilege_repair_when_supplied(void) {
           result.cydia_privileges_verified &&
           result.cydia_sources_added &&
           result.cydia_sources_verified &&
+          result.apt_trust_installed &&
+          result.apt_trust_verified &&
           result.rootfs.file_repairs_applied == 1u &&
-          result.rootfs.provision_entries >= 2u &&
+          result.rootfs.provision_entries >= 4u &&
           result.rootfs.provision_entries +
                   result.rootfs.provision_reused_entries >=
-              7u &&
+              9u &&
           result.rootfs.provision_entries +
                   result.rootfs.provision_reused_entries <=
-              8u &&
+              11u &&
           result.privilege_transaction.committed &&
-          result.sources_v2_transaction.committed,
-          "combined Cydia repair/source migration refused or did not apply: %s / %s",
+          result.sources_v2_transaction.committed &&
+          result.apt_trust_transaction.committed,
+          "combined Cydia repair/source/trust migration refused or did not apply: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     uint64_t after = file_size_or_zero(live);
     CHECK(after == (expect_storage_growth
@@ -1437,7 +1561,8 @@ static void test_real_privilege_repair_when_supplied(void) {
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
           !retry.storage_upgraded && !retry.cydia_privileges_repaired &&
           retry.cydia_privileges_verified && !retry.cydia_sources_added &&
-          retry.cydia_sources_verified && retry.rootfs.final_size == 0u,
+          retry.cydia_sources_verified && !retry.apt_trust_installed &&
+          retry.apt_trust_verified && retry.rootfs.final_size == 0u,
           "real privilege-repair retry rewrote the disk: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     printf("real-cydia-privilege-repair before=%llu after=%llu applied=%u\n",
@@ -1480,13 +1605,15 @@ static void test_real_cache_recovery_when_supplied(void) {
           result.storage_upgraded == expect_storage_growth &&
           result.cydia_privileges_verified &&
           result.cydia_sources_added && result.cydia_sources_verified &&
-          result.rootfs.provision_entries >= 2u &&
+          result.apt_trust_installed && result.apt_trust_verified &&
+          result.rootfs.provision_entries >= 4u &&
           result.rootfs.provision_entries +
-                  result.rootfs.provision_reused_entries >= 7u &&
+                  result.rootfs.provision_reused_entries >= 9u &&
           result.rootfs.provision_entries +
-                  result.rootfs.provision_reused_entries <= 8u &&
+                  result.rootfs.provision_reused_entries <= 11u &&
           result.sources_transaction.committed &&
-          result.sources_v2_transaction.committed,
+          result.sources_v2_transaction.committed &&
+          result.apt_trust_transaction.committed,
           "real cache recovery refused or omitted its payload: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     uint64_t after = file_size_or_zero(live);
@@ -1510,11 +1637,94 @@ static void test_real_cache_recovery_when_supplied(void) {
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
           !retry.storage_upgraded && !retry.cydia_privileges_repaired &&
           retry.cydia_privileges_verified && !retry.cydia_sources_added &&
-          retry.cydia_sources_verified && retry.rootfs.final_size == 0u,
+          retry.cydia_sources_verified && !retry.apt_trust_installed &&
+          retry.apt_trust_verified && retry.rootfs.final_size == 0u,
           "cache-recovery retry rewrote the disk: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     printf("real-cydia-cache-recovery before=%llu after=%llu entries=%u\n",
            (unsigned long long)before, (unsigned long long)after,
+           result.rootfs.provision_entries);
+}
+
+static void test_real_apt_trust_when_supplied(void) {
+    const char *machine = getenv("S5LBOX_EXISTING_APT_TRUST_MACHINE_DIR");
+    if (!machine || !*machine) {
+        printf("real-apt-trust SKIP (existing machine path unset)\n");
+        return;
+    }
+
+    char live[VM_GUEST_INSTALL_PATH_CAPACITY];
+    CHECK(join_path(live, sizeof live, machine,
+                    VM_GUEST_INSTALL_LIVE_FILE),
+          "real APT-trust live path overflow");
+    uint64_t before = file_size_or_zero(live);
+    CHECK(before >= VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES,
+          "real APT-trust source is smaller than the 2 GiB migration floor");
+    if (before < VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES) return;
+
+    uint8_t manifest[VM_GUEST_INSTALL_SHA256_SIZE];
+    char detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+    CHECK(vm_guest_install_probe(machine, manifest, detail, sizeof detail) ==
+              VM_GUEST_INSTALL_PROBE_VALID,
+          "real APT-trust source has no valid install marker: %s", detail);
+    vm_guest_install_result_t before_transaction;
+    CHECK(vm_guest_apt_trust_recover(
+              machine, &before_transaction, detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK,
+          "real APT-trust transaction could not be recovered: %s", detail);
+
+    progress_log_t progress;
+    memset(&progress, 0, sizeof progress);
+    vm_guest_install_build_result_t result;
+    vm_guest_install_build_status_t status =
+        vm_guest_install_build_from_directory(
+            machine, NULL, capture_progress, &progress,
+            &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_OK && result.already_installed &&
+          !result.storage_upgraded && !result.cydia_privileges_repaired &&
+          !result.cydia_sources_added && result.apt_trust_verified &&
+          result.apt_trust_transaction.committed &&
+          file_size_or_zero(live) == before,
+          "real APT-trust migration refused or changed unrelated state: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+    if (!before_transaction.committed) {
+        CHECK(result.rootfs.published &&
+              result.rootfs.provision_entries >= 2u &&
+              result.rootfs.provision_entries +
+                      result.rootfs.provision_reused_entries == 8u,
+              "real APT-trust migration omitted its bounded payload: %s",
+              result.rootfs.detail);
+    }
+    rootfs_work_result_t keyring_probe;
+    memset(&keyring_probe, 0, sizeof keyring_probe);
+    CHECK(probe_exact_bigboss_keyring(live, &keyring_probe),
+          "published trusted.gpg is not the exact pinned BigBoss key: %s at %s (%s)",
+          rootfs_work_status_name(keyring_probe.status),
+          rootfs_work_stage_name(keyring_probe.stage), keyring_probe.detail);
+
+    vm_guest_install_result_t recovered;
+    CHECK(vm_guest_apt_trust_recover(machine, &recovered,
+                                     detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && recovered.committed &&
+          recovered.cleanup_complete && recovered.has_manifest &&
+          memcmp(recovered.manifest_sha256, manifest, sizeof manifest) == 0,
+          "real APT-trust record is not recoverable: %s", detail);
+
+    vm_guest_install_build_result_t retry;
+    memset(&progress, 0, sizeof progress);
+    status = vm_guest_install_build_from_directory(
+        machine, NULL, capture_progress, &progress,
+        &retry, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
+          !retry.storage_upgraded && !retry.cydia_privileges_repaired &&
+          !retry.cydia_sources_added && !retry.apt_trust_installed &&
+          retry.apt_trust_verified && retry.rootfs.final_size == 0u &&
+          file_size_or_zero(live) == before,
+          "real APT-trust retry rewrote the disk: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+    printf("real-apt-trust before=%llu after=%llu entries=%u\n",
+           (unsigned long long)before,
+           (unsigned long long)file_size_or_zero(live),
            result.rootfs.provision_entries);
 }
 
@@ -1639,6 +1849,7 @@ int main(void) {
     test_argument_and_package_refusals();
     test_allocation_repair_publication_proof();
     test_bigboss_cache_plan_avoids_stashed_system_paths();
+    test_apt_trust_plan_is_exact_and_private();
     test_historical_snapshot_gate();
     test_existing_install_is_idempotent();
     test_snapshot_blocks_free_count_recovery();
@@ -1648,6 +1859,7 @@ int main(void) {
     test_real_storage_upgrade_when_supplied();
     test_real_privilege_repair_when_supplied();
     test_real_cache_recovery_when_supplied();
+    test_real_apt_trust_when_supplied();
     test_real_allocation_recovery_when_supplied();
     test_real_build_when_supplied();
     clear_fixture();

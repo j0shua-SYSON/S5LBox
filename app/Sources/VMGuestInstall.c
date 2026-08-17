@@ -49,6 +49,10 @@ static const char VM_GUEST_SOURCES_V2_MARKER_PREFIX[] =
     "s5lbox-guest-cydia-sources 2\ninstall-manifest-sha256 ";
 static const char VM_GUEST_SOURCES_V2_JOURNAL_PREFIX[] =
     "s5lbox-guest-cydia-sources-transaction 2\ninstall-manifest-sha256 ";
+static const char VM_GUEST_APT_TRUST_MARKER_PREFIX[] =
+    "s5lbox-guest-apt-trust 1\ninstall-manifest-sha256 ";
+static const char VM_GUEST_APT_TRUST_JOURNAL_PREFIX[] =
+    "s5lbox-guest-apt-trust-transaction 1\ninstall-manifest-sha256 ";
 static const char VM_GUEST_RECOVERY_MARKER_PREFIX[] =
     "s5lbox-guest-recovery 1\nrecovery-id ";
 static const char VM_GUEST_RECOVERY_JOURNAL_PREFIX[] =
@@ -136,6 +140,19 @@ static const guest_transaction_spec_t VM_GUEST_SOURCES_V2_SPEC = {
     VM_GUEST_SOURCES_V2_MARKER_PREFIX,
     VM_GUEST_SOURCES_V2_JOURNAL_PREFIX,
     "guest-cydia-sources-v2",
+    false
+};
+
+static const guest_transaction_spec_t VM_GUEST_APT_TRUST_SPEC = {
+    VM_GUEST_APT_TRUST_BACKUP_FILE,
+    VM_GUEST_APT_TRUST_STAGE_DIRECTORY,
+    VM_GUEST_APT_TRUST_MARKER_FILE,
+    VM_GUEST_APT_TRUST_MARKER_TMP,
+    VM_GUEST_APT_TRUST_JOURNAL_FILE,
+    VM_GUEST_APT_TRUST_JOURNAL_TMP,
+    VM_GUEST_APT_TRUST_MARKER_PREFIX,
+    VM_GUEST_APT_TRUST_JOURNAL_PREFIX,
+    "guest-apt-trust",
     false
 };
 
@@ -307,6 +324,12 @@ bool vm_guest_sources_v2_stage_image_path(char *out, size_t capacity,
                                           const char *work_directory) {
     return guest_stage_image_path_for(out, capacity, work_directory,
                                       &VM_GUEST_SOURCES_V2_SPEC);
+}
+
+bool vm_guest_apt_trust_stage_image_path(char *out, size_t capacity,
+                                         const char *work_directory) {
+    return guest_stage_image_path_for(out, capacity, work_directory,
+                                      &VM_GUEST_APT_TRUST_SPEC);
 }
 
 bool vm_guest_recovery_stage_image_path(char *out, size_t capacity,
@@ -888,6 +911,14 @@ vm_guest_sources_v2_recover(const char *work_directory,
 }
 
 vm_guest_install_status_t
+vm_guest_apt_trust_recover(const char *work_directory,
+                           vm_guest_install_result_t *result,
+                           char *detail, size_t detail_capacity) {
+    return guest_recover_for(work_directory, &VM_GUEST_APT_TRUST_SPEC,
+                             result, detail, detail_capacity);
+}
+
+vm_guest_install_status_t
 vm_guest_recovery_recover(const char *work_directory,
                           vm_guest_install_result_t *result,
                           char *detail, size_t detail_capacity) {
@@ -901,13 +932,14 @@ vm_guest_maintenance_recover(const char *work_directory,
                              vm_guest_install_result_t *storage_result,
                              vm_guest_install_result_t *sources_result,
                              char *detail, size_t detail_capacity) {
-    enum { MAINTENANCE_COUNT = 5 };
+    enum { MAINTENANCE_COUNT = 6 };
     const guest_transaction_spec_t *specs[MAINTENANCE_COUNT] = {
         &VM_GUEST_RECOVERY_SPEC,
         &VM_GUEST_PRIVILEGE_SPEC,
         &VM_GUEST_STORAGE_SPEC,
         &VM_GUEST_SOURCES_SPEC,
-        &VM_GUEST_SOURCES_V2_SPEC
+        &VM_GUEST_SOURCES_V2_SPEC,
+        &VM_GUEST_APT_TRUST_SPEC
     };
     guest_paths_t paths[MAINTENANCE_COUNT];
     vm_guest_install_result_t local[MAINTENANCE_COUNT];
@@ -916,7 +948,8 @@ vm_guest_maintenance_recover(const char *work_directory,
         privilege_result ? privilege_result : &local[1],
         storage_result ? storage_result : &local[2],
         sources_result ? sources_result : &local[3],
-        &local[4]
+        &local[4],
+        &local[5]
     };
     bool journal[MAINTENANCE_COUNT] = {false};
     size_t owner = MAINTENANCE_COUNT;
@@ -1195,6 +1228,31 @@ vm_guest_sources_v2_prepare_stage(const char *work_directory,
         return VM_GUEST_INSTALL_OK;
     }
     return guest_prepare_stage_for(work_directory, &VM_GUEST_SOURCES_V2_SPEC,
+                                   result, detail, detail_capacity);
+}
+
+vm_guest_install_status_t
+vm_guest_apt_trust_prepare_stage(const char *work_directory,
+                                 vm_guest_install_result_t *result,
+                                 char *detail, size_t detail_capacity) {
+    vm_guest_install_result_t privilege;
+    vm_guest_install_result_t storage;
+    vm_guest_install_result_t sources;
+    vm_guest_install_result_t apt_trust;
+    vm_guest_install_status_t status = vm_guest_maintenance_recover(
+        work_directory, &privilege, &storage, &sources,
+        detail, detail_capacity);
+    if (status != VM_GUEST_INSTALL_OK)
+        return status;
+    status = vm_guest_apt_trust_recover(
+        work_directory, &apt_trust, detail, detail_capacity);
+    if (status != VM_GUEST_INSTALL_OK)
+        return status;
+    if (apt_trust.committed) {
+        if (result) *result = apt_trust;
+        return VM_GUEST_INSTALL_OK;
+    }
+    return guest_prepare_stage_for(work_directory, &VM_GUEST_APT_TRUST_SPEC,
                                    result, detail, detail_capacity);
 }
 
@@ -1519,6 +1577,17 @@ vm_guest_sources_v2_publish(const char *work_directory,
 }
 
 vm_guest_install_status_t
+vm_guest_apt_trust_publish(const char *work_directory,
+                           const uint8_t manifest_sha256[
+                               VM_GUEST_INSTALL_SHA256_SIZE],
+                           vm_guest_install_result_t *result,
+                           char *detail, size_t detail_capacity) {
+    return guest_publish_for(work_directory, &VM_GUEST_APT_TRUST_SPEC,
+                             manifest_sha256, result,
+                             detail, detail_capacity);
+}
+
+vm_guest_install_status_t
 vm_guest_recovery_publish(const char *work_directory,
                           vm_guest_install_result_t *result,
                           char *detail, size_t detail_capacity) {
@@ -1669,6 +1738,18 @@ vm_guest_sources_v2_confirm(const char *work_directory,
                             char *detail, size_t detail_capacity) {
     return guest_confirm_for(work_directory, &VM_GUEST_SOURCES_V2_SPEC,
                              "Cydia repository-cache maintenance",
+                             manifest_sha256, result, detail,
+                             detail_capacity);
+}
+
+vm_guest_install_status_t
+vm_guest_apt_trust_confirm(const char *work_directory,
+                           const uint8_t manifest_sha256[
+                               VM_GUEST_INSTALL_SHA256_SIZE],
+                           vm_guest_install_result_t *result,
+                           char *detail, size_t detail_capacity) {
+    return guest_confirm_for(work_directory, &VM_GUEST_APT_TRUST_SPEC,
+                             "APT trust-store maintenance",
                              manifest_sha256, result, detail,
                              detail_capacity);
 }

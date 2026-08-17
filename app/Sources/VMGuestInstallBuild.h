@@ -60,6 +60,8 @@ typedef struct {
     bool cydia_privileges_verified;
     bool cydia_sources_added;
     bool cydia_sources_verified;
+    bool apt_trust_installed;
+    bool apt_trust_verified;
     bool filesystem_repaired;
     bool powered_off_checkpoint_witnessed;
     size_t historical_snapshots;
@@ -74,6 +76,8 @@ typedef struct {
     vm_guest_install_result_t sources_transaction;
     /* Current repository-cache compatibility transaction. */
     vm_guest_install_result_t sources_v2_transaction;
+    /* Legacy APT's exact trusted.gpg compatibility transaction. */
+    vm_guest_install_result_t apt_trust_transaction;
     uint8_t manifest_sha256[VM_GUEST_INSTALL_SHA256_SIZE];
 } vm_guest_install_build_result_t;
 
@@ -109,6 +113,13 @@ typedef struct {
  * overwritten. Its independent marker makes retries idempotent for guests
  * installed by older rootfs plans.
  *
+ * Legacy APT 0.7 reads one /etc/apt/trusted.gpg and does not scan the modern
+ * trusted.gpg.d convention. Fresh plans seed the exact verified BigBoss public
+ * key; older installations receive it through another crash-safe transaction.
+ * The exact known historical multi-key ring is preserved, while any unknown
+ * existing trust store is refused instead of overwritten. Signature checking
+ * is never disabled.
+ *
  * A strict source preflight also distinguishes an exact HFS freeBlocks/bitmap
  * disagreement from every other validation failure without parsing diagnostic
  * prose. For a cleanly unmounted disk, or one independently authorized by the
@@ -140,6 +151,8 @@ bool vm_guest_install_build_test_allocation_repair_proven(
  * testable without publishing an image. */
 size_t vm_guest_install_build_test_bigboss_source_entries(
     rootfs_work_entry_t *entries, size_t capacity, bool create_source);
+size_t vm_guest_install_build_test_apt_trust_entries(
+    rootfs_work_entry_t *entries, size_t capacity, bool create_keyring);
 #endif
 
 const char *vm_guest_install_build_status_text(
