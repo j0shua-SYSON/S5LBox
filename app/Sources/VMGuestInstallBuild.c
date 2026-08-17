@@ -373,11 +373,25 @@ static vm_guest_install_build_status_t build_repair_allocation_accounting(
         if (repair_status != ROOTFS_WORK_OK)
             return build_rootfs_refusal(
                 repair_status, &repair, detail, detail_capacity);
-        build_detail(
-            detail, detail_capacity,
-            geometry_ok
-                ? "The powered-off disk scan did not prove and repair the stale HFS free-space counter; the clone was not published."
-                : "The repaired clone changed guest-disk geometry; it was not published.");
+        if (geometry_ok) {
+            (void)snprintf(
+                detail, detail_capacity,
+                "Filesystem repair evidence mismatch: source bitmap/header "
+                "%u/%u blocks, free-count plan/applied %u/%u, and catalog "
+                "topology plan/applied %u/%u. The clone was not published.",
+                repair.source_allocation_bitmap_used,
+                repair.source_allocation_header_used,
+                repair.allocation_free_count_repairable,
+                repair.allocation_free_count_repaired,
+                repair.catalog_topology_nodes_repairable,
+                repair.catalog_topology_nodes_repaired);
+            if (detail && detail_capacity)
+                detail[detail_capacity - 1u] = '\0';
+        } else {
+            build_detail(
+                detail, detail_capacity,
+                "The repaired clone changed guest-disk geometry; it was not published.");
+        }
         return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
     }
 
