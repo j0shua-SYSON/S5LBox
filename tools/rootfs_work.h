@@ -441,6 +441,29 @@ typedef struct rootfs_work_options {
      */
     bool repair_catalog_backlinks;
 
+    /*
+     * Opt-in, OFF by default, and valid only with allow_unclean_source.  This
+     * is the broader powered-off recovery used when the guest persisted all
+     * allocated catalog records but stopped between the writes that publish
+     * their B-tree topology.
+     *
+     * The unpublished clone is repairable only when every allocated leaf is
+     * independently readable, their complete record set has the header's
+     * exact count and one strict global key order, and every allocated node at
+     * each index level is named exactly once.  Child references to nodes the
+     * catalog map calls free are discarded; links and index keys are then
+     * derived from that independently proven allocated-node order.  No node
+     * is allocated or freed, no leaf record or header identity is changed,
+     * and an ambiguous or incomplete topology is refused.  A strict raw
+     * audit is repeated after commit.  Callers must gate this with durable
+     * proof of full guest power-off, exactly like allow_unclean_source.
+     *
+     * This is deliberately separate from repair_catalog_backlinks.  The two
+     * repair modes are mutually exclusive so a caller cannot accidentally
+     * weaken the narrow backlink-only contract.
+     */
+    bool repair_catalog_topology;
+
     /* Zero selects ROOTFS_WORK_MAX_IO_BUFFER; otherwise 1..that limit. */
     size_t io_buffer_bytes;
 
@@ -543,6 +566,12 @@ typedef struct rootfs_work_result {
     uint32_t catalog_backlinks_repairable;
     /* Populated only after those repairs are committed and strictly re-read. */
     uint32_t catalog_backlinks_repaired;
+    /* Allocated nodes whose derived topology differs in the recovery plan. */
+    uint32_t catalog_topology_nodes_repairable;
+    /* Populated only after the topology commit passes a strict raw re-audit. */
+    uint32_t catalog_topology_nodes_repaired;
+    /* Index records naming map-free nodes, removed by the proven plan. */
+    uint32_t catalog_topology_stale_refs;
     uint8_t source_sha256[IOS3_SHA256_DIGEST_SIZE];
     size_t io_buffer_bytes;
     bool source_sha256_valid;
@@ -608,6 +637,24 @@ rootfs_work_status_t rootfs_work_probe_file_repair_policy(
     bool allow_unclean_source, bool allow_catalog_backlink_recovery,
     rootfs_work_file_repair_state_t *state,
     rootfs_work_result_t *result);
+
+/*
+ * Repair one CALLER-OWNED, UNPUBLISHED clone in place after the caller has
+ * durably proved a full guest power-off.  This avoids copying a multi-GiB work
+ * image twice: the app can create a filesystem clone in its transaction
+ * directory, call this function, strictly validate the repaired clone, and
+ * atomically publish it only on success.
+ *
+ * The function obtains exclusive read/write access, rejects links and path
+ * indirection, performs the same bounded topology proof documented by
+ * repair_catalog_topology, plans every byte before the first write, fsyncs the
+ * clone, and never renames or publishes it.  Once the call reaches
+ * PROVISION_WRITE the clone may have been modified even if a later write,
+ * validation, or sync fails; the caller must discard that unpublished clone.
+ * Passing a live or otherwise published disk is a contract violation.
+ */
+rootfs_work_status_t rootfs_work_repair_powered_off_catalog_clone(
+    const char *clone_path, rootfs_work_result_t *result);
 
 /*
  * Create destination_path.  The destination must not exist.  On success the

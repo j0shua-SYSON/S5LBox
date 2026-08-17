@@ -354,6 +354,18 @@ static uint16_t fx_emit_index(fixture_t *fx, uint32_t node_index,
                       offset);
 }
 
+static void fx_index_child_set(fixture_t *fx, uint32_t node_index,
+                               uint16_t record, uint32_t child) {
+    uint8_t *node = fx_node(fx, node_index);
+    uint16_t offset = get_be16(node + fx->node_size -
+                               2u * ((uint32_t)record + 1u));
+    uint16_t key_bytes = (uint16_t)(2u + get_be16(node + offset));
+
+    if ((key_bytes & 1u) != 0u)
+        key_bytes++;
+    put_be32(node + offset + key_bytes, child);
+}
+
 /*
  * `used` is a bitmap of nodes to mark in use, or NULL to mark 0..used_nodes-1.
  * The split tests need the second form because their trees do not occupy a
@@ -538,6 +550,57 @@ static fixture_t *fx_create_depth2(int malformed_index) {
     }
     (void)fx_emit_index(fx, 3u, children, first, 2u, 2u, 0u, 0u);
     fx_emit_header(fx, 2u, 3u, 1u, 2u, (uint32_t)fx->count, 4u, NULL);
+    fx_emit_volume(fx);
+    return fx;
+}
+
+/*
+ * Powered-off partial-topology witness, reduced to eight catalog nodes:
+ *
+ *   allocated leaves: 1 (records 0..5), 4 (records 6..end)
+ *   map-free stale leaf: 2 (an older copy of records 6..end)
+ *   persisted leaf links: 1 -> 2 -> 4, with 4.bLink = 2
+ *   persisted root: children [1, 2, 4]
+ *   authoritative map: nodes [0, 1, 3, 4] only
+ *
+ * All allocated leaf records are present exactly once and already form the
+ * header's complete key set.  Node 2 and its root record are stale topology,
+ * not content.  A strict walk must refuse it; the powered-off recovery can
+ * derive [1, 4] without inventing or deleting an allocated record.
+ */
+static fixture_t *fx_create_powered_off_topology(void) {
+    fixture_t *fx = (fixture_t *)calloc(1u, sizeof(*fx));
+    uint32_t children[3] = {1u, 2u, 4u};
+    const uint8_t *first[3];
+    uint8_t used[(FX_CATALOG_NODES + 7u) / 8u];
+    const uint32_t allocated[] = {0u, 1u, 3u, 4u};
+    size_t index;
+
+    if (!fx)
+        return NULL;
+    fx_init(fx, (uint16_t)FX_NODE_SIZE);
+    fx->free_data_blocks = FX_DATA_BLOCKS - 1u;
+    fx->file_count = 1u;
+    fx->folder_count = 3u;
+    fx->next_cnid = FX_NEXT_CNID;
+    fx_records(fx);
+    memcpy(fx->image + FX_DATA_FIRST * FX_BLOCK_SIZE, "note\n", 5u);
+    (void)fx_emit_leaf(fx, 1u, 0u, 6u, 2u, 0u);
+    (void)fx_emit_leaf(fx, 2u, 6u, fx->count, 4u, 1u);
+    (void)fx_emit_leaf(fx, 4u, 6u, fx->count, 0u, 2u);
+    first[0] = fx->record[0];
+    first[1] = fx->record[6];
+    first[2] = fx->record[6];
+    (void)fx_emit_index(fx, 3u, children, first, 3u, 2u, 0u, 0u);
+    memset(used, 0, sizeof(used));
+    for (index = 0u; index < sizeof(allocated) / sizeof(allocated[0]);
+         index++) {
+        uint32_t node = allocated[index];
+
+        used[node >> 3] |= (uint8_t)(1u << (7u - (node & 7u)));
+    }
+    fx_emit_header(fx, 2u, 3u, 1u, 4u, (uint32_t)fx->count,
+                   (uint32_t)(sizeof(allocated) / sizeof(allocated[0])), used);
     fx_emit_volume(fx);
     return fx;
 }
@@ -1669,6 +1732,39 @@ static int run_catalog_backlink_recovery(
                                      &run->options, &run->result);
     if (run->status == ROOTFS_WORK_OK)
         run->output = read_file(run->destination, &run->output_size);
+    return 1;
+}
+
+static int run_catalog_topology_recovery(
+    run_t *run, const fixture_t *fx, const char *tag,
+    int allow_unclean_source, int repair_catalog_topology) {
+    memset(run, 0, sizeof(*run));
+    if (!make_path(run->source, sizeof(run->source), tag) ||
+        !make_path(run->destination, sizeof(run->destination), tag) ||
+        !write_file(run->source, fx->image, FX_SIZE))
+        return 0;
+    run->options.preserve_fstab = true;
+    run->options.allow_unclean_source = allow_unclean_source != 0;
+    run->options.repair_catalog_topology =
+        repair_catalog_topology != 0;
+    run->status = rootfs_work_create(run->source, run->destination,
+                                     &run->options, &run->result);
+    if (run->status == ROOTFS_WORK_OK)
+        run->output = read_file(run->destination, &run->output_size);
+    return 1;
+}
+
+static int run_catalog_topology_in_place(run_t *run, const fixture_t *fx,
+                                         const char *tag) {
+    memset(run, 0, sizeof(*run));
+    if (!make_path(run->source, sizeof(run->source), tag) ||
+        !make_path(run->destination, sizeof(run->destination), tag) ||
+        !write_file(run->source, fx->image, FX_SIZE))
+        return 0;
+    run->status = rootfs_work_repair_powered_off_catalog_clone(
+        run->source, &run->result);
+    if (run->status == ROOTFS_WORK_OK)
+        run->output = read_file(run->source, &run->output_size);
     return 1;
 }
 
@@ -3130,6 +3226,272 @@ static void test_powered_off_clone_repairs_only_catalog_backlinks(void) {
             expect_refusal(&run, fx,
                            ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
                            "backlink recovery with a wrong first key");
+            run_release(&run);
+        }
+        free(fx);
+    }
+}
+
+/*
+ * Broader shutdown witness: the node map and every allocated leaf record are
+ * coherent, but a map-free stale leaf remains in both the leaf links and the
+ * root index.  Recovery is permitted only with explicit powered-off authority
+ * and only when allocated children form one complete, unique topology.
+ */
+static void test_powered_off_clone_repairs_derivable_catalog_topology(void) {
+    rootfs_work_entry_t entry;
+    run_t run;
+
+    /* Ordinary provisioning keeps its strict fail-closed behavior. */
+    {
+        fixture_t *fx = fx_create_powered_off_topology();
+
+        if (!fx) {
+            CHECK(0, "powered-off topology fixture allocation failed");
+            return;
+        }
+        entry_directory(&entry, "/gamma", 0u);
+        if (run_provision(&run, fx, "topostrict", &entry, 1u, 0u)) {
+            expect_refusal(&run, fx,
+                           ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                           "stale free-node topology without recovery");
+            run_release(&run);
+        }
+        free(fx);
+    }
+
+    /* A repair bit alone is not proof that the guest powered off. */
+    {
+        fixture_t *fx = fx_create_powered_off_topology();
+
+        if (!fx) {
+            CHECK(0, "unauthorized topology fixture allocation failed");
+            return;
+        }
+        if (run_catalog_topology_recovery(&run, fx, "topounauth", 0, 1)) {
+            uint8_t *source_after = NULL;
+            size_t source_size = 0u;
+
+            CHECK(run.status == ROOTFS_WORK_INVALID_ARGUMENT &&
+                  run.result.stage == ROOTFS_WORK_STAGE_ARGUMENTS,
+                  "unauthorized topology recovery returned %s at %s (%s)",
+                  rootfs_work_status_name(run.status),
+                  rootfs_work_stage_name(run.result.stage),
+                  run.result.detail);
+            CHECK(!run.result.published && !path_exists(run.destination),
+                  "unauthorized topology recovery published a destination");
+            source_after = read_file(run.source, &source_size);
+            CHECK(source_after && source_size == FX_SIZE &&
+                  memcmp(source_after, fx->image, FX_SIZE) == 0,
+                  "unauthorized topology recovery changed its source");
+            free(source_after);
+            run_release(&run);
+        }
+        free(fx);
+    }
+
+    /* Exact recoverable shape: two stale links and one stale root record. */
+    {
+        fixture_t *fx = fx_create_powered_off_topology();
+
+        if (!fx) {
+            CHECK(0, "recoverable topology fixture allocation failed");
+            return;
+        }
+        if (run_catalog_topology_recovery(&run, fx, "toporepair", 1, 1)) {
+            uint8_t *source_after = NULL;
+            size_t source_size = 0u;
+
+            CHECK(run.status == ROOTFS_WORK_OK && run.result.published &&
+                  run.output && run.output_size == FX_SIZE,
+                  "authorized topology recovery returned %s at %s (%s)",
+                  rootfs_work_status_name(run.status),
+                  rootfs_work_stage_name(run.result.stage),
+                  run.result.detail);
+            CHECK(run.result.catalog_topology_nodes_repairable == 3u &&
+                  run.result.catalog_topology_nodes_repaired == 3u &&
+                  run.result.catalog_topology_stale_refs == 1u,
+                  "topology recovery reported %u repairable, %u repaired, "
+                  "%u stale refs",
+                  run.result.catalog_topology_nodes_repairable,
+                  run.result.catalog_topology_nodes_repaired,
+                  run.result.catalog_topology_stale_refs);
+            source_after = read_file(run.source, &source_size);
+            CHECK(source_after && source_size == FX_SIZE &&
+                  memcmp(source_after, fx->image, FX_SIZE) == 0,
+                  "topology clone recovery changed the immutable source");
+            free(source_after);
+            if (run.output) {
+                tr_volume_t vol;
+
+                if (tr_open(run.output, run.output_size, &vol)) {
+                    uint32_t chain[FX_CATALOG_NODES];
+                    uint32_t children[FX_CATALOG_NODES];
+                    uint16_t child_count;
+                    int links_ok = 0;
+                    uint32_t nodes = tr_level_chain(
+                        &vol, vol.first_leaf, chain,
+                        sizeof(chain) / sizeof(chain[0]), &links_ok);
+
+                    child_count = tr_children(
+                        &vol, vol.root_node, 2u, children,
+                        sizeof(children) / sizeof(children[0]));
+                    CHECK(nodes == 2u && links_ok && chain[0] == 1u &&
+                          chain[1] == 4u && tr_flink(&vol, 1u) == 4u &&
+                          tr_blink(&vol, 4u) == 1u,
+                          "recovered topology leaf chain is %u nodes, "
+                          "links_ok=%d, 1.fLink=%u, 4.bLink=%u", nodes,
+                          links_ok, tr_flink(&vol, 1u), tr_blink(&vol, 4u));
+                    CHECK(child_count == 2u && children[0] == 1u &&
+                          children[1] == 4u,
+                          "recovered root has %u children [%u, %u]",
+                          child_count, child_count > 0u ? children[0] : 0u,
+                          child_count > 1u ? children[1] : 0u);
+                    CHECK(tr_node_used(&vol, 2u) == 0 &&
+                          memcmp(tr_node(&vol, 2u), fx_node(fx, 2u),
+                                 FX_NODE_SIZE) == 0,
+                          "map-free stale node 2 was changed or allocated");
+                    tr_close(&vol);
+                } else {
+                    CHECK(0, "the topology-recovered image could not open");
+                }
+            }
+            run_release(&run);
+        }
+        free(fx);
+    }
+
+    /* The boot path repairs a caller-owned filesystem clone in place, avoiding
+     * a second multi-GiB copy while keeping publication outside this API. */
+    {
+        fixture_t *fx = fx_create_powered_off_topology();
+
+        if (!fx) {
+            CHECK(0, "in-place topology fixture allocation failed");
+            return;
+        }
+        if (run_catalog_topology_in_place(&run, fx, "topoinplace")) {
+            CHECK(run.status == ROOTFS_WORK_OK && !run.result.published &&
+                  run.output && run.output_size == FX_SIZE,
+                  "in-place topology repair returned %s at %s (%s)",
+                  rootfs_work_status_name(run.status),
+                  rootfs_work_stage_name(run.result.stage),
+                  run.result.detail);
+            CHECK(run.result.catalog_topology_nodes_repairable == 3u &&
+                  run.result.catalog_topology_nodes_repaired == 3u &&
+                  run.result.catalog_topology_stale_refs == 1u,
+                  "in-place repair reported %u/%u nodes and %u stale refs",
+                  run.result.catalog_topology_nodes_repairable,
+                  run.result.catalog_topology_nodes_repaired,
+                  run.result.catalog_topology_stale_refs);
+            if (run.output) {
+                tr_volume_t vol;
+
+                if (tr_open(run.output, run.output_size, &vol)) {
+                    uint32_t children[FX_CATALOG_NODES];
+                    uint16_t child_count = tr_children(
+                        &vol, vol.root_node, 2u, children,
+                        sizeof(children) / sizeof(children[0]));
+
+                    CHECK(child_count == 2u && children[0] == 1u &&
+                          children[1] == 4u && tr_flink(&vol, 1u) == 4u &&
+                          tr_blink(&vol, 4u) == 1u,
+                          "in-place repaired topology is not canonical");
+                    tr_close(&vol);
+                } else {
+                    CHECK(0, "in-place repaired image could not open");
+                }
+            }
+            run_release(&run);
+        }
+        free(fx);
+    }
+
+    /* Filtering stale records cannot excuse a missing allocated child. */
+    {
+        fixture_t *fx = fx_create_powered_off_topology();
+
+        if (!fx) {
+            CHECK(0, "missing-child topology fixture allocation failed");
+            return;
+        }
+        fx_index_child_set(fx, 3u, 2u, 5u);
+        if (run_catalog_topology_recovery(&run, fx, "topomissing", 1, 1)) {
+            expect_refusal(&run, fx,
+                           ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                           "topology recovery with an unparented leaf");
+            run_release(&run);
+        }
+        free(fx);
+    }
+
+    /* An in-place refusal is still write-free because the complete plan is
+     * held in memory until commit. */
+    {
+        fixture_t *fx = fx_create_powered_off_topology();
+
+        if (!fx) {
+            CHECK(0, "in-place refusal fixture allocation failed");
+            return;
+        }
+        fx_index_child_set(fx, 3u, 2u, 5u);
+        if (run_catalog_topology_in_place(&run, fx, "topoinplacerefuse")) {
+            uint8_t *after = NULL;
+            size_t after_size = 0u;
+
+            CHECK(run.status == ROOTFS_WORK_PROVISION_CATALOG_CORRUPT &&
+                  run.result.stage == ROOTFS_WORK_STAGE_PROVISION_PLAN,
+                  "in-place ambiguous repair returned %s at %s (%s)",
+                  rootfs_work_status_name(run.status),
+                  rootfs_work_stage_name(run.result.stage),
+                  run.result.detail);
+            after = read_file(run.source, &after_size);
+            CHECK(after && after_size == FX_SIZE &&
+                  memcmp(after, fx->image, FX_SIZE) == 0,
+                  "in-place plan refusal changed the clone");
+            free(after);
+            run_release(&run);
+        }
+        free(fx);
+    }
+
+    /* Nor can one allocated child be used twice to make the counts fit. */
+    {
+        fixture_t *fx = fx_create_powered_off_topology();
+
+        if (!fx) {
+            CHECK(0, "duplicate-child topology fixture allocation failed");
+            return;
+        }
+        fx_index_child_set(fx, 3u, 1u, 1u);
+        if (run_catalog_topology_recovery(&run, fx, "topoduplicate", 1, 1)) {
+            expect_refusal(&run, fx,
+                           ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                           "topology recovery with a duplicate child");
+            run_release(&run);
+        }
+        free(fx);
+    }
+
+    /* Allocated leaf content is never repaired or reordered. */
+    {
+        fixture_t *fx = fx_create_powered_off_topology();
+
+        if (!fx) {
+            CHECK(0, "overlapping-leaf topology fixture allocation failed");
+            return;
+        }
+        {
+            uint8_t *leaf = fx_node(fx, 4u);
+            uint16_t first = get_be16(leaf + FX_NODE_SIZE - 2u);
+
+            /* (17, "") -> (16, ""), now before leaf 1's final (16,"dup"). */
+            put_be32(leaf + first + 2u, FX_ALPHA);
+        }
+        if (run_catalog_topology_recovery(&run, fx, "topooverlap", 1, 1)) {
+            expect_refusal(&run, fx,
+                           ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                           "topology recovery with overlapping leaf keys");
             run_release(&run);
         }
         free(fx);
@@ -5345,6 +5707,7 @@ int main(void) {
     test_out_of_space_is_refused();
     test_broken_catalog_is_never_absence();
     test_powered_off_clone_repairs_only_catalog_backlinks();
+    test_powered_off_clone_repairs_derivable_catalog_topology();
     test_unsupported_catalogs_are_refused();
     test_index_descent_and_leaf_head();
     test_rightmost_leaf_split();

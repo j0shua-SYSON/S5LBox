@@ -1157,6 +1157,92 @@ static bool windows_open_source(const char *path, host_file_t *source,
     return true;
 }
 
+static bool windows_open_unpublished_clone(const char *path,
+                                           host_file_t *clone,
+                                           file_stamp_t *stamp,
+                                           rootfs_work_result_t *result) {
+    char *full = NULL;
+    int error = 0;
+    bool unsafe = false;
+    BY_HANDLE_FILE_INFORMATION info;
+
+    if (!windows_full_path(path, &full, &error)) {
+        result_fail(result, error == ERROR_NOT_ENOUGH_MEMORY ?
+                        ROOTFS_WORK_NO_MEMORY :
+                        ROOTFS_WORK_SOURCE_OPEN_FAILED,
+                    ROOTFS_WORK_STAGE_SOURCE_PATH, error,
+                    "cannot resolve unpublished clone path");
+        return false;
+    }
+    if (!windows_validate_chain(full, true, &error, &unsafe)) {
+        result_fail(result,
+                    unsafe ? ROOTFS_WORK_PATH_UNSAFE :
+                             ROOTFS_WORK_SOURCE_OPEN_FAILED,
+                    ROOTFS_WORK_STAGE_SOURCE_PATH, error,
+                    unsafe ? "unpublished clone path traverses a reparse point"
+                           : "cannot inspect unpublished clone path");
+        free(full);
+        return false;
+    }
+    clone->handle = CreateFileA(
+        full, GENERIC_READ | GENERIC_WRITE, 0u, NULL, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
+            FILE_FLAG_RANDOM_ACCESS,
+        NULL);
+    if (clone->handle == INVALID_HANDLE_VALUE) {
+        error = windows_error();
+        result_fail(result,
+                    error == ERROR_SHARING_VIOLATION ?
+                        ROOTFS_WORK_SOURCE_BUSY :
+                        ROOTFS_WORK_SOURCE_OPEN_FAILED,
+                    ROOTFS_WORK_STAGE_SOURCE_OPEN, error,
+                    "cannot open unpublished clone for exclusive repair");
+        free(full);
+        return false;
+    }
+    if (!windows_handle_matches_path(clone->handle, full, &error)) {
+        result_fail(result, ROOTFS_WORK_PATH_UNSAFE,
+                    ROOTFS_WORK_STAGE_SOURCE_OPEN, error,
+                    "opened unpublished clone identity is ambiguous");
+        free(full);
+        return false;
+    }
+    free(full);
+    if (!GetFileInformationByHandle(clone->handle, &info)) {
+        result_fail(result, ROOTFS_WORK_SOURCE_OPEN_FAILED,
+                    ROOTFS_WORK_STAGE_SOURCE_OPEN, windows_error(),
+                    "cannot inspect opened unpublished clone");
+        return false;
+    }
+    if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0u) {
+        result_fail(result, ROOTFS_WORK_PATH_UNSAFE,
+                    ROOTFS_WORK_STAGE_SOURCE_OPEN, 0,
+                    "unpublished clone is a reparse point");
+        return false;
+    }
+    if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0u ||
+        (info.dwFileAttributes & FILE_ATTRIBUTE_DEVICE) != 0u) {
+        result_fail(result, ROOTFS_WORK_SOURCE_NOT_REGULAR,
+                    ROOTFS_WORK_STAGE_SOURCE_OPEN, 0,
+                    "unpublished clone is not a regular disk image file");
+        return false;
+    }
+    if (info.nNumberOfLinks != 1u) {
+        result_fail(result, ROOTFS_WORK_SOURCE_ALIAS,
+                    ROOTFS_WORK_STAGE_SOURCE_OPEN, 0,
+                    "unpublished clone has %lu hard links",
+                    (unsigned long)info.nNumberOfLinks);
+        return false;
+    }
+    if (!host_file_stamp(clone, stamp, &error)) {
+        result_fail(result, ROOTFS_WORK_SOURCE_OPEN_FAILED,
+                    ROOTFS_WORK_STAGE_SOURCE_OPEN, error,
+                    "cannot capture unpublished clone identity");
+        return false;
+    }
+    return true;
+}
+
 static bool destination_temp_create(destination_dir_t *destination,
                                      host_file_t *temporary,
                                      bool *temporary_created,
@@ -1836,6 +1922,148 @@ static bool posix_open_source(const char *path, host_file_t *source,
         result_fail(result, ROOTFS_WORK_SOURCE_OPEN_FAILED,
                     ROOTFS_WORK_STAGE_SOURCE_OPEN, error,
                     "cannot capture source identity");
+        return false;
+    }
+    return true;
+}
+
+static bool posix_open_unpublished_clone(const char *path,
+                                         host_file_t *clone,
+                                         file_stamp_t *stamp,
+                                         rootfs_work_result_t *result) {
+    char *parent = NULL;
+    char *leaf = NULL;
+    int parent_fd = -1;
+    int error = 0;
+    bool unsafe = false;
+    struct stat before;
+    struct stat after;
+    struct flock lock;
+    int flags = O_RDWR | O_CLOEXEC;
+
+    if (!split_path(path, &parent, &leaf)) {
+        result_fail(result, ROOTFS_WORK_PATH_UNSAFE,
+                    ROOTFS_WORK_STAGE_SOURCE_PATH, 0,
+                    "unpublished clone has no safe file name");
+        return false;
+    }
+    {
+        char culprit[64];
+
+        culprit[0] = '\0';
+        parent_fd = open_directory_no_links(parent, &error, &unsafe,
+                                            culprit, sizeof culprit);
+        if (parent_fd < 0) {
+            char said[160];
+
+            if (unsafe && culprit[0])
+                (void)snprintf(
+                    said, sizeof said,
+                    "unpublished clone path traverses a symbolic link or "
+                    "'..' at component \"%s\"", culprit);
+            else if (unsafe)
+                (void)snprintf(
+                    said, sizeof said,
+                    "unpublished clone path traverses a symbolic link or '..'");
+            else
+                (void)snprintf(said, sizeof said,
+                               "cannot open unpublished clone directory: %s "
+                               "(errno %d)", strerror(error), error);
+            result_fail(result,
+                        unsafe ? ROOTFS_WORK_PATH_UNSAFE :
+                                 (error == ENOMEM ? ROOTFS_WORK_NO_MEMORY :
+                                                    ROOTFS_WORK_SOURCE_OPEN_FAILED),
+                        ROOTFS_WORK_STAGE_SOURCE_PATH, error, said);
+            free(parent);
+            free(leaf);
+            return false;
+        }
+    }
+    if (posix_fstatat_bounded(parent_fd, leaf, &before,
+                              AT_SYMLINK_NOFOLLOW) != 0) {
+        error = errno;
+        result_fail(result, ROOTFS_WORK_SOURCE_OPEN_FAILED,
+                    ROOTFS_WORK_STAGE_SOURCE_PATH, error,
+                    "cannot inspect unpublished clone path");
+        (void)close(parent_fd);
+        free(parent);
+        free(leaf);
+        return false;
+    }
+    if (S_ISLNK(before.st_mode)) {
+        result_fail(result, ROOTFS_WORK_PATH_UNSAFE,
+                    ROOTFS_WORK_STAGE_SOURCE_PATH, 0,
+                    "unpublished clone is a symbolic link");
+        (void)close(parent_fd);
+        free(parent);
+        free(leaf);
+        return false;
+    }
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    clone->descriptor = openat(parent_fd, leaf, flags);
+    error = errno;
+    (void)close(parent_fd);
+    free(parent);
+    free(leaf);
+    if (clone->descriptor < 0) {
+        result_fail(result,
+                    error == EACCES || error == EAGAIN ?
+                        ROOTFS_WORK_SOURCE_BUSY :
+                        ROOTFS_WORK_SOURCE_OPEN_FAILED,
+                    ROOTFS_WORK_STAGE_SOURCE_OPEN, error,
+                    "cannot open unpublished clone for repair");
+        return false;
+    }
+    if (posix_fstat_bounded(clone->descriptor, &after) != 0) {
+        result_fail(result, ROOTFS_WORK_SOURCE_OPEN_FAILED,
+                    ROOTFS_WORK_STAGE_SOURCE_OPEN, errno,
+                    "cannot inspect opened unpublished clone");
+        return false;
+    }
+    if (before.st_dev != after.st_dev || before.st_ino != after.st_ino) {
+        result_fail(result, ROOTFS_WORK_PATH_UNSAFE,
+                    ROOTFS_WORK_STAGE_SOURCE_OPEN, 0,
+                    "unpublished clone identity changed while it was opened");
+        return false;
+    }
+    if (!S_ISREG(after.st_mode)) {
+        result_fail(result, ROOTFS_WORK_SOURCE_NOT_REGULAR,
+                    ROOTFS_WORK_STAGE_SOURCE_OPEN, 0,
+                    "unpublished clone is not a regular disk image file");
+        return false;
+    }
+    if (after.st_nlink != 1) {
+        result_fail(result, ROOTFS_WORK_SOURCE_ALIAS,
+                    ROOTFS_WORK_STAGE_SOURCE_OPEN, 0,
+                    "unpublished clone has %lu hard links",
+                    (unsigned long)after.st_nlink);
+        return false;
+    }
+    memset(&lock, 0, sizeof(lock));
+    lock.l_type = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+    {
+        unsigned retries = 0;
+        int rc;
+
+        do {
+            rc = fcntl(clone->descriptor, F_SETLK, &lock);
+        } while (rc != 0 && errno == EINTR &&
+                 retries++ < ROOTFS_EINTR_RETRY_LIMIT);
+        if (rc != 0) {
+            error = errno;
+            result_fail(result, ROOTFS_WORK_SOURCE_BUSY,
+                        ROOTFS_WORK_STAGE_SOURCE_OPEN, error,
+                        "cannot lock unpublished clone against other users");
+            return false;
+        }
+    }
+    if (!host_file_stamp(clone, stamp, &error)) {
+        result_fail(result, ROOTFS_WORK_SOURCE_OPEN_FAILED,
+                    ROOTFS_WORK_STAGE_SOURCE_OPEN, error,
+                    "cannot capture unpublished clone identity");
         return false;
     }
     return true;
@@ -3807,6 +4035,496 @@ static bool catalog_audit(catalog_ctx_t *ctx, uint32_t expect_records,
 
 done:
     free(leaf_chain);
+    return okay;
+}
+
+typedef struct catalog_topology_node {
+    uint32_t index;
+    uint8_t *bytes;
+    const uint8_t *first_key;
+    uint16_t first_length;
+    uint32_t segment_start;
+    uint32_t segment_end;
+} catalog_topology_node_t;
+
+/* Compare only the HFSX catalog key at the start of two records. */
+static int catalog_record_key_compare(const uint8_t *left,
+                                      uint16_t left_length,
+                                      const uint8_t *right,
+                                      uint16_t right_length, bool *valid) {
+    uint16_t right_units[HFS_NAME_MAX_UNITS];
+    uint16_t right_count;
+    uint16_t unit;
+    bool right_valid = false;
+
+    *valid = false;
+    (void)catalog_key_compare_raw(right, right_length, 0u, NULL, 0u,
+                                  &right_valid);
+    if (!right_valid)
+        return 0;
+    right_count = read_be16(right + 6);
+    for (unit = 0; unit < right_count; unit++)
+        right_units[unit] = read_be16(right + 8u + (uint32_t)unit * 2u);
+    return catalog_key_compare_raw(left, left_length, read_be32(right + 2),
+                                   right_units, right_count, valid);
+}
+
+static int catalog_topology_compare_first_key(const void *left,
+                                              const void *right) {
+    const catalog_topology_node_t *a =
+        (const catalog_topology_node_t *)left;
+    const catalog_topology_node_t *b =
+        (const catalog_topology_node_t *)right;
+    bool valid = false;
+    int order = catalog_record_key_compare(a->first_key, a->first_length,
+                                           b->first_key, b->first_length,
+                                           &valid);
+
+    /* Every node passed catalog_node_check() before qsort.  Returning equality
+     * here is only a defensive fallback; the global-order proof below reports
+     * an explicit corruption error for duplicate or malformed keys. */
+    return valid ? order : 0;
+}
+
+static int catalog_topology_compare_segment(const void *left,
+                                            const void *right) {
+    const catalog_topology_node_t *a =
+        (const catalog_topology_node_t *)left;
+    const catalog_topology_node_t *b =
+        (const catalog_topology_node_t *)right;
+
+    if (a->segment_start != b->segment_start)
+        return a->segment_start < b->segment_start ? -1 : 1;
+    if (a->segment_end != b->segment_end)
+        return a->segment_end < b->segment_end ? -1 : 1;
+    if (a->index == b->index)
+        return 0;
+    return a->index < b->index ? -1 : 1;
+}
+
+/* Lay one complete canonical index node from a proven contiguous child run. */
+static bool catalog_topology_lay_index(
+    const catalog_ctx_t *ctx, uint8_t *dest, uint16_t level,
+    uint32_t flink, uint32_t blink, const catalog_topology_node_t *below,
+    uint32_t from, uint32_t to, uint32_t node_index,
+    rootfs_work_stage_t stage, rootfs_work_result_t *result) {
+    uint32_t child_count = to - from;
+    uint16_t offset = HFS_NODE_DESCRIPTOR;
+    uint16_t limit;
+    uint32_t child;
+
+    if (child_count == 0u || child_count > UINT16_MAX) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "catalog index node %u would have %u children",
+                    node_index, child_count);
+        return false;
+    }
+    if (2u * (child_count + 1u) > ctx->node_size) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "catalog index node %u has no room for %u offset slots",
+                    node_index, child_count);
+        return false;
+    }
+    limit = (uint16_t)(ctx->node_size - 2u * (child_count + 1u));
+    memset(dest, 0, ctx->node_size);
+    write_be32(dest, flink);
+    write_be32(dest + 4, blink);
+    dest[8] = HFS_BT_INDEX_NODE;
+    dest[9] = (uint8_t)level;
+    write_be16(dest + 10, (uint16_t)child_count);
+    for (child = from; child < to; child++) {
+        uint16_t key_unpadded =
+            (uint16_t)(2u + read_be16(below[child].first_key));
+        uint16_t key_bytes = key_unpadded;
+        uint16_t record_length;
+
+        if ((key_bytes & 1u) != 0u)
+            key_bytes++;
+        record_length = (uint16_t)(key_bytes + 4u);
+        if (key_unpadded > below[child].first_length ||
+            (uint32_t)offset + record_length > limit) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage,
+                        0, "the derived key for child %u does not fit index "
+                        "node %u", below[child].index, node_index);
+            return false;
+        }
+        catalog_slot_write(dest, ctx->node_size,
+                           (uint16_t)(child - from), offset);
+        memcpy(dest + offset, below[child].first_key, key_unpadded);
+        write_be32(dest + offset + key_bytes, below[child].index);
+        offset = (uint16_t)(offset + record_length);
+    }
+    catalog_slot_write(dest, ctx->node_size, (uint16_t)child_count, offset);
+    return catalog_node_check(ctx, dest, node_index, HFS_BT_INDEX_NODE,
+                              (uint8_t)level, stage, result);
+}
+
+/*
+ * Canonicalize only topology that is completely derivable from the catalog
+ * node-allocation map and the allocated leaf records.
+ *
+ * This is intentionally independent of the damaged fLink chains and index
+ * keys.  Allocated leaves are sorted by their own first keys and must form the
+ * header's exact, strictly ordered record set.  At each higher level, surviving
+ * child pointers must partition that lower level exactly once into contiguous
+ * runs.  References to map-free nodes are the only records discarded.  The
+ * existing allocated node membership and grouping are preserved; no node or
+ * leaf record is invented, dropped, allocated, or freed.
+ */
+static bool catalog_repair_powered_off_topology(
+    catalog_ctx_t *ctx, bool repair, uint32_t *changed_nodes,
+    uint32_t *stale_refs, rootfs_work_stage_t stage,
+    rootfs_work_result_t *result) {
+    catalog_topology_node_t *levels[HFS_MAX_TREE_DEPTH + 1u];
+    uint32_t level_counts[HFS_MAX_TREE_DEPTH + 1u];
+    uint32_t level_fill[HFS_MAX_TREE_DEPTH + 1u];
+    int32_t *positions = NULL;
+    uint8_t *seen = NULL;
+    uint32_t map_used = 0;
+    uint32_t changed = 0;
+    uint32_t stale = 0;
+    uint32_t node_index;
+    uint16_t level;
+    bool okay = false;
+
+    memset(levels, 0, sizeof(levels));
+    memset(level_counts, 0, sizeof(level_counts));
+    memset(level_fill, 0, sizeof(level_fill));
+    if (changed_nodes)
+        *changed_nodes = 0u;
+    if (stale_refs)
+        *stale_refs = 0u;
+
+    /* Classify and fully validate every allocated tree node without following
+     * one possibly stale link or route. */
+    for (node_index = 0u; node_index < ctx->total_nodes; node_index++) {
+        uint8_t *node = NULL;
+        uint16_t node_level;
+        uint8_t kind;
+
+        if (!catalog_node_map_used(ctx, node_index))
+            continue;
+        map_used++;
+        if (node_index == 0u)
+            continue;
+        if (!catalog_node_load(ctx, node_index, &node, stage, result))
+            goto done;
+        kind = node[8];
+        node_level = node[9];
+        if (kind == HFS_BT_LEAF_NODE && node_level == 1u) {
+            /* Classified below. */
+        } else if (kind == HFS_BT_INDEX_NODE && node_level >= 2u &&
+                   node_level <= ctx->tree_depth) {
+            /* Classified below. */
+        } else {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage,
+                        0, "allocated catalog node %u is kind 0x%02x at "
+                        "height %u", node_index, kind, node_level);
+            goto done;
+        }
+        if (!catalog_node_check(ctx, node, node_index, kind,
+                                (uint8_t)node_level, stage, result))
+            goto done;
+        level_counts[node_level]++;
+    }
+    if (map_used != ctx->total_nodes - ctx->free_nodes) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "catalog map marks %u nodes used but the header implies "
+                    "%u", map_used, ctx->total_nodes - ctx->free_nodes);
+        goto done;
+    }
+    if (map_used == 0u || map_used - 1u > ROOTFS_WORK_MAX_CATALOG_NODES) {
+        result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage, 0,
+                    "powered-off topology uses %u tree nodes; the cap is %u",
+                    map_used == 0u ? 0u : map_used - 1u,
+                    ROOTFS_WORK_MAX_CATALOG_NODES);
+        goto done;
+    }
+    for (level = 1u; level <= ctx->tree_depth; level++) {
+        if (level_counts[level] == 0u) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage,
+                        0, "catalog topology has no allocated level-%u node",
+                        level);
+            goto done;
+        }
+        levels[level] = (catalog_topology_node_t *)calloc(
+            level_counts[level], sizeof(*levels[level]));
+        if (!levels[level]) {
+            result_fail(result, ROOTFS_WORK_NO_MEMORY, stage, 0,
+                        "cannot record %u catalog nodes at level %u",
+                        level_counts[level], level);
+            goto done;
+        }
+    }
+
+    for (node_index = 1u; node_index < ctx->total_nodes; node_index++) {
+        uint8_t *node = NULL;
+        catalog_topology_node_t *ref;
+        uint16_t node_level;
+        uint16_t first;
+        uint16_t end;
+
+        if (!catalog_node_map_used(ctx, node_index))
+            continue;
+        if (!catalog_node_load(ctx, node_index, &node, stage, result))
+            goto done;
+        node_level = node[9];
+        ref = &levels[node_level][level_fill[node_level]++];
+        first = catalog_slot(node, ctx->node_size, 0u);
+        end = catalog_slot(node, ctx->node_size, 1u);
+        ref->index = node_index;
+        ref->bytes = node;
+        ref->first_key = node + first;
+        ref->first_length = (uint16_t)(end - first);
+    }
+    if (level_counts[ctx->tree_depth] != 1u ||
+        levels[ctx->tree_depth][0].index != ctx->root_node) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "catalog depth %u has %u allocated roots; header names "
+                    "node %u", ctx->tree_depth,
+                    level_counts[ctx->tree_depth], ctx->root_node);
+        goto done;
+    }
+
+    /* Leaves are the only non-redundant catalog content. */
+    qsort(levels[1], level_counts[1], sizeof(*levels[1]),
+          catalog_topology_compare_first_key);
+    {
+        const uint8_t *previous = NULL;
+        uint16_t previous_length = 0u;
+        uint32_t records = 0u;
+        uint32_t leaf;
+
+        for (leaf = 0u; leaf < level_counts[1]; leaf++) {
+            uint8_t *node = levels[1][leaf].bytes;
+            uint16_t count = catalog_record_count(node);
+            uint16_t record;
+
+            for (record = 0u; record < count; record++) {
+                uint16_t start = catalog_slot(node, ctx->node_size, record);
+                uint16_t end = catalog_slot(node, ctx->node_size,
+                                            (uint16_t)(record + 1u));
+                const uint8_t *current = node + start;
+
+                if (previous) {
+                    bool valid = false;
+                    int order = catalog_record_key_compare(
+                        current, (uint16_t)(end - start), previous,
+                        previous_length, &valid);
+
+                    if (!valid || order <= 0) {
+                        result_fail(
+                            result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                            stage, 0, "allocated catalog key order breaks at "
+                            "leaf %u record %u", levels[1][leaf].index,
+                            record);
+                        goto done;
+                    }
+                }
+                previous = current;
+                previous_length = (uint16_t)(end - start);
+                if (records == UINT32_MAX) {
+                    result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage, 0,
+                                "allocated catalog record count overflowed");
+                    goto done;
+                }
+                records++;
+            }
+        }
+        if (records != ctx->leaf_records) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage,
+                        0, "allocated catalog leaves hold %u records; header "
+                        "says %u", records, ctx->leaf_records);
+            goto done;
+        }
+    }
+    if (levels[1][0].index != ctx->first_leaf ||
+        levels[1][level_counts[1] - 1u].index != ctx->last_leaf) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "allocated leaf order spans %u..%u; header names %u..%u",
+                    levels[1][0].index,
+                    levels[1][level_counts[1] - 1u].index, ctx->first_leaf,
+                    ctx->last_leaf);
+        goto done;
+    }
+    for (node_index = 0u; node_index < level_counts[1]; node_index++) {
+        uint8_t *node = levels[1][node_index].bytes;
+        uint32_t expect_flink = node_index + 1u < level_counts[1]
+                                    ? levels[1][node_index + 1u].index
+                                    : 0u;
+        uint32_t expect_blink = node_index != 0u
+                                    ? levels[1][node_index - 1u].index
+                                    : 0u;
+
+        if (read_be32(node) != expect_flink ||
+            read_be32(node + 4) != expect_blink) {
+            changed++;
+            if (repair) {
+                write_be32(node, expect_flink);
+                write_be32(node + 4, expect_blink);
+                catalog_node_dirty(ctx, levels[1][node_index].index);
+            }
+        }
+    }
+
+    positions = (int32_t *)malloc((size_t)ctx->total_nodes *
+                                  sizeof(*positions));
+    seen = (uint8_t *)malloc((size_t)ctx->total_nodes);
+    if (!positions || !seen) {
+        result_fail(result, ROOTFS_WORK_NO_MEMORY, stage, 0,
+                    "cannot derive catalog index topology");
+        goto done;
+    }
+    for (level = 2u; level <= ctx->tree_depth; level++) {
+        catalog_topology_node_t *below = levels[level - 1u];
+        catalog_topology_node_t *current = levels[level];
+        uint32_t below_count = level_counts[level - 1u];
+        uint32_t current_count = level_counts[level];
+        uint32_t current_index;
+        uint32_t cursor;
+
+        for (node_index = 0u; node_index < ctx->total_nodes; node_index++)
+            positions[node_index] = -1;
+        memset(seen, 0, below_count);
+        for (node_index = 0u; node_index < below_count; node_index++)
+            positions[below[node_index].index] = (int32_t)node_index;
+
+        for (current_index = 0u; current_index < current_count;
+             current_index++) {
+            uint8_t *node = current[current_index].bytes;
+            uint16_t count = catalog_record_count(node);
+            uint16_t record;
+            uint32_t first_position = UINT32_MAX;
+            uint32_t previous_position = UINT32_MAX;
+            uint32_t surviving = 0u;
+
+            for (record = 0u; record < count; record++) {
+                uint16_t offset = catalog_slot(node, ctx->node_size, record);
+                uint32_t child = read_be32(
+                    node + offset + catalog_record_data_offset(node + offset));
+                int32_t position;
+
+                if (!catalog_node_map_used(ctx, child)) {
+                    if (stale == UINT32_MAX) {
+                        result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage,
+                                    0, "stale catalog child count overflowed");
+                        goto done;
+                    }
+                    stale++;
+                    continue;
+                }
+                position = positions[child];
+                if (position < 0) {
+                    result_fail(result,
+                                ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage,
+                                0, "level-%u index node %u points at allocated "
+                                "node %u outside level %u", level,
+                                current[current_index].index, child,
+                                (unsigned)(level - 1u));
+                    goto done;
+                }
+                if (seen[(uint32_t)position]) {
+                    result_fail(result,
+                                ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage,
+                                0, "allocated child %u is named more than once "
+                                "at level %u", child, level);
+                    goto done;
+                }
+                if (surviving != 0u &&
+                    (uint32_t)position != previous_position + 1u) {
+                    result_fail(result,
+                                ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage,
+                                0, "level-%u index node %u does not name one "
+                                "contiguous child run", level,
+                                current[current_index].index);
+                    goto done;
+                }
+                if (surviving == 0u)
+                    first_position = (uint32_t)position;
+                previous_position = (uint32_t)position;
+                seen[(uint32_t)position] = 1u;
+                surviving++;
+            }
+            if (surviving == 0u) {
+                result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                            stage, 0, "level-%u index node %u names no "
+                            "allocated child", level,
+                            current[current_index].index);
+                goto done;
+            }
+            current[current_index].segment_start = first_position;
+            current[current_index].segment_end = previous_position + 1u;
+        }
+        for (node_index = 0u; node_index < below_count; node_index++) {
+            if (!seen[node_index]) {
+                result_fail(result,
+                            ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                            "allocated level-%u node %u has no level-%u "
+                            "parent", (unsigned)(level - 1u),
+                            below[node_index].index, level);
+                goto done;
+            }
+        }
+        qsort(current, current_count, sizeof(*current),
+              catalog_topology_compare_segment);
+        cursor = 0u;
+        for (current_index = 0u; current_index < current_count;
+             current_index++) {
+            uint32_t expect_flink = current_index + 1u < current_count
+                                        ? current[current_index + 1u].index
+                                        : 0u;
+            uint32_t expect_blink = current_index != 0u
+                                        ? current[current_index - 1u].index
+                                        : 0u;
+
+            if (current[current_index].segment_start != cursor ||
+                current[current_index].segment_end <= cursor) {
+                result_fail(result,
+                            ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                            "level-%u index node %u begins child segment %u "
+                            "after %u", level, current[current_index].index,
+                            current[current_index].segment_start, cursor);
+                goto done;
+            }
+            if (!catalog_topology_lay_index(
+                    ctx, ctx->scratch, level, expect_flink, expect_blink,
+                    below, current[current_index].segment_start,
+                    current[current_index].segment_end,
+                    current[current_index].index, stage, result))
+                goto done;
+            if (memcmp(ctx->scratch, current[current_index].bytes,
+                       ctx->node_size) != 0) {
+                changed++;
+                if (repair) {
+                    memcpy(current[current_index].bytes, ctx->scratch,
+                           ctx->node_size);
+                    catalog_node_dirty(ctx, current[current_index].index);
+                }
+            }
+            current[current_index].first_key =
+                below[current[current_index].segment_start].first_key;
+            current[current_index].first_length =
+                below[current[current_index].segment_start].first_length;
+            cursor = current[current_index].segment_end;
+        }
+        if (cursor != below_count) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage,
+                        0, "level %u covers %u of %u allocated children",
+                        level, cursor, below_count);
+            goto done;
+        }
+    }
+    if (changed_nodes)
+        *changed_nodes = changed;
+    if (stale_refs)
+        *stale_refs = stale;
+    okay = true;
+
+done:
+    free(positions);
+    free(seen);
+    for (level = 1u; level <= HFS_MAX_TREE_DEPTH; level++)
+        free(levels[level]);
     return okay;
 }
 
@@ -6307,6 +7025,8 @@ static bool provision_volume(host_file_t *file, uint64_t file_size,
     catalog_content_t *contents = NULL;
     uint32_t before_records;
     uint32_t backlink_repairs = 0;
+    uint32_t topology_repairs = 0;
+    uint32_t topology_stale_refs = 0;
     size_t index;
     bool okay = false;
 
@@ -6346,14 +7066,36 @@ static bool provision_volume(host_file_t *file, uint64_t file_size,
                       result))
         goto done;
     before_records = ctx.leaf_records;
-    /* Refuse a catalog whose header and content disagree BEFORE planning,
-     * so a lookup can never answer "absent" out of a tree it cannot walk. */
-    if (!catalog_audit(&ctx, before_records,
-                       options->repair_catalog_backlinks,
-                       options->repair_catalog_backlinks,
-                       &backlink_repairs,
-                       ROOTFS_WORK_STAGE_PROVISION_PLAN, result))
+    /* Refuse a catalog whose header and content disagree BEFORE planning, so
+     * a lookup can never answer "absent" out of a tree it cannot walk.  The
+     * powered-off topology mode has its own stronger independent proof and
+     * then audits the derived in-memory tree before any provisioning lookup. */
+    if (options->repair_catalog_topology) {
+        uint32_t residual_backlinks = 0;
+
+        if (!catalog_repair_powered_off_topology(
+                &ctx, true, &topology_repairs, &topology_stale_refs,
+                ROOTFS_WORK_STAGE_PROVISION_PLAN, result) ||
+            !catalog_audit(&ctx, before_records, true, false,
+                           &residual_backlinks,
+                           ROOTFS_WORK_STAGE_PROVISION_PLAN, result))
+            goto done;
+        if (residual_backlinks != 0u) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                        ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                        "derived catalog topology still has %u backlink "
+                        "mismatches", residual_backlinks);
+            goto done;
+        }
+        result->catalog_topology_nodes_repairable = topology_repairs;
+        result->catalog_topology_stale_refs = topology_stale_refs;
+    } else if (!catalog_audit(&ctx, before_records,
+                              options->repair_catalog_backlinks,
+                              options->repair_catalog_backlinks,
+                              &backlink_repairs,
+                              ROOTFS_WORK_STAGE_PROVISION_PLAN, result)) {
         goto done;
+    }
     result->catalog_backlinks_repairable = backlink_repairs;
     if (options->entry_count != 0u) {
         contents = (catalog_content_t *)calloc(options->entry_count,
@@ -6394,6 +7136,7 @@ static bool provision_volume(host_file_t *file, uint64_t file_size,
                        ROOTFS_WORK_STAGE_PROVISION_WRITE, result))
         goto done;
     result->catalog_backlinks_repaired = backlink_repairs;
+    result->catalog_topology_nodes_repaired = topology_repairs;
     okay = true;
 
 done:
@@ -7029,6 +7772,123 @@ rootfs_work_status_t rootfs_work_probe_file_repair(
         source_path, repair, false, state, result);
 }
 
+rootfs_work_status_t rootfs_work_repair_powered_off_catalog_clone(
+    const char *clone_path, rootfs_work_result_t *result) {
+    host_file_t clone;
+    file_stamp_t before;
+    file_stamp_t after;
+    hfs_volume_t volume;
+    hfs_volume_t final_volume;
+    catalog_ctx_t catalog;
+    uint8_t *buffer = NULL;
+    uint32_t changed_nodes = 0u;
+    uint32_t stale_refs = 0u;
+    uint32_t residual_backlinks = 0u;
+    int error = 0;
+
+    if (!result)
+        return ROOTFS_WORK_INVALID_ARGUMENT;
+    result_reset(result);
+    host_file_init(&clone);
+    memset(&catalog, 0, sizeof(catalog));
+    if (!clone_path || clone_path[0] == '\0')
+        return result_fail(result, ROOTFS_WORK_INVALID_ARGUMENT,
+                           ROOTFS_WORK_STAGE_ARGUMENTS, 0,
+                           "an unpublished clone path is required");
+    result->io_buffer_bytes = ROOTFS_WORK_MAX_IO_BUFFER;
+    buffer = (uint8_t *)malloc(ROOTFS_WORK_MAX_IO_BUFFER);
+    if (!buffer)
+        return result_fail(result, ROOTFS_WORK_NO_MEMORY,
+                           ROOTFS_WORK_STAGE_ARGUMENTS, 0,
+                           "cannot allocate %u-byte bounded I/O buffer",
+                           ROOTFS_WORK_MAX_IO_BUFFER);
+
+#ifdef _WIN32
+    if (!windows_open_unpublished_clone(clone_path, &clone, &before, result))
+        goto done;
+#else
+    if (!posix_open_unpublished_clone(clone_path, &clone, &before, result))
+        goto done;
+#endif
+    result->source_size = before.size;
+    if (!hfs_validate(&clone, before.size, &volume, buffer,
+                      ROOTFS_WORK_MAX_IO_BUFFER, true,
+                      ROOTFS_WORK_STAGE_SOURCE_VALIDATE, result) ||
+        !catalog_open(&catalog, &clone, before.size, &volume,
+                      ROOTFS_WORK_DEFAULT_MAC_TIME, result) ||
+        !catalog_repair_powered_off_topology(
+            &catalog, true, &changed_nodes, &stale_refs,
+            ROOTFS_WORK_STAGE_PROVISION_PLAN, result) ||
+        !catalog_audit(&catalog, catalog.leaf_records, true, false,
+                       &residual_backlinks,
+                       ROOTFS_WORK_STAGE_PROVISION_PLAN, result))
+        goto done;
+    if (residual_backlinks != 0u) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                    ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                    "derived catalog topology still has %u backlink "
+                    "mismatches", residual_backlinks);
+        goto done;
+    }
+    result->catalog_topology_nodes_repairable = changed_nodes;
+    result->catalog_topology_stale_refs = stale_refs;
+    if (!catalog_commit(&catalog, NULL, 0u, buffer,
+                        ROOTFS_WORK_MAX_IO_BUFFER, result) ||
+        !catalog_audit(&catalog, catalog.leaf_records, false, false, NULL,
+                       ROOTFS_WORK_STAGE_PROVISION_WRITE, result))
+        goto done;
+    result->catalog_topology_nodes_repaired = changed_nodes;
+    if (!hfs_validate(&clone, before.size, &final_volume, buffer,
+                      ROOTFS_WORK_MAX_IO_BUFFER, true,
+                      ROOTFS_WORK_STAGE_FINAL_VALIDATE, result))
+        goto done;
+    if (memcmp(&volume, &final_volume, sizeof(volume)) != 0) {
+        result_fail(result, ROOTFS_WORK_HFS_INVALID,
+                    ROOTFS_WORK_STAGE_FINAL_VALIDATE, 0,
+                    "catalog repair changed HFS volume geometry or allocation");
+        goto done;
+    }
+    if (!host_file_sync(&clone, &error)) {
+        result_fail(result, ROOTFS_WORK_SYNC_FAILED,
+                    ROOTFS_WORK_STAGE_FLUSH, error,
+                    "cannot flush repaired unpublished clone");
+        goto done;
+    }
+    if (!host_file_stamp(&clone, &after, &error)) {
+        result_fail(result, ROOTFS_WORK_SOURCE_CHANGED,
+                    ROOTFS_WORK_STAGE_FLUSH, error,
+                    "cannot revalidate repaired unpublished clone identity");
+        goto done;
+    }
+    if (after.size != before.size ||
+        after.identity_a != before.identity_a ||
+        after.identity_b != before.identity_b || after.links != before.links) {
+        result_fail(result, ROOTFS_WORK_SOURCE_CHANGED,
+                    ROOTFS_WORK_STAGE_FLUSH, 0,
+                    "unpublished clone identity, size, or links changed "
+                    "during repair");
+        goto done;
+    }
+    result->final_size = before.size;
+    (void)snprintf(result->detail, sizeof(result->detail),
+                   "repaired %u catalog topology nodes and removed %u stale "
+                   "free-node references in the unpublished clone",
+                   changed_nodes, stale_refs);
+
+done:
+    catalog_close(&catalog);
+    if (host_file_is_open(&clone) && !host_file_close(&clone, &error)) {
+        if (result->status == ROOTFS_WORK_OK)
+            result_fail(result, ROOTFS_WORK_SYNC_FAILED,
+                        ROOTFS_WORK_STAGE_FLUSH, error,
+                        "cannot close repaired unpublished clone");
+        else if (result->cleanup_system_error == 0)
+            result->cleanup_system_error = error;
+    }
+    free(buffer);
+    return result->status;
+}
+
 rootfs_work_status_t rootfs_work_create(const char *source_path,
                                         const char *destination_path,
                                         const rootfs_work_options_t *options,
@@ -7065,12 +7925,19 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
                            ROOTFS_WORK_STAGE_ARGUMENTS, 0,
                            "preserve_fstab and fstab_line are mutually "
                            "exclusive");
-    if (selected.repair_catalog_backlinks &&
+    if ((selected.repair_catalog_backlinks ||
+         selected.repair_catalog_topology) &&
         !selected.allow_unclean_source)
         return result_fail(result, ROOTFS_WORK_INVALID_ARGUMENT,
                            ROOTFS_WORK_STAGE_ARGUMENTS, 0,
-                           "catalog backlink repair requires an authorized "
-                           "unclean source");
+                           "catalog repair requires an authorized unclean "
+                           "source");
+    if (selected.repair_catalog_backlinks &&
+        selected.repair_catalog_topology)
+        return result_fail(result, ROOTFS_WORK_INVALID_ARGUMENT,
+                           ROOTFS_WORK_STAGE_ARGUMENTS, 0,
+                           "catalog backlink and topology repair modes are "
+                           "mutually exclusive");
     if (!selected.preserve_fstab && !selected.fstab_line)
         selected.fstab_line = ROOTFS_WORK_DEFAULT_FSTAB;
     if (selected.io_buffer_bytes == 0u)
@@ -7225,7 +8092,8 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
      * refusal rather than an assumption about what the caller did.
      */
     if (selected.entry_count != 0u || selected.file_repair_count != 0u ||
-        selected.repair_catalog_backlinks) {
+        selected.repair_catalog_backlinks ||
+        selected.repair_catalog_topology) {
         if (!hfs_validate(&temporary, work_size, &grown_volume, buffer,
                           selected.io_buffer_bytes,
                           selected.allow_unclean_source,
