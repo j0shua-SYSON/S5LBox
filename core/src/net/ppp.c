@@ -150,6 +150,12 @@ size_t ppp_output_pending(const ppp_peer_t *p) {
     return p ? tx_used(p) : 0u;
 }
 
+size_t ppp_output_capacity(const ppp_peer_t *p) {
+    if (!p) return 0u;
+    size_t used = tx_used(p);
+    return used <= PPP_TX_RING ? PPP_TX_RING - used : 0u;
+}
+
 int ppp_output_byte(ppp_peer_t *p) {
     if (!p || p->tx_head == p->tx_tail) return -1;
     uint8_t b = p->tx[p->tx_tail % PPP_TX_RING];

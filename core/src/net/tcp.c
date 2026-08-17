@@ -59,7 +59,7 @@
  * is a NAT: nothing about the translation is visible from the guest's side,
  * which is what lets a stock 2010 CFNetwork work against it unmodified.
  */
-static void tcp_out(net_stack_t *ns, net_flow_t *f, uint8_t flags,
+static bool tcp_out(net_stack_t *ns, net_flow_t *f, uint8_t flags,
                     uint32_t seq, const uint8_t *data, size_t n) {
     uint8_t seg[TCP_HDR_LEN + 4u + NET_TCP_MSS_MAX];
     size_t  hl = TCP_HDR_LEN;
@@ -98,7 +98,9 @@ static void tcp_out(net_stack_t *ns, net_flow_t *f, uint8_t flags,
         ns->stats.tcp_out++;
         if (n) ns->stats.tcp_bytes_to_guest += n;
         if (flags & TCP_ACK) f->need_ack = false;
+        return true;
     }
+    return false;
 }
 
 /*
@@ -193,7 +195,9 @@ static void tcp_pump(net_stack_t *ns, net_flow_t *f) {
         if (win == 0u) break;
         if (seg > win) seg = win;
         if (seg > f->mss) seg = f->mss;
-        tcp_out(ns, f, TCP_ACK | TCP_PSH, f->snd_nxt, f->txbuf + sent, seg);
+        if (!tcp_out(ns, f, TCP_ACK | TCP_PSH, f->snd_nxt,
+                     f->txbuf + sent, seg))
+            break;
         f->snd_nxt += seg;
         sent       += seg;
     }
@@ -227,8 +231,8 @@ static void tcp_pump(net_stack_t *ns, net_flow_t *f) {
     if (f->fin_sent && f->snd_nxt == f->snd_una + f->txlen &&
         (f->state == NET_TCP_FIN_WAIT_1 || f->state == NET_TCP_CLOSING ||
          f->state == NET_TCP_LAST_ACK)) {
-        tcp_out(ns, f, TCP_ACK | TCP_FIN, f->snd_nxt, NULL, 0);
-        f->snd_nxt++;
+        if (tcp_out(ns, f, TCP_ACK | TCP_FIN, f->snd_nxt, NULL, 0))
+            f->snd_nxt++;
     }
 
     if (f->need_ack) tcp_out(ns, f, TCP_ACK, f->snd_nxt, NULL, 0);
@@ -515,7 +519,8 @@ void net_tcp_tick(net_stack_t *ns, net_flow_t *f) {
             tcp_abort(ns, f);
             return;
         }
-        tcp_out(ns, f, TCP_SYN | TCP_ACK, f->snd_nxt, NULL, 0);
+        if (!tcp_out(ns, f, TCP_SYN | TCP_ACK, f->snd_nxt, NULL, 0))
+            return;
         f->snd_nxt++;
         tcp_timers(ns, f);
         return;
@@ -563,9 +568,10 @@ void net_tcp_tick(net_stack_t *ns, net_flow_t *f) {
         if (f->snd_nxt == f->snd_una && f->txlen && f->snd_wnd == 0u) {
             /* Persist. RFC 1122 §4.2.2.17 explicitly allows the probe to
              * carry one octet beyond the offered window. */
-            tcp_out(ns, f, TCP_ACK, f->snd_nxt, f->txbuf, 1u);
-            f->snd_nxt++;
-            tcp_timers(ns, f);
+            if (tcp_out(ns, f, TCP_ACK, f->snd_nxt, f->txbuf, 1u)) {
+                f->snd_nxt++;
+                tcp_timers(ns, f);
+            }
             return;
         }
         /* Go back N. tcp_pump() rebuilds the whole window from snd_una, and

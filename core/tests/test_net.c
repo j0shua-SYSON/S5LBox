@@ -76,6 +76,7 @@ typedef struct {
     /* What the host hands back. `recv_err` is returned once the queue is dry. */
     uint8_t  give[MOCK_BUF];
     size_t   givelen, givepos;
+    size_t   stream_pos, stream_left;
     int      recv_err;          /* NET_EG_WOULDBLOCK / _EOF / _ERROR         */
     size_t   give_chunk;        /* 0 = as much as fits                       */
 } mock_flow_t;
@@ -136,6 +137,18 @@ static int m_recv(void *ctx, int h, uint8_t *buf, size_t cap) {
     if (h < 0 || h >= MOCK_HANDLES) return NET_EG_ERROR;
     mock_flow_t *f = &m->h[h];
     size_t left = f->givelen - f->givepos;
+    if (!left && f->stream_left) {
+        size_t take = f->stream_left;
+        if (f->give_chunk && take > f->give_chunk) take = f->give_chunk;
+        if (take > cap) take = cap;
+        for (size_t i = 0; i < take; i++) {
+            size_t at = f->stream_pos + i;
+            buf[i] = (uint8_t)(((at * 131u + 17u) ^ (at >> 7u)) & 0xffu);
+        }
+        f->stream_pos += take;
+        f->stream_left -= take;
+        return (int)take;
+    }
     if (!left) return f->recv_err;
     size_t take = left;
     if (f->give_chunk && take > f->give_chunk) take = f->give_chunk;
@@ -1001,6 +1014,108 @@ static void test_data_crosses_in_both_directions(void) {
           "the segment's checksum does not verify");
 }
 
+/*
+ * BigBoss's current compressed package index is about 1.3 MB. Before using a
+ * repository rewrite to hide its failure, prove that the byte-stream bridge
+ * can carry a response of that size across thousands of bounded refills and
+ * acknowledgements. The mock generates bytes instead of storing the body, so
+ * this remains a fast deterministic unit test rather than a network fixture.
+ */
+static void test_a_bigboss_sized_stream_arrives_byte_exact(void) {
+    const size_t total = 1317743u;
+    pkt_t r;
+    uint32_t gseq;
+    start(true, false);
+    uint32_t ours = handshake(50015u, &gseq);
+    CHECK(ours != 0u, "the handshake did not complete");
+    drain();
+
+    g_mock.h[0].stream_left = total;
+    g_mock.h[0].give_chunk = 997u;  /* deliberately unrelated to MSS/buffer */
+    g_mock.h[0].recv_err = NET_EG_EOF;
+
+    size_t received = 0u;
+    uint32_t expected_seq = ours;
+    bool sequence_ok = true;
+    bool bytes_ok = true;
+    bool saw_fin = false;
+    bool saw_rst = false;
+
+    for (uint32_t now = 1u; now < 100000u && !saw_fin; now++) {
+        net_tick(&g_ns, now);
+        while (take(&r)) {
+            if (r.flags & TCP_RST) saw_rst = true;
+            if (r.paylen) {
+                if (r.seq != expected_seq) sequence_ok = false;
+                for (size_t i = 0; i < r.paylen; i++) {
+                    size_t at = received + i;
+                    uint8_t want =
+                        (uint8_t)(((at * 131u + 17u) ^ (at >> 7u)) & 0xffu);
+                    if (r.pay[i] != want) bytes_ok = false;
+                }
+                received += r.paylen;
+                expected_seq += (uint32_t)r.paylen;
+            }
+            if (r.flags & TCP_FIN) {
+                if (r.seq != expected_seq) sequence_ok = false;
+                saw_fin = true;
+            }
+            if (r.paylen || (r.flags & TCP_FIN)) {
+                uint32_t ack = expected_seq + (saw_fin ? 1u : 0u);
+                send_tcp(PEER_IP, 50015u, 80u, gseq, ack, TCP_ACK,
+                         8192u, NULL, 0, NULL, 0);
+            }
+        }
+    }
+
+    CHECK(received == total, "received %zu of %zu stream octets", received,
+          total);
+    CHECK(sequence_ok, "the long stream had a gap, overlap, or misplaced FIN");
+    CHECK(bytes_ok, "the long stream changed at least one octet");
+    CHECK(saw_fin && !saw_rst, "the long stream ended with fin/reset=%u/%u",
+          saw_fin, saw_rst);
+    CHECK(g_ns.stats.tcp_bytes_to_guest == total,
+          "the TCP byte counter is %llu, expected %zu",
+          (unsigned long long)g_ns.stats.tcp_bytes_to_guest, total);
+    CHECK(g_ns.stats.tcp_retransmits == 0u && g_ns.stats.out_dropped == 0u,
+          "an ideal long stream retransmitted/dropped %llu/%llu times",
+          (unsigned long long)g_ns.stats.tcp_retransmits,
+          (unsigned long long)g_ns.stats.out_dropped);
+}
+
+/* A full bounded queue is backpressure, not evidence that bytes reached the
+ * guest. Once room returns, TCP must send immediately rather than waiting an
+ * emulated-second RTO for data it only imagined it had emitted. */
+static void test_a_full_output_queue_does_not_strand_tcp_data(void) {
+    pkt_t r;
+    uint32_t gseq;
+    start(true, false);
+    uint32_t ours = handshake(50016u, &gseq);
+    CHECK(ours != 0u, "the handshake did not complete");
+    drain();
+
+    uint8_t icmp[12];
+    memset(icmp, 0, sizeof icmp);
+    icmp[0] = 8u;
+    w16(icmp + 2, net_checksum(icmp, sizeof icmp));
+    for (unsigned i = 0; i < NET_OUT_SLOTS; i++)
+        feed(LOCAL_IP, NET_PROTO_ICMP, icmp, sizeof icmp);
+    CHECK(net_output_pending(&g_ns) == NET_OUT_SLOTS,
+          "only %zu of %u queue slots filled", net_output_pending(&g_ns),
+          (unsigned)NET_OUT_SLOTS);
+
+    for (unsigned i = 0; i < 100u; i++) g_mock.h[0].give[i] = (uint8_t)i;
+    g_mock.h[0].givelen = 100u;
+    net_tick(&g_ns, 10u);       /* the first send attempt has nowhere to go */
+    CHECK(net_output_pending(&g_ns) == NET_OUT_SLOTS,
+          "the rejected TCP segment overwrote queued output");
+
+    drain();                    /* the attachment made room for the packet  */
+    net_tick(&g_ns, 11u);       /* well before NET_TCP_RTO_MS               */
+    CHECK(take(&r) && r.paylen == 100u && r.seq == ours,
+          "TCP data was stranded until an RTO after output backpressure");
+}
+
 static void test_the_guests_window_bounds_what_we_send(void) {
     pkt_t r;
     uint32_t gseq;
@@ -1530,6 +1645,8 @@ int main(void) {
     RUN(test_the_handshake_waits_for_the_host_connect);
     RUN(test_a_refused_connect_resets_rather_than_hanging);
     RUN(test_data_crosses_in_both_directions);
+    RUN(test_a_bigboss_sized_stream_arrives_byte_exact);
+    RUN(test_a_full_output_queue_does_not_strand_tcp_data);
     RUN(test_the_guests_window_bounds_what_we_send);
     RUN(test_a_small_mss_from_the_guest_is_honoured);
     RUN(test_out_of_order_is_reacked_and_never_reassembled);

@@ -119,13 +119,30 @@ static void uart4_host_service(void *ctx, unsigned retired) {
         drain_guest_ip(session);
         net_tick(session->net, now_ms);
         for (unsigned guard = 0u; guard < NET_OUT_SLOTS; guard++) {
+            /* net_output() consumes a datagram. Reserve enough encoded space
+             * before consuming it so a full PPP ring is ordinary
+             * backpressure, never a packet silently removed between TCP and
+             * the guest. The exact frame is usually smaller; this worst-case
+             * bound includes both flags and every frame octet escaped. */
+            const size_t worst_frame = 2u * PPP_MAX_FRAME + 2u;
+            if (!ppp_ipcp_open(session->peer) ||
+                ppp_output_capacity(session->peer) < worst_frame)
+                break;
             uint8_t packet[NET_MTU];
             size_t length = net_output(session->net, packet, sizeof packet);
             if (!length) break;
             if (ppp_send_ip(session->peer, packet, length))
                 session->net_to_guest++;
-            else
+            else {
+                /* With the same-thread capacity reservation above this is an
+                 * invariant failure (for example, a peer MRU contradiction),
+                 * not congestion. Keep it counted and make it diagnosable. */
                 session->net_to_guest_lost++;
+                (void)fprintf(stderr,
+                              "[network] guest datagram handoff failed "
+                              "after PPP capacity reservation\n");
+                break;
+            }
         }
     }
 

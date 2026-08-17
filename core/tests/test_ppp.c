@@ -1530,6 +1530,42 @@ static void test_ip_crosses_both_ways_once_ipcp_is_open(void) {
           "the outbound datagram was not counted");
 }
 
+static void test_output_capacity_prevents_destructive_backpressure(void) {
+    ppp_peer_t p;
+    uint8_t ip[PPP_MRU_DEFAULT];
+    uint8_t encoded[PPP_TX_RING];
+    bring_ipcp_up(&p);
+    (void)ppp_output(&p, encoded, sizeof encoded);
+    memset(ip, PPP_FLAG, sizeof ip); /* close to the maximum escaped size */
+    ip[0] = 0x45u;
+
+    const size_t worst_frame = 2u * PPP_MAX_FRAME + 2u;
+    CHECK(ppp_output_capacity(&p) == PPP_TX_RING,
+          "an empty ring reports %zu of %u bytes free",
+          ppp_output_capacity(&p), (unsigned)PPP_TX_RING);
+
+    unsigned queued = 0u;
+    while (ppp_output_capacity(&p) >= worst_frame) {
+        CHECK(ppp_send_ip(&p, ip, sizeof ip),
+              "a frame failed after worst-case capacity was reserved");
+        queued++;
+    }
+    CHECK(queued >= 3u, "only %u maximum datagrams fit in the four-frame ring",
+          queued);
+    CHECK(ppp_output_capacity(&p) < worst_frame,
+          "the capacity guard did not stop at a bounded backpressure point");
+    CHECK(p.stats.tx_overflows == 0u,
+          "capacity-controlled queuing counted %llu overflow(s)",
+          (unsigned long long)p.stats.tx_overflows);
+
+    (void)ppp_output(&p, encoded, sizeof encoded);
+    CHECK(ppp_output_capacity(&p) == PPP_TX_RING,
+          "draining the ring restored only %zu bytes of capacity",
+          ppp_output_capacity(&p));
+    CHECK(ppp_output_capacity(NULL) == 0u,
+          "a NULL peer reported output capacity");
+}
+
 static void test_a_datagram_past_the_peers_mru_is_refused(void) {
     ppp_peer_t p;
     uint8_t big[2048];
@@ -1602,6 +1638,7 @@ int main(void) {
     test_the_default_addresses_are_the_documented_ones();
     test_ip_is_refused_until_ipcp_is_opened();
     test_ip_crosses_both_ways_once_ipcp_is_open();
+    test_output_capacity_prevents_destructive_backpressure();
     test_a_datagram_past_the_peers_mru_is_refused();
     test_no_sink_is_a_drop_and_not_a_crash();
     printf("  %d passed, %d failed\n", g_pass, g_fail);

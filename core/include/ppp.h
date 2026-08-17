@@ -315,6 +315,11 @@ void ppp_input_byte(ppp_peer_t *p, uint8_t byte);
 size_t ppp_output(ppp_peer_t *p, uint8_t *buf, size_t cap);
 int    ppp_output_byte(ppp_peer_t *p);
 size_t ppp_output_pending(const ppp_peer_t *p);
+/* Free encoded-byte capacity in the transmit ring. A caller that owns a
+ * datagram queue can reserve `2 * PPP_MAX_FRAME + 2` bytes before removing a
+ * packet from that queue, guaranteeing that even a maximally escaped frame
+ * cannot be lost at this handoff. */
+size_t ppp_output_capacity(const ppp_peer_t *p);
 
 /*
  * Install (or, with fn == NULL, remove) the destination for received IPv4
