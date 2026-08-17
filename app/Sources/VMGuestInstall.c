@@ -19,11 +19,15 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
+#if defined(__APPLE__)
+#include <sys/clonefile.h>
+#endif
 #include <unistd.h>
 #endif
 
 #define VM_GUEST_INSTALL_WRITE_RETRIES 64u
 #define VM_GUEST_INSTALL_RECORD_CAPACITY 160u
+#define VM_GUEST_RECOVERY_COPY_BUFFER (1024u * 1024u)
 
 static const char VM_GUEST_MARKER_PREFIX[] =
     "s5lbox-guest-install 1\nmanifest-sha256 ";
@@ -41,6 +45,17 @@ static const char VM_GUEST_SOURCES_MARKER_PREFIX[] =
     "s5lbox-guest-cydia-sources 1\ninstall-manifest-sha256 ";
 static const char VM_GUEST_SOURCES_JOURNAL_PREFIX[] =
     "s5lbox-guest-cydia-sources-transaction 1\ninstall-manifest-sha256 ";
+static const char VM_GUEST_RECOVERY_MARKER_PREFIX[] =
+    "s5lbox-guest-recovery 1\nrecovery-id ";
+static const char VM_GUEST_RECOVERY_JOURNAL_PREFIX[] =
+    "s5lbox-guest-recovery-transaction 1\nrecovery-id ";
+static const uint8_t VM_GUEST_RECOVERY_IDENTITY[
+    VM_GUEST_INSTALL_SHA256_SIZE] = {
+    0x95u, 0x3bu, 0xa3u, 0xa2u, 0xafu, 0x51u, 0x75u, 0x2du,
+    0xccu, 0x45u, 0x05u, 0x20u, 0x54u, 0xf1u, 0xcbu, 0x33u,
+    0xf8u, 0xc8u, 0x55u, 0x8fu, 0x54u, 0xc3u, 0x30u, 0x25u,
+    0x89u, 0x4eu, 0x22u, 0x09u, 0x1au, 0xafu, 0x3au, 0x63u
+};
 
 typedef struct {
     const char *backup_file;
@@ -52,6 +67,7 @@ typedef struct {
     const char *marker_prefix;
     const char *journal_prefix;
     const char *diagnostic_name;
+    bool ephemeral_marker;
 } guest_transaction_spec_t;
 
 static const guest_transaction_spec_t VM_GUEST_INSTALL_SPEC = {
@@ -63,7 +79,8 @@ static const guest_transaction_spec_t VM_GUEST_INSTALL_SPEC = {
     VM_GUEST_INSTALL_JOURNAL_TMP,
     VM_GUEST_MARKER_PREFIX,
     VM_GUEST_JOURNAL_PREFIX,
-    "guest-install"
+    "guest-install",
+    false
 };
 
 static const guest_transaction_spec_t VM_GUEST_STORAGE_SPEC = {
@@ -75,7 +92,8 @@ static const guest_transaction_spec_t VM_GUEST_STORAGE_SPEC = {
     VM_GUEST_STORAGE_JOURNAL_TMP,
     VM_GUEST_STORAGE_MARKER_PREFIX,
     VM_GUEST_STORAGE_JOURNAL_PREFIX,
-    "guest-storage"
+    "guest-storage",
+    false
 };
 
 static const guest_transaction_spec_t VM_GUEST_PRIVILEGE_SPEC = {
@@ -87,7 +105,8 @@ static const guest_transaction_spec_t VM_GUEST_PRIVILEGE_SPEC = {
     VM_GUEST_PRIVILEGE_JOURNAL_TMP,
     VM_GUEST_PRIVILEGE_MARKER_PREFIX,
     VM_GUEST_PRIVILEGE_JOURNAL_PREFIX,
-    "guest-cydia-privileges"
+    "guest-cydia-privileges",
+    false
 };
 
 static const guest_transaction_spec_t VM_GUEST_SOURCES_SPEC = {
@@ -99,7 +118,21 @@ static const guest_transaction_spec_t VM_GUEST_SOURCES_SPEC = {
     VM_GUEST_SOURCES_JOURNAL_TMP,
     VM_GUEST_SOURCES_MARKER_PREFIX,
     VM_GUEST_SOURCES_JOURNAL_PREFIX,
-    "guest-cydia-sources"
+    "guest-cydia-sources",
+    false
+};
+
+static const guest_transaction_spec_t VM_GUEST_RECOVERY_SPEC = {
+    VM_GUEST_RECOVERY_BACKUP_FILE,
+    VM_GUEST_RECOVERY_STAGE_DIRECTORY,
+    VM_GUEST_RECOVERY_MARKER_FILE,
+    VM_GUEST_RECOVERY_MARKER_TMP,
+    VM_GUEST_RECOVERY_JOURNAL_FILE,
+    VM_GUEST_RECOVERY_JOURNAL_TMP,
+    VM_GUEST_RECOVERY_MARKER_PREFIX,
+    VM_GUEST_RECOVERY_JOURNAL_PREFIX,
+    "guest-recovery",
+    true
 };
 
 typedef enum {
@@ -251,6 +284,12 @@ bool vm_guest_sources_stage_image_path(char *out, size_t capacity,
                                        const char *work_directory) {
     return guest_stage_image_path_for(out, capacity, work_directory,
                                       &VM_GUEST_SOURCES_SPEC);
+}
+
+bool vm_guest_recovery_stage_image_path(char *out, size_t capacity,
+                                        const char *work_directory) {
+    return guest_stage_image_path_for(out, capacity, work_directory,
+                                      &VM_GUEST_RECOVERY_SPEC);
 }
 
 static guest_node_t guest_node(const char *path) {
@@ -541,6 +580,14 @@ static bool guest_remove_committed_artifacts(const guest_paths_t *paths) {
     return ok;
 }
 
+static bool guest_finish_committed_cleanup(
+    const guest_paths_t *paths, const guest_transaction_spec_t *spec) {
+    if (!guest_remove_committed_artifacts(paths)) return false;
+    if (!spec || !spec->ephemeral_marker) return true;
+    if (!guest_remove_if_present(paths->marker)) return false;
+    return guest_sync_directory(paths->work);
+}
+
 static bool guest_remove_rolled_back_artifacts(const guest_paths_t *paths) {
     bool ok = true;
     if (!guest_remove_if_present(paths->journal)) ok = false;
@@ -558,11 +605,6 @@ guest_continue(const guest_paths_t *paths,
                const uint8_t digest[VM_GUEST_INSTALL_SHA256_SIZE],
                vm_guest_install_result_t *result,
                char *detail, size_t detail_capacity) {
-    if (!guest_invalidate_resume(paths)) {
-        guest_detail(detail, detail_capacity,
-                     "The stale automatic-resume request could not be cleared before replacing the guest disk.");
-        return VM_GUEST_INSTALL_ERR_IO;
-    }
     guest_node_t live = guest_node(paths->live);
     guest_node_t backup = guest_node(paths->backup);
     guest_node_t next = guest_node(paths->next);
@@ -577,6 +619,7 @@ guest_continue(const guest_paths_t *paths,
     bool have_live = live == GUEST_NODE_REGULAR;
     bool have_backup = backup == GUEST_NODE_REGULAR;
     bool have_next = next == GUEST_NODE_REGULAR;
+    bool resume_invalidated = false;
 
     if (have_live && have_next && !have_backup) {
         if (!guest_rename_new(paths->live, paths->backup) ||
@@ -601,11 +644,22 @@ guest_continue(const guest_paths_t *paths,
         }
         have_live = true;
         have_next = false;
+        if (!guest_invalidate_resume(paths)) {
+            guest_detail(detail, detail_capacity,
+                         "The stale automatic-resume request could not be cleared after installing the prepared guest disk.");
+            return VM_GUEST_INSTALL_ERR_IO;
+        }
+        resume_invalidated = true;
         if (guest_test_interrupt(3u))
             return VM_GUEST_INSTALL_ERR_INTERRUPTED;
     }
 
     if (have_live && !have_next && have_backup) {
+        if (!resume_invalidated && !guest_invalidate_resume(paths)) {
+            guest_detail(detail, detail_capacity,
+                         "The installed guest disk is awaiting automatic-resume invalidation.");
+            return VM_GUEST_INSTALL_ERR_IO;
+        }
         if (!guest_publish_record(paths->marker_tmp, paths->marker,
                                   paths->work, spec->marker_prefix,
                                   digest)) {
@@ -621,7 +675,7 @@ guest_continue(const guest_paths_t *paths,
         }
         if (guest_test_interrupt(4u))
             return VM_GUEST_INSTALL_ERR_INTERRUPTED;
-        bool cleaned = guest_remove_committed_artifacts(paths);
+        bool cleaned = guest_finish_committed_cleanup(paths, spec);
         if (result) result->cleanup_complete = cleaned;
         if (!cleaned)
             guest_detail(detail, detail_capacity,
@@ -731,7 +785,7 @@ guest_recover_for(const char *work_directory,
                          "The guest disk is committed, but its stale automatic-resume request could not be cleared.");
             return VM_GUEST_INSTALL_ERR_IO;
         }
-        bool cleaned = guest_remove_committed_artifacts(&paths);
+        bool cleaned = guest_finish_committed_cleanup(&paths, spec);
         if (result) result->cleanup_complete = cleaned;
         if (!cleaned)
             guest_detail(detail, detail_capacity,
@@ -803,13 +857,22 @@ vm_guest_sources_recover(const char *work_directory,
 }
 
 vm_guest_install_status_t
+vm_guest_recovery_recover(const char *work_directory,
+                          vm_guest_install_result_t *result,
+                          char *detail, size_t detail_capacity) {
+    return guest_recover_for(work_directory, &VM_GUEST_RECOVERY_SPEC, result,
+                             detail, detail_capacity);
+}
+
+vm_guest_install_status_t
 vm_guest_maintenance_recover(const char *work_directory,
                              vm_guest_install_result_t *privilege_result,
                              vm_guest_install_result_t *storage_result,
                              vm_guest_install_result_t *sources_result,
                              char *detail, size_t detail_capacity) {
-    enum { MAINTENANCE_COUNT = 3 };
+    enum { MAINTENANCE_COUNT = 4 };
     const guest_transaction_spec_t *specs[MAINTENANCE_COUNT] = {
+        &VM_GUEST_RECOVERY_SPEC,
         &VM_GUEST_PRIVILEGE_SPEC,
         &VM_GUEST_STORAGE_SPEC,
         &VM_GUEST_SOURCES_SPEC
@@ -817,11 +880,12 @@ vm_guest_maintenance_recover(const char *work_directory,
     guest_paths_t paths[MAINTENANCE_COUNT];
     vm_guest_install_result_t local[MAINTENANCE_COUNT];
     vm_guest_install_result_t *results[MAINTENANCE_COUNT] = {
-        privilege_result ? privilege_result : &local[0],
-        storage_result ? storage_result : &local[1],
-        sources_result ? sources_result : &local[2]
+        &local[0],
+        privilege_result ? privilege_result : &local[1],
+        storage_result ? storage_result : &local[2],
+        sources_result ? sources_result : &local[3]
     };
-    bool journal[MAINTENANCE_COUNT] = {false, false, false};
+    bool journal[MAINTENANCE_COUNT] = {false};
     size_t owner = MAINTENANCE_COUNT;
     size_t owner_count = 0u;
 
@@ -1076,6 +1140,172 @@ vm_guest_sources_prepare_stage(const char *work_directory,
                                    result, detail, detail_capacity);
 }
 
+vm_guest_install_status_t
+vm_guest_recovery_prepare_stage(const char *work_directory,
+                                vm_guest_install_result_t *result,
+                                char *detail, size_t detail_capacity) {
+    vm_guest_install_result_t privilege;
+    vm_guest_install_result_t storage;
+    vm_guest_install_result_t sources;
+    vm_guest_install_status_t status = vm_guest_maintenance_recover(
+        work_directory, &privilege, &storage, &sources,
+        detail, detail_capacity);
+    if (status != VM_GUEST_INSTALL_OK)
+        return status;
+    if (((privilege.committed || privilege.rolled_back) &&
+         !privilege.cleanup_complete) ||
+        ((storage.committed || storage.rolled_back) &&
+         !storage.cleanup_complete) ||
+        ((sources.committed || sources.rolled_back) &&
+         !sources.cleanup_complete)) {
+        guest_detail(detail, detail_capacity,
+                     "Guest-maintenance residue must be cleaned before filesystem recovery starts.");
+        return VM_GUEST_INSTALL_ERR_STATE;
+    }
+    return guest_prepare_stage_for(work_directory, &VM_GUEST_RECOVERY_SPEC,
+                                   result, detail, detail_capacity);
+}
+
+static bool guest_copy_new(const char *source, const char *destination) {
+#if defined(__APPLE__)
+    if (clonefile(source, destination, 0u) == 0) return true;
+    (void)remove(destination);
+    return false;
+#else
+    uint8_t *buffer = NULL;
+    bool okay = false;
+#ifdef _WIN32
+    int input = _open(source, _O_RDONLY | _O_BINARY);
+    int output = -1;
+#else
+    int input = open(source, O_RDONLY);
+    int output = -1;
+#endif
+    if (input < 0) return false;
+    buffer = (uint8_t *)malloc(VM_GUEST_RECOVERY_COPY_BUFFER);
+    if (!buffer) goto done;
+#ifdef _WIN32
+    output = _open(destination,
+                   _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY,
+                   _S_IREAD | _S_IWRITE);
+#else
+    output = open(destination, O_WRONLY | O_CREAT | O_EXCL, 0600);
+#endif
+    if (output < 0) goto done;
+    for (;;) {
+#ifdef _WIN32
+        int got = _read(input, buffer,
+                        (unsigned)VM_GUEST_RECOVERY_COPY_BUFFER);
+#else
+        ssize_t got = read(input, buffer, VM_GUEST_RECOVERY_COPY_BUFFER);
+#endif
+        if (got > 0) {
+            if (!guest_write_all(output, buffer, (size_t)got)) goto done;
+            continue;
+        }
+        if (got == 0) break;
+        if (errno != EINTR) goto done;
+    }
+#ifdef _WIN32
+    if (_commit(output) != 0) goto done;
+#else
+    if (fsync(output) != 0) goto done;
+#endif
+    okay = true;
+
+done:
+    free(buffer);
+#ifdef _WIN32
+    if (output >= 0 && _close(output) != 0) okay = false;
+    if (_close(input) != 0) okay = false;
+#else
+    if (output >= 0 && close(output) != 0) okay = false;
+    if (close(input) != 0) okay = false;
+#endif
+    if (!okay) (void)remove(destination);
+    return okay;
+#endif
+}
+
+vm_guest_install_status_t
+vm_guest_recovery_clone_live_to_stage(const char *work_directory,
+                                      char *detail, size_t detail_capacity) {
+    guest_paths_t paths;
+
+    guest_detail(detail, detail_capacity, "");
+    if (!guest_paths_init_for(&paths, work_directory,
+                              &VM_GUEST_RECOVERY_SPEC)) {
+        guest_detail(detail, detail_capacity,
+                     "The filesystem-recovery path is too long to use.");
+        return VM_GUEST_INSTALL_ERR_PATH;
+    }
+    if (!guest_work_directory_ok(&paths) ||
+        guest_node(paths.stage) != GUEST_NODE_DIRECTORY ||
+        guest_node(paths.live) != GUEST_NODE_REGULAR ||
+        guest_node(paths.next) != GUEST_NODE_ABSENT ||
+        guest_node(paths.backup) != GUEST_NODE_ABSENT ||
+        guest_node(paths.marker) != GUEST_NODE_ABSENT ||
+        guest_node(paths.journal) != GUEST_NODE_ABSENT) {
+        guest_detail(detail, detail_capacity,
+                     "Filesystem recovery needs one live disk and one empty prepared stage.");
+        return VM_GUEST_INSTALL_ERR_STATE;
+    }
+    if (!guest_copy_new(paths.live, paths.next) ||
+        guest_node(paths.next) != GUEST_NODE_REGULAR ||
+        !guest_sync_directory(paths.stage)) {
+        (void)guest_remove_if_present(paths.next);
+        guest_detail(detail, detail_capacity,
+                     "The live guest disk could not be cloned into the recovery stage.");
+        return VM_GUEST_INSTALL_ERR_IO;
+    }
+    return VM_GUEST_INSTALL_OK;
+}
+
+vm_guest_install_status_t
+vm_guest_recovery_discard_stage(const char *work_directory,
+                                char *detail, size_t detail_capacity) {
+    guest_paths_t paths;
+
+    guest_detail(detail, detail_capacity, "");
+    if (!guest_paths_init_for(&paths, work_directory,
+                              &VM_GUEST_RECOVERY_SPEC)) {
+        guest_detail(detail, detail_capacity,
+                     "The filesystem-recovery path is too long to use.");
+        return VM_GUEST_INSTALL_ERR_PATH;
+    }
+    if (guest_node(paths.journal) != GUEST_NODE_ABSENT ||
+        guest_node(paths.backup) != GUEST_NODE_ABSENT ||
+        guest_node(paths.marker) != GUEST_NODE_ABSENT) {
+        guest_detail(detail, detail_capacity,
+                     "A published filesystem-recovery transaction cannot be discarded as an inert stage.");
+        return VM_GUEST_INSTALL_ERR_STATE;
+    }
+    guest_node_t stage = guest_node(paths.stage);
+    if (stage == GUEST_NODE_ABSENT) return VM_GUEST_INSTALL_OK;
+    if (stage != GUEST_NODE_DIRECTORY) {
+        guest_detail(detail, detail_capacity,
+                     "The filesystem-recovery stage has an unsafe file type.");
+        return stage == GUEST_NODE_IO_ERROR ? VM_GUEST_INSTALL_ERR_IO
+                                            : VM_GUEST_INSTALL_ERR_STATE;
+    }
+    guest_node_t next = guest_node(paths.next);
+    if (next != GUEST_NODE_ABSENT && next != GUEST_NODE_REGULAR &&
+        next != GUEST_NODE_EMPTY) {
+        guest_detail(detail, detail_capacity,
+                     "The staged recovery disk has an unsafe file type.");
+        return next == GUEST_NODE_IO_ERROR ? VM_GUEST_INSTALL_ERR_IO
+                                           : VM_GUEST_INSTALL_ERR_STATE;
+    }
+    if (!guest_remove_if_present(paths.next) ||
+        !guest_remove_directory_if_present(paths.stage) ||
+        !guest_sync_directory(paths.work)) {
+        guest_detail(detail, detail_capacity,
+                     "The inert filesystem-recovery stage could not be removed durably.");
+        return VM_GUEST_INSTALL_ERR_IO;
+    }
+    return VM_GUEST_INSTALL_OK;
+}
+
 static vm_guest_install_status_t
 guest_publish_for(const char *work_directory,
                   const guest_transaction_spec_t *spec,
@@ -1216,6 +1446,15 @@ vm_guest_sources_publish(const char *work_directory,
                          char *detail, size_t detail_capacity) {
     return guest_publish_for(work_directory, &VM_GUEST_SOURCES_SPEC,
                              manifest_sha256, result,
+                             detail, detail_capacity);
+}
+
+vm_guest_install_status_t
+vm_guest_recovery_publish(const char *work_directory,
+                          vm_guest_install_result_t *result,
+                          char *detail, size_t detail_capacity) {
+    return guest_publish_for(work_directory, &VM_GUEST_RECOVERY_SPEC,
+                             VM_GUEST_RECOVERY_IDENTITY, result,
                              detail, detail_capacity);
 }
 

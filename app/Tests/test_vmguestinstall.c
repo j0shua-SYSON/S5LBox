@@ -99,6 +99,14 @@ static bool sources_stage_path_for(char *out, size_t capacity,
            join_path(out, capacity, stage, name);
 }
 
+static bool recovery_stage_path_for(char *out, size_t capacity,
+                                    const char *name) {
+    char stage[1400];
+    return path_for(stage, sizeof stage,
+                    VM_GUEST_RECOVERY_STAGE_DIRECTORY) &&
+           join_path(out, capacity, stage, name);
+}
+
 static bool file_equals(const char *path, const char *wanted) {
     char bytes[64];
     memset(bytes, 0, sizeof bytes);
@@ -139,6 +147,11 @@ static void remove_fixture_artifacts(void) {
         VM_GUEST_SOURCES_MARKER_TMP,
         VM_GUEST_SOURCES_JOURNAL_FILE,
         VM_GUEST_SOURCES_JOURNAL_TMP,
+        VM_GUEST_RECOVERY_BACKUP_FILE,
+        VM_GUEST_RECOVERY_MARKER_FILE,
+        VM_GUEST_RECOVERY_MARKER_TMP,
+        VM_GUEST_RECOVERY_JOURNAL_FILE,
+        VM_GUEST_RECOVERY_JOURNAL_TMP,
         VM_GUEST_INSTALL_RESUME_ONCE_FILE,
         VM_GUEST_INSTALL_RESUME_ONCE_TMP,
     };
@@ -161,6 +174,11 @@ static void remove_fixture_artifacts(void) {
                                VM_GUEST_INSTALL_NEXT_FILE))
         (void)remove(path);
     if (path_for(path, sizeof path, VM_GUEST_SOURCES_STAGE_DIRECTORY))
+        (void)remove_directory(path);
+    if (recovery_stage_path_for(path, sizeof path,
+                                VM_GUEST_INSTALL_NEXT_FILE))
+        (void)remove(path);
+    if (path_for(path, sizeof path, VM_GUEST_RECOVERY_STAGE_DIRECTORY))
         (void)remove_directory(path);
     for (size_t i = 0u; i < sizeof names / sizeof names[0]; i++) {
         if (!path_for(path, sizeof path, names[i])) continue;
@@ -190,6 +208,18 @@ static void fill_digest(uint8_t digest[VM_GUEST_INSTALL_SHA256_SIZE],
                         unsigned seed) {
     for (size_t i = 0u; i < VM_GUEST_INSTALL_SHA256_SIZE; i++)
         digest[i] = (uint8_t)(seed + (unsigned)i * 7u);
+}
+
+static bool prepare_recovery_live(void) {
+    char live[1400];
+    char resume[1400];
+
+    remove_fixture_artifacts();
+    return path_for(live, sizeof live, VM_GUEST_INSTALL_LIVE_FILE) &&
+           path_for(resume, sizeof resume,
+                    VM_GUEST_INSTALL_RESUME_ONCE_FILE) &&
+           write_bytes(live, "old-rootfs") &&
+           write_bytes(resume, "powered-off checkpoint\n");
 }
 
 static void check_committed_files(const uint8_t digest[
@@ -898,6 +928,132 @@ static void test_maintenance_recovery_refuses_competing_owners(void) {
           "orphan-backup conflict restored an arbitrary owner");
 }
 
+static void test_repeatable_recovery_transaction(void) {
+    vm_guest_install_result_t result;
+    char detail[256];
+    char live[1400];
+    char next[1400];
+    char stage[1400];
+    char marker[1400];
+    char backup[1400];
+    char journal[1400];
+    char resume[1400];
+
+    CHECK(path_for(live, sizeof live, VM_GUEST_INSTALL_LIVE_FILE) &&
+          recovery_stage_path_for(next, sizeof next,
+                                  VM_GUEST_INSTALL_NEXT_FILE) &&
+          path_for(stage, sizeof stage,
+                   VM_GUEST_RECOVERY_STAGE_DIRECTORY) &&
+          path_for(marker, sizeof marker, VM_GUEST_RECOVERY_MARKER_FILE) &&
+          path_for(backup, sizeof backup, VM_GUEST_RECOVERY_BACKUP_FILE) &&
+          path_for(journal, sizeof journal, VM_GUEST_RECOVERY_JOURNAL_FILE) &&
+          path_for(resume, sizeof resume,
+                   VM_GUEST_INSTALL_RESUME_ONCE_FILE),
+          "recovery transaction path overflow");
+
+    CHECK(prepare_recovery_live(), "could not prepare normal recovery");
+    CHECK(vm_guest_recovery_prepare_stage(FIXTURE_DIR, &result,
+                                          detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && !result.committed && exists(stage),
+          "could not prepare recovery stage: %s", detail);
+    CHECK(vm_guest_recovery_clone_live_to_stage(FIXTURE_DIR,
+                                                detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && file_equals(next, "old-rootfs"),
+          "recovery clone was not exact: %s", detail);
+    CHECK(write_bytes(next, "repaired-rootfs"),
+          "could not modify unpublished recovery clone");
+    CHECK(vm_guest_recovery_publish(FIXTURE_DIR, &result,
+                                    detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && result.committed &&
+          result.cleanup_complete && file_equals(live, "repaired-rootfs") &&
+          !exists(marker) && !exists(backup) && !exists(journal) &&
+          !exists(stage) && !exists(resume),
+          "normal recovery did not commit and clean ephemerally: %s", detail);
+    CHECK(vm_guest_recovery_recover(FIXTURE_DIR, &result,
+                                    detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && !result.committed,
+          "clean recovery marker became permanent policy: %s", detail);
+
+    /* A clone that proved no repair was needed can be discarded without
+     * changing the live inode's bytes or consuming its powered-off witness. */
+    CHECK(write_bytes(resume, "powered-off checkpoint 2\n") &&
+          vm_guest_recovery_prepare_stage(FIXTURE_DIR, &result,
+                                          detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK &&
+          vm_guest_recovery_clone_live_to_stage(FIXTURE_DIR,
+                                                detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK &&
+          vm_guest_recovery_discard_stage(FIXTURE_DIR,
+                                          detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK &&
+          file_equals(live, "repaired-rootfs") &&
+          file_equals(resume, "powered-off checkpoint 2\n") &&
+          !exists(stage),
+          "discarding an inert recovery clone changed live state: %s", detail);
+
+    for (unsigned boundary = 1u; boundary <= 4u; boundary++) {
+        CHECK(prepare_recovery_live(),
+              "could not prepare recovery boundary %u", boundary);
+        CHECK(vm_guest_recovery_prepare_stage(FIXTURE_DIR, &result,
+                                              detail, sizeof detail) ==
+                  VM_GUEST_INSTALL_OK &&
+              vm_guest_recovery_clone_live_to_stage(FIXTURE_DIR,
+                                                    detail, sizeof detail) ==
+                  VM_GUEST_INSTALL_OK &&
+              write_bytes(next, "repaired-rootfs"),
+              "could not seed recovery boundary %u: %s", boundary, detail);
+        vm_guest_install_test_interrupt_after(boundary);
+        vm_guest_install_status_t status = vm_guest_recovery_publish(
+            FIXTURE_DIR, &result, detail, sizeof detail);
+        vm_guest_install_test_interrupt_after(0u);
+        CHECK(status == VM_GUEST_INSTALL_ERR_INTERRUPTED,
+              "recovery boundary %u returned %s", boundary,
+              vm_guest_install_status_text(status));
+        CHECK((boundary <= 2u) == exists(resume),
+              "recovery boundary %u invalidated resume at the wrong rename",
+              boundary);
+        status = vm_guest_recovery_recover(FIXTURE_DIR, &result,
+                                           detail, sizeof detail);
+        CHECK(status == VM_GUEST_INSTALL_OK && result.committed &&
+              result.cleanup_complete && file_equals(live, "repaired-rootfs") &&
+              !exists(marker) && !exists(backup) && !exists(journal) &&
+              !exists(stage) && !exists(resume),
+              "recovery boundary %u did not finish cleanly: %s",
+              boundary, detail);
+        CHECK(vm_guest_recovery_recover(FIXTURE_DIR, &result,
+                                        detail, sizeof detail) ==
+                  VM_GUEST_INSTALL_OK && !result.committed,
+              "recovery boundary %u left a permanent marker", boundary);
+    }
+
+    /* If the staged clone disappears before installation, the original disk
+     * and its matching powered-off checkpoint are restored together. */
+    CHECK(prepare_recovery_live(), "could not prepare recovery rollback");
+    CHECK(vm_guest_recovery_prepare_stage(FIXTURE_DIR, &result,
+                                          detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK &&
+          vm_guest_recovery_clone_live_to_stage(FIXTURE_DIR,
+                                                detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK &&
+          write_bytes(next, "repaired-rootfs"),
+          "could not seed recovery rollback: %s", detail);
+    vm_guest_install_test_interrupt_after(2u);
+    CHECK(vm_guest_recovery_publish(FIXTURE_DIR, &result,
+                                    detail, sizeof detail) ==
+              VM_GUEST_INSTALL_ERR_INTERRUPTED,
+          "recovery rollback did not stop after preserving live");
+    vm_guest_install_test_interrupt_after(0u);
+    CHECK(remove(next) == 0, "could not simulate a lost recovery clone");
+    CHECK(vm_guest_recovery_recover(FIXTURE_DIR, &result,
+                                    detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && result.rolled_back &&
+          !result.committed && file_equals(live, "old-rootfs") &&
+          file_equals(resume, "powered-off checkpoint\n") &&
+          !exists(marker) && !exists(backup) && !exists(journal),
+          "lost recovery clone did not preserve the original pair: %s",
+          detail);
+}
+
 int main(void) {
     printf("== guest install transaction ==\n");
     if (!make_directory(FIXTURE_DIR)) {
@@ -929,6 +1085,11 @@ int main(void) {
           strstr(stage_image, VM_GUEST_SOURCES_STAGE_DIRECTORY) != NULL &&
           strstr(stage_image, VM_GUEST_INSTALL_NEXT_FILE) != NULL,
           "sources stage-image path names the wrong file: %s", stage_image);
+    CHECK(vm_guest_recovery_stage_image_path(stage_image, sizeof stage_image,
+                                             FIXTURE_DIR) &&
+          strstr(stage_image, VM_GUEST_RECOVERY_STAGE_DIRECTORY) != NULL &&
+          strstr(stage_image, VM_GUEST_INSTALL_NEXT_FILE) != NULL,
+          "recovery stage-image path names the wrong file: %s", stage_image);
 
     test_stage_preparation();
     test_normal_and_idempotent();
@@ -943,6 +1104,7 @@ int main(void) {
     test_privilege_confirmation_is_marker_only();
     test_maintenance_recovery_chooses_the_active_owner();
     test_maintenance_recovery_refuses_competing_owners();
+    test_repeatable_recovery_transaction();
 
     vm_guest_install_test_interrupt_after(0u);
     remove_fixture_artifacts();

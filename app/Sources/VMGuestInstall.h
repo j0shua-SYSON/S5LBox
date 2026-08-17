@@ -55,6 +55,15 @@ extern "C" {
 #define VM_GUEST_SOURCES_MARKER_TMP      "guest.cydia-sources-v1.partial"
 #define VM_GUEST_SOURCES_JOURNAL_FILE    "guest.cydia-sources-v1.transaction"
 #define VM_GUEST_SOURCES_JOURNAL_TMP     "guest.cydia-sources-v1.transaction.partial"
+/* Powered-off filesystem repair is repeatable, so its commit record is only a
+ * crash-recovery boundary. It is removed after the backup, journal, and stage
+ * are durably cleaned instead of becoming permanent boot policy. */
+#define VM_GUEST_RECOVERY_BACKUP_FILE     "rootfs-work.pre-recovery-v1"
+#define VM_GUEST_RECOVERY_STAGE_DIRECTORY "guest.recovery-v1.stage"
+#define VM_GUEST_RECOVERY_MARKER_FILE     "guest.recovery-v1"
+#define VM_GUEST_RECOVERY_MARKER_TMP      "guest.recovery-v1.partial"
+#define VM_GUEST_RECOVERY_JOURNAL_FILE    "guest.recovery-v1.transaction"
+#define VM_GUEST_RECOVERY_JOURNAL_TMP     "guest.recovery-v1.transaction.partial"
 /* A filesystem replacement can never resume a CPU/RAM image captured against
  * the old disk. The transaction removes only this one-shot authority; inert
  * checkpoint payloads are harmless and can be replaced by the next save. */
@@ -201,6 +210,37 @@ vm_guest_sources_confirm(const char *work_directory,
                              VM_GUEST_INSTALL_SHA256_SIZE],
                          vm_guest_install_result_t *result,
                          char *detail, size_t detail_capacity);
+
+/* Crash-safe publication of an unpublished powered-off filesystem repair.
+ * prepare_stage() creates an empty same-directory stage after recovering every
+ * transaction that can own the shared live pathname. clone_live_to_stage()
+ * uses a filesystem clone on Apple hosts and an exact-copy test fallback
+ * elsewhere; the caller may then repair only the returned stage image.
+ *
+ * discard_stage() is valid before a journal exists. publish() durably installs
+ * the candidate and invalidates the old CPU/RAM restore request. Its versioned
+ * commit marker is ephemeral: result->committed reports this call's outcome,
+ * but a clean later recovery correctly reports no active transaction. */
+bool vm_guest_recovery_stage_image_path(char *out, size_t capacity,
+                                        const char *work_directory);
+vm_guest_install_status_t
+vm_guest_recovery_prepare_stage(const char *work_directory,
+                                vm_guest_install_result_t *result,
+                                char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_recovery_clone_live_to_stage(const char *work_directory,
+                                      char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_recovery_discard_stage(const char *work_directory,
+                                char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_recovery_recover(const char *work_directory,
+                          vm_guest_install_result_t *result,
+                          char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_recovery_publish(const char *work_directory,
+                          vm_guest_install_result_t *result,
+                          char *detail, size_t detail_capacity);
 
 /* Recover all maintenance namespaces in the only safe dynamic order. If one
  * journal/backup currently owns the shared live pathname, it runs first; two
