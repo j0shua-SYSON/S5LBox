@@ -3278,6 +3278,15 @@ typedef struct catalog_content {
     size_t size;
 } catalog_content_t;
 
+typedef struct catalog_file_rewrite_plan {
+    uint32_t start_block[8];
+    uint32_t block_count[8];
+    const uint8_t *bytes;
+    size_t size;
+    uint64_t capacity;
+    bool needed;
+} catalog_file_rewrite_plan_t;
+
 typedef struct catalog_ctx {
     host_file_t *file;
     uint64_t file_size;
@@ -7476,6 +7485,139 @@ static bool catalog_file_repair(catalog_ctx_t *ctx,
     return true;
 }
 
+static bool catalog_file_rewrite(
+    catalog_ctx_t *ctx, const rootfs_work_file_rewrite_t *rewrite,
+    bool apply, rootfs_work_file_rewrite_state_t *state,
+    catalog_file_rewrite_plan_t *plan, rootfs_work_result_t *result) {
+    const rootfs_work_stage_t stage = ROOTFS_WORK_STAGE_PROVISION_PLAN;
+    uint32_t leaf = 0u;
+    uint16_t position = 0u;
+    bool found = false;
+    uint8_t *data = NULL;
+    uint8_t expected_digest[IOS3_SHA256_DIGEST_SIZE];
+    uint8_t desired_digest[IOS3_SHA256_DIGEST_SIZE];
+    uint8_t actual_digest[IOS3_SHA256_DIGEST_SIZE];
+    uint64_t logical;
+    uint64_t capacity = 0u;
+    uint32_t declared_blocks;
+    unsigned extent;
+
+    *state = ROOTFS_WORK_FILE_REWRITE_MISSING;
+    if (plan) memset(plan, 0, sizeof *plan);
+    if (!rewrite || !rewrite->path || rewrite->path[0] == '\0' ||
+        rewrite->expected_content_size > ROOTFS_WORK_MAX_ENTRY_BYTES ||
+        rewrite->desired_content_size > ROOTFS_WORK_MAX_ENTRY_BYTES ||
+        (rewrite->expected_content_size != 0u &&
+         !rewrite->expected_content) ||
+        (rewrite->desired_content_size != 0u &&
+         !rewrite->desired_content) ||
+        (rewrite->permissions &
+         (uint16_t)~(uint16_t)HFS_MODE_PERM_MASK) != 0u ||
+        (apply && !plan) ||
+        !ios3_sha256(rewrite->expected_content,
+                     rewrite->expected_content_size, expected_digest) ||
+        !ios3_sha256(rewrite->desired_content,
+                     rewrite->desired_content_size, desired_digest)) {
+        result_fail(result, ROOTFS_WORK_PROVISION_INVALID, stage, 0,
+                    "the exact file-rewrite request is malformed");
+        return false;
+    }
+    if (!catalog_find_path_record(ctx, rewrite->path, &leaf, &position,
+                                  &found, &data, stage, result))
+        return false;
+    if (!found) {
+        if (apply) {
+            result_fail(result, ROOTFS_WORK_FILE_REPAIR_MISMATCH, stage, 0,
+                        "file-rewrite path %.160s is missing",
+                        rewrite->path);
+            return false;
+        }
+        return true;
+    }
+    if (read_be16(data) != HFS_CAT_FILE_RECORD ||
+        (read_be16(data + 42u) & HFS_MODE_IFMT) != HFS_MODE_IFREG) {
+        result_fail(result, ROOTFS_WORK_FILE_REPAIR_MISMATCH, stage, 0,
+                    "file-rewrite path %.160s is not a regular file",
+                    rewrite->path);
+        return false;
+    }
+    if (read_be32(data + 32u) != rewrite->owner_id ||
+        read_be32(data + 36u) != rewrite->group_id ||
+        (read_be16(data + 42u) & HFS_MODE_PERM_MASK) !=
+            rewrite->permissions) {
+        result_fail(result, ROOTFS_WORK_FILE_REPAIR_MISMATCH, stage, 0,
+                    "file-rewrite path %.160s is uid %u gid %u mode 0%o, "
+                    "not exact uid %u gid %u mode 0%o",
+                    rewrite->path, read_be32(data + 32u),
+                    read_be32(data + 36u),
+                    read_be16(data + 42u) & HFS_MODE_PERM_MASK,
+                    rewrite->owner_id, rewrite->group_id,
+                    rewrite->permissions);
+        return false;
+    }
+    logical = read_be64(data + 88u);
+    if (logical != rewrite->expected_content_size &&
+        logical != rewrite->desired_content_size) {
+        result_fail(result, ROOTFS_WORK_FILE_REPAIR_MISMATCH, stage, 0,
+                    "file-rewrite path %.160s is %" PRIu64
+                    " bytes, not the exact legacy or desired size",
+                    rewrite->path, logical);
+        return false;
+    }
+    if (!catalog_regular_file_digest(ctx, data, logical, actual_digest,
+                                     stage, result))
+        return false;
+    if (logical == rewrite->desired_content_size &&
+        memcmp(actual_digest, desired_digest, sizeof actual_digest) == 0) {
+        *state = ROOTFS_WORK_FILE_REWRITE_SATISFIED;
+        result->file_rewrites_satisfied++;
+        return true;
+    }
+    if (logical != rewrite->expected_content_size ||
+        memcmp(actual_digest, expected_digest, sizeof actual_digest) != 0) {
+        result_fail(result, ROOTFS_WORK_FILE_REPAIR_MISMATCH, stage, 0,
+                    "file-rewrite path %.160s has neither exact legacy nor "
+                    "desired bytes", rewrite->path);
+        return false;
+    }
+
+    *state = ROOTFS_WORK_FILE_REWRITE_NEEDED;
+    if (!apply) return true;
+
+    declared_blocks = read_be32(data + 100u);
+    for (extent = 0u; extent < 8u; extent++) {
+        uint32_t start = read_be32(data + 104u + extent * 8u);
+        uint32_t count = read_be32(data + 108u + extent * 8u);
+        uint64_t span = (uint64_t)count * ctx->block_size;
+
+        if (UINT64_MAX - capacity < span) {
+            result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage, 0,
+                        "file-rewrite extent capacity overflows");
+            return false;
+        }
+        plan->start_block[extent] = start;
+        plan->block_count[extent] = count;
+        capacity += span;
+    }
+    if (capacity != (uint64_t)declared_blocks * ctx->block_size ||
+        capacity > ROOTFS_WORK_MAX_ENTRY_BYTES ||
+        rewrite->desired_content_size > capacity) {
+        result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage, 0,
+                    "file-rewrite desired size %zu does not fit the bounded "
+                    "%" PRIu64 "-byte inline data fork",
+                    rewrite->desired_content_size, capacity);
+        return false;
+    }
+    plan->bytes = rewrite->desired_content;
+    plan->size = rewrite->desired_content_size;
+    plan->capacity = capacity;
+    plan->needed = true;
+    write_be64(data + 88u, (uint64_t)rewrite->desired_content_size);
+    catalog_node_dirty(ctx, leaf);
+    result->file_rewrites_applied++;
+    return true;
+}
+
 static bool provision_one(catalog_ctx_t *ctx,
                           const rootfs_work_entry_t *entry,
                           catalog_content_t *content,
@@ -7811,6 +7953,94 @@ static bool catalog_alloc_fork_io(catalog_ctx_t *ctx, bool writing,
     return true;
 }
 
+static bool catalog_commit_file_rewrite(
+    catalog_ctx_t *ctx, const catalog_file_rewrite_plan_t *plan,
+    uint8_t *buffer, size_t buffer_size, rootfs_work_result_t *result) {
+    const rootfs_work_stage_t stage = ROOTFS_WORK_STAGE_PROVISION_WRITE;
+    uint64_t stream_offset = 0u;
+    unsigned extent;
+
+    if (!plan->needed) return true;
+    memset(buffer, 0, buffer_size);
+    for (extent = 0u; extent < 8u; extent++) {
+        uint64_t remaining =
+            (uint64_t)plan->block_count[extent] * ctx->block_size;
+        uint64_t physical =
+            (uint64_t)plan->start_block[extent] * ctx->block_size;
+
+        while (remaining != 0u) {
+            size_t amount = remaining > buffer_size
+                ? buffer_size : (size_t)remaining;
+            if (stream_offset < plan->size) {
+                uint64_t content_left = (uint64_t)plan->size - stream_offset;
+                if ((uint64_t)amount > content_left)
+                    amount = (size_t)content_left;
+                if (!checked_write(ctx->file, ctx->file_size, physical,
+                                   plan->bytes + (size_t)stream_offset,
+                                   amount, stage, result))
+                    return false;
+            } else if (!checked_write(ctx->file, ctx->file_size, physical,
+                                      buffer, amount, stage, result)) {
+                return false;
+            }
+            physical += amount;
+            stream_offset += amount;
+            remaining -= amount;
+        }
+    }
+    if (stream_offset != plan->capacity) {
+        result_fail(result, ROOTFS_WORK_RANGE_ERROR, stage, 0,
+                    "file-rewrite extents ended at %" PRIu64
+                    " bytes, expected %" PRIu64,
+                    stream_offset, plan->capacity);
+        return false;
+    }
+
+    /* Read back both the desired logical bytes and every zeroed slack byte.
+     * The catalog logicalSize has not reached disk yet, so a failed write can
+     * only invalidate the unpublished clone, never publish a mixed state. */
+    stream_offset = 0u;
+    for (extent = 0u; extent < 8u; extent++) {
+        uint64_t remaining =
+            (uint64_t)plan->block_count[extent] * ctx->block_size;
+        uint64_t physical =
+            (uint64_t)plan->start_block[extent] * ctx->block_size;
+
+        while (remaining != 0u) {
+            size_t amount = remaining > buffer_size
+                ? buffer_size : (size_t)remaining;
+            size_t content_amount = 0u;
+
+            if (!checked_read(ctx->file, ctx->file_size, physical, buffer,
+                              amount, stage, result))
+                return false;
+            if (stream_offset < plan->size) {
+                uint64_t content_left = (uint64_t)plan->size - stream_offset;
+                content_amount = (uint64_t)amount > content_left
+                    ? (size_t)content_left : amount;
+                if (memcmp(buffer,
+                           plan->bytes + (size_t)stream_offset,
+                           content_amount) != 0) {
+                    result_fail(result, ROOTFS_WORK_WRITE_FAILED, stage, 0,
+                                "file-rewrite content readback disagrees");
+                    return false;
+                }
+            }
+            for (size_t index = content_amount; index < amount; index++) {
+                if (buffer[index] != 0u) {
+                    result_fail(result, ROOTFS_WORK_WRITE_FAILED, stage, 0,
+                                "file-rewrite slack readback is not zero");
+                    return false;
+                }
+            }
+            physical += amount;
+            stream_offset += amount;
+            remaining -= amount;
+        }
+    }
+    return true;
+}
+
 /*
  * Commit order is deliberate: data first, then the bitmap that claims those
  * blocks, then the catalog records that name them, then the volume header.  A
@@ -7819,6 +8049,8 @@ static bool catalog_alloc_fork_io(catalog_ctx_t *ctx, bool writing,
  */
 static bool catalog_commit(catalog_ctx_t *ctx,
                            const catalog_content_t *contents, size_t count,
+                           const catalog_file_rewrite_plan_t *rewrites,
+                           size_t rewrite_count,
                            uint8_t *buffer, size_t buffer_size,
                            rootfs_work_result_t *result) {
     const rootfs_work_stage_t stage = ROOTFS_WORK_STAGE_PROVISION_WRITE;
@@ -7850,6 +8082,11 @@ static bool catalog_commit(catalog_ctx_t *ctx,
                 return false;
             written += amount;
         }
+    }
+    for (index = 0; index < rewrite_count; index++) {
+        if (!catalog_commit_file_rewrite(ctx, &rewrites[index], buffer,
+                                         buffer_size, result))
+            return false;
     }
     if (ctx->bitmap_dirty &&
         !catalog_alloc_fork_io(ctx, true, stage, result))
@@ -8177,6 +8414,7 @@ static bool provision_volume(host_file_t *file, uint64_t file_size,
                              rootfs_work_result_t *result) {
     catalog_ctx_t ctx;
     catalog_content_t *contents = NULL;
+    catalog_file_rewrite_plan_t *rewrites = NULL;
     uint32_t before_records;
     uint32_t backlink_repairs = 0;
     uint32_t topology_repairs = 0;
@@ -8200,6 +8438,14 @@ static bool provision_volume(host_file_t *file, uint64_t file_size,
                     ROOTFS_WORK_MAX_FILE_REPAIRS);
         return false;
     }
+    if (options->file_rewrite_count > ROOTFS_WORK_MAX_FILE_REWRITES) {
+        result_fail(result, ROOTFS_WORK_PROVISION_LIMIT,
+                    ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                    "%zu file rewrites requested; the cap is %u",
+                    options->file_rewrite_count,
+                    ROOTFS_WORK_MAX_FILE_REWRITES);
+        return false;
+    }
     if (options->entry_count != 0u && !options->entries) {
         result_fail(result, ROOTFS_WORK_PROVISION_INVALID,
                     ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
@@ -8212,6 +8458,13 @@ static bool provision_volume(host_file_t *file, uint64_t file_size,
                     ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
                     "file_repair_count is %zu but file_repairs is NULL",
                     options->file_repair_count);
+        return false;
+    }
+    if (options->file_rewrite_count != 0u && !options->file_rewrites) {
+        result_fail(result, ROOTFS_WORK_PROVISION_INVALID,
+                    ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                    "file_rewrite_count is %zu but file_rewrites is NULL",
+                    options->file_rewrite_count);
         return false;
     }
     if (!catalog_open(&ctx, file, file_size, volume,
@@ -8262,6 +8515,17 @@ static bool provision_volume(host_file_t *file, uint64_t file_size,
             goto done;
         }
     }
+    if (options->file_rewrite_count != 0u) {
+        rewrites = (catalog_file_rewrite_plan_t *)calloc(
+            options->file_rewrite_count, sizeof(*rewrites));
+        if (!rewrites) {
+            result_fail(result, ROOTFS_WORK_NO_MEMORY,
+                        ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                        "cannot allocate %zu file-rewrite plans",
+                        options->file_rewrite_count);
+            goto done;
+        }
+    }
     for (index = 0; index < options->entry_count; index++) {
         if (!provision_one(&ctx, &options->entries[index], &contents[index],
                            result))
@@ -8274,13 +8538,21 @@ static bool provision_volume(host_file_t *file, uint64_t file_size,
                                  &state, result))
             goto done;
     }
+    for (index = 0; index < options->file_rewrite_count; index++) {
+        rootfs_work_file_rewrite_state_t state;
+
+        if (!catalog_file_rewrite(&ctx, &options->file_rewrites[index], true,
+                                  &state, &rewrites[index], result))
+            goto done;
+    }
     ctx.vh_dirty = options->entry_count != 0u;
     /* Report the shape change before the commit can fail, so a caller reading
      * a failed result still learns that a split was required. */
     result->provision_leaf_splits = ctx.leaf_splits;
     result->provision_index_splits = ctx.index_splits;
-    if (!catalog_commit(&ctx, contents, options->entry_count, buffer,
-                        buffer_size, result))
+    if (!catalog_commit(&ctx, contents, options->entry_count, rewrites,
+                        options->file_rewrite_count, buffer, buffer_size,
+                        result))
         goto done;
     /* Read the tree back through the independent chain walk.  This shares no
      * state with the writer: if the commit produced anything the leaf chain
@@ -8294,6 +8566,7 @@ static bool provision_volume(host_file_t *file, uint64_t file_size,
     okay = true;
 
 done:
+    free(rewrites);
     free(contents);
     catalog_close(&ctx);
     return okay;
@@ -8926,6 +9199,112 @@ rootfs_work_status_t rootfs_work_probe_file_repair(
         source_path, repair, false, state, result);
 }
 
+rootfs_work_status_t rootfs_work_probe_file_rewrite_policy(
+    const char *source_path, const rootfs_work_file_rewrite_t *rewrite,
+    bool allow_unclean_source, bool allow_catalog_backlink_recovery,
+    rootfs_work_file_rewrite_state_t *state,
+    rootfs_work_result_t *result) {
+    host_file_t source;
+    file_stamp_t source_before;
+    file_stamp_t source_after;
+    hfs_volume_t source_volume;
+    catalog_ctx_t catalog;
+    uint8_t *buffer = NULL;
+    uint32_t backlink_mismatches = 0u;
+    int error = 0;
+
+    if (!result)
+        return ROOTFS_WORK_INVALID_ARGUMENT;
+    result_reset(result);
+    host_file_init(&source);
+    memset(&catalog, 0, sizeof catalog);
+    if (state) *state = ROOTFS_WORK_FILE_REWRITE_MISSING;
+    if (!source_path || source_path[0] == '\0' || !rewrite || !state)
+        return result_fail(result, ROOTFS_WORK_INVALID_ARGUMENT,
+                           ROOTFS_WORK_STAGE_ARGUMENTS, 0,
+                           "a source, one file rewrite and its state are required");
+    if (allow_catalog_backlink_recovery && !allow_unclean_source)
+        return result_fail(result, ROOTFS_WORK_INVALID_ARGUMENT,
+                           ROOTFS_WORK_STAGE_ARGUMENTS, 0,
+                           "catalog backlink recovery requires an authorized "
+                           "unclean source");
+
+    buffer = (uint8_t *)malloc(ROOTFS_WORK_MAX_IO_BUFFER);
+    if (!buffer)
+        return result_fail(result, ROOTFS_WORK_NO_MEMORY,
+                           ROOTFS_WORK_STAGE_ARGUMENTS, 0,
+                           "cannot allocate %u-byte bounded I/O buffer",
+                           ROOTFS_WORK_MAX_IO_BUFFER);
+
+#ifdef _WIN32
+    if (!windows_open_source(source_path, &source, &source_before, result))
+        goto done;
+#else
+    if (!posix_open_source(source_path, &source, &source_before, result))
+        goto done;
+#endif
+    result->source_size = source_before.size;
+    if (!hfs_validate(&source, source_before.size, &source_volume, buffer,
+                      ROOTFS_WORK_MAX_IO_BUFFER, allow_unclean_source,
+                      ROOTFS_WORK_STAGE_SOURCE_VALIDATE, result) ||
+        !catalog_open(&catalog, &source, source_before.size, &source_volume,
+                      ROOTFS_WORK_DEFAULT_MAC_TIME, result) ||
+        !catalog_audit(&catalog, catalog.leaf_records,
+                       allow_catalog_backlink_recovery, false,
+                       &backlink_mismatches,
+                       ROOTFS_WORK_STAGE_PROVISION_PLAN, result) ||
+        !catalog_file_rewrite(&catalog, rewrite, false, state, NULL, result))
+        goto done;
+    result->catalog_backlinks_repairable = backlink_mismatches;
+    if (!host_file_stamp(&source, &source_after, &error)) {
+        result_fail(result, ROOTFS_WORK_SOURCE_CHANGED,
+                    ROOTFS_WORK_STAGE_SOURCE_VALIDATE, error,
+                    "cannot revalidate source identity after rewrite preflight");
+        goto done;
+    }
+    if (!stamp_equal(&source_before, &source_after)) {
+        result_fail(result, ROOTFS_WORK_SOURCE_CHANGED,
+                    ROOTFS_WORK_STAGE_SOURCE_VALIDATE, 0,
+                    "source identity, size, links, or timestamps changed during rewrite preflight");
+        goto done;
+    }
+    (void)snprintf(result->detail, sizeof(result->detail),
+                   *state == ROOTFS_WORK_FILE_REWRITE_MISSING
+                       ? "file-rewrite path is not installed yet"
+                       : (*state == ROOTFS_WORK_FILE_REWRITE_NEEDED
+                              ? "exact legacy file contents need rewrite"
+                              : "exact desired file contents are already present"));
+
+done:
+    catalog_close(&catalog);
+    if (host_file_is_open(&source) && !host_file_close(&source, &error)) {
+        if (result->status == ROOTFS_WORK_OK)
+            result_fail(result, ROOTFS_WORK_SOURCE_CHANGED,
+                        ROOTFS_WORK_STAGE_SOURCE_VALIDATE, error,
+                        "source close failed after rewrite preflight");
+        else if (result->cleanup_system_error == 0)
+            result->cleanup_system_error = error;
+    }
+    free(buffer);
+    return result->status;
+}
+
+rootfs_work_status_t rootfs_work_probe_file_rewrite_ex(
+    const char *source_path, const rootfs_work_file_rewrite_t *rewrite,
+    bool allow_unclean_source, rootfs_work_file_rewrite_state_t *state,
+    rootfs_work_result_t *result) {
+    return rootfs_work_probe_file_rewrite_policy(
+        source_path, rewrite, allow_unclean_source, false, state, result);
+}
+
+rootfs_work_status_t rootfs_work_probe_file_rewrite(
+    const char *source_path, const rootfs_work_file_rewrite_t *rewrite,
+    rootfs_work_file_rewrite_state_t *state,
+    rootfs_work_result_t *result) {
+    return rootfs_work_probe_file_rewrite_ex(
+        source_path, rewrite, false, state, result);
+}
+
 static rootfs_work_status_t rootfs_work_repair_powered_off_clone_impl(
     const char *clone_path, bool repair_allocation,
     rootfs_work_result_t *result) {
@@ -9003,7 +9382,7 @@ static rootfs_work_status_t rootfs_work_repair_powered_off_clone_impl(
     }
     result->catalog_topology_nodes_repairable = changed_nodes;
     result->catalog_topology_stale_refs = stale_refs;
-    if (!catalog_commit(&catalog, NULL, 0u, buffer,
+    if (!catalog_commit(&catalog, NULL, 0u, NULL, 0u, buffer,
                         ROOTFS_WORK_MAX_IO_BUFFER, result))
         goto done;
     if (repair_allocation &&
@@ -9330,6 +9709,7 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
      * refusal rather than an assumption about what the caller did.
      */
     if (selected.entry_count != 0u || selected.file_repair_count != 0u ||
+        selected.file_rewrite_count != 0u ||
         selected.repair_catalog_backlinks ||
         selected.repair_catalog_topology) {
         if (!hfs_validate(&temporary, work_size, &grown_volume, buffer,

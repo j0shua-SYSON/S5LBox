@@ -1838,6 +1838,24 @@ static int run_repair_existing_image(
     return 1;
 }
 
+static int run_rewrite_existing_image(
+    run_t *run, const uint8_t *image, size_t size, const char *tag,
+    const rootfs_work_file_rewrite_t *rewrite) {
+    memset(run, 0, sizeof(*run));
+    if (!make_path(run->source, sizeof(run->source), tag) ||
+        !make_path(run->destination, sizeof(run->destination), tag) ||
+        !write_file(run->source, image, size))
+        return 0;
+    run->options.preserve_fstab = true;
+    run->options.file_rewrites = rewrite;
+    run->options.file_rewrite_count = 1u;
+    run->status = rootfs_work_create(run->source, run->destination,
+                                     &run->options, &run->result);
+    if (run->status == ROOTFS_WORK_OK)
+        run->output = read_file(run->destination, &run->output_size);
+    return 1;
+}
+
 static int run_catalog_backlink_recovery(
     run_t *run, const fixture_t *fx, const char *tag,
     int allow_unclean_source, int repair_catalog_backlinks) {
@@ -2762,6 +2780,246 @@ static void test_exact_file_metadata_repair(void) {
               ROOTFS_WORK_FILE_REPAIR_MISMATCH &&
           probe.stage == ROOTFS_WORK_STAGE_PROVISION_PLAN,
           "directory at repair path was not a read-only type refusal: %s at %s (%s)",
+          rootfs_work_status_name(probe.status),
+          rootfs_work_stage_name(probe.stage), probe.detail);
+
+    run_release(&second);
+    run_release(&first);
+    free(fx);
+}
+
+static void test_exact_file_content_rewrite(void) {
+    static const char legacy[] = "fixture configuration generation one\n";
+    static const char desired[] =
+        "fixture configuration generation two with a longer payload\n";
+    fixture_t *fx = fx_create(FX_DATA_BLOCKS - 1u);
+    rootfs_work_entry_t entry;
+    rootfs_work_file_rewrite_t rewrite;
+    rootfs_work_file_rewrite_t wrong;
+    rootfs_work_file_rewrite_state_t state;
+    rootfs_work_result_t probe;
+    run_t first;
+    run_t second;
+    run_t retry;
+    run_t refusal;
+    tr_volume_t vol;
+    tr_record_t file;
+    uint64_t data_offset = 0u;
+
+    if (!fx) {
+        CHECK(0, "file-rewrite fixture allocation failed");
+        return;
+    }
+    entry_file(&entry, "/alpha/repository.list", legacy,
+               sizeof legacy - 1u, 0644u);
+    entry.owner_id = 0u;
+    entry.group_id = 0u;
+    if (!run_provision(&first, fx, "rewritebase", &entry, 1u, 0u)) {
+        CHECK(0, "file-rewrite base setup failed");
+        free(fx);
+        return;
+    }
+    expect_success(&first, "file-rewrite base");
+    if (first.output && tr_open(first.output, first.output_size, &vol)) {
+        CHECK(tr_find(&vol, FX_ALPHA, "repository.list", &file),
+              "file-rewrite base record is missing");
+        data_offset = (uint64_t)get_be32(file.data + 104u) * vol.block_size;
+        CHECK(get_be32(file.data + 100u) == 1u &&
+              data_offset + vol.block_size <= first.output_size,
+              "file-rewrite base does not own one complete inline block");
+        tr_close(&vol);
+    } else {
+        CHECK(0, "file-rewrite base could not be independently opened");
+    }
+    if (data_offset != 0u &&
+        data_offset + FX_BLOCK_SIZE <= first.output_size) {
+        /* Bytes past logicalSize are deliberately made nonzero. The rewrite
+         * must clear the entire retained allocation block, not merely copy
+         * the longer replacement over the legacy prefix. */
+        memset(first.output + (size_t)data_offset + sizeof legacy - 1u,
+               0xa5, FX_BLOCK_SIZE - (sizeof legacy - 1u));
+    }
+
+    memset(&rewrite, 0, sizeof rewrite);
+    rewrite.path = "/alpha/repository.list";
+    rewrite.expected_content = (const uint8_t *)legacy;
+    rewrite.expected_content_size = sizeof legacy - 1u;
+    rewrite.desired_content = (const uint8_t *)desired;
+    rewrite.desired_content_size = sizeof desired - 1u;
+    rewrite.owner_id = 0u;
+    rewrite.group_id = 0u;
+    rewrite.permissions = 0644u;
+
+    {
+        char probe_path[256];
+
+        CHECK(make_path(probe_path, sizeof probe_path, "rewriteprobe") &&
+              write_file(probe_path, first.output, first.output_size),
+              "could not create exact file-rewrite probe image");
+        state = ROOTFS_WORK_FILE_REWRITE_MISSING;
+        CHECK(rootfs_work_probe_file_rewrite(probe_path, &rewrite, &state,
+                                              &probe) == ROOTFS_WORK_OK &&
+              state == ROOTFS_WORK_FILE_REWRITE_NEEDED &&
+              probe.file_rewrites_applied == 0u &&
+              probe.file_rewrites_satisfied == 0u,
+              "legacy contents did not probe as rewriteable: %s at %s (%s)",
+              rootfs_work_status_name(probe.status),
+              rootfs_work_stage_name(probe.stage), probe.detail);
+        remove_if_present(probe_path);
+    }
+
+    if (!run_rewrite_existing_image(&second, first.output,
+                                    first.output_size, "rewriteapply",
+                                    &rewrite)) {
+        CHECK(0, "file-rewrite apply setup failed");
+        run_release(&first);
+        free(fx);
+        return;
+    }
+    expect_success(&second, "apply exact file rewrite");
+    CHECK(second.result.file_rewrites_applied == 1u &&
+          second.result.file_rewrites_satisfied == 0u &&
+          second.result.provision_entries == 0u &&
+          second.result.provision_blocks == 0u,
+          "rewrite result says applied=%u satisfied=%u entries=%u blocks=%u",
+          second.result.file_rewrites_applied,
+          second.result.file_rewrites_satisfied,
+          second.result.provision_entries, second.result.provision_blocks);
+    if (second.output && tr_open(second.output, second.output_size, &vol)) {
+        uint32_t start;
+        uint64_t offset;
+        size_t dirty_slack = 0u;
+
+        CHECK(tr_find(&vol, FX_ALPHA, "repository.list", &file),
+              "rewritten file vanished");
+        start = get_be32(file.data + 104u);
+        offset = (uint64_t)start * vol.block_size;
+        CHECK(file.type == 2u && get_be32(file.data + 32u) == 0u &&
+              get_be32(file.data + 36u) == 0u &&
+              get_be16(file.data + 42u) == (0100000u | 0644u),
+              "rewritten file metadata changed");
+        CHECK(get_be64(file.data + 88u) == sizeof desired - 1u &&
+              get_be32(file.data + 100u) == 1u &&
+              offset + vol.block_size <= second.output_size &&
+              memcmp(second.output + (size_t)offset, desired,
+                     sizeof desired - 1u) == 0,
+              "rewritten logical size, allocation, or content is wrong");
+        if (offset + vol.block_size <= second.output_size) {
+            for (size_t index = sizeof desired - 1u;
+                 index < vol.block_size; index++)
+                if (second.output[(size_t)offset + index] != 0u)
+                    dirty_slack++;
+        }
+        CHECK(dirty_slack == 0u,
+              "%zu retained data-fork slack bytes were not zeroed",
+              dirty_slack);
+        tr_close(&vol);
+    } else {
+        CHECK(0, "rewritten image could not be independently opened");
+    }
+    {
+        size_t source_size = 0u;
+        uint8_t *source = read_file(second.source, &source_size);
+        CHECK(source && source_size == first.output_size &&
+              memcmp(source, first.output, source_size) == 0,
+              "file rewrite modified its immutable source image");
+        free(source);
+    }
+    state = ROOTFS_WORK_FILE_REWRITE_MISSING;
+    CHECK(rootfs_work_probe_file_rewrite(second.destination, &rewrite, &state,
+                                          &probe) == ROOTFS_WORK_OK &&
+          state == ROOTFS_WORK_FILE_REWRITE_SATISFIED &&
+          probe.file_rewrites_satisfied == 1u,
+          "rewritten file did not probe as satisfied: %s at %s (%s)",
+          rootfs_work_status_name(probe.status),
+          rootfs_work_stage_name(probe.stage), probe.detail);
+
+    if (run_rewrite_existing_image(&retry, second.output,
+                                   second.output_size, "rewriteretry",
+                                   &rewrite)) {
+        expect_success(&retry, "idempotent exact file rewrite");
+        CHECK(retry.result.file_rewrites_applied == 0u &&
+              retry.result.file_rewrites_satisfied == 1u &&
+              retry.output_size == second.output_size && retry.output &&
+              memcmp(retry.output, second.output, second.output_size) == 0,
+              "satisfied rewrite was not byte-idempotent");
+        run_release(&retry);
+    }
+
+    wrong = rewrite;
+    wrong.expected_content = (const uint8_t *)"different legacy bytes\n";
+    wrong.expected_content_size = strlen(
+        (const char *)wrong.expected_content);
+    if (run_rewrite_existing_image(&refusal, first.output,
+                                   first.output_size, "rewriteidentity",
+                                   &wrong)) {
+        CHECK(refusal.status == ROOTFS_WORK_FILE_REPAIR_MISMATCH &&
+              refusal.result.stage == ROOTFS_WORK_STAGE_PROVISION_PLAN &&
+              !refusal.result.published && !refusal.result.temporary_left &&
+              !path_exists(refusal.destination),
+              "unexpected rewrite bytes did not fail closed: %s at %s (%s)",
+              rootfs_work_status_name(refusal.status),
+              rootfs_work_stage_name(refusal.result.stage),
+              refusal.result.detail);
+        run_release(&refusal);
+    }
+
+    wrong = rewrite;
+    wrong.permissions = 0600u;
+    if (run_rewrite_existing_image(&refusal, first.output,
+                                   first.output_size, "rewritemode", &wrong)) {
+        CHECK(refusal.status == ROOTFS_WORK_FILE_REPAIR_MISMATCH &&
+              !refusal.result.published && !path_exists(refusal.destination),
+              "unexpected rewrite metadata was accepted: %s (%s)",
+              rootfs_work_status_name(refusal.status), refusal.result.detail);
+        run_release(&refusal);
+    }
+
+    {
+        uint8_t too_large[FX_BLOCK_SIZE + 1u];
+        memset(too_large, 0x5a, sizeof too_large);
+        wrong = rewrite;
+        wrong.desired_content = too_large;
+        wrong.desired_content_size = sizeof too_large;
+        if (run_rewrite_existing_image(&refusal, first.output,
+                                       first.output_size, "rewritecapacity",
+                                       &wrong)) {
+            CHECK(refusal.status == ROOTFS_WORK_PROVISION_LIMIT &&
+                  !refusal.result.published &&
+                  !path_exists(refusal.destination),
+                  "oversize rewrite escaped its existing extent: %s (%s)",
+                  rootfs_work_status_name(refusal.status),
+                  refusal.result.detail);
+            run_release(&refusal);
+        }
+    }
+
+    wrong = rewrite;
+    wrong.path = "/alpha/not-installed-yet";
+    state = ROOTFS_WORK_FILE_REWRITE_NEEDED;
+    CHECK(rootfs_work_probe_file_rewrite(first.destination, &wrong, &state,
+                                          &probe) == ROOTFS_WORK_OK &&
+          state == ROOTFS_WORK_FILE_REWRITE_MISSING,
+          "missing rewrite path was not a clean probe result: %s (%s)",
+          rootfs_work_status_name(probe.status), probe.detail);
+    if (run_rewrite_existing_image(&refusal, first.output,
+                                   first.output_size, "rewritemissing",
+                                   &wrong)) {
+        CHECK(refusal.status == ROOTFS_WORK_FILE_REPAIR_MISMATCH &&
+              !refusal.result.published && !path_exists(refusal.destination),
+              "missing rewrite path was silently accepted: %s (%s)",
+              rootfs_work_status_name(refusal.status), refusal.result.detail);
+        run_release(&refusal);
+    }
+
+    wrong = rewrite;
+    wrong.path = "/alpha";
+    state = ROOTFS_WORK_FILE_REWRITE_MISSING;
+    CHECK(rootfs_work_probe_file_rewrite(first.destination, &wrong, &state,
+                                          &probe) ==
+              ROOTFS_WORK_FILE_REPAIR_MISMATCH &&
+          probe.stage == ROOTFS_WORK_STAGE_PROVISION_PLAN,
+          "directory at rewrite path was not a read-only type refusal: %s at %s (%s)",
           rootfs_work_status_name(probe.status),
           rootfs_work_stage_name(probe.stage), probe.detail);
 
@@ -6076,6 +6334,7 @@ int main(void) {
     test_existing_directory_reuse_is_explicit_and_type_safe();
     test_existing_symlink_reuse_requires_the_same_target();
     test_exact_file_metadata_repair();
+    test_exact_file_content_rewrite();
     test_full_leaf_is_refused_not_split();
     test_out_of_space_is_refused();
     test_broken_catalog_is_never_absence();

@@ -117,6 +117,7 @@ extern "C" {
  */
 #define ROOTFS_WORK_MAX_ENTRIES 1024u
 #define ROOTFS_WORK_MAX_FILE_REPAIRS 16u
+#define ROOTFS_WORK_MAX_FILE_REWRITES 16u
 #define ROOTFS_WORK_MAX_ENTRY_BYTES (16u * 1024u * 1024u)
 /*
  * 4096 catalog nodes one request may TOUCH -- not a bound on the tree, which
@@ -337,6 +338,37 @@ typedef enum rootfs_work_file_repair_state {
     ROOTFS_WORK_FILE_REPAIR_SATISFIED
 } rootfs_work_file_repair_state_t;
 
+/*
+ * One exact, capacity-preserving data-fork migration for an existing regular
+ * file. The current file must be byte-for-byte either `expected_content`
+ * (NEEDED) or `desired_content` (SATISFIED), with the exact named BSD metadata
+ * in both cases. Any third content or metadata state is refused before the
+ * first destination write.
+ *
+ * Applying a rewrite preserves the file's CNID, allocation, extents, dates,
+ * Finder metadata and resource fork. The desired content may change
+ * logicalSize only when it still fits the file's already allocated inline
+ * extents; no block is allocated or freed and extents-overflow files are
+ * refused. Slack in those extents is zeroed before the catalog record is
+ * published, so shorter replacements cannot expose stale tail bytes later.
+ */
+typedef struct rootfs_work_file_rewrite {
+    const char *path;
+    const uint8_t *expected_content;
+    size_t expected_content_size;
+    const uint8_t *desired_content;
+    size_t desired_content_size;
+    uint32_t owner_id;
+    uint32_t group_id;
+    uint16_t permissions;
+} rootfs_work_file_rewrite_t;
+
+typedef enum rootfs_work_file_rewrite_state {
+    ROOTFS_WORK_FILE_REWRITE_MISSING = 0,
+    ROOTFS_WORK_FILE_REWRITE_NEEDED,
+    ROOTFS_WORK_FILE_REWRITE_SATISFIED
+} rootfs_work_file_rewrite_state_t;
+
 typedef struct rootfs_work_options {
     /* NULL selects ROOTFS_WORK_DEFAULT_FSTAB unless preserve_fstab is true. */
     const char *fstab_line;
@@ -493,6 +525,15 @@ typedef struct rootfs_work_options {
     size_t file_repair_count;
 
     /*
+     * Existing regular files whose exact legacy contents may be replaced
+     * without reallocating their data forks. Rewrites are planned after new
+     * entries and metadata repairs, then their data is written before the
+     * catalog records that publish the new logical sizes.
+     */
+    const rootfs_work_file_rewrite_t *file_rewrites;
+    size_t file_rewrite_count;
+
+    /*
      * HFS+ epoch seconds stamped on created records and on the modification
      * times of the folders that gain a child.  Zero selects
      * ROOTFS_WORK_DEFAULT_MAC_TIME, which keeps output reproducible.
@@ -554,6 +595,8 @@ typedef struct rootfs_work_result {
     uint32_t provision_blocks;
     uint32_t file_repairs_applied;
     uint32_t file_repairs_satisfied;
+    uint32_t file_rewrites_applied;
+    uint32_t file_rewrites_satisfied;
     /*
      * B-tree nodes the request had to add, reported rather than absorbed: a
      * split changes the catalog's shape, and a caller comparing two work
@@ -651,6 +694,27 @@ rootfs_work_status_t rootfs_work_probe_file_repair_policy(
     const char *source_path, const rootfs_work_file_repair_t *repair,
     bool allow_unclean_source, bool allow_catalog_backlink_recovery,
     rootfs_work_file_repair_state_t *state,
+    rootfs_work_result_t *result);
+
+/*
+ * Read-only preflight for one exact data-fork rewrite. These mirror the file
+ * metadata probe APIs above: MISSING is an OK state, NEEDED and SATISFIED are
+ * exact identities, and any other object/content/metadata state fails closed.
+ */
+rootfs_work_status_t rootfs_work_probe_file_rewrite(
+    const char *source_path, const rootfs_work_file_rewrite_t *rewrite,
+    rootfs_work_file_rewrite_state_t *state,
+    rootfs_work_result_t *result);
+
+rootfs_work_status_t rootfs_work_probe_file_rewrite_ex(
+    const char *source_path, const rootfs_work_file_rewrite_t *rewrite,
+    bool allow_unclean_source, rootfs_work_file_rewrite_state_t *state,
+    rootfs_work_result_t *result);
+
+rootfs_work_status_t rootfs_work_probe_file_rewrite_policy(
+    const char *source_path, const rootfs_work_file_rewrite_t *rewrite,
+    bool allow_unclean_source, bool allow_catalog_backlink_recovery,
+    rootfs_work_file_rewrite_state_t *state,
     rootfs_work_result_t *result);
 
 /*
