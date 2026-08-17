@@ -584,6 +584,9 @@ typedef struct rootfs_work_result {
     /* Allocation-bitmap bits changed by the complete reference reconstruction. */
     uint32_t allocation_bits_repairable;
     uint32_t allocation_bits_repaired;
+    /* One logical freeBlocks value, written to both HFS+ volume headers. */
+    uint32_t allocation_free_count_repairable;
+    uint32_t allocation_free_count_repaired;
     uint8_t source_sha256[IOS3_SHA256_DIGEST_SIZE];
     size_t io_buffer_bytes;
     bool source_sha256_valid;

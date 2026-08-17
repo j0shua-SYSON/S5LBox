@@ -3803,7 +3803,9 @@ static void test_powered_off_clone_repairs_complete_allocation_witness(void) {
                                      "alloc-free-count")) {
             CHECK(run.status == ROOTFS_WORK_OK && run.output &&
                   get_be32(run.output + VH_OFF + 48u) == 1u &&
-                  get_be32(run.output + FX_SIZE - VH_OFF + 48u) == 1u,
+                  get_be32(run.output + FX_SIZE - VH_OFF + 48u) == 1u &&
+                  run.result.allocation_free_count_repairable == 1u &&
+                  run.result.allocation_free_count_repaired == 1u,
                   "powered-off repair did not reconcile both freeBlocks "
                   "headers (%s)", run.result.detail);
             run_release(&run);

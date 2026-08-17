@@ -5671,6 +5671,8 @@ static bool catalog_repair_powered_off_allocation(
         result->allocation_extent_collisions = plan->collision_count;
         result->catalog_extent_records_repairable = plan->extent_changes;
         result->allocation_bits_repairable = plan->bitmap_changes;
+        result->allocation_free_count_repairable =
+            plan->final_free_blocks != ctx->free_blocks ? 1u : 0u;
     }
     okay = true;
 
@@ -9023,6 +9025,8 @@ static rootfs_work_status_t rootfs_work_repair_powered_off_clone_impl(
         result->catalog_extent_records_repaired =
             allocation_plan.extent_changes;
         result->allocation_bits_repaired = allocation_plan.bitmap_changes;
+        result->allocation_free_count_repaired =
+            allocation_plan.final_free_blocks != volume.free_blocks ? 1u : 0u;
     }
     expected_volume = volume;
     if (repair_allocation)

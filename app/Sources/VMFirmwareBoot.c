@@ -684,6 +684,195 @@ static bool reapply_engine_controls_after_reset(
     return true;
 }
 
+static bool powered_off_repair_changed(
+        const rootfs_work_result_t *result) {
+    return result &&
+        (result->catalog_backlinks_repaired != 0u ||
+         result->catalog_topology_nodes_repaired != 0u ||
+         result->catalog_extent_records_repaired != 0u ||
+         result->allocation_bits_repaired != 0u ||
+         result->allocation_free_count_repaired != 0u);
+}
+
+/*
+ * A full guest shutdown is the one point at which the durable CPU/PMU state
+ * proves that iPhone OS has stopped touching its disk. Repair never opens the
+ * live image: it works on an unpublished same-directory clone, strictly
+ * re-audits that clone, and then hands publication to VMGuestInstall's
+ * crash-recoverable rename transaction. Ordinary running checkpoints and
+ * marker-free boots do no filesystem maintenance here.
+ */
+static bool recover_powered_off_work_image(
+        const vm_firmware_boot_paths_t *paths, uint64_t work_size,
+        uint32_t ram_base, uint32_t ram_size, bool *published,
+        char *detail, size_t detail_capacity) {
+    char checkpoint_detail[VM_FW_BOOT_DETAIL_CAPACITY] = {0};
+    vm_resume_checkpoint_state_t checkpoint =
+        vm_resume_checkpoint_probe_state(
+            paths->work, work_size, ram_base, ram_size,
+            checkpoint_detail, sizeof checkpoint_detail);
+    if (published) *published = false;
+    if (checkpoint != VM_RESUME_CHECKPOINT_POWERED_OFF)
+        return true;
+
+    char stage_path[VM_FW_BOOT_PATH_CAPACITY + 128u];
+    if (!vm_guest_recovery_stage_image_path(
+            stage_path, sizeof stage_path, paths->work)) {
+        set_detail(detail, detail_capacity,
+                   "The powered-off filesystem recovery path is too long.");
+        return false;
+    }
+
+    vm_guest_install_result_t transaction;
+    char transaction_detail[VM_FW_BOOT_DETAIL_CAPACITY] = {0};
+    vm_guest_install_status_t transaction_status =
+        vm_guest_recovery_prepare_stage(
+            paths->work, &transaction, transaction_detail,
+            sizeof transaction_detail);
+    if (transaction_status != VM_GUEST_INSTALL_OK) {
+        (void)snprintf(
+            detail, detail_capacity,
+            "Powered-off filesystem recovery could not prepare its safe "
+            "clone (%s): %.100s",
+            vm_guest_install_status_text(transaction_status),
+            transaction_detail[0] ? transaction_detail
+                                  : "no safe stage was created");
+        if (detail && detail_capacity) detail[detail_capacity - 1u] = '\0';
+        return false;
+    }
+
+    transaction_status = vm_guest_recovery_clone_live_to_stage(
+        paths->work, transaction_detail, sizeof transaction_detail);
+    if (transaction_status != VM_GUEST_INSTALL_OK) {
+        char discard_detail[VM_FW_BOOT_DETAIL_CAPACITY] = {0};
+        vm_guest_install_status_t discarded =
+            vm_guest_recovery_discard_stage(
+                paths->work, discard_detail, sizeof discard_detail);
+        (void)snprintf(
+            detail, detail_capacity,
+            "Powered-off filesystem recovery could not clone the live disk "
+            "(%s): %.84s%s%.48s",
+            vm_guest_install_status_text(transaction_status),
+            transaction_detail[0] ? transaction_detail : "clone failed",
+            discarded == VM_GUEST_INSTALL_OK ? "" : "; cleanup: ",
+            discarded == VM_GUEST_INSTALL_OK
+                ? ""
+                : (discard_detail[0] ? discard_detail
+                                     : vm_guest_install_status_text(discarded)));
+        if (detail && detail_capacity) detail[detail_capacity - 1u] = '\0';
+        return false;
+    }
+
+    rootfs_work_result_t repair;
+    rootfs_work_status_t repair_status =
+        rootfs_work_repair_powered_off_clone(stage_path, &repair);
+    if (repair_status != ROOTFS_WORK_OK) {
+        char discard_detail[VM_FW_BOOT_DETAIL_CAPACITY] = {0};
+        vm_guest_install_status_t discarded =
+            vm_guest_recovery_discard_stage(
+                paths->work, discard_detail, sizeof discard_detail);
+        if (discarded != VM_GUEST_INSTALL_OK) {
+            (void)snprintf(
+                detail, detail_capacity,
+                "The unpublished filesystem repair was refused and its "
+                "stage could not be removed (%s): %.112s",
+                vm_guest_install_status_text(discarded),
+                discard_detail[0] ? discard_detail
+                                  : "manual recovery is required");
+            if (detail && detail_capacity)
+                detail[detail_capacity - 1u] = '\0';
+            return false;
+        }
+        fprintf(stderr,
+                "[rootfs] powered-off recovery skipped (%s at %s): %s\n",
+                rootfs_work_status_name(repair_status),
+                rootfs_work_stage_name(repair.stage),
+                repair.detail[0] ? repair.detail
+                                 : "the clone was not provably repairable");
+        return true;
+    }
+
+    if (repair.source_size != work_size || repair.final_size != work_size) {
+        char discard_detail[VM_FW_BOOT_DETAIL_CAPACITY] = {0};
+        vm_guest_install_status_t discarded =
+            vm_guest_recovery_discard_stage(
+                paths->work, discard_detail, sizeof discard_detail);
+        (void)snprintf(
+            detail, detail_capacity,
+            "The repaired clone changed disk geometry (%llu/%llu, expected "
+            "%llu)%s%.64s",
+            (unsigned long long)repair.source_size,
+            (unsigned long long)repair.final_size,
+            (unsigned long long)work_size,
+            discarded == VM_GUEST_INSTALL_OK ? "" : "; cleanup: ",
+            discarded == VM_GUEST_INSTALL_OK ? "" : discard_detail);
+        if (detail && detail_capacity) detail[detail_capacity - 1u] = '\0';
+        return false;
+    }
+
+    if (!powered_off_repair_changed(&repair)) {
+        transaction_status = vm_guest_recovery_discard_stage(
+            paths->work, transaction_detail, sizeof transaction_detail);
+        if (transaction_status != VM_GUEST_INSTALL_OK) {
+            (void)snprintf(
+                detail, detail_capacity,
+                "The verified unchanged disk could not discard its recovery "
+                "clone (%s): %.112s",
+                vm_guest_install_status_text(transaction_status),
+                transaction_detail[0] ? transaction_detail
+                                      : "cleanup failed");
+            if (detail && detail_capacity)
+                detail[detail_capacity - 1u] = '\0';
+            return false;
+        }
+        return true;
+    }
+
+    transaction_status = vm_guest_recovery_publish(
+        paths->work, &transaction, transaction_detail,
+        sizeof transaction_detail);
+    if (transaction_status != VM_GUEST_INSTALL_OK ||
+        !transaction.committed) {
+        (void)snprintf(
+            detail, detail_capacity,
+            "The repaired disk could not be published atomically (%s): "
+            "%.112s",
+            vm_guest_install_status_text(transaction_status),
+            transaction_detail[0] ? transaction_detail
+                                  : "the transaction did not commit");
+        if (detail && detail_capacity) detail[detail_capacity - 1u] = '\0';
+        return false;
+    }
+    if (!transaction.cleanup_complete) {
+        transaction_status = vm_guest_recovery_recover(
+            paths->work, &transaction, transaction_detail,
+            sizeof transaction_detail);
+        if (transaction_status != VM_GUEST_INSTALL_OK ||
+            !transaction.committed || !transaction.cleanup_complete) {
+            (void)snprintf(
+                detail, detail_capacity,
+                "The repaired disk is committed, but its recovery journal "
+                "could not be cleaned (%s): %.104s",
+                vm_guest_install_status_text(transaction_status),
+                transaction_detail[0] ? transaction_detail
+                                      : "cleanup is incomplete");
+            if (detail && detail_capacity)
+                detail[detail_capacity - 1u] = '\0';
+            return false;
+        }
+    }
+
+    if (published) *published = true;
+    fprintf(stderr,
+            "[rootfs] powered-off recovery published: topology=%u, "
+            "extents=%u, bitmap=%u, free-count=%u\n",
+            repair.catalog_topology_nodes_repaired,
+            repair.catalog_extent_records_repaired,
+            repair.allocation_bits_repaired,
+            repair.allocation_free_count_repaired);
+    return true;
+}
+
 bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                             s5l8900_t *machine,
                             const vm_firmware_boot_paths_t *paths,
@@ -977,6 +1166,16 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         return false;
     }
 
+    bool repaired_powered_off_disk = false;
+    if (!recover_powered_off_work_image(
+            paths, state.work_size, machine->ram_base, machine->ram_size,
+            &repaired_powered_off_disk, report->detail,
+            sizeof report->detail)) {
+        set_detail(report->summary, sizeof report->summary,
+                   "filesystem recovery required");
+        return false;
+    }
+
     /* The work image first: it is the only step that can fail because another
      * machine is already using the file, and discovering that after reading
      * 8 MB of kernel wastes the user's time for no reason. */
@@ -1121,7 +1320,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     }
 
     bool checkpoint_loaded = restored;
-    bool fresh_boot_after_poweroff = false;
+    bool fresh_boot_after_poweroff = repaired_powered_off_disk;
 
     /* OOCSHDWN.GO_STANDBY is the guest's full power-off command, not an
      * ordinary suspend point. A prior implementation reset directly into
