@@ -145,6 +145,31 @@ static void write_be64(uint8_t *bytes, uint64_t value) {
     write_be32(bytes + 4u, (uint32_t)value);
 }
 
+static bool seek_file(FILE *file, uint64_t offset) {
+#ifdef _WIN32
+    return file && _fseeki64(file, (__int64)offset, SEEK_SET) == 0;
+#else
+    return file && fseeko(file, (off_t)offset, SEEK_SET) == 0;
+#endif
+}
+
+static bool write_hfs_free_blocks(const char *path, uint64_t image_size,
+                                  uint32_t free_blocks) {
+    if (!path || image_size < 2u * HFS_VOLUME_HEADER_OFFSET) return false;
+    FILE *file = fopen(path, "r+b");
+    if (!file) return false;
+    uint8_t bytes[4];
+    write_be32(bytes, free_blocks);
+    bool ok = seek_file(file, HFS_VOLUME_HEADER_OFFSET + 48u) &&
+              fwrite(bytes, 1u, sizeof bytes, file) == sizeof bytes &&
+              seek_file(file,
+                        image_size - HFS_VOLUME_HEADER_OFFSET + 48u) &&
+              fwrite(bytes, 1u, sizeof bytes, file) == sizeof bytes &&
+              fflush(file) == 0;
+    if (fclose(file) != 0) ok = false;
+    return ok;
+}
+
 static void hfs_fixture_bitmap_set(uint8_t *image, uint32_t bit) {
     uint8_t *byte = image + HFS_FIXTURE_BITMAP_OFFSET + (bit >> 3);
     *byte |= (uint8_t)(1u << (7u - (bit & 7u)));
@@ -171,6 +196,19 @@ static void make_dirty_hfs_fixture(uint8_t image[HFS_FIXTURE_SIZE]) {
         hfs_fixture_bitmap_set(image, USED_BLOCKS[i]);
     memcpy(image + HFS_FIXTURE_SIZE - HFS_VOLUME_HEADER_OFFSET, header,
            HFS_VOLUME_HEADER_SIZE);
+}
+
+static void make_clean_free_count_mismatch_fixture(
+    uint8_t image[HFS_FIXTURE_SIZE]) {
+    make_dirty_hfs_fixture(image);
+    uint8_t *primary = image + HFS_VOLUME_HEADER_OFFSET;
+    uint8_t *alternate =
+        image + HFS_FIXTURE_SIZE - HFS_VOLUME_HEADER_OFFSET;
+    write_be32(primary + 4u, 1u << 8); /* cleanly unmounted */
+    write_be32(alternate + 4u, 1u << 8);
+    uint32_t actual_free = read_be32(primary + 48u);
+    write_be32(primary + 48u, actual_free - 1u);
+    write_be32(alternate + 48u, actual_free - 1u);
 }
 
 static bool read_hfs_geometry(const char *path, uint32_t *block_size,
@@ -310,6 +348,11 @@ static void clear_fixture(void) {
     (void)join_path(next, sizeof next, stage, VM_GUEST_INSTALL_NEXT_FILE);
     (void)remove(next);
     (void)remove_directory(stage);
+    (void)join_path(stage, sizeof stage, FIXTURE_DIR,
+                    VM_GUEST_RECOVERY_STAGE_DIRECTORY);
+    (void)join_path(next, sizeof next, stage, VM_GUEST_INSTALL_NEXT_FILE);
+    (void)remove(next);
+    (void)remove_directory(stage);
     static const char *const LEAVES[] = {
         VM_GUEST_INSTALL_LIVE_FILE,
         VM_GUEST_INSTALL_BACKUP_FILE,
@@ -337,6 +380,11 @@ static void clear_fixture(void) {
         VM_GUEST_SOURCES_V2_MARKER_TMP,
         VM_GUEST_SOURCES_V2_JOURNAL_FILE,
         VM_GUEST_SOURCES_V2_JOURNAL_TMP,
+        VM_GUEST_RECOVERY_BACKUP_FILE,
+        VM_GUEST_RECOVERY_MARKER_FILE,
+        VM_GUEST_RECOVERY_MARKER_TMP,
+        VM_GUEST_RECOVERY_JOURNAL_FILE,
+        VM_GUEST_RECOVERY_JOURNAL_TMP,
         VM_FW_BOOT_STATE_FILE,
         VM_FW_BOOT_STATE_MD_FILE,
         VM_FW_BOOT_STATE_TMP,
@@ -502,6 +550,104 @@ static void test_existing_install_is_idempotent(void) {
           "idempotent progress did not reach completion");
 }
 
+static void test_snapshot_blocks_free_count_recovery(void) {
+    clear_fixture();
+    CHECK(make_directory(FIXTURE_DIR),
+          "could not create free-count snapshot fixture");
+    char live[VM_GUEST_INSTALL_PATH_CAPACITY];
+    char next[VM_GUEST_INSTALL_PATH_CAPACITY];
+    CHECK(join_path(live, sizeof live, FIXTURE_DIR,
+                    VM_GUEST_INSTALL_LIVE_FILE) &&
+          write_bytes(live, "old-rootfs"),
+          "could not seed free-count snapshot fixture");
+
+    vm_guest_install_result_t transaction;
+    char detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+    CHECK(vm_guest_install_prepare_stage(FIXTURE_DIR, &transaction,
+                                         detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK &&
+          vm_guest_install_stage_image_path(next, sizeof next, FIXTURE_DIR) &&
+          write_bytes(next, "installed-rootfs"),
+          "could not prepare free-count snapshot fixture: %s", detail);
+    uint8_t digest[VM_GUEST_INSTALL_SHA256_SIZE];
+    fill_digest(digest);
+    CHECK(vm_guest_install_publish(FIXTURE_DIR, digest, &transaction,
+                                   detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_privilege_confirm(FIXTURE_DIR, digest, &transaction,
+                                     detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_sources_confirm(FIXTURE_DIR, digest, &transaction,
+                                   detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_sources_v2_confirm(FIXTURE_DIR, digest, &transaction,
+                                      detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed,
+          "could not commit free-count snapshot fixture: %s", detail);
+
+    uint8_t fixture[HFS_FIXTURE_SIZE];
+    uint8_t observed[HFS_FIXTURE_SIZE];
+    make_clean_free_count_mismatch_fixture(fixture);
+    CHECK(write_buffer(live, fixture, sizeof fixture),
+          "could not write free-count HFS fixture");
+    rootfs_work_result_t probe;
+    CHECK(rootfs_work_validate_source(live, &probe) ==
+              ROOTFS_WORK_HFS_INVALID &&
+          probe.source_cleanly_unmounted &&
+          probe.source_allocation_free_count_mismatch &&
+          probe.source_allocation_bitmap_used == 6u &&
+          probe.source_allocation_header_used == 7u,
+          "free-count fixture did not expose structured mismatch evidence: %s",
+          probe.detail);
+
+    char snapshots[VM_GUEST_INSTALL_PATH_CAPACITY];
+    char snapshot[VM_GUEST_INSTALL_PATH_CAPACITY];
+    char meta[VM_GUEST_INSTALL_PATH_CAPACITY];
+    CHECK(vm_snapshot_dir(FIXTURE_DIR, snapshots, sizeof snapshots) ==
+              VM_SNAPSHOT_OK &&
+          make_directory(snapshots) &&
+          vm_snapshot_path(snapshots, "20260811T000000Z", false,
+                           snapshot, sizeof snapshot) == VM_SNAPSHOT_OK &&
+          make_directory(snapshot) &&
+          vm_snapshot_member_path(snapshots, "20260811T000000Z", false,
+                                  VM_SNAPSHOT_META_FILE,
+                                  meta, sizeof meta) == VM_SNAPSHOT_OK,
+          "could not prepare free-count historical snapshot");
+    vm_snapshot_info_t info;
+    memset(&info, 0, sizeof info);
+    (void)snprintf(info.id, sizeof info.id, "%s", "20260811T000000Z");
+    info.created_unix = UINT64_C(1786383600);
+    info.retired = UINT64_C(7654321);
+    char snapshot_detail[128];
+    CHECK(vm_snapshot_meta_write(meta, &info, snapshot_detail,
+                                 sizeof snapshot_detail) == VM_SNAPSHOT_OK,
+          "could not write free-count snapshot metadata: %s", snapshot_detail);
+
+    progress_log_t progress;
+    memset(&progress, 0, sizeof progress);
+    vm_guest_install_build_result_t result;
+    vm_guest_install_build_status_t status =
+        vm_guest_install_build_from_directory(
+            FIXTURE_DIR, NULL, capture_progress, &progress,
+            &result, detail, sizeof detail);
+    char recovery_stage[VM_GUEST_INSTALL_PATH_CAPACITY];
+    CHECK(status == VM_GUEST_INSTALL_BUILD_ERR_SNAPSHOTS &&
+          result.historical_snapshots == 1u &&
+          result.rootfs.source_allocation_free_count_mismatch &&
+          !result.filesystem_repaired &&
+          !result.filesystem_recovery_transaction.committed &&
+          !progress.staging_seen &&
+          vm_guest_recovery_stage_image_path(
+              recovery_stage, sizeof recovery_stage, FIXTURE_DIR) &&
+          !exists(recovery_stage),
+          "snapshot gate did not precede free-count recovery: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+    CHECK(read_buffer(live, observed, sizeof observed) &&
+          memcmp(observed, fixture, sizeof fixture) == 0 &&
+          file_size_or_zero(live) == HFS_FIXTURE_SIZE,
+          "snapshot-gated free-count recovery changed the live disk");
+}
+
 static void test_committed_maintenance_cleanup_blocks_new_transaction(void) {
     clear_fixture();
     char live[VM_GUEST_INSTALL_PATH_CAPACITY];
@@ -647,7 +793,13 @@ static void test_dirty_existing_install_refuses_before_stage(void) {
         VM_GUEST_SOURCES_V2_MARKER_FILE,
         VM_GUEST_SOURCES_V2_MARKER_TMP,
         VM_GUEST_SOURCES_V2_JOURNAL_FILE,
-        VM_GUEST_SOURCES_V2_JOURNAL_TMP
+        VM_GUEST_SOURCES_V2_JOURNAL_TMP,
+        VM_GUEST_RECOVERY_BACKUP_FILE,
+        VM_GUEST_RECOVERY_STAGE_DIRECTORY,
+        VM_GUEST_RECOVERY_MARKER_FILE,
+        VM_GUEST_RECOVERY_MARKER_TMP,
+        VM_GUEST_RECOVERY_JOURNAL_FILE,
+        VM_GUEST_RECOVERY_JOURNAL_TMP
     };
     for (size_t i = 0u;
          i < sizeof MAINTENANCE_LEAVES / sizeof MAINTENANCE_LEAVES[0]; i++) {
@@ -1234,6 +1386,112 @@ static void test_real_cache_recovery_when_supplied(void) {
            result.rootfs.provision_entries);
 }
 
+static void test_real_free_count_recovery_when_supplied(void) {
+    const char *machine = getenv("S5LBOX_FREE_COUNT_RECOVERY_MACHINE_DIR");
+    if (!machine || !*machine) {
+        printf("real-free-count-recovery SKIP (disposable machine path unset)\n");
+        return;
+    }
+
+    char live[VM_GUEST_INSTALL_PATH_CAPACITY];
+    CHECK(join_path(live, sizeof live, machine,
+                    VM_GUEST_INSTALL_LIVE_FILE),
+          "real free-count recovery live path overflow");
+    uint64_t size = file_size_or_zero(live);
+    CHECK(size > 2u * HFS_VOLUME_HEADER_OFFSET,
+          "real free-count recovery source has no usable live disk");
+    if (size <= 2u * HFS_VOLUME_HEADER_OFFSET) return;
+
+    uint32_t block_size = 0u, total_blocks = 0u, header_free_blocks = 0u;
+    CHECK(read_hfs_geometry(live, &block_size, &total_blocks,
+                            &header_free_blocks) &&
+          header_free_blocks > 0u,
+          "real free-count recovery source has invalid HFS geometry");
+    if (block_size == 0u || total_blocks == 0u ||
+        header_free_blocks == 0u) return;
+    rootfs_work_result_t before;
+    rootfs_work_status_t before_status =
+        rootfs_work_validate_source(live, &before);
+    uint32_t expected_free_blocks = header_free_blocks;
+    if (before_status == ROOTFS_WORK_OK) {
+        CHECK(write_hfs_free_blocks(live, size, header_free_blocks - 1u),
+              "could not inject the disposable free-count mismatch");
+    } else if (before_status == ROOTFS_WORK_HFS_INVALID &&
+               before.source_cleanly_unmounted &&
+               before.source_allocation_free_count_mismatch &&
+               before.source_allocation_header_used ==
+                   before.source_allocation_bitmap_used + 1u) {
+        /* A timed-out external harness may have stopped after injecting the
+         * mismatch but before publication. Continue the same transaction test
+         * instead of requiring a fresh 2 GiB copy. */
+        expected_free_blocks = header_free_blocks + 1u;
+    } else {
+        CHECK(0,
+              "real free-count source was not a valid or exact stale-count disk: %s at %s (%s)",
+              rootfs_work_status_name(before.status),
+              rootfs_work_stage_name(before.stage), before.detail);
+        return;
+    }
+    rootfs_work_result_t mismatch;
+    CHECK(rootfs_work_validate_source(live, &mismatch) ==
+              ROOTFS_WORK_HFS_INVALID &&
+          mismatch.source_cleanly_unmounted &&
+          mismatch.source_allocation_free_count_mismatch &&
+          mismatch.source_allocation_header_used ==
+              mismatch.source_allocation_bitmap_used + 1u,
+          "real free-count mismatch was not diagnosed structurally: %s",
+          mismatch.detail);
+
+    char detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+    progress_log_t progress;
+    memset(&progress, 0, sizeof progress);
+    vm_guest_install_build_result_t result;
+    vm_guest_install_build_status_t status =
+        vm_guest_install_build_from_directory(
+            machine, NULL, capture_progress, &progress,
+            &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_OK && result.already_installed &&
+          result.filesystem_repaired &&
+          result.filesystem_recovery_transaction.committed &&
+          result.filesystem_recovery_transaction.cleanup_complete &&
+          result.filesystem_recovery.allocation_free_count_repairable == 1u &&
+          result.filesystem_recovery.allocation_free_count_repaired == 1u &&
+          !result.storage_upgraded && !result.cydia_privileges_repaired &&
+          !result.cydia_sources_added,
+          "real free-count recovery refused or did not publish its proven repair: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+
+    rootfs_work_result_t verified;
+    uint32_t repaired_block_size = 0u, repaired_total_blocks = 0u,
+             repaired_free_blocks = 0u;
+    CHECK(rootfs_work_validate_source(live, &verified) == ROOTFS_WORK_OK &&
+          read_hfs_geometry(live, &repaired_block_size,
+                            &repaired_total_blocks,
+                            &repaired_free_blocks) &&
+          file_size_or_zero(live) == size &&
+          repaired_block_size == block_size &&
+          repaired_total_blocks == total_blocks &&
+          repaired_free_blocks == expected_free_blocks,
+          "published free-count repair did not restore exact geometry: %s",
+          verified.detail);
+
+    vm_guest_install_build_result_t retry;
+    memset(&progress, 0, sizeof progress);
+    status = vm_guest_install_build_from_directory(
+        machine, NULL, capture_progress, &progress,
+        &retry, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
+          !retry.filesystem_repaired && !retry.storage_upgraded &&
+          !retry.cydia_privileges_repaired && !retry.cydia_sources_added &&
+          file_size_or_zero(live) == size,
+          "real free-count recovery retry was not idempotent: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+    printf("real-free-count-recovery size=%llu used=%u header=%u repaired=1\n",
+           (unsigned long long)size,
+           mismatch.source_allocation_bitmap_used,
+           mismatch.source_allocation_header_used);
+}
+
 int main(void) {
     printf("== guest install builder ==\n");
     if (!make_directory(FIXTURE_DIR)) {
@@ -1243,12 +1501,14 @@ int main(void) {
     test_argument_and_package_refusals();
     test_historical_snapshot_gate();
     test_existing_install_is_idempotent();
+    test_snapshot_blocks_free_count_recovery();
     test_committed_maintenance_cleanup_blocks_new_transaction();
     test_dirty_existing_install_refuses_before_stage();
     test_powered_off_checkpoint_allows_only_dirty_bit();
     test_real_storage_upgrade_when_supplied();
     test_real_privilege_repair_when_supplied();
     test_real_cache_recovery_when_supplied();
+    test_real_free_count_recovery_when_supplied();
     test_real_build_when_supplied();
     clear_fixture();
     (void)remove_directory(FIXTURE_DIR);

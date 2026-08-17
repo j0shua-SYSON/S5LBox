@@ -279,6 +279,142 @@ static vm_guest_install_build_status_t build_rootfs_refusal(
     return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
 }
 
+static bool build_repair_includes_free_count(
+    const rootfs_work_result_t *repair) {
+    return repair &&
+           repair->allocation_free_count_repairable == 1u &&
+           repair->allocation_free_count_repaired == 1u;
+}
+
+/* The strict read-only probe admits this path only for a stale redundant
+ * freeBlocks count. The powered-off scanner then proves the complete disk, so
+ * it may also canonicalize derivable catalog topology or reconcile other
+ * crash-consistent allocation state. Ambiguity is refused by that scanner;
+ * nothing is published unless its raw strict re-audit succeeds. */
+static vm_guest_install_build_status_t build_repair_allocation_accounting(
+    const char *work_directory, uint64_t live_size,
+    vm_guest_install_build_progress_t progress, void *progress_context,
+    vm_guest_install_build_result_t *result,
+    char *detail, size_t detail_capacity) {
+    char stage[VM_GUEST_INSTALL_PATH_CAPACITY];
+    char transaction_detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+    if (!vm_guest_recovery_stage_image_path(
+            stage, sizeof stage, work_directory)) {
+        build_detail(detail, detail_capacity,
+                     "The filesystem-accounting recovery path is too long.");
+        return VM_GUEST_INSTALL_BUILD_ERR_PATH;
+    }
+
+    build_progress(progress, progress_context,
+                   VM_GUEST_INSTALL_BUILD_STAGING, 0u, 1u);
+    vm_guest_install_result_t transaction;
+    vm_guest_install_status_t transaction_status =
+        vm_guest_recovery_prepare_stage(
+            work_directory, &transaction, transaction_detail,
+            sizeof transaction_detail);
+    if (transaction_status != VM_GUEST_INSTALL_OK || transaction.committed) {
+        build_detail(detail, detail_capacity,
+                     transaction_status == VM_GUEST_INSTALL_OK
+                         ? "Filesystem recovery unexpectedly became committed before its clone was prepared."
+                         : (transaction_detail[0]
+                                ? transaction_detail
+                                : vm_guest_install_status_text(
+                                      transaction_status)));
+        return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
+    }
+
+    transaction_status = vm_guest_recovery_clone_live_to_stage(
+        work_directory, transaction_detail, sizeof transaction_detail);
+    if (transaction_status != VM_GUEST_INSTALL_OK) {
+        char discard_detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+        vm_guest_install_status_t discarded =
+            vm_guest_recovery_discard_stage(
+                work_directory, discard_detail, sizeof discard_detail);
+        if (discarded != VM_GUEST_INSTALL_OK) {
+            (void)snprintf(
+                detail, detail_capacity,
+                "The filesystem recovery clone failed and its inert stage could not be removed: %.120s",
+                discard_detail[0] ? discard_detail
+                                  : vm_guest_install_status_text(discarded));
+        } else {
+            build_detail(detail, detail_capacity,
+                         transaction_detail[0]
+                             ? transaction_detail
+                             : vm_guest_install_status_text(
+                                   transaction_status));
+        }
+        if (detail && detail_capacity) detail[detail_capacity - 1u] = '\0';
+        return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
+    }
+
+    rootfs_work_result_t repair;
+    rootfs_work_status_t repair_status =
+        rootfs_work_repair_powered_off_clone(stage, &repair);
+    if (result) result->filesystem_recovery = repair;
+    bool geometry_ok = repair.source_size == live_size &&
+                       repair.final_size == live_size;
+    bool proven_repair = repair_status == ROOTFS_WORK_OK && geometry_ok &&
+                         build_repair_includes_free_count(&repair);
+    if (!proven_repair) {
+        char discard_detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+        vm_guest_install_status_t discarded =
+            vm_guest_recovery_discard_stage(
+                work_directory, discard_detail, sizeof discard_detail);
+        if (discarded != VM_GUEST_INSTALL_OK) {
+            (void)snprintf(
+                detail, detail_capacity,
+                "The unpublished filesystem repair was refused and its stage could not be removed: %.112s",
+                discard_detail[0] ? discard_detail
+                                  : vm_guest_install_status_text(discarded));
+            if (detail && detail_capacity)
+                detail[detail_capacity - 1u] = '\0';
+            return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
+        }
+        if (repair_status != ROOTFS_WORK_OK)
+            return build_rootfs_refusal(
+                repair_status, &repair, detail, detail_capacity);
+        build_detail(
+            detail, detail_capacity,
+            geometry_ok
+                ? "The powered-off disk scan did not prove and repair the stale HFS free-space counter; the clone was not published."
+                : "The repaired clone changed guest-disk geometry; it was not published.");
+        return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
+    }
+
+    build_progress(progress, progress_context,
+                   VM_GUEST_INSTALL_BUILD_PUBLISHING, 0u, 1u);
+    transaction_status = vm_guest_recovery_publish(
+        work_directory, &transaction, transaction_detail,
+        sizeof transaction_detail);
+    if (result) result->filesystem_recovery_transaction = transaction;
+    if (transaction_status != VM_GUEST_INSTALL_OK || !transaction.committed) {
+        build_detail(detail, detail_capacity,
+                     transaction_detail[0]
+                         ? transaction_detail
+                         : vm_guest_install_status_text(transaction_status));
+        return VM_GUEST_INSTALL_BUILD_ERR_PUBLISH;
+    }
+    if (!transaction.cleanup_complete) {
+        transaction_status = vm_guest_recovery_recover(
+            work_directory, &transaction, transaction_detail,
+            sizeof transaction_detail);
+        if (result) result->filesystem_recovery_transaction = transaction;
+        if (transaction_status != VM_GUEST_INSTALL_OK ||
+            !transaction.committed || !transaction.cleanup_complete) {
+            build_detail(detail, detail_capacity,
+                         transaction_detail[0]
+                             ? transaction_detail
+                             : vm_guest_install_status_text(
+                                   transaction_status));
+            return VM_GUEST_INSTALL_BUILD_ERR_PUBLISH;
+        }
+    }
+    if (result) result->filesystem_repaired = true;
+    build_progress(progress, progress_context,
+                   VM_GUEST_INSTALL_BUILD_PUBLISHING, 1u, 1u);
+    return VM_GUEST_INSTALL_BUILD_OK;
+}
+
 static bool build_rootfs_is_unclean(rootfs_work_status_t status,
                                     const rootfs_work_result_t *rootfs) {
     return status == ROOTFS_WORK_HFS_INVALID && rootfs &&
@@ -380,6 +516,46 @@ static vm_guest_install_build_status_t build_maintain_install(
         return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
     }
 
+    /* A clean HFS unmount can still leave its redundant freeBlocks value one
+     * transaction behind the allocation bitmap. Detect that exact condition
+     * before any file-specific probe, then repair it through the same
+     * unpublished-clone transaction used by powered-off boot recovery. A
+     * dirty source receives this privilege only when its exact powered-off
+     * checkpoint independently authorizes the existing narrow exception. */
+    bool allow_unclean_source = false;
+    bool source_validated = false;
+    bool snapshot_gate_passed = false;
+    rootfs_work_result_t accounting_probe;
+    rootfs_work_status_t accounting_status = build_validate_source(
+        work_directory, live, live_size, &allow_unclean_source,
+        result, &accounting_probe);
+    if (result) result->rootfs = accounting_probe;
+    if (accounting_status == ROOTFS_WORK_OK) {
+        source_validated = true;
+    } else if (accounting_status == ROOTFS_WORK_HFS_INVALID &&
+               accounting_probe.source_allocation_free_count_mismatch &&
+               (accounting_probe.source_cleanly_unmounted ||
+                allow_unclean_source)) {
+        vm_guest_install_build_status_t snapshot_gate = build_snapshot_gate(
+            work_directory, result, detail, detail_capacity);
+        if (snapshot_gate != VM_GUEST_INSTALL_BUILD_OK) return snapshot_gate;
+        snapshot_gate_passed = true;
+        vm_guest_install_build_status_t repaired =
+            build_repair_allocation_accounting(
+                work_directory, live_size, progress, progress_context,
+                result, detail, detail_capacity);
+        if (repaired != VM_GUEST_INSTALL_BUILD_OK) return repaired;
+        accounting_status = build_validate_source(
+            work_directory, live, live_size, &allow_unclean_source,
+            result, &accounting_probe);
+        if (result) result->rootfs = accounting_probe;
+        if (accounting_status != ROOTFS_WORK_OK)
+            return build_rootfs_refusal(
+                accounting_status, &accounting_probe,
+                detail, detail_capacity);
+        source_validated = true;
+    }
+
     rootfs_work_file_repair_t repair;
     build_cydia_privilege_repair(&repair);
     rootfs_work_file_repair_state_t repair_state =
@@ -387,7 +563,6 @@ static vm_guest_install_build_status_t build_maintain_install(
     bool repair_needed = false;
     bool source_needed = false;
     bool source_preflighted = false;
-    bool allow_unclean_source = false;
     char transaction_detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
 
     if (privilege->committed) {
@@ -471,10 +646,12 @@ static vm_guest_install_build_status_t build_maintain_install(
         return VM_GUEST_INSTALL_BUILD_OK;
     }
 
-    vm_guest_install_build_status_t snapshot_gate = build_snapshot_gate(
-        work_directory, result, detail, detail_capacity);
-    if (snapshot_gate != VM_GUEST_INSTALL_BUILD_OK) return snapshot_gate;
-    if (!source_preflighted) {
+    if (!snapshot_gate_passed) {
+        vm_guest_install_build_status_t snapshot_gate = build_snapshot_gate(
+            work_directory, result, detail, detail_capacity);
+        if (snapshot_gate != VM_GUEST_INSTALL_BUILD_OK) return snapshot_gate;
+    }
+    if (!source_preflighted && !source_validated) {
         rootfs_work_result_t preflight;
         rootfs_work_status_t preflight_status = build_validate_source(
             work_directory, live, live_size, &allow_unclean_source,

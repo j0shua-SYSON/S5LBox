@@ -3895,6 +3895,61 @@ static void test_powered_off_clone_repairs_derivable_catalog_topology(void) {
 static void test_powered_off_clone_repairs_complete_allocation_witness(void) {
     run_t run;
 
+    /* A stale redundant freeBlocks value is a structured, independently
+     * detectable source condition, not an English diagnostic contract. */
+    {
+        fixture_t *fx = fx_create(FX_DATA_BLOCKS - 1u);
+
+        if (!fx) {
+            CHECK(0, "free-count-only fixture allocation failed");
+            return;
+        }
+        uint32_t expected_free = get_be32(fx->image + VH_OFF + 48u);
+        CHECK(expected_free > 0u,
+              "free-count-only fixture has no free block to miscount");
+        if (expected_free > 0u) {
+            char probe_path[256];
+            rootfs_work_result_t probe;
+            put_be32(fx->image + VH_OFF + 48u, expected_free - 1u);
+            put_be32(fx->image + FX_SIZE - VH_OFF + 48u,
+                     expected_free - 1u);
+            if (make_path(probe_path, sizeof(probe_path),
+                          "alloc-free-count-probe") &&
+                write_file(probe_path, fx->image, FX_SIZE)) {
+                rootfs_work_status_t probe_status =
+                    rootfs_work_validate_source(probe_path, &probe);
+                CHECK(probe_status == ROOTFS_WORK_HFS_INVALID &&
+                      probe.source_cleanly_unmounted &&
+                      probe.source_allocation_free_count_mismatch &&
+                      probe.source_allocation_bitmap_used +
+                              expected_free == FX_BLOCKS &&
+                      probe.source_allocation_header_used ==
+                          probe.source_allocation_bitmap_used + 1u,
+                      "free-count preflight lacked structured evidence: %s",
+                      probe.detail);
+                (void)remove(probe_path);
+            } else {
+                CHECK(0, "could not create free-count preflight fixture");
+            }
+            if (run_powered_off_in_place(&run, fx->image, FX_SIZE,
+                                         "alloc-free-count-only")) {
+                CHECK(run.status == ROOTFS_WORK_OK && run.output &&
+                      get_be32(run.output + VH_OFF + 48u) == expected_free &&
+                      get_be32(run.output + FX_SIZE - VH_OFF + 48u) ==
+                          expected_free &&
+                      run.result.allocation_free_count_repairable == 1u &&
+                      run.result.allocation_free_count_repaired == 1u &&
+                      run.result.catalog_topology_nodes_repaired == 0u &&
+                      run.result.catalog_extent_records_repaired == 0u &&
+                      run.result.allocation_bits_repaired == 0u,
+                      "free-count-only recovery broadened its repair (%s)",
+                      run.result.detail);
+                run_release(&run);
+            }
+        }
+        free(fx);
+    }
+
     /* The topology-only API must not silently waive the allocation mismatch. */
     {
         fixture_t *fx = fx_create_powered_off_allocation(0);

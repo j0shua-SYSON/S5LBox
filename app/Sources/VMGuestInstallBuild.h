@@ -60,11 +60,14 @@ typedef struct {
     bool cydia_privileges_verified;
     bool cydia_sources_added;
     bool cydia_sources_verified;
+    bool filesystem_repaired;
     bool powered_off_checkpoint_witnessed;
     size_t historical_snapshots;
     vm_guest_rootfs_stats_t plan;
     rootfs_work_result_t rootfs;
+    rootfs_work_result_t filesystem_recovery;
     vm_guest_install_result_t transaction;
+    vm_guest_install_result_t filesystem_recovery_transaction;
     vm_guest_install_result_t storage_transaction;
     vm_guest_install_result_t privilege_transaction;
     /* Historical v1 source transaction, retained for safe upgrade recovery. */
@@ -105,6 +108,16 @@ typedef struct {
  * unpublished clone; an unexpected existing file is refused rather than
  * overwritten. Its independent marker makes retries idempotent for guests
  * installed by older rootfs plans.
+ *
+ * A strict source preflight also distinguishes a stale HFS freeBlocks field
+ * from every other validation failure without parsing diagnostic prose. For a
+ * cleanly unmounted disk, or one independently authorized by the exact
+ * powered-off checkpoint, that condition is repaired only on an unpublished
+ * recovery clone. The complete powered-off scanner may also canonicalize
+ * derivable catalog topology or reconcile other fully proven allocation state;
+ * ambiguous content remains a refusal. Geometry must stay identical, the raw
+ * clone must pass strict revalidation, historical snapshots still block the
+ * operation, and only the crash-safe recovery journal can publish it.
  */
 vm_guest_install_build_status_t
 vm_guest_install_build_from_directory(

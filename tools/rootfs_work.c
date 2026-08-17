@@ -2439,6 +2439,9 @@ static bool hfs_validate_policy(host_file_t *file, uint64_t file_size,
         return false;
     }
     volume->attributes = read_be32(primary + 4);
+    if (stage == ROOTFS_WORK_STAGE_SOURCE_VALIDATE)
+        result->source_cleanly_unmounted =
+            (volume->attributes & HFS_ATTR_UNMOUNTED) != 0u;
     journal_info_block = read_be32(primary + 12);
     volume->block_size = read_be32(primary + 40);
     volume->total_blocks = read_be32(primary + 44);
@@ -2583,6 +2586,13 @@ static bool hfs_validate_policy(host_file_t *file, uint64_t file_size,
         return false;
     if (bitmap_used)
         *bitmap_used = used;
+    if (stage == ROOTFS_WORK_STAGE_SOURCE_VALIDATE) {
+        result->source_allocation_bitmap_used = used;
+        result->source_allocation_header_used =
+            volume->total_blocks - volume->free_blocks;
+        result->source_allocation_free_count_mismatch =
+            used != volume->total_blocks - volume->free_blocks;
+    }
     if (used != volume->total_blocks - volume->free_blocks &&
         !allow_free_count_mismatch) {
         result_fail(result, ROOTFS_WORK_HFS_INVALID, stage, 0,

@@ -630,11 +630,19 @@ typedef struct rootfs_work_result {
     /* One logical freeBlocks value, written to both HFS+ volume headers. */
     uint32_t allocation_free_count_repairable;
     uint32_t allocation_free_count_repaired;
+    /* Structured source-preflight evidence. These are populated before an
+     * exact freeBlocks mismatch is refused, so callers never need to parse a
+     * diagnostic sentence to distinguish stale redundant accounting from a
+     * different HFS failure. */
+    uint32_t source_allocation_bitmap_used;
+    uint32_t source_allocation_header_used;
     uint8_t source_sha256[IOS3_SHA256_DIGEST_SIZE];
     size_t io_buffer_bytes;
     bool source_sha256_valid;
     bool source_identity_verified;
     bool source_unclean_accepted;
+    bool source_cleanly_unmounted;
+    bool source_allocation_free_count_mismatch;
     bool published;
     bool temporary_left;
     char detail[ROOTFS_WORK_DETAIL_CAPACITY];
