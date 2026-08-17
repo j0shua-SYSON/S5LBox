@@ -109,15 +109,17 @@ typedef struct {
  * overwritten. Its independent marker makes retries idempotent for guests
  * installed by older rootfs plans.
  *
- * A strict source preflight also distinguishes a stale HFS freeBlocks field
- * from every other validation failure without parsing diagnostic prose. For a
- * cleanly unmounted disk, or one independently authorized by the exact
- * powered-off checkpoint, that condition is repaired only on an unpublished
- * recovery clone. The complete powered-off scanner may also canonicalize
- * derivable catalog topology or reconcile other fully proven allocation state;
- * ambiguous content remains a refusal. Geometry must stay identical, the raw
- * clone must pass strict revalidation, historical snapshots still block the
- * operation, and only the crash-safe recovery journal can publish it.
+ * A strict source preflight also distinguishes an exact HFS freeBlocks/bitmap
+ * disagreement from every other validation failure without parsing diagnostic
+ * prose. For a cleanly unmounted disk, or one independently authorized by the
+ * exact powered-off checkpoint, that condition is repaired only on an
+ * unpublished recovery clone. The complete powered-off scanner determines
+ * whether the header, bitmap, or a uniquely identifiable catalog extent is
+ * stale; it may also canonicalize derivable catalog topology. Ambiguous
+ * content remains a refusal. Geometry must stay identical, every planned
+ * mutation must be reported as applied, the raw clone must pass strict
+ * revalidation, historical snapshots still block the operation, and only the
+ * crash-safe recovery journal can publish it.
  */
 vm_guest_install_build_status_t
 vm_guest_install_build_from_directory(
@@ -125,6 +127,14 @@ vm_guest_install_build_from_directory(
     vm_guest_install_build_progress_t progress, void *progress_context,
     vm_guest_install_build_result_t *result,
     char *detail, size_t detail_capacity);
+
+#if defined(S5LBOX_GUEST_INSTALL_TESTING)
+/* Pure policy seam: production reaches the same predicate only after the
+ * unpublished clone's complete repair and strict raw re-audit. */
+bool vm_guest_install_build_test_allocation_repair_proven(
+    const rootfs_work_result_t *preflight,
+    const rootfs_work_result_t *repair, uint64_t live_size);
+#endif
 
 const char *vm_guest_install_build_status_text(
     vm_guest_install_build_status_t status);

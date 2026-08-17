@@ -279,12 +279,53 @@ static vm_guest_install_build_status_t build_rootfs_refusal(
     return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
 }
 
-static bool build_repair_includes_free_count(
-    const rootfs_work_result_t *repair) {
-    return repair &&
-           repair->allocation_free_count_repairable == 1u &&
-           repair->allocation_free_count_repaired == 1u;
+static bool build_repair_proves_allocation_reconciliation(
+    const rootfs_work_result_t *preflight,
+    const rootfs_work_result_t *repair, uint64_t live_size) {
+    if (!preflight || !repair || live_size == 0u ||
+        preflight->status != ROOTFS_WORK_HFS_INVALID ||
+        repair->status != ROOTFS_WORK_OK || repair->published ||
+        preflight->source_size != live_size ||
+        repair->source_size != live_size || repair->final_size != live_size ||
+        !preflight->source_allocation_free_count_mismatch ||
+        !repair->source_allocation_free_count_mismatch ||
+        preflight->source_allocation_bitmap_used !=
+            repair->source_allocation_bitmap_used ||
+        preflight->source_allocation_header_used !=
+            repair->source_allocation_header_used ||
+        preflight->source_cleanly_unmounted !=
+            repair->source_cleanly_unmounted)
+        return false;
+
+    /* The scanner has already performed a raw strict re-audit before it can
+     * return OK. Keep the app-level publication gate independent: every
+     * planned mutation must also be reported as applied, and the original
+     * bitmap/header disagreement must have caused either a bitmap change or a
+     * redundant freeBlocks change. A topology-only identity pass cannot make
+     * an allocation mismatch safe to publish. */
+    if (repair->catalog_backlinks_repairable !=
+            repair->catalog_backlinks_repaired ||
+        repair->catalog_topology_nodes_repairable !=
+            repair->catalog_topology_nodes_repaired ||
+        repair->catalog_extent_records_repairable !=
+            repair->catalog_extent_records_repaired ||
+        repair->allocation_bits_repairable !=
+            repair->allocation_bits_repaired ||
+        repair->allocation_free_count_repairable !=
+            repair->allocation_free_count_repaired)
+        return false;
+    return repair->allocation_bits_repaired != 0u ||
+           repair->allocation_free_count_repaired != 0u;
 }
+
+#if defined(S5LBOX_GUEST_INSTALL_TESTING)
+bool vm_guest_install_build_test_allocation_repair_proven(
+    const rootfs_work_result_t *preflight,
+    const rootfs_work_result_t *repair, uint64_t live_size) {
+    return build_repair_proves_allocation_reconciliation(
+        preflight, repair, live_size);
+}
+#endif
 
 /* The strict read-only probe admits this path only for a stale redundant
  * freeBlocks count. The powered-off scanner then proves the complete disk, so
@@ -293,6 +334,7 @@ static bool build_repair_includes_free_count(
  * nothing is published unless its raw strict re-audit succeeds. */
 static vm_guest_install_build_status_t build_repair_allocation_accounting(
     const char *work_directory, uint64_t live_size,
+    const rootfs_work_result_t *accounting_probe,
     vm_guest_install_build_progress_t progress, void *progress_context,
     vm_guest_install_build_result_t *result,
     char *detail, size_t detail_capacity) {
@@ -353,8 +395,9 @@ static vm_guest_install_build_status_t build_repair_allocation_accounting(
     if (result) result->filesystem_recovery = repair;
     bool geometry_ok = repair.source_size == live_size &&
                        repair.final_size == live_size;
-    bool proven_repair = repair_status == ROOTFS_WORK_OK && geometry_ok &&
-                         build_repair_includes_free_count(&repair);
+    bool proven_repair = repair_status == ROOTFS_WORK_OK &&
+        build_repair_proves_allocation_reconciliation(
+            accounting_probe, &repair, live_size);
     if (!proven_repair) {
         char discard_detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
         vm_guest_install_status_t discarded =
@@ -377,14 +420,19 @@ static vm_guest_install_build_status_t build_repair_allocation_accounting(
             (void)snprintf(
                 detail, detail_capacity,
                 "Filesystem repair evidence mismatch: source bitmap/header "
-                "%u/%u blocks, free-count plan/applied %u/%u, and catalog "
-                "topology plan/applied %u/%u. The clone was not published.",
+                "%u/%u blocks; topology %u/%u, fork records %u/%u, bitmap "
+                "bits %u/%u, and free count %u/%u. The clone was not "
+                "published.",
                 repair.source_allocation_bitmap_used,
                 repair.source_allocation_header_used,
-                repair.allocation_free_count_repairable,
-                repair.allocation_free_count_repaired,
                 repair.catalog_topology_nodes_repairable,
-                repair.catalog_topology_nodes_repaired);
+                repair.catalog_topology_nodes_repaired,
+                repair.catalog_extent_records_repairable,
+                repair.catalog_extent_records_repaired,
+                repair.allocation_bits_repairable,
+                repair.allocation_bits_repaired,
+                repair.allocation_free_count_repairable,
+                repair.allocation_free_count_repaired);
             if (detail && detail_capacity)
                 detail[detail_capacity - 1u] = '\0';
         } else {
@@ -530,12 +578,14 @@ static vm_guest_install_build_status_t build_maintain_install(
         return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
     }
 
-    /* A clean HFS unmount can still leave its redundant freeBlocks value one
-     * transaction behind the allocation bitmap. Detect that exact condition
-     * before any file-specific probe, then repair it through the same
-     * unpublished-clone transaction used by powered-off boot recovery. A
-     * dirty source receives this privilege only when its exact powered-off
-     * checkpoint independently authorizes the existing narrow exception. */
+    /* A clean HFS unmount can still leave its redundant freeBlocks value or
+     * allocation bitmap one transaction behind the catalog. Detect only the
+     * exact header/bitmap disagreement before any file-specific probe; the
+     * complete powered-off scanner then determines which fully reconstructed
+     * state is stale. Repair remains confined to the same unpublished-clone
+     * transaction used by powered-off boot recovery. A dirty source receives
+     * this privilege only when its exact powered-off checkpoint independently
+     * authorizes the existing narrow exception. */
     bool allow_unclean_source = false;
     bool source_validated = false;
     bool snapshot_gate_passed = false;
@@ -556,8 +606,9 @@ static vm_guest_install_build_status_t build_maintain_install(
         snapshot_gate_passed = true;
         vm_guest_install_build_status_t repaired =
             build_repair_allocation_accounting(
-                work_directory, live_size, progress, progress_context,
-                result, detail, detail_capacity);
+                work_directory, live_size, &accounting_probe,
+                progress, progress_context, result, detail,
+                detail_capacity);
         if (repaired != VM_GUEST_INSTALL_BUILD_OK) return repaired;
         accounting_status = build_validate_source(
             work_directory, live, live_size, &allow_unclean_source,

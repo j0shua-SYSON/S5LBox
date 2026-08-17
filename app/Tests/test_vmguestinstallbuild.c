@@ -445,6 +445,88 @@ static void test_argument_and_package_refusals(void) {
           "missing package files were not refused by the package layer");
 }
 
+static void test_allocation_repair_publication_proof(void) {
+    const uint64_t size = UINT64_C(2) * 1024u * 1024u * 1024u;
+    rootfs_work_result_t probe;
+    rootfs_work_result_t repair;
+
+    memset(&probe, 0, sizeof probe);
+    probe.status = ROOTFS_WORK_HFS_INVALID;
+    probe.source_size = size;
+    probe.source_cleanly_unmounted = true;
+    probe.source_allocation_free_count_mismatch = true;
+    probe.source_allocation_bitmap_used = 113816u;
+    probe.source_allocation_header_used = 113817u;
+
+    memset(&repair, 0, sizeof repair);
+    repair.status = ROOTFS_WORK_OK;
+    repair.source_size = size;
+    repair.final_size = size;
+    repair.source_cleanly_unmounted = true;
+    repair.source_allocation_free_count_mismatch = true;
+    repair.source_allocation_bitmap_used = 113816u;
+    repair.source_allocation_header_used = 113817u;
+    repair.allocation_free_count_repairable = 1u;
+    repair.allocation_free_count_repaired = 1u;
+    CHECK(vm_guest_install_build_test_allocation_repair_proven(
+              &probe, &repair, size),
+          "an exact stale free-count repair was not publishable");
+
+    repair.allocation_free_count_repairable = 0u;
+    repair.allocation_free_count_repaired = 0u;
+    repair.catalog_topology_nodes_repairable = 20u;
+    repair.catalog_topology_nodes_repaired = 20u;
+    repair.catalog_extent_records_repairable = 1u;
+    repair.catalog_extent_records_repaired = 1u;
+    repair.allocation_bits_repairable = 1u;
+    repair.allocation_bits_repaired = 1u;
+    repair.allocation_missing_blocks = 1u;
+    repair.allocation_orphan_blocks = 1u;
+    repair.allocation_extent_collisions = 1u;
+    CHECK(vm_guest_install_build_test_allocation_repair_proven(
+              &probe, &repair, size),
+          "a fully applied bitmap reconciliation was not publishable");
+
+    rootfs_work_result_t bad = repair;
+    bad.allocation_bits_repaired = 0u;
+    CHECK(!vm_guest_install_build_test_allocation_repair_proven(
+              &probe, &bad, size),
+          "a partially applied bitmap plan was publishable");
+    bad = repair;
+    bad.catalog_extent_records_repaired = 0u;
+    CHECK(!vm_guest_install_build_test_allocation_repair_proven(
+              &probe, &bad, size),
+          "a partially applied fork repair was publishable");
+    bad = repair;
+    bad.catalog_topology_nodes_repaired = 19u;
+    CHECK(!vm_guest_install_build_test_allocation_repair_proven(
+              &probe, &bad, size),
+          "a partially applied topology repair was publishable");
+    bad = repair;
+    bad.source_allocation_bitmap_used++;
+    CHECK(!vm_guest_install_build_test_allocation_repair_proven(
+              &probe, &bad, size),
+          "a clone that did not match preflight accounting was publishable");
+    bad = repair;
+    bad.published = true;
+    CHECK(!vm_guest_install_build_test_allocation_repair_proven(
+              &probe, &bad, size),
+          "a scanner-owned published image was accepted as an unpublished clone");
+    bad = repair;
+    bad.final_size--;
+    CHECK(!vm_guest_install_build_test_allocation_repair_proven(
+              &probe, &bad, size),
+          "a repair with changed geometry was publishable");
+    bad = repair;
+    bad.allocation_bits_repairable = 0u;
+    bad.allocation_bits_repaired = 0u;
+    bad.catalog_extent_records_repairable = 0u;
+    bad.catalog_extent_records_repaired = 0u;
+    CHECK(!vm_guest_install_build_test_allocation_repair_proven(
+              &probe, &bad, size),
+          "a topology-only pass was allowed to waive an allocation mismatch");
+}
+
 static void test_historical_snapshot_gate(void) {
     clear_fixture();
     char live[VM_GUEST_INSTALL_PATH_CAPACITY];
@@ -1386,10 +1468,10 @@ static void test_real_cache_recovery_when_supplied(void) {
            result.rootfs.provision_entries);
 }
 
-static void test_real_free_count_recovery_when_supplied(void) {
+static void test_real_allocation_recovery_when_supplied(void) {
     const char *machine = getenv("S5LBOX_FREE_COUNT_RECOVERY_MACHINE_DIR");
     if (!machine || !*machine) {
-        printf("real-free-count-recovery SKIP (disposable machine path unset)\n");
+        printf("real-allocation-recovery SKIP (disposable machine path unset)\n");
         return;
     }
 
@@ -1412,7 +1494,6 @@ static void test_real_free_count_recovery_when_supplied(void) {
     rootfs_work_result_t before;
     rootfs_work_status_t before_status =
         rootfs_work_validate_source(live, &before);
-    uint32_t expected_free_blocks = header_free_blocks;
     if (before_status == ROOTFS_WORK_OK) {
         CHECK(write_hfs_free_blocks(live, size, header_free_blocks - 1u),
               "could not inject the disposable free-count mismatch");
@@ -1424,7 +1505,6 @@ static void test_real_free_count_recovery_when_supplied(void) {
         /* A timed-out external harness may have stopped after injecting the
          * mismatch but before publication. Continue the same transaction test
          * instead of requiring a fresh 2 GiB copy. */
-        expected_free_blocks = header_free_blocks + 1u;
     } else {
         CHECK(0,
               "real free-count source was not a valid or exact stale-count disk: %s at %s (%s)",
@@ -1433,12 +1513,15 @@ static void test_real_free_count_recovery_when_supplied(void) {
         return;
     }
     rootfs_work_result_t mismatch;
+    uint32_t mismatch_free_blocks = 0u;
     CHECK(rootfs_work_validate_source(live, &mismatch) ==
               ROOTFS_WORK_HFS_INVALID &&
           mismatch.source_cleanly_unmounted &&
           mismatch.source_allocation_free_count_mismatch &&
           mismatch.source_allocation_header_used ==
-              mismatch.source_allocation_bitmap_used + 1u,
+              mismatch.source_allocation_bitmap_used + 1u &&
+          read_hfs_geometry(live, &block_size, &total_blocks,
+                            &mismatch_free_blocks),
           "real free-count mismatch was not diagnosed structurally: %s",
           mismatch.detail);
 
@@ -1454,16 +1537,19 @@ static void test_real_free_count_recovery_when_supplied(void) {
           result.filesystem_repaired &&
           result.filesystem_recovery_transaction.committed &&
           result.filesystem_recovery_transaction.cleanup_complete &&
-          result.filesystem_recovery.allocation_free_count_repairable == 1u &&
-          result.filesystem_recovery.allocation_free_count_repaired == 1u &&
+          vm_guest_install_build_test_allocation_repair_proven(
+              &mismatch, &result.filesystem_recovery, size) &&
           !result.storage_upgraded && !result.cydia_privileges_repaired &&
           !result.cydia_sources_added,
-          "real free-count recovery refused or did not publish its proven repair: %s / %s",
+          "real allocation recovery refused or did not publish its proven repair: %s / %s",
           vm_guest_install_build_status_text(status), detail);
 
     rootfs_work_result_t verified;
     uint32_t repaired_block_size = 0u, repaired_total_blocks = 0u,
              repaired_free_blocks = 0u;
+    uint32_t expected_free_blocks = mismatch_free_blocks +
+        (result.filesystem_recovery.allocation_free_count_repaired != 0u
+             ? 1u : 0u);
     CHECK(rootfs_work_validate_source(live, &verified) == ROOTFS_WORK_OK &&
           read_hfs_geometry(live, &repaired_block_size,
                             &repaired_total_blocks,
@@ -1472,7 +1558,7 @@ static void test_real_free_count_recovery_when_supplied(void) {
           repaired_block_size == block_size &&
           repaired_total_blocks == total_blocks &&
           repaired_free_blocks == expected_free_blocks,
-          "published free-count repair did not restore exact geometry: %s",
+          "published allocation repair did not restore exact geometry: %s",
           verified.detail);
 
     vm_guest_install_build_result_t retry;
@@ -1486,10 +1572,12 @@ static void test_real_free_count_recovery_when_supplied(void) {
           file_size_or_zero(live) == size,
           "real free-count recovery retry was not idempotent: %s / %s",
           vm_guest_install_build_status_text(status), detail);
-    printf("real-free-count-recovery size=%llu used=%u header=%u repaired=1\n",
+    printf("real-allocation-recovery size=%llu used=%u header=%u bits=%u free=%u\n",
            (unsigned long long)size,
            mismatch.source_allocation_bitmap_used,
-           mismatch.source_allocation_header_used);
+           mismatch.source_allocation_header_used,
+           result.filesystem_recovery.allocation_bits_repaired,
+           result.filesystem_recovery.allocation_free_count_repaired);
 }
 
 int main(void) {
@@ -1499,6 +1587,7 @@ int main(void) {
         return 2;
     }
     test_argument_and_package_refusals();
+    test_allocation_repair_publication_proof();
     test_historical_snapshot_gate();
     test_existing_install_is_idempotent();
     test_snapshot_blocks_free_count_recovery();
@@ -1508,7 +1597,7 @@ int main(void) {
     test_real_storage_upgrade_when_supplied();
     test_real_privilege_repair_when_supplied();
     test_real_cache_recovery_when_supplied();
-    test_real_free_count_recovery_when_supplied();
+    test_real_allocation_recovery_when_supplied();
     test_real_build_when_supplied();
     clear_fixture();
     (void)remove_directory(FIXTURE_DIR);
