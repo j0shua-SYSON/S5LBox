@@ -527,6 +527,56 @@ static void test_allocation_repair_publication_proof(void) {
           "a topology-only pass was allowed to waive an allocation mismatch");
 }
 
+static void test_bigboss_cache_plan_avoids_stashed_system_paths(void) {
+    static const char helper[] =
+        "/private/var/lib/s5lbox/cydia-index-cache-v2";
+    rootfs_work_entry_t entries[8];
+    rootfs_work_entry_t sentinel[7];
+    memset(entries, 0, sizeof entries);
+    memset(sentinel, 0xa5, sizeof sentinel);
+
+    CHECK(vm_guest_install_build_test_bigboss_source_entries(
+              sentinel, 7u, true) == 8u &&
+          ((const unsigned char *)sentinel)[0] == 0xa5u,
+          "a short cache-plan buffer was modified");
+    size_t count = vm_guest_install_build_test_bigboss_source_entries(
+        entries, 8u, true);
+    CHECK(count == 8u, "cache plan has %zu entries, expected 8", count);
+
+    const rootfs_work_entry_t *helper_entry = NULL;
+    const rootfs_work_entry_t *plist_entry = NULL;
+    for (size_t i = 0u; i < count; i++) {
+        CHECK(entries[i].path != NULL,
+              "cache plan entry %zu has no path", i);
+        if (!entries[i].path) continue;
+        CHECK(strcmp(entries[i].path, "/usr/libexec") != 0 &&
+                  strncmp(entries[i].path, "/usr/libexec/", 13u) != 0,
+              "cache plan still depends on a stashed path: %s",
+              entries[i].path);
+        if (strcmp(entries[i].path, helper) == 0)
+            helper_entry = &entries[i];
+        if (strcmp(entries[i].path,
+                   "/System/Library/LaunchDaemons/"
+                   "com.j0shua.s5lbox.cydia-index-cache-v2.plist") == 0)
+            plist_entry = &entries[i];
+    }
+    CHECK(helper_entry && helper_entry->kind == ROOTFS_WORK_ENTRY_FILE &&
+              helper_entry->permissions == 0755u &&
+              helper_entry->content_size != 0u,
+          "cache cleanup helper is absent from the private state directory");
+    CHECK(plist_entry && plist_entry->kind == ROOTFS_WORK_ENTRY_FILE &&
+              plist_entry->content_size != 0u &&
+              strstr((const char *)plist_entry->content, helper) != NULL,
+          "cache cleanup launchd job does not call the private helper");
+
+    memset(entries, 0, sizeof entries);
+    count = vm_guest_install_build_test_bigboss_source_entries(
+        entries, 8u, false);
+    CHECK(count == 7u,
+          "cache plan without source creation has %zu entries, expected 7",
+          count);
+}
+
 static void test_historical_snapshot_gate(void) {
     clear_fixture();
     char live[VM_GUEST_INSTALL_PATH_CAPACITY];
@@ -1314,10 +1364,10 @@ static void test_real_privilege_repair_when_supplied(void) {
           result.rootfs.provision_entries >= 2u &&
           result.rootfs.provision_entries +
                   result.rootfs.provision_reused_entries >=
-              8u &&
+              7u &&
           result.rootfs.provision_entries +
                   result.rootfs.provision_reused_entries <=
-              9u &&
+              8u &&
           result.privilege_transaction.committed &&
           result.sources_v2_transaction.committed,
           "combined Cydia repair/source migration refused or did not apply: %s / %s",
@@ -1432,9 +1482,9 @@ static void test_real_cache_recovery_when_supplied(void) {
           result.cydia_sources_added && result.cydia_sources_verified &&
           result.rootfs.provision_entries >= 2u &&
           result.rootfs.provision_entries +
-                  result.rootfs.provision_reused_entries >= 8u &&
+                  result.rootfs.provision_reused_entries >= 7u &&
           result.rootfs.provision_entries +
-                  result.rootfs.provision_reused_entries <= 9u &&
+                  result.rootfs.provision_reused_entries <= 8u &&
           result.sources_transaction.committed &&
           result.sources_v2_transaction.committed,
           "real cache recovery refused or omitted its payload: %s / %s",
@@ -1588,6 +1638,7 @@ int main(void) {
     }
     test_argument_and_package_refusals();
     test_allocation_repair_publication_proof();
+    test_bigboss_cache_plan_avoids_stashed_system_paths();
     test_historical_snapshot_gate();
     test_existing_install_is_idempotent();
     test_snapshot_blocks_free_count_recovery();

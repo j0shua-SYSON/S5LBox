@@ -7777,9 +7777,9 @@ static bool provision_one(catalog_ctx_t *ctx,
             data = node + offset + catalog_record_data_offset(node + offset);
             if (read_be16(data) != HFS_CAT_FOLDER_RECORD) {
                 result_fail(result, ROOTFS_WORK_PROVISION_EXISTS, stage, 0,
-                            "an object already exists under CNID %u with that "
-                            "name, but it is not a directory",
-                            folder.cnid);
+                            "provisioned directory %.160s already exists under "
+                            "CNID %u, but it is not a directory",
+                            entry->path, folder.cnid);
                 return false;
             }
             if (read_be32(data + 8) < HFS_FIRST_USER_CNID) {

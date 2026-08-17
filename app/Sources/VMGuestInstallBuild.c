@@ -102,6 +102,9 @@ static const uint8_t VM_BIGBOSS_CACHE_CLEANUP[] =
     "echo 'cached BigBoss package indexes removed for a clean retry'\n"
     "exit 0\n";
 
+#define VM_BIGBOSS_CACHE_CLEANUP_PATH \
+    "/private/var/lib/s5lbox/cydia-index-cache-v2"
+
 static const uint8_t VM_BIGBOSS_CACHE_CLEANUP_PLIST[] =
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
     "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
@@ -111,30 +114,31 @@ static const uint8_t VM_BIGBOSS_CACHE_CLEANUP_PLIST[] =
     "  <string>com.j0shua.s5lbox.cydia-index-cache-v2</string>\n"
     "  <key>ProgramArguments</key>\n"
     "  <array>\n"
-    "    <string>/usr/libexec/s5lbox-cydia-index-cache-v2</string>\n"
+    "    <string>" VM_BIGBOSS_CACHE_CLEANUP_PATH "</string>\n"
     "  </array>\n"
     "  <key>RunAtLoad</key>\n"
     "  <true/>\n"
     "</dict>\n"
     "</plist>\n";
 
-enum { VM_BIGBOSS_MIGRATION_MAX_ENTRIES = 9u };
+enum { VM_BIGBOSS_MIGRATION_MAX_ENTRIES = 8u };
 
 static size_t build_bigboss_source_entries(
-    rootfs_work_entry_t entries[VM_BIGBOSS_MIGRATION_MAX_ENTRIES],
-    bool create_source) {
-    memset(entries, 0,
-           VM_BIGBOSS_MIGRATION_MAX_ENTRIES * sizeof entries[0]);
+    rootfs_work_entry_t *entries, size_t capacity, bool create_source) {
     static const char *directories[] = {
         "/private/etc/apt",
         "/private/etc/apt/sources.list.d",
         "/private/var/lib/s5lbox",
         "/private/var/log",
-        "/usr/libexec",
         "/System/Library/LaunchDaemons"
     };
+    const size_t directory_count =
+        sizeof directories / sizeof directories[0];
+    const size_t required = directory_count + 2u + (create_source ? 1u : 0u);
+    if (!entries || capacity < required) return required;
+    memset(entries, 0, required * sizeof entries[0]);
     size_t count = 0u;
-    for (size_t i = 0u; i < sizeof directories / sizeof directories[0]; i++) {
+    for (size_t i = 0u; i < directory_count; i++) {
         entries[count].kind = ROOTFS_WORK_ENTRY_DIRECTORY;
         entries[count].path = directories[i];
         entries[count].permissions = 0755u;
@@ -151,7 +155,10 @@ static size_t build_bigboss_source_entries(
         count++;
     }
     entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
-    entries[count].path = "/usr/libexec/s5lbox-cydia-index-cache-v2";
+    /* Cydia-era bootstraps may stash /usr/libexec behind a symlink. The
+     * provisioner must not replace or traverse that guest-owned object, and
+     * this one-shot helper belongs with the state it manages anyway. */
+    entries[count].path = VM_BIGBOSS_CACHE_CLEANUP_PATH;
     entries[count].content = VM_BIGBOSS_CACHE_CLEANUP;
     entries[count].content_size = sizeof VM_BIGBOSS_CACHE_CLEANUP - 1u;
     entries[count].permissions = 0755u;
@@ -167,6 +174,13 @@ static size_t build_bigboss_source_entries(
     count++;
     return count;
 }
+
+#if defined(S5LBOX_GUEST_INSTALL_TESTING)
+size_t vm_guest_install_build_test_bigboss_source_entries(
+    rootfs_work_entry_t *entries, size_t capacity, bool create_source) {
+    return build_bigboss_source_entries(entries, capacity, create_source);
+}
+#endif
 
 static void build_detail(char *detail, size_t capacity, const char *text) {
     if (!detail || capacity == 0u) return;
@@ -791,7 +805,8 @@ static vm_guest_install_build_status_t build_maintain_install(
     size_t source_entry_count = 0u;
     if (source_needed) {
         source_entry_count = build_bigboss_source_entries(
-            source_entries, source_create);
+            source_entries, VM_BIGBOSS_MIGRATION_MAX_ENTRIES,
+            source_create);
         options.entries = source_entries;
         options.entry_count = source_entry_count;
     }

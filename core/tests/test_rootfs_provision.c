@@ -2545,6 +2545,9 @@ static void test_existing_directory_reuse_is_explicit_and_type_safe(void) {
     if (run_provision(&run, fx, "reusetype", &wrong, 1u, 0u)) {
         expect_refusal(&run, fx, ROOTFS_WORK_PROVISION_EXISTS,
                        "reuse-directory policy over an existing file");
+        CHECK(strstr(run.result.detail, "/beta/note.txt") != NULL,
+              "directory type refusal omitted its path: %s",
+              run.result.detail);
         run_release(&run);
     }
     free(fx);

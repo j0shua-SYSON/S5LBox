@@ -134,6 +134,12 @@ vm_guest_install_build_from_directory(
 bool vm_guest_install_build_test_allocation_repair_proven(
     const rootfs_work_result_t *preflight,
     const rootfs_work_result_t *repair, uint64_t live_size);
+
+/* Returns the required entry count and fills nothing when capacity is too
+ * small. This keeps the legacy-stashing compatibility policy directly
+ * testable without publishing an image. */
+size_t vm_guest_install_build_test_bigboss_source_entries(
+    rootfs_work_entry_t *entries, size_t capacity, bool create_source);
 #endif
 
 const char *vm_guest_install_build_status_text(
