@@ -572,6 +572,18 @@ typedef struct rootfs_work_result {
     uint32_t catalog_topology_nodes_repaired;
     /* Index records naming map-free nodes, removed by the proven plan. */
     uint32_t catalog_topology_stale_refs;
+    /* Referenced volume blocks the allocation bitmap incorrectly called free. */
+    uint32_t allocation_missing_blocks;
+    /* Bitmap-used blocks not named by any completely audited fork. */
+    uint32_t allocation_orphan_blocks;
+    /* Blocks named by more than one non-sharing HFS+ extent. */
+    uint32_t allocation_extent_collisions;
+    /* Catalog fork records whose unique extent/logical-size pair was fixed. */
+    uint32_t catalog_extent_records_repairable;
+    uint32_t catalog_extent_records_repaired;
+    /* Allocation-bitmap bits changed by the complete reference reconstruction. */
+    uint32_t allocation_bits_repairable;
+    uint32_t allocation_bits_repaired;
     uint8_t source_sha256[IOS3_SHA256_DIGEST_SIZE];
     size_t io_buffer_bytes;
     bool source_sha256_valid;
@@ -654,6 +666,24 @@ rootfs_work_status_t rootfs_work_probe_file_repair_policy(
  * Passing a live or otherwise published disk is a contract violation.
  */
 rootfs_work_status_t rootfs_work_repair_powered_off_catalog_clone(
+    const char *clone_path, rootfs_work_result_t *result);
+
+/*
+ * Perform the broader powered-off repair used by the boot transaction.  It
+ * includes the catalog-topology proof above, then independently reconstructs
+ * the complete volume-block reference set from the reserved areas, all five
+ * special files, every allocated catalog leaf, and the attributes tree.
+ * Extents-overflow records, attribute fork records, unknown attribute record
+ * types, ambiguous collisions, and unrecognised content are refused.
+ *
+ * A duplicated one-block catalog extent may be redirected to one orphaned
+ * allocated block only when an exact binary-property-list parser finds one and
+ * only one complete assignment compatible with both catalog logical sizes.
+ * Referenced-but-free bits and redundant freeBlocks accounting are then
+ * derived from the proven final reference set.  The same unpublished-clone,
+ * exclusive-open, write-plan, fsync, and no-publication contract applies.
+ */
+rootfs_work_status_t rootfs_work_repair_powered_off_clone(
     const char *clone_path, rootfs_work_result_t *result);
 
 /*

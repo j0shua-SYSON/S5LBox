@@ -2404,11 +2404,13 @@ static bool hfs_headers_share_layout(const uint8_t primary[HFS_VH_LEN],
                   HFS_VH_LEN - 112u) == 0;
 }
 
-static bool hfs_validate(host_file_t *file, uint64_t file_size,
-                         hfs_volume_t *volume, uint8_t *buffer,
-                         size_t buffer_size, bool allow_unclean_source,
-                         rootfs_work_stage_t stage,
-                         rootfs_work_result_t *result) {
+static bool hfs_validate_policy(host_file_t *file, uint64_t file_size,
+                                hfs_volume_t *volume, uint8_t *buffer,
+                                size_t buffer_size, bool allow_unclean_source,
+                                bool allow_free_count_mismatch,
+                                uint32_t *bitmap_used,
+                                rootfs_work_stage_t stage,
+                                rootfs_work_result_t *result) {
     uint8_t primary[HFS_VH_LEN];
     uint8_t alternate[HFS_VH_LEN];
     uint16_t signature;
@@ -2579,13 +2581,26 @@ static bool hfs_validate(host_file_t *file, uint64_t file_size,
     if (!allocation_scan(file, file_size, volume, buffer, buffer_size,
                          &used, stage, result))
         return false;
-    if (used != volume->total_blocks - volume->free_blocks) {
+    if (bitmap_used)
+        *bitmap_used = used;
+    if (used != volume->total_blocks - volume->free_blocks &&
+        !allow_free_count_mismatch) {
         result_fail(result, ROOTFS_WORK_HFS_INVALID, stage, 0,
                     "bitmap marks %u used blocks but header implies %u",
                     used, volume->total_blocks - volume->free_blocks);
         return false;
     }
     return true;
+}
+
+static bool hfs_validate(host_file_t *file, uint64_t file_size,
+                         hfs_volume_t *volume, uint8_t *buffer,
+                         size_t buffer_size, bool allow_unclean_source,
+                         rootfs_work_stage_t stage,
+                         rootfs_work_result_t *result) {
+    return hfs_validate_policy(file, file_size, volume, buffer, buffer_size,
+                               allow_unclean_source, false, NULL, stage,
+                               result);
 }
 
 static bool allocation_bit_read(host_file_t *file, uint64_t file_size,
@@ -4525,6 +4540,1143 @@ done:
     free(seen);
     for (level = 1u; level <= HFS_MAX_TREE_DEPTH; level++)
         free(levels[level]);
+    return okay;
+}
+
+/* ---------------- powered-off whole-volume allocation reconstruction ---- */
+
+#define HFS_SPECIAL_FORK_COUNT 5u
+#define HFS_ATTR_INLINE_DATA 0x10u
+#define HFS_ATTR_FORK_DATA 0x20u
+#define HFS_ATTR_EXTENTS 0x30u
+#define ROOTFS_WORK_MAX_RECOVERY_BLOCKS 4194304u
+#define ROOTFS_WORK_MAX_RECOVERY_OWNERS 1048576u
+#define RECOVERY_OWNER_NONE UINT32_MAX
+#define RECOVERY_OWNER_NONFILE (UINT32_MAX - 1u)
+
+typedef struct recovery_fork {
+    uint64_t logical_bytes;
+    uint32_t total_blocks;
+    uint32_t start[8];
+    uint32_t count[8];
+} recovery_fork_t;
+
+typedef struct recovery_btree {
+    recovery_fork_t fork;
+    uint8_t *header;
+    uint16_t node_size;
+    uint16_t depth;
+    uint32_t root;
+    uint32_t leaf_records;
+    uint32_t first_leaf;
+    uint32_t last_leaf;
+    uint32_t total_nodes;
+    uint32_t free_nodes;
+    const uint8_t *map;
+    uint16_t map_bytes;
+    bool present;
+} recovery_btree_t;
+
+typedef struct recovery_extent_owner {
+    uint32_t node_index;
+    uint16_t record_index;
+    uint16_t start_field;
+    uint16_t logical_field;
+    uint32_t start_block;
+    uint32_t block_count;
+    uint32_t fork_blocks;
+    uint64_t logical_bytes;
+} recovery_extent_owner_t;
+
+typedef struct recovery_allocation_plan {
+    uint8_t *target_bitmap;
+    uint32_t *block_owner;
+    recovery_extent_owner_t *owners;
+    uint32_t owner_count;
+    uint32_t owner_capacity;
+    uint32_t collision_block;
+    uint32_t collision_owner[2];
+    uint32_t collision_count;
+    uint32_t missing_count;
+    uint32_t orphan_count;
+    uint32_t orphan_block;
+    uint32_t bitmap_changes;
+    uint32_t extent_changes;
+    uint32_t final_free_blocks;
+} recovery_allocation_plan_t;
+
+static bool recovery_bitmap_test(const uint8_t *bitmap, uint32_t block) {
+    return (bitmap[block >> 3] &
+            (uint8_t)(1u << (7u - (block & 7u)))) != 0u;
+}
+
+static void recovery_bitmap_set(uint8_t *bitmap, uint32_t block) {
+    bitmap[block >> 3] |= (uint8_t)(1u << (7u - (block & 7u)));
+}
+
+static bool recovery_fork_open(const catalog_ctx_t *ctx, uint16_t vh_offset,
+                               const char *name, recovery_fork_t *fork,
+                               rootfs_work_stage_t stage,
+                               rootfs_work_result_t *result) {
+    uint64_t physical_blocks = 0u;
+    bool saw_empty = false;
+    unsigned extent;
+
+    memset(fork, 0, sizeof(*fork));
+    fork->logical_bytes = read_be64(ctx->vh + vh_offset);
+    fork->total_blocks = read_be32(ctx->vh + vh_offset + 12u);
+    for (extent = 0u; extent < 8u; extent++) {
+        uint64_t end;
+
+        fork->start[extent] = read_be32(ctx->vh + vh_offset + 16u +
+                                       extent * 8u);
+        fork->count[extent] = read_be32(ctx->vh + vh_offset + 20u +
+                                       extent * 8u);
+        if (fork->count[extent] == 0u) {
+            if (fork->start[extent] != 0u) {
+                result_fail(result, ROOTFS_WORK_HFS_INVALID, stage, 0,
+                            "%s fork empty extent %u has start block %u",
+                            name, extent, fork->start[extent]);
+                return false;
+            }
+            saw_empty = true;
+            continue;
+        }
+        if (saw_empty) {
+            result_fail(result, ROOTFS_WORK_HFS_INVALID, stage, 0,
+                        "%s fork extent %u follows an empty extent", name,
+                        extent);
+            return false;
+        }
+        end = (uint64_t)fork->start[extent] + fork->count[extent];
+        if (end > ctx->total_blocks) {
+            result_fail(result, ROOTFS_WORK_HFS_INVALID, stage, 0,
+                        "%s fork extent %u runs past the volume", name,
+                        extent);
+            return false;
+        }
+        physical_blocks += fork->count[extent];
+    }
+    if (physical_blocks != fork->total_blocks) {
+        result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED, stage, 0,
+                    "%s fork needs extents-overflow records (%" PRIu64
+                    " of %u blocks are inline)", name, physical_blocks,
+                    fork->total_blocks);
+        return false;
+    }
+    if (fork->logical_bytes > physical_blocks * ctx->block_size ||
+        ((fork->logical_bytes == 0u) != (fork->total_blocks == 0u))) {
+        result_fail(result, ROOTFS_WORK_HFS_INVALID, stage, 0,
+                    "%s fork logical and physical sizes disagree", name);
+        return false;
+    }
+    return true;
+}
+
+static bool recovery_fork_read(const catalog_ctx_t *ctx,
+                               const recovery_fork_t *fork,
+                               uint64_t logical_offset, uint8_t *bytes,
+                               size_t length, rootfs_work_stage_t stage,
+                               rootfs_work_result_t *result) {
+    uint64_t logical = logical_offset;
+    size_t done = 0u;
+    unsigned extent;
+
+    if (logical_offset > fork->logical_bytes ||
+        (uint64_t)length > fork->logical_bytes - logical_offset) {
+        result_fail(result, ROOTFS_WORK_RANGE_ERROR, stage, 0,
+                    "special-file read is outside logicalSize");
+        return false;
+    }
+    for (extent = 0u; extent < 8u && done < length; extent++) {
+        uint64_t span = (uint64_t)fork->count[extent] * ctx->block_size;
+        size_t take;
+        uint64_t physical;
+
+        if (logical >= span) {
+            logical -= span;
+            continue;
+        }
+        take = length - done;
+        if ((uint64_t)take > span - logical)
+            take = (size_t)(span - logical);
+        physical = (uint64_t)fork->start[extent] * ctx->block_size + logical;
+        if (!checked_read(ctx->file, ctx->file_size, physical, bytes + done,
+                          take, stage, result))
+            return false;
+        done += take;
+        logical = 0u;
+    }
+    if (done != length) {
+        result_fail(result, ROOTFS_WORK_RANGE_ERROR, stage, 0,
+                    "special-file extents ended after %zu of %zu bytes", done,
+                    length);
+        return false;
+    }
+    return true;
+}
+
+static bool recovery_node_layout(const uint8_t *node, uint16_t node_size,
+                                 uint32_t node_index, bool allow_header,
+                                 rootfs_work_stage_t stage,
+                                 rootfs_work_result_t *result) {
+    uint16_t count = read_be16(node + 10u);
+    uint16_t previous = HFS_NODE_DESCRIPTOR;
+    uint16_t limit;
+    uint16_t record;
+
+    if ((!allow_header && count == 0u) ||
+        (uint32_t)HFS_NODE_DESCRIPTOR + 2u * ((uint32_t)count + 1u) >
+            node_size) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "B-tree node %u claims %u records", node_index, count);
+        return false;
+    }
+    limit = (uint16_t)(node_size - 2u * ((uint32_t)count + 1u));
+    for (record = 0u; record <= count; record++) {
+        uint16_t offset = catalog_slot(node, node_size, record);
+
+        if ((offset & 1u) != 0u || offset > limit ||
+            (record == 0u ? offset != HFS_NODE_DESCRIPTOR
+                          : offset <= previous)) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage,
+                        0, "B-tree node %u offset %u is 0x%04x after 0x%04x",
+                        node_index, record, offset, previous);
+            return false;
+        }
+        previous = offset;
+    }
+    return true;
+}
+
+static void recovery_btree_close(recovery_btree_t *tree) {
+    free(tree->header);
+    memset(tree, 0, sizeof(*tree));
+}
+
+static bool recovery_btree_open(const catalog_ctx_t *ctx, uint16_t vh_offset,
+                                const char *name, recovery_btree_t *tree,
+                                rootfs_work_stage_t stage,
+                                rootfs_work_result_t *result) {
+    uint8_t probe[64];
+    uint16_t map_start;
+    uint16_t map_end;
+    uint32_t used = 0u;
+    uint32_t node;
+
+    memset(tree, 0, sizeof(*tree));
+    if (!recovery_fork_open(ctx, vh_offset, name, &tree->fork, stage, result))
+        return false;
+    if (tree->fork.total_blocks == 0u)
+        return true;
+    tree->present = true;
+    if (tree->fork.logical_bytes < sizeof(probe) ||
+        !recovery_fork_read(ctx, &tree->fork, 0u, probe, sizeof(probe), stage,
+                            result))
+        goto fail;
+    tree->node_size = read_be16(probe + HFS_NODE_DESCRIPTOR + 18u);
+    if (tree->node_size < 512u || tree->node_size > 32768u ||
+        (tree->node_size & (uint16_t)(tree->node_size - 1u)) != 0u ||
+        tree->fork.logical_bytes < tree->node_size) {
+        result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED, stage, 0,
+                    "%s B-tree nodeSize %u is unsupported", name,
+                    tree->node_size);
+        goto fail;
+    }
+    tree->header = (uint8_t *)malloc(tree->node_size);
+    if (!tree->header) {
+        result_fail(result, ROOTFS_WORK_NO_MEMORY, stage, 0,
+                    "cannot cache the %s B-tree header", name);
+        goto fail;
+    }
+    if (!recovery_fork_read(ctx, &tree->fork, 0u, tree->header,
+                            tree->node_size, stage, result))
+        goto fail;
+    if (tree->header[8] != HFS_BT_HEADER_NODE || tree->header[9] != 0u ||
+        read_be16(tree->header + 10u) != HFS_BT_HEADER_RECORDS ||
+        !recovery_node_layout(tree->header, tree->node_size, 0u, true, stage,
+                              result)) {
+        if (result->status == ROOTFS_WORK_OK)
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage,
+                        0, "%s node 0 is not a three-record header", name);
+        goto fail;
+    }
+    tree->depth = read_be16(tree->header + HFS_NODE_DESCRIPTOR);
+    tree->root = read_be32(tree->header + HFS_NODE_DESCRIPTOR + 2u);
+    tree->leaf_records = read_be32(tree->header + HFS_NODE_DESCRIPTOR + 6u);
+    tree->first_leaf = read_be32(tree->header + HFS_NODE_DESCRIPTOR + 10u);
+    tree->last_leaf = read_be32(tree->header + HFS_NODE_DESCRIPTOR + 14u);
+    tree->total_nodes = read_be32(tree->header + HFS_NODE_DESCRIPTOR + 22u);
+    tree->free_nodes = read_be32(tree->header + HFS_NODE_DESCRIPTOR + 26u);
+    if (tree->total_nodes == 0u || tree->free_nodes >= tree->total_nodes ||
+        (uint64_t)tree->total_nodes * tree->node_size !=
+            tree->fork.logical_bytes) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "%s B-tree geometry is inconsistent", name);
+        goto fail;
+    }
+    map_start = catalog_slot(tree->header, tree->node_size,
+                             HFS_BT_MAP_RECORD);
+    map_end = catalog_slot(tree->header, tree->node_size,
+                           HFS_BT_MAP_RECORD + 1u);
+    if (map_end <= map_start ||
+        tree->total_nodes > (uint32_t)(map_end - map_start) * 8u) {
+        result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED, stage, 0,
+                    "%s B-tree node map needs chained map nodes", name);
+        goto fail;
+    }
+    tree->map = tree->header + map_start;
+    tree->map_bytes = (uint16_t)(map_end - map_start);
+    for (node = 0u; node < (uint32_t)tree->map_bytes * 8u; node++) {
+        if (!recovery_bitmap_test(tree->map, node))
+            continue;
+        if (node >= tree->total_nodes) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage,
+                        0, "%s B-tree map sets out-of-range node %u", name,
+                        node);
+            goto fail;
+        }
+        used++;
+    }
+    if (!recovery_bitmap_test(tree->map, 0u) ||
+        used != tree->total_nodes - tree->free_nodes) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "%s B-tree map marks %u nodes used; header implies %u",
+                    name, used, tree->total_nodes - tree->free_nodes);
+        goto fail;
+    }
+    return true;
+
+fail:
+    recovery_btree_close(tree);
+    return false;
+}
+
+static bool recovery_btree_read_node(const catalog_ctx_t *ctx,
+                                     const recovery_btree_t *tree,
+                                     uint32_t node, uint8_t *bytes,
+                                     rootfs_work_stage_t stage,
+                                     rootfs_work_result_t *result) {
+    if (node >= tree->total_nodes) {
+        result_fail(result, ROOTFS_WORK_RANGE_ERROR, stage, 0,
+                    "B-tree node %u is outside %u nodes", node,
+                    tree->total_nodes);
+        return false;
+    }
+    return recovery_fork_read(ctx, &tree->fork,
+                              (uint64_t)node * tree->node_size, bytes,
+                              tree->node_size, stage, result);
+}
+
+static bool recovery_extents_tree_is_empty(const catalog_ctx_t *ctx,
+                                           rootfs_work_stage_t stage,
+                                           rootfs_work_result_t *result) {
+    recovery_btree_t tree;
+    bool okay = false;
+
+    if (!recovery_btree_open(ctx, 192u, "extents-overflow", &tree, stage,
+                             result))
+        return false;
+    if (!tree.present) {
+        okay = true;
+        goto done;
+    }
+    if (tree.depth != 0u || tree.root != 0u || tree.leaf_records != 0u ||
+        tree.first_leaf != 0u || tree.last_leaf != 0u ||
+        tree.total_nodes - tree.free_nodes != 1u) {
+        result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED, stage, 0,
+                    "powered-off allocation recovery requires an empty "
+                    "extents-overflow tree");
+        goto done;
+    }
+    okay = true;
+
+done:
+    recovery_btree_close(&tree);
+    return okay;
+}
+
+static bool recovery_attributes_are_inline(const catalog_ctx_t *ctx,
+                                           rootfs_work_stage_t stage,
+                                           rootfs_work_result_t *result) {
+    recovery_btree_t tree;
+    uint8_t *node_bytes = NULL;
+    uint32_t node;
+    uint32_t observed_records = 0u;
+    bool root_seen = false;
+    bool okay = false;
+
+    if (!recovery_btree_open(ctx, 352u, "attributes", &tree, stage, result))
+        return false;
+    if (!tree.present) {
+        okay = true;
+        goto done;
+    }
+    if (tree.leaf_records == 0u) {
+        if (tree.depth == 0u && tree.root == 0u && tree.first_leaf == 0u &&
+            tree.last_leaf == 0u &&
+            tree.total_nodes - tree.free_nodes == 1u) {
+            okay = true;
+        } else {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage,
+                        0, "empty attributes B-tree has nonempty topology");
+        }
+        goto done;
+    }
+    if (tree.depth == 0u || tree.depth > HFS_MAX_TREE_DEPTH ||
+        tree.root == 0u || tree.root >= tree.total_nodes ||
+        tree.first_leaf == 0u || tree.last_leaf == 0u) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "attributes B-tree header names an invalid topology");
+        goto done;
+    }
+    node_bytes = (uint8_t *)malloc(tree.node_size);
+    if (!node_bytes) {
+        result_fail(result, ROOTFS_WORK_NO_MEMORY, stage, 0,
+                    "cannot allocate one attributes B-tree node");
+        goto done;
+    }
+    for (node = 1u; node < tree.total_nodes; node++) {
+        uint8_t kind;
+        uint8_t height;
+        uint16_t count;
+        uint16_t record;
+
+        if (!recovery_bitmap_test(tree.map, node))
+            continue;
+        if (!recovery_btree_read_node(ctx, &tree, node, node_bytes, stage,
+                                      result) ||
+            !recovery_node_layout(node_bytes, tree.node_size, node, false,
+                                  stage, result))
+            goto done;
+        kind = node_bytes[8];
+        height = node_bytes[9];
+        count = read_be16(node_bytes + 10u);
+        if (kind == HFS_BT_INDEX_NODE && height >= 2u &&
+            height <= tree.depth) {
+            if (node == tree.root && height == tree.depth)
+                root_seen = true;
+            continue;
+        }
+        if (kind != HFS_BT_LEAF_NODE || height != 1u) {
+            result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED, stage, 0,
+                        "attributes node %u is kind 0x%02x at height %u",
+                        node, kind, height);
+            goto done;
+        }
+        if (node == tree.root && tree.depth == 1u)
+            root_seen = true;
+        for (record = 0u; record < count; record++) {
+            uint16_t start = catalog_slot(node_bytes, tree.node_size, record);
+            uint16_t end = catalog_slot(node_bytes, tree.node_size,
+                                        (uint16_t)(record + 1u));
+            const uint8_t *item = node_bytes + start;
+            uint32_t data_offset = 2u + read_be16(item);
+            uint32_t type;
+
+            if ((data_offset & 1u) != 0u)
+                data_offset++;
+            if (data_offset + 4u > (uint32_t)(end - start)) {
+                result_fail(result,
+                            ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                            "attributes node %u record %u has no data type",
+                            node, record);
+                goto done;
+            }
+            type = read_be32(item + data_offset);
+            if (type == HFS_ATTR_FORK_DATA || type == HFS_ATTR_EXTENTS) {
+                result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED, stage,
+                            0, "attribute fork extents are not recoverable");
+                goto done;
+            }
+            if (type != HFS_ATTR_INLINE_DATA) {
+                result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED, stage,
+                            0, "unknown attributes record type 0x%08x", type);
+                goto done;
+            }
+            if (data_offset + 16u > (uint32_t)(end - start) ||
+                read_be32(item + data_offset + 12u) >
+                    (uint32_t)(end - start) - data_offset - 16u) {
+                result_fail(result,
+                            ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                            "inline attribute node %u record %u is truncated",
+                            node, record);
+                goto done;
+            }
+            if (observed_records == UINT32_MAX) {
+                result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage, 0,
+                            "inline attribute record count overflowed");
+                goto done;
+            }
+            observed_records++;
+        }
+    }
+    if (!root_seen || observed_records != tree.leaf_records ||
+        !recovery_bitmap_test(tree.map, tree.first_leaf) ||
+        !recovery_bitmap_test(tree.map, tree.last_leaf)) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "attributes B-tree exposes %u of %u leaf records",
+                    observed_records, tree.leaf_records);
+        goto done;
+    }
+    okay = true;
+
+done:
+    free(node_bytes);
+    recovery_btree_close(&tree);
+    return okay;
+}
+
+static bool recovery_plan_init(const catalog_ctx_t *ctx,
+                               recovery_allocation_plan_t *plan,
+                               rootfs_work_stage_t stage,
+                               rootfs_work_result_t *result) {
+    memset(plan, 0, sizeof(*plan));
+    plan->collision_block = UINT32_MAX;
+    plan->orphan_block = UINT32_MAX;
+    if (ctx->total_blocks == 0u ||
+        ctx->total_blocks > ROOTFS_WORK_MAX_RECOVERY_BLOCKS) {
+        result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage, 0,
+                    "powered-off allocation audit has %u blocks; cap is %u",
+                    ctx->total_blocks, ROOTFS_WORK_MAX_RECOVERY_BLOCKS);
+        return false;
+    }
+    plan->target_bitmap = (uint8_t *)calloc(1u, ctx->bitmap_bytes);
+    plan->block_owner = (uint32_t *)malloc(
+        (size_t)ctx->total_blocks * sizeof(*plan->block_owner));
+    if (!plan->target_bitmap || !plan->block_owner) {
+        result_fail(result, ROOTFS_WORK_NO_MEMORY, stage, 0,
+                    "cannot allocate bounded volume-reference maps");
+        return false;
+    }
+    memset(plan->block_owner, 0xff,
+           (size_t)ctx->total_blocks * sizeof(*plan->block_owner));
+    return true;
+}
+
+static void recovery_plan_close(recovery_allocation_plan_t *plan) {
+    free(plan->target_bitmap);
+    free(plan->block_owner);
+    free(plan->owners);
+    memset(plan, 0, sizeof(*plan));
+}
+
+static bool recovery_plan_add_owner(recovery_allocation_plan_t *plan,
+                                    const recovery_extent_owner_t *owner,
+                                    uint32_t *owner_index,
+                                    rootfs_work_stage_t stage,
+                                    rootfs_work_result_t *result) {
+    if (plan->owner_count == ROOTFS_WORK_MAX_RECOVERY_OWNERS) {
+        result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage, 0,
+                    "powered-off allocation audit exceeded %u extents",
+                    ROOTFS_WORK_MAX_RECOVERY_OWNERS);
+        return false;
+    }
+    if (plan->owner_count == plan->owner_capacity) {
+        uint32_t next = plan->owner_capacity == 0u ? 1024u
+                                                   : plan->owner_capacity * 2u;
+        recovery_extent_owner_t *grown;
+
+        if (next > ROOTFS_WORK_MAX_RECOVERY_OWNERS ||
+            next < plan->owner_capacity)
+            next = ROOTFS_WORK_MAX_RECOVERY_OWNERS;
+        grown = (recovery_extent_owner_t *)realloc(
+            plan->owners, (size_t)next * sizeof(*grown));
+        if (!grown) {
+            result_fail(result, ROOTFS_WORK_NO_MEMORY, stage, 0,
+                        "cannot record powered-off catalog extents");
+            return false;
+        }
+        plan->owners = grown;
+        plan->owner_capacity = next;
+    }
+    *owner_index = plan->owner_count;
+    plan->owners[plan->owner_count++] = *owner;
+    return true;
+}
+
+static bool recovery_plan_mark(recovery_allocation_plan_t *plan,
+                               uint32_t total_blocks, uint32_t start,
+                               uint32_t count, uint32_t owner,
+                               const char *what, rootfs_work_stage_t stage,
+                               rootfs_work_result_t *result) {
+    uint32_t block;
+
+    if (count == 0u || start >= total_blocks ||
+        (uint64_t)start + count > total_blocks) {
+        result_fail(result, ROOTFS_WORK_HFS_INVALID, stage, 0,
+                    "%s extent %u+%u is outside %u blocks", what, start,
+                    count, total_blocks);
+        return false;
+    }
+    for (block = start; block < start + count; block++) {
+        uint32_t previous;
+
+        if (!recovery_bitmap_test(plan->target_bitmap, block)) {
+            recovery_bitmap_set(plan->target_bitmap, block);
+            plan->block_owner[block] = owner;
+            continue;
+        }
+        previous = plan->block_owner[block];
+        if (previous == RECOVERY_OWNER_NONFILE ||
+            owner == RECOVERY_OWNER_NONFILE ||
+            previous == RECOVERY_OWNER_NONE ||
+            plan->collision_count != 0u) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage,
+                        0, "ambiguous allocation overlap at block %u", block);
+            return false;
+        }
+        plan->collision_block = block;
+        plan->collision_owner[0] = previous;
+        plan->collision_owner[1] = owner;
+        plan->collision_count = 1u;
+    }
+    return true;
+}
+
+static bool recovery_plan_mark_special_fork(
+    const catalog_ctx_t *ctx, recovery_allocation_plan_t *plan,
+    uint16_t vh_offset, const char *name, rootfs_work_stage_t stage,
+    rootfs_work_result_t *result) {
+    recovery_fork_t fork;
+    unsigned extent;
+
+    if (!recovery_fork_open(ctx, vh_offset, name, &fork, stage, result))
+        return false;
+    for (extent = 0u; extent < 8u; extent++) {
+        if (fork.count[extent] != 0u &&
+            !recovery_plan_mark(plan, ctx->total_blocks, fork.start[extent],
+                                fork.count[extent], RECOVERY_OWNER_NONFILE,
+                                name, stage, result))
+            return false;
+    }
+    return true;
+}
+
+static bool recovery_plan_catalog_forks(catalog_ctx_t *ctx,
+                                        recovery_allocation_plan_t *plan,
+                                        rootfs_work_stage_t stage,
+                                        rootfs_work_result_t *result) {
+    uint32_t node_index;
+
+    for (node_index = 1u; node_index < ctx->total_nodes; node_index++) {
+        uint8_t *node = NULL;
+        uint16_t count;
+        uint16_t record_index;
+
+        if (!catalog_node_map_used(ctx, node_index))
+            continue;
+        if (!catalog_node_load(ctx, node_index, &node, stage, result))
+            return false;
+        if (node[8] != HFS_BT_LEAF_NODE || node[9] != 1u)
+            continue;
+        count = catalog_record_count(node);
+        for (record_index = 0u; record_index < count; record_index++) {
+            uint16_t start = catalog_slot(node, ctx->node_size, record_index);
+            uint16_t end = catalog_slot(node, ctx->node_size,
+                                        (uint16_t)(record_index + 1u));
+            uint8_t *record = node + start;
+            uint16_t data_offset = catalog_record_data_offset(record);
+            uint8_t *data = record + data_offset;
+            unsigned fork_index;
+
+            if (read_be16(data) != HFS_CAT_FILE_RECORD)
+                continue;
+            for (fork_index = 0u; fork_index < 2u; fork_index++) {
+                uint16_t fork_offset = fork_index == 0u ? 88u : 168u;
+                uint64_t logical = read_be64(data + fork_offset);
+                uint32_t total = read_be32(data + fork_offset + 12u);
+                uint64_t inline_blocks = 0u;
+                bool saw_empty = false;
+                unsigned extent;
+
+                if (logical > (uint64_t)total * ctx->block_size) {
+                    result_fail(result,
+                                ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage,
+                                0, "catalog file fork logicalSize exceeds its "
+                                "physical blocks");
+                    return false;
+                }
+                for (extent = 0u; extent < 8u; extent++) {
+                    uint16_t field = (uint16_t)(start + data_offset +
+                                               fork_offset + 16u +
+                                               extent * 8u);
+                    uint32_t extent_start = read_be32(node + field);
+                    uint32_t extent_count = read_be32(node + field + 4u);
+
+                    if (extent_count == 0u) {
+                        if (extent_start != 0u) {
+                            result_fail(result,
+                                        ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                                        stage, 0, "empty catalog extent has a "
+                                        "nonzero start block");
+                            return false;
+                        }
+                        saw_empty = true;
+                        continue;
+                    }
+                    if (saw_empty) {
+                        result_fail(result,
+                                    ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                                    stage, 0, "catalog extent follows an "
+                                    "empty inline extent");
+                        return false;
+                    }
+                    inline_blocks += extent_count;
+                    if ((uint64_t)extent_start + extent_count >
+                        ctx->total_blocks) {
+                        result_fail(result,
+                                    ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                                    stage, 0, "catalog file extent runs past "
+                                    "the volume");
+                        return false;
+                    }
+                }
+                if (inline_blocks != total) {
+                    result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED,
+                                stage, 0, "catalog file fork needs "
+                                "extents-overflow records");
+                    return false;
+                }
+                for (extent = 0u; extent < 8u; extent++) {
+                    recovery_extent_owner_t owner;
+                    uint16_t field = (uint16_t)(start + data_offset +
+                                               fork_offset + 16u +
+                                               extent * 8u);
+                    uint32_t owner_index;
+
+                    owner.start_block = read_be32(node + field);
+                    owner.block_count = read_be32(node + field + 4u);
+                    if (owner.block_count == 0u)
+                        continue;
+                    owner.node_index = node_index;
+                    owner.record_index = record_index;
+                    owner.start_field = field;
+                    owner.logical_field = (uint16_t)(start + data_offset +
+                                                     fork_offset);
+                    owner.fork_blocks = total;
+                    owner.logical_bytes = logical;
+                    if (!recovery_plan_add_owner(plan, &owner, &owner_index,
+                                                 stage, result) ||
+                        !recovery_plan_mark(plan, ctx->total_blocks,
+                                            owner.start_block,
+                                            owner.block_count, owner_index,
+                                            "catalog file", stage, result))
+                        return false;
+                }
+                (void)end;
+            }
+        }
+    }
+    return true;
+}
+
+static bool bplist_read_integer(const uint8_t *bytes, size_t limit,
+                                size_t offset, size_t width,
+                                uint64_t *value) {
+    size_t index;
+    uint64_t result = 0u;
+
+    if (width == 0u || width > 8u || offset > limit || width > limit - offset)
+        return false;
+    for (index = 0u; index < width; index++)
+        result = (result << 8u) | bytes[offset + index];
+    *value = result;
+    return true;
+}
+
+static bool bplist_object_count(const uint8_t *bytes, size_t limit,
+                                size_t *cursor, uint8_t nibble,
+                                uint64_t *count) {
+    uint8_t marker;
+    size_t width;
+
+    if (nibble != 0x0fu) {
+        *count = nibble;
+        return true;
+    }
+    if (*cursor >= limit)
+        return false;
+    marker = bytes[(*cursor)++];
+    if ((marker >> 4u) != 0x01u || (marker & 0x0fu) > 3u)
+        return false;
+    width = (size_t)1u << (marker & 0x0fu);
+    if (!bplist_read_integer(bytes, limit, *cursor, width, count))
+        return false;
+    *cursor += width;
+    return true;
+}
+
+static bool bplist_object_valid(const uint8_t *bytes, size_t object_limit,
+                                size_t offset, uint8_t ref_size,
+                                uint64_t object_count) {
+    uint8_t marker;
+    uint8_t type;
+    uint8_t info;
+    size_t cursor;
+    uint64_t count = 0u;
+    uint64_t bytes_needed = 0u;
+    uint64_t reference;
+    uint64_t index;
+
+    if (offset >= object_limit)
+        return false;
+    marker = bytes[offset];
+    type = marker >> 4u;
+    info = marker & 0x0fu;
+    cursor = offset + 1u;
+    switch (type) {
+    case 0x00u:
+        return info == 0u || info == 8u || info == 9u || info == 0x0fu;
+    case 0x01u:
+    case 0x02u:
+        if (info > 4u)
+            return false;
+        bytes_needed = (uint64_t)1u << info;
+        break;
+    case 0x03u:
+        if (info != 3u)
+            return false;
+        bytes_needed = 8u;
+        break;
+    case 0x04u:
+    case 0x05u:
+        if (!bplist_object_count(bytes, object_limit, &cursor, info, &count))
+            return false;
+        bytes_needed = count;
+        break;
+    case 0x06u:
+        if (!bplist_object_count(bytes, object_limit, &cursor, info, &count) ||
+            count > UINT64_MAX / 2u)
+            return false;
+        bytes_needed = count * 2u;
+        break;
+    case 0x08u:
+        bytes_needed = (uint64_t)info + 1u;
+        break;
+    case 0x0au:
+    case 0x0cu:
+    case 0x0du:
+        if (!bplist_object_count(bytes, object_limit, &cursor, info, &count) ||
+            (type == 0x0du && count > UINT64_MAX / 2u))
+            return false;
+        if (type == 0x0du)
+            count *= 2u;
+        if (count > UINT64_MAX / ref_size)
+            return false;
+        bytes_needed = count * ref_size;
+        if ((uint64_t)cursor + bytes_needed > object_limit)
+            return false;
+        for (index = 0u; index < count; index++) {
+            if (!bplist_read_integer(bytes, object_limit,
+                                     cursor + (size_t)index * ref_size,
+                                     ref_size, &reference) ||
+                reference >= object_count)
+                return false;
+        }
+        return true;
+    default:
+        return false;
+    }
+    return (uint64_t)cursor + bytes_needed <= object_limit;
+}
+
+static bool binary_plist_exact(const uint8_t *bytes, size_t length) {
+    const size_t trailer_size = 32u;
+    size_t trailer;
+    uint8_t offset_size;
+    uint8_t ref_size;
+    uint64_t object_count;
+    uint64_t top_object;
+    uint64_t table_offset;
+    uint64_t table_bytes;
+    uint64_t object;
+    uint64_t offset;
+    uint64_t previous_offset = 0u;
+    size_t index;
+
+    if (length < 8u + 2u + trailer_size ||
+        memcmp(bytes, "bplist00", 8u) != 0)
+        return false;
+    trailer = length - trailer_size;
+    for (index = 0u; index < 6u; index++)
+        if (bytes[trailer + index] != 0u)
+            return false;
+    offset_size = bytes[trailer + 6u];
+    ref_size = bytes[trailer + 7u];
+    if (offset_size == 0u || offset_size > 8u || ref_size == 0u ||
+        ref_size > 8u ||
+        !bplist_read_integer(bytes, length, trailer + 8u, 8u,
+                             &object_count) ||
+        !bplist_read_integer(bytes, length, trailer + 16u, 8u,
+                             &top_object) ||
+        !bplist_read_integer(bytes, length, trailer + 24u, 8u,
+                             &table_offset) ||
+        object_count == 0u || top_object >= object_count ||
+        object_count > UINT64_MAX / offset_size)
+        return false;
+    table_bytes = object_count * offset_size;
+    if (table_offset < 8u || table_offset > trailer ||
+        table_bytes != (uint64_t)trailer - table_offset)
+        return false;
+    for (object = 0u; object < object_count; object++) {
+        if (!bplist_read_integer(bytes, trailer,
+                                 (size_t)table_offset +
+                                     (size_t)object * offset_size,
+                                 offset_size, &offset) ||
+            offset < 8u || offset >= table_offset ||
+            (object != 0u && offset <= previous_offset) ||
+            !bplist_object_valid(bytes, (size_t)table_offset, (size_t)offset,
+                                 ref_size, object_count))
+            return false;
+        previous_offset = offset;
+    }
+    return true;
+}
+
+static bool binary_plist_compatible(const uint8_t *bytes, size_t block_size,
+                                    uint64_t recorded_length,
+                                    size_t *actual_length) {
+    size_t limit;
+    size_t candidate;
+    size_t nonzero_end;
+    size_t found = 0u;
+    size_t found_length = 0u;
+
+    if (recorded_length > block_size || recorded_length > SIZE_MAX)
+        return false;
+    limit = (size_t)recorded_length;
+    nonzero_end = block_size;
+    while (nonzero_end != 0u && bytes[nonzero_end - 1u] == 0u)
+        nonzero_end--;
+    if (nonzero_end > limit)
+        return false;
+    candidate = nonzero_end > 42u ? nonzero_end : 42u;
+    for (; candidate <= limit; candidate++) {
+        if (!binary_plist_exact(bytes, candidate))
+            continue;
+        found++;
+        found_length = candidate;
+        if (found > 1u)
+            return false;
+    }
+    if (found != 1u)
+        return false;
+    *actual_length = found_length;
+    return true;
+}
+
+static bool recovery_resolve_one_collision(
+    catalog_ctx_t *ctx, recovery_allocation_plan_t *plan,
+    rootfs_work_stage_t stage, rootfs_work_result_t *result) {
+    recovery_extent_owner_t *a;
+    recovery_extent_owner_t *b;
+    uint8_t *collision = NULL;
+    uint8_t *orphan = NULL;
+    bool a_collision;
+    bool a_orphan;
+    bool b_collision;
+    bool b_orphan;
+    bool assignment_ab;
+    bool assignment_ba;
+    size_t a_collision_length = 0u;
+    size_t a_orphan_length = 0u;
+    size_t b_collision_length = 0u;
+    size_t b_orphan_length = 0u;
+    size_t moved_length;
+    uint32_t moved_index;
+    recovery_extent_owner_t *moved;
+    uint8_t *node = NULL;
+    bool okay = false;
+
+    if (plan->collision_count != 1u || plan->orphan_count != 1u ||
+        plan->collision_owner[0] >= plan->owner_count ||
+        plan->collision_owner[1] >= plan->owner_count) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "allocation collisions do not have one orphan candidate");
+        return false;
+    }
+    a = &plan->owners[plan->collision_owner[0]];
+    b = &plan->owners[plan->collision_owner[1]];
+    if (a->start_block != plan->collision_block ||
+        b->start_block != plan->collision_block || a->block_count != 1u ||
+        b->block_count != 1u || a->fork_blocks != 1u ||
+        b->fork_blocks != 1u || a->logical_bytes == 0u ||
+        b->logical_bytes == 0u || a->logical_bytes > ctx->block_size ||
+        b->logical_bytes > ctx->block_size) {
+        result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED, stage, 0,
+                    "only a duplicated pair of one-block catalog forks is "
+                    "recoverable");
+        return false;
+    }
+    collision = (uint8_t *)malloc(ctx->block_size);
+    orphan = (uint8_t *)malloc(ctx->block_size);
+    if (!collision || !orphan) {
+        result_fail(result, ROOTFS_WORK_NO_MEMORY, stage, 0,
+                    "cannot read candidate allocation blocks");
+        goto done;
+    }
+    if (!checked_read(ctx->file, ctx->file_size,
+                      (uint64_t)plan->collision_block * ctx->block_size,
+                      collision, ctx->block_size, stage, result) ||
+        !checked_read(ctx->file, ctx->file_size,
+                      (uint64_t)plan->orphan_block * ctx->block_size, orphan,
+                      ctx->block_size, stage, result))
+        goto done;
+    a_collision = binary_plist_compatible(
+        collision, ctx->block_size, a->logical_bytes, &a_collision_length);
+    a_orphan = binary_plist_compatible(
+        orphan, ctx->block_size, a->logical_bytes, &a_orphan_length);
+    b_collision = binary_plist_compatible(
+        collision, ctx->block_size, b->logical_bytes, &b_collision_length);
+    b_orphan = binary_plist_compatible(
+        orphan, ctx->block_size, b->logical_bytes, &b_orphan_length);
+    /* The stationary record must already be exact.  Recovery may shorten only
+     * the record redirected to the orphan; otherwise a second torn logical
+     * size would survive the supposedly complete repair. */
+    assignment_ab = a_collision &&
+                    a_collision_length == a->logical_bytes && b_orphan;
+    assignment_ba = a_orphan && b_collision &&
+                    b_collision_length == b->logical_bytes;
+    if (assignment_ab == assignment_ba) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "binary-plist contents do not identify one unique extent "
+                    "assignment (A=%u/%u B=%u/%u, sizes=%" PRIu64 "/%" PRIu64
+                    ")", a_collision ? 1u : 0u, a_orphan ? 1u : 0u,
+                    b_collision ? 1u : 0u, b_orphan ? 1u : 0u,
+                    a->logical_bytes, b->logical_bytes);
+        goto done;
+    }
+    moved_index = assignment_ab ? plan->collision_owner[1]
+                                : plan->collision_owner[0];
+    moved = &plan->owners[moved_index];
+    moved_length = assignment_ab ? b_orphan_length : a_orphan_length;
+    if (!catalog_node_load(ctx, moved->node_index, &node, stage, result))
+        goto done;
+    if ((uint32_t)moved->start_field + 4u > ctx->node_size ||
+        (uint32_t)moved->logical_field + 8u > ctx->node_size ||
+        read_be32(node + moved->start_field) != plan->collision_block ||
+        read_be64(node + moved->logical_field) != moved->logical_bytes) {
+        result_fail(result, ROOTFS_WORK_SOURCE_CHANGED, stage, 0,
+                    "catalog extent changed after the recovery plan");
+        goto done;
+    }
+    write_be32(node + moved->start_field, plan->orphan_block);
+    write_be64(node + moved->logical_field, moved_length);
+    catalog_node_dirty(ctx, moved->node_index);
+    moved->start_block = plan->orphan_block;
+    moved->logical_bytes = moved_length;
+    recovery_bitmap_set(plan->target_bitmap, plan->orphan_block);
+    plan->block_owner[plan->orphan_block] = moved_index;
+    plan->extent_changes = 1u;
+    okay = true;
+
+done:
+    free(collision);
+    free(orphan);
+    return okay;
+}
+
+static bool catalog_repair_powered_off_allocation(
+    catalog_ctx_t *ctx, bool repair, recovery_allocation_plan_t *plan,
+    rootfs_work_stage_t stage, rootfs_work_result_t *result) {
+    static const uint16_t FORK_OFFSETS[HFS_SPECIAL_FORK_COUNT] = {
+        112u, 192u, 272u, 352u, 432u
+    };
+    static const char *const FORK_NAMES[HFS_SPECIAL_FORK_COUNT] = {
+        "allocation", "extents-overflow", "catalog", "attributes", "startup"
+    };
+    uint32_t head_end = hfs_head_end(ctx->block_size);
+    uint32_t tail_first = hfs_tail_first(ctx->total_blocks, ctx->block_size);
+    uint32_t block;
+    uint32_t target_used = 0u;
+    uint32_t initial_missing = 0u;
+    uint32_t initial_orphan = 0u;
+    unsigned fork;
+    bool okay = false;
+
+    if (!recovery_plan_init(ctx, plan, stage, result))
+        goto done;
+    if (!recovery_plan_mark(plan, ctx->total_blocks, 0u, head_end,
+                            RECOVERY_OWNER_NONFILE, "reserved head", stage,
+                            result) ||
+        !recovery_plan_mark(plan, ctx->total_blocks, tail_first,
+                            ctx->total_blocks - tail_first,
+                            RECOVERY_OWNER_NONFILE, "reserved tail", stage,
+                            result))
+        goto done;
+    for (fork = 0u; fork < HFS_SPECIAL_FORK_COUNT; fork++)
+        if (!recovery_plan_mark_special_fork(
+                ctx, plan, FORK_OFFSETS[fork], FORK_NAMES[fork], stage,
+                result))
+            goto done;
+    if (!recovery_extents_tree_is_empty(ctx, stage, result) ||
+        !recovery_attributes_are_inline(ctx, stage, result) ||
+        !recovery_plan_catalog_forks(ctx, plan, stage, result))
+        goto done;
+
+    for (block = 0u; block < ctx->total_blocks; block++) {
+        bool target = recovery_bitmap_test(plan->target_bitmap, block);
+        bool current = recovery_bitmap_test(ctx->bitmap, block);
+
+        if (target && !current)
+            initial_missing++;
+        else if (!target && current) {
+            initial_orphan++;
+            plan->orphan_block = block;
+        }
+    }
+    plan->missing_count = initial_missing;
+    plan->orphan_count = initial_orphan;
+    if (!repair && (plan->collision_count != 0u || initial_missing != 0u ||
+                    initial_orphan != 0u)) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "strict allocation audit found %u missing, %u orphan, and "
+                    "%u collided blocks", initial_missing, initial_orphan,
+                    plan->collision_count);
+        goto done;
+    }
+    if (plan->collision_count != 0u &&
+        (!repair || !recovery_resolve_one_collision(ctx, plan, stage, result)))
+        goto done;
+
+    for (block = 0u; block < ctx->total_blocks; block++) {
+        bool target = recovery_bitmap_test(plan->target_bitmap, block);
+        bool current = recovery_bitmap_test(ctx->bitmap, block);
+
+        if (target)
+            target_used++;
+        if (target != current)
+            plan->bitmap_changes++;
+    }
+    if (target_used > ctx->total_blocks) {
+        result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage, 0,
+                    "reconstructed allocation count overflowed");
+        goto done;
+    }
+    plan->final_free_blocks = ctx->total_blocks - target_used;
+    if (!repair && plan->final_free_blocks != ctx->free_blocks) {
+        result_fail(result, ROOTFS_WORK_HFS_INVALID, stage, 0,
+                    "strict allocation audit derives %u free blocks; header "
+                    "says %u", plan->final_free_blocks, ctx->free_blocks);
+        goto done;
+    }
+    if (repair && plan->bitmap_changes != 0u) {
+        memcpy(ctx->bitmap, plan->target_bitmap, ctx->bitmap_bytes);
+        ctx->bitmap_dirty = true;
+    }
+    if (repair) {
+        result->allocation_missing_blocks = initial_missing;
+        result->allocation_orphan_blocks = initial_orphan;
+        result->allocation_extent_collisions = plan->collision_count;
+        result->catalog_extent_records_repairable = plan->extent_changes;
+        result->allocation_bits_repairable = plan->bitmap_changes;
+    }
+    okay = true;
+
+done:
+    if (!okay)
+        recovery_plan_close(plan);
     return okay;
 }
 
@@ -7772,18 +8924,24 @@ rootfs_work_status_t rootfs_work_probe_file_repair(
         source_path, repair, false, state, result);
 }
 
-rootfs_work_status_t rootfs_work_repair_powered_off_catalog_clone(
-    const char *clone_path, rootfs_work_result_t *result) {
+static rootfs_work_status_t rootfs_work_repair_powered_off_clone_impl(
+    const char *clone_path, bool repair_allocation,
+    rootfs_work_result_t *result) {
     host_file_t clone;
     file_stamp_t before;
     file_stamp_t after;
     hfs_volume_t volume;
+    hfs_volume_t expected_volume;
     hfs_volume_t final_volume;
     catalog_ctx_t catalog;
+    recovery_allocation_plan_t allocation_plan;
+    recovery_allocation_plan_t verify_plan;
     uint8_t *buffer = NULL;
     uint32_t changed_nodes = 0u;
     uint32_t stale_refs = 0u;
     uint32_t residual_backlinks = 0u;
+    uint32_t verify_changed = 0u;
+    uint32_t verify_stale = 0u;
     int error = 0;
 
     if (!result)
@@ -7791,6 +8949,8 @@ rootfs_work_status_t rootfs_work_repair_powered_off_catalog_clone(
     result_reset(result);
     host_file_init(&clone);
     memset(&catalog, 0, sizeof(catalog));
+    memset(&allocation_plan, 0, sizeof(allocation_plan));
+    memset(&verify_plan, 0, sizeof(verify_plan));
     if (!clone_path || clone_path[0] == '\0')
         return result_fail(result, ROOTFS_WORK_INVALID_ARGUMENT,
                            ROOTFS_WORK_STAGE_ARGUMENTS, 0,
@@ -7811,14 +8971,23 @@ rootfs_work_status_t rootfs_work_repair_powered_off_catalog_clone(
         goto done;
 #endif
     result->source_size = before.size;
-    if (!hfs_validate(&clone, before.size, &volume, buffer,
-                      ROOTFS_WORK_MAX_IO_BUFFER, true,
-                      ROOTFS_WORK_STAGE_SOURCE_VALIDATE, result) ||
+    if (!(repair_allocation
+              ? hfs_validate_policy(
+                    &clone, before.size, &volume, buffer,
+                    ROOTFS_WORK_MAX_IO_BUFFER, true, true, NULL,
+                    ROOTFS_WORK_STAGE_SOURCE_VALIDATE, result)
+              : hfs_validate(&clone, before.size, &volume, buffer,
+                             ROOTFS_WORK_MAX_IO_BUFFER, true,
+                             ROOTFS_WORK_STAGE_SOURCE_VALIDATE, result)) ||
         !catalog_open(&catalog, &clone, before.size, &volume,
-                      ROOTFS_WORK_DEFAULT_MAC_TIME, result) ||
+                       ROOTFS_WORK_DEFAULT_MAC_TIME, result) ||
         !catalog_repair_powered_off_topology(
             &catalog, true, &changed_nodes, &stale_refs,
             ROOTFS_WORK_STAGE_PROVISION_PLAN, result) ||
+        (repair_allocation &&
+         !catalog_repair_powered_off_allocation(
+             &catalog, true, &allocation_plan,
+             ROOTFS_WORK_STAGE_PROVISION_PLAN, result)) ||
         !catalog_audit(&catalog, catalog.leaf_records, true, false,
                        &residual_backlinks,
                        ROOTFS_WORK_STAGE_PROVISION_PLAN, result))
@@ -7833,19 +9002,62 @@ rootfs_work_status_t rootfs_work_repair_powered_off_catalog_clone(
     result->catalog_topology_nodes_repairable = changed_nodes;
     result->catalog_topology_stale_refs = stale_refs;
     if (!catalog_commit(&catalog, NULL, 0u, buffer,
-                        ROOTFS_WORK_MAX_IO_BUFFER, result) ||
-        !catalog_audit(&catalog, catalog.leaf_records, false, false, NULL,
-                       ROOTFS_WORK_STAGE_PROVISION_WRITE, result))
+                        ROOTFS_WORK_MAX_IO_BUFFER, result))
         goto done;
+    if (repair_allocation &&
+        allocation_plan.final_free_blocks != volume.free_blocks) {
+        uint8_t free_blocks[4];
+
+        write_be32(free_blocks, allocation_plan.final_free_blocks);
+        if (!checked_write(&clone, before.size, HFS_VH_OFF + 48u,
+                           free_blocks, sizeof(free_blocks),
+                           ROOTFS_WORK_STAGE_PROVISION_WRITE, result) ||
+            !checked_write(&clone, before.size,
+                           before.size - HFS_VH_OFF + 48u, free_blocks,
+                           sizeof(free_blocks),
+                           ROOTFS_WORK_STAGE_PROVISION_WRITE, result))
+            goto done;
+    }
     result->catalog_topology_nodes_repaired = changed_nodes;
+    if (repair_allocation) {
+        result->catalog_extent_records_repaired =
+            allocation_plan.extent_changes;
+        result->allocation_bits_repaired = allocation_plan.bitmap_changes;
+    }
+    expected_volume = volume;
+    if (repair_allocation)
+        expected_volume.free_blocks = allocation_plan.final_free_blocks;
+
+    /* Drop every cached node before the strict validation.  This is a raw
+     * re-read of what was written, not a second walk over the in-memory plan. */
+    catalog_close(&catalog);
     if (!hfs_validate(&clone, before.size, &final_volume, buffer,
                       ROOTFS_WORK_MAX_IO_BUFFER, true,
                       ROOTFS_WORK_STAGE_FINAL_VALIDATE, result))
         goto done;
-    if (memcmp(&volume, &final_volume, sizeof(volume)) != 0) {
+    if (memcmp(&expected_volume, &final_volume, sizeof(expected_volume)) != 0) {
         result_fail(result, ROOTFS_WORK_HFS_INVALID,
                     ROOTFS_WORK_STAGE_FINAL_VALIDATE, 0,
-                    "catalog repair changed HFS volume geometry or allocation");
+                    "powered-off repair changed HFS geometry outside the "
+                    "proven allocation count");
+        goto done;
+    }
+    if (!catalog_open(&catalog, &clone, before.size, &final_volume,
+                      ROOTFS_WORK_DEFAULT_MAC_TIME, result) ||
+        !catalog_repair_powered_off_topology(
+            &catalog, false, &verify_changed, &verify_stale,
+            ROOTFS_WORK_STAGE_FINAL_VALIDATE, result) ||
+        verify_changed != 0u || verify_stale != 0u ||
+        !catalog_audit(&catalog, catalog.leaf_records, false, false, NULL,
+                       ROOTFS_WORK_STAGE_FINAL_VALIDATE, result) ||
+        (repair_allocation &&
+         !catalog_repair_powered_off_allocation(
+             &catalog, false, &verify_plan,
+             ROOTFS_WORK_STAGE_FINAL_VALIDATE, result))) {
+        if (result->status == ROOTFS_WORK_OK)
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                        ROOTFS_WORK_STAGE_FINAL_VALIDATE, 0,
+                        "raw re-audit did not reproduce the repair plan");
         goto done;
     }
     if (!host_file_sync(&clone, &error)) {
@@ -7870,12 +9082,23 @@ rootfs_work_status_t rootfs_work_repair_powered_off_catalog_clone(
         goto done;
     }
     result->final_size = before.size;
-    (void)snprintf(result->detail, sizeof(result->detail),
-                   "repaired %u catalog topology nodes and removed %u stale "
-                   "free-node references in the unpublished clone",
-                   changed_nodes, stale_refs);
+    if (repair_allocation) {
+        (void)snprintf(
+            result->detail, sizeof(result->detail),
+            "repaired %u catalog topology nodes, %u catalog fork records, "
+            "and %u allocation bitmap bits in the unpublished clone",
+            changed_nodes, allocation_plan.extent_changes,
+            allocation_plan.bitmap_changes);
+    } else {
+        (void)snprintf(result->detail, sizeof(result->detail),
+                       "repaired %u catalog topology nodes and removed %u "
+                       "stale free-node references in the unpublished clone",
+                       changed_nodes, stale_refs);
+    }
 
 done:
+    recovery_plan_close(&verify_plan);
+    recovery_plan_close(&allocation_plan);
     catalog_close(&catalog);
     if (host_file_is_open(&clone) && !host_file_close(&clone, &error)) {
         if (result->status == ROOTFS_WORK_OK)
@@ -7887,6 +9110,17 @@ done:
     }
     free(buffer);
     return result->status;
+}
+
+rootfs_work_status_t rootfs_work_repair_powered_off_catalog_clone(
+    const char *clone_path, rootfs_work_result_t *result) {
+    return rootfs_work_repair_powered_off_clone_impl(clone_path, false,
+                                                     result);
+}
+
+rootfs_work_status_t rootfs_work_repair_powered_off_clone(
+    const char *clone_path, rootfs_work_result_t *result) {
+    return rootfs_work_repair_powered_off_clone_impl(clone_path, true, result);
 }
 
 rootfs_work_status_t rootfs_work_create(const char *source_path,

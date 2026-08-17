@@ -71,6 +71,10 @@
 #define FX_DUP 18u
 #define FX_NOTE 19u
 #define FX_NEXT_CNID 20u
+#define FX_RECOVERY_A 20u
+#define FX_RECOVERY_B 21u
+#define FX_RECOVERY_LINK 22u
+#define FX_RECOVERY_NEXT_CNID 23u
 
 static int g_pass;
 static int g_fail;
@@ -264,6 +268,20 @@ static void fx_file(fixture_t *fx, uint32_t parent, const char *name,
                     uint32_t blocks) {
     fx_commit(fx, rec_file(fx_next(fx), parent, name, cnid, logical, start,
                            blocks));
+}
+
+static void fx_file_mode(fixture_t *fx, uint32_t parent, const char *name,
+                         uint32_t cnid, uint64_t logical, uint32_t start,
+                         uint32_t blocks, uint16_t mode) {
+    uint8_t *record = fx_next(fx);
+    uint16_t length = rec_file(record, parent, name, cnid, logical, start,
+                               blocks);
+    uint16_t data_offset = (uint16_t)(2u + get_be16(record));
+
+    if ((data_offset & 1u) != 0u)
+        data_offset++;
+    fx_bsd(record + data_offset, mode);
+    fx_commit(fx, length);
 }
 
 static void fx_thread(fixture_t *fx, uint32_t cnid, uint16_t type,
@@ -602,6 +620,110 @@ static fixture_t *fx_create_powered_off_topology(void) {
     fx_emit_header(fx, 2u, 3u, 1u, 4u, (uint32_t)fx->count,
                    (uint32_t)(sizeof(allocated) / sizeof(allocated[0])), used);
     fx_emit_volume(fx);
+    return fx;
+}
+
+/*
+ * A reduced version of the complete physical shutdown witness.  The volume
+ * contains four files and five data blocks:
+ *
+ *   block 10  note.txt (ordinary control)
+ *   block 11  one complete 52-byte binary plist, still allocated but orphaned
+ *   block 12  one complete 49-byte binary plist, named by TWO file records
+ *   block 13  a symlink target named by the catalog but marked free
+ *   block 14  genuinely free
+ *
+ * File A's torn record names block 12 and 80 bytes even though block 11 holds
+ * its one uniquely valid previous plist ending at byte 52.  File B's exact
+ * 49-byte plist is block 12.  Header freeBlocks already accounts for block 13,
+ * so the bitmap is one used bit behind the primary header.  The same stale
+ * map-free leaf topology as fx_create_powered_off_topology() is layered on top.
+ */
+static fixture_t *fx_create_powered_off_allocation(int mode) {
+    static const uint8_t PLIST_A[52] = {
+        0x62, 0x70, 0x6c, 0x69, 0x73, 0x74, 0x30, 0x30,
+        0x5a, 0x61, 0x63, 0x74, 0x69, 0x76, 0x61, 0x74,
+        0x69, 0x6f, 0x6e, 0x08, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x13
+    };
+    static const uint8_t PLIST_B[49] = {
+        0x62, 0x70, 0x6c, 0x69, 0x73, 0x74, 0x30, 0x30,
+        0x57, 0x64, 0x69, 0x73, 0x70, 0x6c, 0x61, 0x79,
+        0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x10
+    };
+    static const char LINK_TARGET[] = "previous/path";
+    fixture_t *fx = (fixture_t *)calloc(1u, sizeof(*fx));
+    uint32_t children[3] = {1u, 2u, 4u};
+    const uint8_t *first[3];
+    uint8_t used[(FX_CATALOG_NODES + 7u) / 8u];
+    const uint32_t allocated[] = {0u, 1u, 3u, 4u};
+    size_t index;
+
+    if (!fx)
+        return NULL;
+    fx_init(fx, (uint16_t)FX_NODE_SIZE);
+    fx->free_data_blocks = 1u;
+    fx->file_count = 4u;
+    fx->folder_count = 3u;
+    fx->next_cnid = FX_RECOVERY_NEXT_CNID;
+
+    fx_folder(fx, 1u, "TestVol", FX_ROOT, 2u, 0x0010u, 2u);
+    fx_thread(fx, FX_ROOT, 3u, 1u, "TestVol");
+    fx_folder(fx, FX_ROOT, "alpha", FX_ALPHA, 1u, 0x0010u, 1u);
+    fx_folder(fx, FX_ROOT, "beta", FX_BETA, 4u, 0x0010u, 0u);
+    fx_thread(fx, FX_ALPHA, 3u, FX_ROOT, "alpha");
+    fx_folder(fx, FX_ALPHA, "dup", FX_DUP, 0u, 0x0010u, 0u);
+    fx_thread(fx, FX_BETA, 3u, FX_ROOT, "beta");
+    fx_file(fx, FX_BETA, "activation.plist", FX_RECOVERY_A,
+            mode == 1 ? sizeof(PLIST_B) : 80u, FX_DATA_FIRST + 2u, 1u);
+    fx_file(fx, FX_BETA, "display.plist", FX_RECOVERY_B,
+            mode == 2 ? 60u : sizeof(PLIST_B), FX_DATA_FIRST + 2u, 1u);
+    fx_file_mode(fx, FX_BETA, "latest", FX_RECOVERY_LINK,
+                 sizeof(LINK_TARGET) - 1u, FX_DATA_FIRST + 3u, 1u,
+                 (uint16_t)(0120000u | 0755u));
+    fx_file(fx, FX_BETA, "note.txt", FX_NOTE, 5u, FX_DATA_FIRST, 1u);
+    fx_thread(fx, FX_DUP, 3u, FX_ALPHA, "dup");
+    fx_thread(fx, FX_NOTE, 4u, FX_BETA, "note.txt");
+    fx_thread(fx, FX_RECOVERY_A, 4u, FX_BETA, "activation.plist");
+    fx_thread(fx, FX_RECOVERY_B, 4u, FX_BETA, "display.plist");
+    fx_thread(fx, FX_RECOVERY_LINK, 4u, FX_BETA, "latest");
+
+    memcpy(fx->image + FX_DATA_FIRST * FX_BLOCK_SIZE, "note\n", 5u);
+    memcpy(fx->image + (FX_DATA_FIRST + 1u) * FX_BLOCK_SIZE,
+           mode == 1 ? PLIST_B : PLIST_A,
+           mode == 1 ? sizeof(PLIST_B) : sizeof(PLIST_A));
+    memcpy(fx->image + (FX_DATA_FIRST + 2u) * FX_BLOCK_SIZE,
+           PLIST_B, sizeof(PLIST_B));
+    memcpy(fx->image + (FX_DATA_FIRST + 3u) * FX_BLOCK_SIZE,
+           LINK_TARGET, sizeof(LINK_TARGET) - 1u);
+
+    (void)fx_emit_leaf(fx, 1u, 0u, 6u, 2u, 0u);
+    (void)fx_emit_leaf(fx, 2u, 6u, fx->count, 4u, 1u);
+    (void)fx_emit_leaf(fx, 4u, 6u, fx->count, 0u, 2u);
+    first[0] = fx->record[0];
+    first[1] = fx->record[6];
+    first[2] = fx->record[6];
+    (void)fx_emit_index(fx, 3u, children, first, 3u, 2u, 0u, 0u);
+    memset(used, 0, sizeof(used));
+    for (index = 0u; index < sizeof(allocated) / sizeof(allocated[0]);
+         index++) {
+        uint32_t node = allocated[index];
+
+        used[node >> 3] |= (uint8_t)(1u << (7u - (node & 7u)));
+    }
+    fx_emit_header(fx, 2u, 3u, 1u, 4u, (uint32_t)fx->count,
+                   (uint32_t)(sizeof(allocated) / sizeof(allocated[0])), used);
+    fx_emit_volume(fx);
+    fx_bitmap_set(fx, FX_DATA_FIRST + 3u, 0);
+    put_be32(fx->image + VH_OFF + 4u, 0u);
+    put_be32(fx->image + FX_SIZE - VH_OFF + 4u, 0u);
     return fx;
 }
 
@@ -1763,6 +1885,20 @@ static int run_catalog_topology_in_place(run_t *run, const fixture_t *fx,
         return 0;
     run->status = rootfs_work_repair_powered_off_catalog_clone(
         run->source, &run->result);
+    if (run->status == ROOTFS_WORK_OK)
+        run->output = read_file(run->source, &run->output_size);
+    return 1;
+}
+
+static int run_powered_off_in_place(run_t *run, const uint8_t *image,
+                                    size_t image_size, const char *tag) {
+    memset(run, 0, sizeof(*run));
+    if (!make_path(run->source, sizeof(run->source), tag) ||
+        !make_path(run->destination, sizeof(run->destination), tag) ||
+        !write_file(run->source, image, image_size))
+        return 0;
+    run->status = rootfs_work_repair_powered_off_clone(run->source,
+                                                       &run->result);
     if (run->status == ROOTFS_WORK_OK)
         run->output = read_file(run->source, &run->output_size);
     return 1;
@@ -3492,6 +3628,241 @@ static void test_powered_off_clone_repairs_derivable_catalog_topology(void) {
             expect_refusal(&run, fx,
                            ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
                            "topology recovery with overlapping leaf keys");
+            run_release(&run);
+        }
+        free(fx);
+    }
+}
+
+static void test_powered_off_clone_repairs_complete_allocation_witness(void) {
+    run_t run;
+
+    /* The topology-only API must not silently waive the allocation mismatch. */
+    {
+        fixture_t *fx = fx_create_powered_off_allocation(0);
+
+        if (!fx) {
+            CHECK(0, "powered-off allocation fixture allocation failed");
+            return;
+        }
+        if (run_catalog_topology_in_place(&run, fx, "alloc-topology-only")) {
+            uint8_t *after = NULL;
+            size_t after_size = 0u;
+
+            CHECK(run.status == ROOTFS_WORK_HFS_INVALID &&
+                  run.result.stage == ROOTFS_WORK_STAGE_SOURCE_VALIDATE,
+                  "topology-only allocation witness returned %s at %s (%s)",
+                  rootfs_work_status_name(run.status),
+                  rootfs_work_stage_name(run.result.stage), run.result.detail);
+            after = read_file(run.source, &after_size);
+            CHECK(after && after_size == FX_SIZE &&
+                  memcmp(after, fx->image, FX_SIZE) == 0,
+                  "topology-only refusal changed the unpublished clone");
+            free(after);
+            run_release(&run);
+        }
+        free(fx);
+    }
+
+    /* Complete, uniquely identifiable transaction rollback. */
+    {
+        fixture_t *fx = fx_create_powered_off_allocation(0);
+
+        if (!fx) {
+            CHECK(0, "recoverable allocation fixture allocation failed");
+            return;
+        }
+        if (run_powered_off_in_place(&run, fx->image, FX_SIZE,
+                                     "alloc-complete")) {
+            CHECK(run.status == ROOTFS_WORK_OK && !run.result.published &&
+                  run.output && run.output_size == FX_SIZE,
+                  "complete powered-off repair returned %s at %s (%s)",
+                  rootfs_work_status_name(run.status),
+                  rootfs_work_stage_name(run.result.stage), run.result.detail);
+            CHECK(run.result.catalog_topology_nodes_repairable == 3u &&
+                  run.result.catalog_topology_nodes_repaired == 3u &&
+                  run.result.catalog_topology_stale_refs == 1u,
+                  "complete repair topology counters are %u/%u stale=%u",
+                  run.result.catalog_topology_nodes_repairable,
+                  run.result.catalog_topology_nodes_repaired,
+                  run.result.catalog_topology_stale_refs);
+            CHECK(run.result.allocation_missing_blocks == 1u &&
+                  run.result.allocation_orphan_blocks == 1u &&
+                  run.result.allocation_extent_collisions == 1u &&
+                  run.result.catalog_extent_records_repairable == 1u &&
+                  run.result.catalog_extent_records_repaired == 1u &&
+                  run.result.allocation_bits_repairable == 1u &&
+                  run.result.allocation_bits_repaired == 1u,
+                  "complete allocation counters are missing=%u orphan=%u "
+                  "collision=%u extents=%u/%u bits=%u/%u",
+                  run.result.allocation_missing_blocks,
+                  run.result.allocation_orphan_blocks,
+                  run.result.allocation_extent_collisions,
+                  run.result.catalog_extent_records_repairable,
+                  run.result.catalog_extent_records_repaired,
+                  run.result.allocation_bits_repairable,
+                  run.result.allocation_bits_repaired);
+            if (run.output) {
+                tr_volume_t vol;
+
+                if (tr_open(run.output, run.output_size, &vol)) {
+                    tr_record_t activation;
+                    tr_record_t display;
+                    tr_record_t latest;
+                    uint32_t children[FX_CATALOG_NODES];
+                    uint16_t child_count = tr_children(
+                        &vol, vol.root_node, 2u, children,
+                        sizeof(children) / sizeof(children[0]));
+
+                    CHECK(child_count == 2u && children[0] == 1u &&
+                          children[1] == 4u && tr_flink(&vol, 1u) == 4u &&
+                          tr_blink(&vol, 4u) == 1u,
+                          "complete repair did not canonicalize catalog links");
+                    CHECK(tr_find(&vol, FX_BETA, "activation.plist",
+                                  &activation) &&
+                          activation.type == 2u &&
+                          get_be64(activation.data + 88u) == 52u &&
+                          get_be32(activation.data + 100u) == 1u &&
+                          get_be32(activation.data + 104u) ==
+                              FX_DATA_FIRST + 1u,
+                          "activation.plist was not rolled back to block 11/52");
+                    CHECK(tr_find(&vol, FX_BETA, "display.plist", &display) &&
+                          display.type == 2u &&
+                          get_be64(display.data + 88u) == 49u &&
+                          get_be32(display.data + 104u) ==
+                              FX_DATA_FIRST + 2u,
+                          "display.plist did not retain block 12/49");
+                    CHECK(tr_find(&vol, FX_BETA, "latest", &latest) &&
+                          latest.type == 2u &&
+                          (get_be16(latest.data + 42u) & 0170000u) == 0120000u &&
+                          get_be32(latest.data + 104u) ==
+                              FX_DATA_FIRST + 3u,
+                          "the bitmap-free symlink record changed unexpectedly");
+                    CHECK(vol.free_blocks == 1u &&
+                          get_be32(run.output + FX_SIZE - VH_OFF + 48u) == 1u &&
+                          tr_bitmap(&vol, FX_DATA_FIRST + 1u) == 1 &&
+                          tr_bitmap(&vol, FX_DATA_FIRST + 2u) == 1 &&
+                          tr_bitmap(&vol, FX_DATA_FIRST + 3u) == 1 &&
+                          tr_bitmap(&vol, FX_DATA_FIRST + 4u) == 0,
+                          "repaired allocation bitmap/header are inconsistent");
+                    CHECK(memcmp(run.output +
+                                     (FX_DATA_FIRST + 1u) * FX_BLOCK_SIZE,
+                                 "bplist00Zactivation", 19u) == 0 &&
+                          memcmp(run.output +
+                                     (FX_DATA_FIRST + 2u) * FX_BLOCK_SIZE,
+                                 "bplist00Wdisplay", 16u) == 0,
+                          "repair moved metadata but changed candidate data");
+                    tr_close(&vol);
+                } else {
+                    CHECK(0, "complete powered-off image could not open");
+                }
+            }
+
+            /* Re-running on the repaired unpublished clone is an identity
+             * operation, which is required after a crash before publication. */
+            if (run.output) {
+                run_t second;
+
+                if (run_powered_off_in_place(&second, run.output,
+                                             run.output_size,
+                                             "alloc-idempotent")) {
+                    CHECK(second.status == ROOTFS_WORK_OK && second.output &&
+                          second.result.catalog_topology_nodes_repairable == 0u &&
+                          second.result.catalog_topology_stale_refs == 0u &&
+                          second.result.allocation_missing_blocks == 0u &&
+                          second.result.allocation_orphan_blocks == 0u &&
+                          second.result.allocation_extent_collisions == 0u &&
+                          second.result.catalog_extent_records_repaired == 0u &&
+                          second.result.allocation_bits_repaired == 0u,
+                          "second powered-off repair was not an identity (%s)",
+                          second.result.detail);
+                    CHECK(second.output &&
+                          memcmp(second.output, run.output, FX_SIZE) == 0,
+                          "idempotent repair changed image bytes");
+                    run_release(&second);
+                }
+            }
+            run_release(&run);
+        }
+        free(fx);
+    }
+
+    /* If the redundant freeBlocks count is stale, both volume headers must be
+     * corrected together; leaving only the alternate stale is not a complete
+     * powered-off transaction repair. */
+    {
+        fixture_t *fx = fx_create_powered_off_allocation(0);
+
+        if (!fx) {
+            CHECK(0, "free-count allocation fixture allocation failed");
+            return;
+        }
+        put_be32(fx->image + VH_OFF + 48u, 2u);
+        put_be32(fx->image + FX_SIZE - VH_OFF + 48u, 2u);
+        if (run_powered_off_in_place(&run, fx->image, FX_SIZE,
+                                     "alloc-free-count")) {
+            CHECK(run.status == ROOTFS_WORK_OK && run.output &&
+                  get_be32(run.output + VH_OFF + 48u) == 1u &&
+                  get_be32(run.output + FX_SIZE - VH_OFF + 48u) == 1u,
+                  "powered-off repair did not reconcile both freeBlocks "
+                  "headers (%s)", run.result.detail);
+            run_release(&run);
+        }
+        free(fx);
+    }
+
+    /* Two valid assignments are ambiguity, not permission to pick one. */
+    {
+        fixture_t *fx = fx_create_powered_off_allocation(1);
+
+        if (!fx) {
+            CHECK(0, "ambiguous allocation fixture allocation failed");
+            return;
+        }
+        if (run_powered_off_in_place(&run, fx->image, FX_SIZE,
+                                     "alloc-ambiguous")) {
+            uint8_t *after = NULL;
+            size_t after_size = 0u;
+
+            CHECK(run.status == ROOTFS_WORK_PROVISION_CATALOG_CORRUPT &&
+                  run.result.stage == ROOTFS_WORK_STAGE_PROVISION_PLAN,
+                  "ambiguous allocation repair returned %s at %s (%s)",
+                  rootfs_work_status_name(run.status),
+                  rootfs_work_stage_name(run.result.stage), run.result.detail);
+            after = read_file(run.source, &after_size);
+            CHECK(after && after_size == FX_SIZE &&
+                  memcmp(after, fx->image, FX_SIZE) == 0,
+                  "ambiguous allocation refusal changed the clone");
+            free(after);
+            run_release(&run);
+        }
+        free(fx);
+    }
+
+    /* A second stale logical size would remain on the stationary record, so
+     * the uniquely located extent alone is not enough to authorize repair. */
+    {
+        fixture_t *fx = fx_create_powered_off_allocation(2);
+
+        if (!fx) {
+            CHECK(0, "stale-stationary allocation fixture failed");
+            return;
+        }
+        if (run_powered_off_in_place(&run, fx->image, FX_SIZE,
+                                     "alloc-stationary-size")) {
+            uint8_t *after = NULL;
+            size_t after_size = 0u;
+
+            CHECK(run.status == ROOTFS_WORK_PROVISION_CATALOG_CORRUPT &&
+                  run.result.stage == ROOTFS_WORK_STAGE_PROVISION_PLAN,
+                  "stale stationary logical size returned %s at %s (%s)",
+                  rootfs_work_status_name(run.status),
+                  rootfs_work_stage_name(run.result.stage), run.result.detail);
+            after = read_file(run.source, &after_size);
+            CHECK(after && after_size == FX_SIZE &&
+                  memcmp(after, fx->image, FX_SIZE) == 0,
+                  "stale stationary-size refusal changed the clone");
+            free(after);
             run_release(&run);
         }
         free(fx);
@@ -5708,6 +6079,7 @@ int main(void) {
     test_broken_catalog_is_never_absence();
     test_powered_off_clone_repairs_only_catalog_backlinks();
     test_powered_off_clone_repairs_derivable_catalog_topology();
+    test_powered_off_clone_repairs_complete_allocation_witness();
     test_unsupported_catalogs_are_refused();
     test_index_descent_and_leaf_head();
     test_rightmost_leaf_split();
