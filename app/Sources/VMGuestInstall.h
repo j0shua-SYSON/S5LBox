@@ -73,6 +73,15 @@ extern "C" {
 #define VM_GUEST_APT_TRUST_MARKER_TMP      "guest.apt-trust-v1.partial"
 #define VM_GUEST_APT_TRUST_JOURNAL_FILE    "guest.apt-trust-v1.transaction"
 #define VM_GUEST_APT_TRUST_JOURNAL_TMP     "guest.apt-trust-v1.transaction.partial"
+/* Old APT ships its signature-method helper separately from the gpgv program
+ * that helper executes. This transaction stages the exact period-compatible
+ * gnupg package for guest dpkg without weakening repository authentication. */
+#define VM_GUEST_APT_VERIFIER_BACKUP_FILE     "rootfs-work.pre-apt-verifier-v1"
+#define VM_GUEST_APT_VERIFIER_STAGE_DIRECTORY "guest.apt-verifier-v1.stage"
+#define VM_GUEST_APT_VERIFIER_MARKER_FILE     "guest.apt-verifier-v1"
+#define VM_GUEST_APT_VERIFIER_MARKER_TMP      "guest.apt-verifier-v1.partial"
+#define VM_GUEST_APT_VERIFIER_JOURNAL_FILE    "guest.apt-verifier-v1.transaction"
+#define VM_GUEST_APT_VERIFIER_JOURNAL_TMP     "guest.apt-verifier-v1.transaction.partial"
 /* Powered-off filesystem repair is repeatable, so its commit record is only a
  * crash-recovery boundary. It is removed after the backup, journal, and stage
  * are durably cleaned instead of becoming permanent boot policy. */
@@ -280,6 +289,32 @@ vm_guest_apt_trust_confirm(const char *work_directory,
                                VM_GUEST_INSTALL_SHA256_SIZE],
                            vm_guest_install_result_t *result,
                            char *detail, size_t detail_capacity);
+
+/* Versioned signature-verifier package migration. A committed record means
+ * the exact package and one-shot guest-dpkg job were staged atomically; the
+ * guest-side completion file and /usr/bin/gpgv remain separately probeable. */
+bool vm_guest_apt_verifier_stage_image_path(char *out, size_t capacity,
+                                            const char *work_directory);
+vm_guest_install_status_t
+vm_guest_apt_verifier_prepare_stage(const char *work_directory,
+                                    vm_guest_install_result_t *result,
+                                    char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_apt_verifier_recover(const char *work_directory,
+                              vm_guest_install_result_t *result,
+                              char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_apt_verifier_publish(const char *work_directory,
+                              const uint8_t manifest_sha256[
+                                  VM_GUEST_INSTALL_SHA256_SIZE],
+                              vm_guest_install_result_t *result,
+                              char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_apt_verifier_confirm(const char *work_directory,
+                              const uint8_t manifest_sha256[
+                                  VM_GUEST_INSTALL_SHA256_SIZE],
+                              vm_guest_install_result_t *result,
+                              char *detail, size_t detail_capacity);
 
 /* Crash-safe publication of an unpublished powered-off filesystem repair.
  * prepare_stage() creates an empty same-directory stage after recovering every

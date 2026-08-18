@@ -473,10 +473,10 @@ static void test_complete_synthetic_plan(void) {
     CHECK(vm_guest_rootfs_plan_manifest_sha256(plan, digest),
           "plan manifest identity was not produced");
     static const uint8_t EXPECTED[VM_GUEST_PACKAGE_SHA256_SIZE] = {
-        0x84u, 0x79u, 0x1bu, 0x17u, 0x28u, 0xc3u, 0xc6u, 0x6du,
-        0xb1u, 0x97u, 0xc2u, 0x59u, 0x1bu, 0x9fu, 0x87u, 0x45u,
-        0x67u, 0xb2u, 0x51u, 0x00u, 0x55u, 0x43u, 0x90u, 0x66u,
-        0xf2u, 0xe2u, 0x5du, 0x43u, 0xdfu, 0xefu, 0x1cu, 0x2du
+        0x00u, 0x2fu, 0xb0u, 0xacu, 0x36u, 0xabu, 0xb9u, 0x16u,
+        0xdeu, 0x16u, 0xb8u, 0x11u, 0xf7u, 0xcau, 0x39u, 0x16u,
+        0x99u, 0xefu, 0x33u, 0x15u, 0xe1u, 0x5cu, 0x08u, 0x89u,
+        0x07u, 0x31u, 0x3au, 0xbfu, 0x21u, 0x97u, 0x80u, 0xd1u
     };
     CHECK(memcmp(digest, EXPECTED, sizeof digest) == 0,
           "synthetic plan identity changed");
@@ -592,7 +592,7 @@ static void test_real_packages_when_supplied(void) {
     if (!plan) return;
     vm_guest_rootfs_stats_t stats;
     vm_guest_rootfs_plan_get_stats(plan, &stats);
-    CHECK(stats.packages == 28u && stats.foundation_packages == 14u,
+    CHECK(stats.packages == 29u && stats.foundation_packages == 14u,
           "real plan has %zu packages / %zu foundation packages",
           stats.packages, stats.foundation_packages);
     CHECK(stats.entries != 0u && stats.entries <= ROOTFS_WORK_MAX_ENTRIES,

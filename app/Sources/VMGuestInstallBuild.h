@@ -62,6 +62,8 @@ typedef struct {
     bool cydia_sources_verified;
     bool apt_trust_installed;
     bool apt_trust_verified;
+    bool apt_verifier_staged;
+    bool apt_verifier_verified;
     bool filesystem_repaired;
     bool powered_off_checkpoint_witnessed;
     size_t historical_snapshots;
@@ -78,6 +80,8 @@ typedef struct {
     vm_guest_install_result_t sources_v2_transaction;
     /* Legacy APT's exact trusted.gpg compatibility transaction. */
     vm_guest_install_result_t apt_trust_transaction;
+    /* Exact legacy gnupg package and one-shot guest-dpkg transaction. */
+    vm_guest_install_result_t apt_verifier_transaction;
     uint8_t manifest_sha256[VM_GUEST_INSTALL_SHA256_SIZE];
 } vm_guest_install_build_result_t;
 
@@ -87,9 +91,11 @@ typedef struct {
  * remain stopped through completion. The source-change checks in rootfs_work
  * are a final refusal, not a substitute for that lifecycle precondition.
  *
- * A valid existing v1 marker needs no package cache. If that installation's
- * live HFS image predates the 2 GiB minimum, a separate crash-safe storage
- * transaction clones and grows it while the v1 boot-policy marker remains
+ * A valid existing v1 marker normally needs no package cache. A guest missing
+ * the signature verifier requests only the exact pinned archive needed for
+ * its repair. If the live HFS image predates the 2 GiB minimum, a separate
+ * crash-safe storage transaction clones and grows it while the v1 boot-policy
+ * marker remains
  * continuously authoritative. Because a running checkpoint leaves this
  * unjournaled HFS volume legitimately dirty. Physical iPhone OS 3.1.3 testing
  * proved that even RB_HALT/PMU-standby can leave the primary header's clean bit
@@ -119,6 +125,12 @@ typedef struct {
  * The exact known historical multi-key ring is preserved, while any unknown
  * existing trust store is refused instead of overwritten. Signature checking
  * is never disabled.
+ *
+ * That APT build also carries only /usr/lib/apt/methods/gpgv: the executable
+ * verifier it invokes is supplied by the period-compatible gnupg package.
+ * Fresh plans install that exact archive. Older guests atomically receive the
+ * archive and a one-shot guest-dpkg job, preserving package ownership and the
+ * dpkg database instead of copying an untracked binary into /usr/bin.
  *
  * A strict source preflight also distinguishes an exact HFS freeBlocks/bitmap
  * disagreement from every other validation failure without parsing diagnostic
@@ -153,6 +165,9 @@ size_t vm_guest_install_build_test_bigboss_source_entries(
     rootfs_work_entry_t *entries, size_t capacity, bool create_source);
 size_t vm_guest_install_build_test_apt_trust_entries(
     rootfs_work_entry_t *entries, size_t capacity, bool create_keyring);
+size_t vm_guest_install_build_test_apt_verifier_entries(
+    rootfs_work_entry_t *entries, size_t capacity,
+    const uint8_t *package, size_t package_size);
 #endif
 
 const char *vm_guest_install_build_status_text(

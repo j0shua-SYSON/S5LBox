@@ -23,10 +23,10 @@ static void test_shipping_manifest(void) {
     char why[256];
     CHECK(vm_guest_package_manifest_validate(why, sizeof why),
           "shipping manifest refused: %s", why);
-    CHECK(vm_guest_package_count() == 28u, "package count is %zu, expected 28",
+    CHECK(vm_guest_package_count() == 29u, "package count is %zu, expected 29",
           vm_guest_package_count());
-    CHECK(vm_guest_package_total_download_bytes() == UINT64_C(9105102),
-          "download total is %llu, expected 9105102",
+    CHECK(vm_guest_package_total_download_bytes() == UINT64_C(9575788),
+          "download total is %llu, expected 9575788",
           (unsigned long long)vm_guest_package_total_download_bytes());
     CHECK(vm_guest_package_at(vm_guest_package_count()) == NULL,
           "out-of-range package lookup succeeded");
@@ -54,6 +54,7 @@ static void test_shipping_manifest(void) {
     const vm_guest_package_t *dpkg = vm_guest_package_find("dpkg");
     const vm_guest_package_t *apt = vm_guest_package_find("apt7-lib");
     const vm_guest_package_t *cydia = vm_guest_package_find("cydia");
+    const vm_guest_package_t *gnupg = vm_guest_package_find("gnupg");
     CHECK(dpkg && strcmp(dpkg->version, "1.14.25-8") == 0,
           "bootstrap dpkg revision drifted");
     CHECK(apt && strcmp(apt->version, "0.7.20.2-1") == 0,
@@ -62,6 +63,11 @@ static void test_shipping_manifest(void) {
           strcmp(cydia->sha256_hex,
                  "94769b67e88198012cd1e45163f2f8bd949b4aa927dab1503a03d62a8ee3dba9") == 0,
           "Cydia identity drifted");
+    CHECK(gnupg && strcmp(gnupg->version, "1.4.8-4") == 0 &&
+          gnupg->size == UINT64_C(470686) &&
+          strcmp(gnupg->sha256_hex,
+                 "9ead71f65ad62e95b31cc821dd6e7b6a3dbd930a7a49e96f280a2988288f5187") == 0,
+          "legacy APT signature-verifier identity drifted");
     CHECK(vm_guest_package_find("mobilesubstrate") == NULL,
           "phase-one manifest unexpectedly installs MobileSubstrate");
 }
@@ -121,10 +127,10 @@ static void test_digest_and_download_match(void) {
     CHECK(vm_guest_package_manifest_sha256(manifest),
           "manifest digest failed");
     static const uint8_t EXPECTED[VM_GUEST_PACKAGE_SHA256_SIZE] = {
-        0x05u, 0x61u, 0xb5u, 0x48u, 0xd0u, 0xefu, 0xd4u, 0x4au,
-        0x2bu, 0x18u, 0x78u, 0x68u, 0x72u, 0x46u, 0x76u, 0x6du,
-        0xbau, 0x40u, 0xb2u, 0x3eu, 0x55u, 0x44u, 0x07u, 0x6eu,
-        0xd3u, 0x4au, 0x7eu, 0x58u, 0x2au, 0x19u, 0x5fu, 0x1eu
+        0x05u, 0x06u, 0x22u, 0x69u, 0x5eu, 0x47u, 0x37u, 0x91u,
+        0x26u, 0xefu, 0x6cu, 0xc1u, 0xdau, 0x5eu, 0xaau, 0x0cu,
+        0x72u, 0x18u, 0x53u, 0x16u, 0x67u, 0xd4u, 0x86u, 0xc0u,
+        0x22u, 0x75u, 0xdau, 0xb7u, 0xd6u, 0xd2u, 0xbeu, 0xd3u
     };
     CHECK(memcmp(manifest, EXPECTED, sizeof manifest) == 0,
           "manifest identity changed");

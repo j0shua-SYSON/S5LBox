@@ -522,7 +522,7 @@ static bool plan_compute_manifest(vm_guest_rootfs_plan_t *plan,
                                   size_t input_count) {
     ios3_sha256_context_t context;
     if (!ios3_sha256_init(&context) ||
-        !plan_hash_text(&context, "s5lbox-guest-rootfs-plan 5\n") ||
+        !plan_hash_text(&context, "s5lbox-guest-rootfs-plan 6\n") ||
         !plan_hash_text(&context,
                         "aliases /etc=/private/etc /var=/private/var\n") ||
         !plan_hash_text(

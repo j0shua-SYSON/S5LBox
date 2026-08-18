@@ -373,6 +373,11 @@ static void clear_fixture(void) {
     (void)remove(next);
     (void)remove_directory(stage);
     (void)join_path(stage, sizeof stage, FIXTURE_DIR,
+                    VM_GUEST_APT_VERIFIER_STAGE_DIRECTORY);
+    (void)join_path(next, sizeof next, stage, VM_GUEST_INSTALL_NEXT_FILE);
+    (void)remove(next);
+    (void)remove_directory(stage);
+    (void)join_path(stage, sizeof stage, FIXTURE_DIR,
                     VM_GUEST_RECOVERY_STAGE_DIRECTORY);
     (void)join_path(next, sizeof next, stage, VM_GUEST_INSTALL_NEXT_FILE);
     (void)remove(next);
@@ -409,6 +414,11 @@ static void clear_fixture(void) {
         VM_GUEST_APT_TRUST_MARKER_TMP,
         VM_GUEST_APT_TRUST_JOURNAL_FILE,
         VM_GUEST_APT_TRUST_JOURNAL_TMP,
+        VM_GUEST_APT_VERIFIER_BACKUP_FILE,
+        VM_GUEST_APT_VERIFIER_MARKER_FILE,
+        VM_GUEST_APT_VERIFIER_MARKER_TMP,
+        VM_GUEST_APT_VERIFIER_JOURNAL_FILE,
+        VM_GUEST_APT_VERIFIER_JOURNAL_TMP,
         VM_GUEST_RECOVERY_BACKUP_FILE,
         VM_GUEST_RECOVERY_MARKER_FILE,
         VM_GUEST_RECOVERY_MARKER_TMP,
@@ -678,6 +688,76 @@ static void test_apt_trust_plan_is_exact_and_private(void) {
           count);
 }
 
+static void test_apt_verifier_plan_uses_guest_dpkg(void) {
+    static const uint8_t PACKAGE[] = {0x21u, 0x3cu, 0x61u, 0x72u};
+    rootfs_work_entry_t entries[9];
+    rootfs_work_entry_t sentinel[8];
+    memset(entries, 0, sizeof entries);
+    memset(sentinel, 0xa5, sizeof sentinel);
+    CHECK(vm_guest_install_build_test_apt_verifier_entries(
+              sentinel, 8u, PACKAGE, sizeof PACKAGE) == 9u &&
+          ((const unsigned char *)sentinel)[0] == 0xa5u,
+          "a short APT-verifier plan buffer was modified");
+    size_t count = vm_guest_install_build_test_apt_verifier_entries(
+        entries, 9u, PACKAGE, sizeof PACKAGE);
+    CHECK(count == 9u,
+          "APT-verifier plan has %zu entries, expected 9", count);
+
+    const rootfs_work_entry_t *package_entry = NULL;
+    const rootfs_work_entry_t *helper_entry = NULL;
+    const rootfs_work_entry_t *plist_entry = NULL;
+    for (size_t i = 0u; i < count; i++) {
+        CHECK(entries[i].path != NULL,
+              "APT-verifier plan entry %zu has no path", i);
+        if (!entries[i].path) continue;
+        if (strcmp(entries[i].path,
+                   "/private/var/lib/s5lbox/apt-verifier-v1/"
+                   "gnupg_1.4.8-4_iphoneos-arm.deb") == 0)
+            package_entry = &entries[i];
+        if (strcmp(entries[i].path,
+                   "/private/var/lib/s5lbox/apt-verifier-v1-install") == 0)
+            helper_entry = &entries[i];
+        if (strcmp(entries[i].path,
+                   "/System/Library/LaunchDaemons/"
+                   "com.j0shua.s5lbox.apt-verifier-v1.plist") == 0)
+            plist_entry = &entries[i];
+    }
+    CHECK(package_entry &&
+              package_entry->kind == ROOTFS_WORK_ENTRY_FILE &&
+              package_entry->permissions == 0644u &&
+              package_entry->content == PACKAGE &&
+              package_entry->content_size == sizeof PACKAGE,
+          "APT-verifier plan does not retain the exact caller-owned package");
+    const char *script = helper_entry
+        ? (const char *)helper_entry->content : NULL;
+    CHECK(helper_entry && helper_entry->kind == ROOTFS_WORK_ENTRY_FILE &&
+              helper_entry->permissions == 0755u && script &&
+              strstr(script,
+                     "/usr/bin/dpkg --force-depends --install \"$package\" || exit 1") != NULL &&
+              strstr(script,
+                     "/usr/bin/dpkg --status gnupg >/dev/null 2>&1 || exit 1") != NULL &&
+              strstr(script,
+                     "/usr/bin/gpgv --version >/dev/null 2>&1 || exit 1") != NULL,
+          "APT-verifier helper does not install and execute the pinned package");
+    const char *published = script
+        ? strstr(script, "/bin/mv -f \"$marker.partial\" \"$marker\" || exit 1")
+        : NULL;
+    const char *removed = script
+        ? strstr(script, "/bin/rm -f \"$package\" || exit 1") : NULL;
+    CHECK(published && removed && published < removed,
+          "APT-verifier package can disappear before its durable completion marker");
+    CHECK(script && strstr(script, "allow-unauthenticated") == NULL &&
+              strstr(script, "AllowInsecureRepositories") == NULL &&
+              strstr(script, "trusted=yes") == NULL,
+          "APT-verifier helper weakens repository authentication");
+    CHECK(plist_entry && plist_entry->kind == ROOTFS_WORK_ENTRY_FILE &&
+              plist_entry->permissions == 0644u &&
+              plist_entry->content_size != 0u &&
+              strstr((const char *)plist_entry->content,
+                     "/private/var/lib/s5lbox/apt-verifier-v1-install") != NULL,
+          "APT-verifier launchd job does not call the private helper");
+}
+
 static void test_historical_snapshot_gate(void) {
     clear_fixture();
     char live[VM_GUEST_INSTALL_PATH_CAPACITY];
@@ -766,6 +846,11 @@ static void test_existing_install_is_idempotent(void) {
               VM_GUEST_INSTALL_OK && transaction.committed,
           "could not seed an already-completed APT-trust migration: %s",
           detail);
+    CHECK(vm_guest_apt_verifier_confirm(FIXTURE_DIR, digest, &transaction,
+                                        detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed,
+          "could not seed an already-completed APT-verifier migration: %s",
+          detail);
     CHECK(resize_sparse(live, VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES),
           "could not make the committed fixture represent a 2 GiB disk");
 
@@ -823,6 +908,9 @@ static void test_snapshot_blocks_free_count_recovery(void) {
               VM_GUEST_INSTALL_OK && transaction.committed &&
           vm_guest_apt_trust_confirm(FIXTURE_DIR, digest, &transaction,
                                      detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_apt_verifier_confirm(FIXTURE_DIR, digest, &transaction,
+                                        detail, sizeof detail) ==
               VM_GUEST_INSTALL_OK && transaction.committed,
           "could not commit free-count snapshot fixture: %s", detail);
 
@@ -921,6 +1009,9 @@ static void test_committed_maintenance_cleanup_blocks_new_transaction(void) {
               VM_GUEST_INSTALL_OK && transaction.committed &&
           vm_guest_apt_trust_confirm(FIXTURE_DIR, digest, &transaction,
                                      detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_apt_verifier_confirm(FIXTURE_DIR, digest, &transaction,
+                                        detail, sizeof detail) ==
               VM_GUEST_INSTALL_OK && transaction.committed &&
           resize_sparse(live, VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES),
           "could not commit cleanup-residue fixture: %s", detail);
@@ -1103,6 +1194,9 @@ static void test_powered_off_checkpoint_allows_only_dirty_bit(void) {
               VM_GUEST_INSTALL_OK && transaction.committed &&
           vm_guest_apt_trust_confirm(FIXTURE_DIR, digest, &transaction,
                                      detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_apt_verifier_confirm(FIXTURE_DIR, digest, &transaction,
+                                        detail, sizeof detail) ==
               VM_GUEST_INSTALL_OK && transaction.committed,
           "could not commit checkpoint-gate fixture: %s", detail);
 
@@ -1169,8 +1263,10 @@ static void test_real_build_when_supplied(void) {
     const char *source = getenv("S5LBOX_ROOTFS_SOURCE");
     const char *packages = getenv("S5LBOX_GUEST_PACKAGE_DIR");
     const char *machine = getenv("S5LBOX_INSTALL_MACHINE_DIR");
-    bool any = (source && *source) || (packages && *packages) ||
-               (machine && *machine);
+    /* The package directory is also a valid input to focused existing-guest
+     * migration replays. Only a source or fresh-machine path opts into this
+     * three-input full-install test. */
+    bool any = (source && *source) || (machine && *machine);
     bool all = source && *source && packages && *packages &&
                machine && *machine;
     CHECK(!any || all,
@@ -1204,11 +1300,13 @@ static void test_real_build_when_supplied(void) {
             machine, packages, capture_progress, &progress,
             &result, detail, sizeof detail);
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK &&
-          result.transaction.committed && !result.already_installed,
+          result.transaction.committed && !result.already_installed &&
+          result.apt_verifier_staged &&
+          result.apt_verifier_transaction.committed,
           "real install build refused: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     CHECK(result.rootfs.final_size > base.final_size &&
-          result.plan.packages == 28u &&
+          result.plan.packages == 29u &&
           result.plan.foundation_packages == 14u,
           "real build result is incomplete");
     CHECK(result.rootfs.final_size ==
@@ -1226,6 +1324,7 @@ static void test_real_build_when_supplied(void) {
         &retry, detail, sizeof detail);
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
           !retry.storage_upgraded && retry.transaction.committed &&
+          retry.apt_verifier_staged &&
           retry.rootfs.final_size == 0u,
           "2 GiB install was rewritten or not idempotent: %s / %s",
           vm_guest_install_build_status_text(status), detail);
@@ -1242,6 +1341,10 @@ static void test_real_storage_upgrade_when_supplied(void) {
         printf("real-storage-upgrade SKIP (existing machine path unset)\n");
         return;
     }
+    const char *packages = getenv("S5LBOX_GUEST_PACKAGE_DIR");
+    CHECK(packages && *packages,
+          "real storage-upgrade replay needs S5LBOX_GUEST_PACKAGE_DIR");
+    if (!packages || !*packages) return;
 
     char live[VM_GUEST_INSTALL_PATH_CAPACITY];
     CHECK(join_path(live, sizeof live, machine,
@@ -1273,11 +1376,13 @@ static void test_real_storage_upgrade_when_supplied(void) {
     vm_guest_install_build_result_t result;
     vm_guest_install_build_status_t status =
         vm_guest_install_build_from_directory(
-            machine, NULL, capture_progress, &progress,
+            machine, packages, capture_progress, &progress,
             &result, detail, sizeof detail);
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && result.already_installed &&
           result.storage_upgraded && result.transaction.committed &&
-          result.storage_transaction.committed,
+          result.storage_transaction.committed &&
+          result.apt_verifier_transaction.committed &&
+          (result.apt_verifier_staged || result.apt_verifier_verified),
           "real storage upgrade refused: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     uint64_t after = file_size_or_zero(live);
@@ -1314,7 +1419,8 @@ static void test_real_storage_upgrade_when_supplied(void) {
         machine, NULL, capture_progress, &progress,
         &retry, detail, sizeof detail);
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
-          !retry.storage_upgraded && retry.rootfs.final_size == 0u,
+          !retry.storage_upgraded && retry.apt_verifier_staged &&
+          retry.rootfs.final_size == 0u,
           "real storage-upgrade retry rewrote the disk: %s / %s",
           vm_guest_install_build_status_text(status), detail);
 
@@ -1388,6 +1494,10 @@ static void test_real_privilege_repair_when_supplied(void) {
         printf("real-cydia-privilege-repair SKIP (existing machine path unset)\n");
         return;
     }
+    const char *packages = getenv("S5LBOX_GUEST_PACKAGE_DIR");
+    CHECK(packages && *packages,
+          "real privilege-repair replay needs S5LBOX_GUEST_PACKAGE_DIR");
+    if (!packages || !*packages) return;
 
     char live[VM_GUEST_INSTALL_PATH_CAPACITY];
     CHECK(join_path(live, sizeof live, machine,
@@ -1473,7 +1583,7 @@ static void test_real_privilege_repair_when_supplied(void) {
     vm_guest_install_build_result_t result;
     vm_guest_install_build_status_t status =
         vm_guest_install_build_from_directory(
-            machine, NULL, capture_progress, &progress,
+            machine, packages, capture_progress, &progress,
             &result, detail, sizeof detail);
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && result.already_installed &&
           result.storage_upgraded == expect_storage_growth &&
@@ -1483,18 +1593,20 @@ static void test_real_privilege_repair_when_supplied(void) {
           result.cydia_sources_verified &&
           result.apt_trust_installed &&
           result.apt_trust_verified &&
+          result.apt_verifier_staged &&
           result.rootfs.file_repairs_applied == 1u &&
-          result.rootfs.provision_entries >= 4u &&
+          result.rootfs.provision_entries >= 7u &&
           result.rootfs.provision_entries +
                   result.rootfs.provision_reused_entries >=
-              9u &&
+              13u &&
           result.rootfs.provision_entries +
                   result.rootfs.provision_reused_entries <=
-              11u &&
+              15u &&
           result.privilege_transaction.committed &&
           result.sources_v2_transaction.committed &&
-          result.apt_trust_transaction.committed,
-          "combined Cydia repair/source/trust migration refused or did not apply: %s / %s",
+          result.apt_trust_transaction.committed &&
+          result.apt_verifier_transaction.committed,
+          "combined Cydia repair/source/trust/verifier migration refused or did not apply: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     uint64_t after = file_size_or_zero(live);
     CHECK(after == (expect_storage_growth
@@ -1562,7 +1674,8 @@ static void test_real_privilege_repair_when_supplied(void) {
           !retry.storage_upgraded && !retry.cydia_privileges_repaired &&
           retry.cydia_privileges_verified && !retry.cydia_sources_added &&
           retry.cydia_sources_verified && !retry.apt_trust_installed &&
-          retry.apt_trust_verified && retry.rootfs.final_size == 0u,
+          retry.apt_trust_verified && retry.apt_verifier_staged &&
+          retry.rootfs.final_size == 0u,
           "real privilege-repair retry rewrote the disk: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     printf("real-cydia-privilege-repair before=%llu after=%llu applied=%u\n",
@@ -1576,6 +1689,10 @@ static void test_real_cache_recovery_when_supplied(void) {
         printf("real-cydia-cache-recovery SKIP (existing machine path unset)\n");
         return;
     }
+    const char *packages = getenv("S5LBOX_GUEST_PACKAGE_DIR");
+    CHECK(packages && *packages,
+          "real cache-recovery replay needs S5LBOX_GUEST_PACKAGE_DIR");
+    if (!packages || !*packages) return;
 
     char live[VM_GUEST_INSTALL_PATH_CAPACITY];
     CHECK(join_path(live, sizeof live, machine,
@@ -1599,21 +1716,23 @@ static void test_real_cache_recovery_when_supplied(void) {
     vm_guest_install_build_result_t result;
     vm_guest_install_build_status_t status =
         vm_guest_install_build_from_directory(
-            machine, NULL, capture_progress, &progress,
+            machine, packages, capture_progress, &progress,
             &result, detail, sizeof detail);
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && result.already_installed &&
           result.storage_upgraded == expect_storage_growth &&
           result.cydia_privileges_verified &&
           result.cydia_sources_added && result.cydia_sources_verified &&
           result.apt_trust_installed && result.apt_trust_verified &&
-          result.rootfs.provision_entries >= 4u &&
+          result.apt_verifier_staged &&
+          result.rootfs.provision_entries >= 7u &&
           result.rootfs.provision_entries +
-                  result.rootfs.provision_reused_entries >= 9u &&
+                  result.rootfs.provision_reused_entries >= 13u &&
           result.rootfs.provision_entries +
-                  result.rootfs.provision_reused_entries <= 11u &&
+                  result.rootfs.provision_reused_entries <= 15u &&
           result.sources_transaction.committed &&
           result.sources_v2_transaction.committed &&
-          result.apt_trust_transaction.committed,
+          result.apt_trust_transaction.committed &&
+          result.apt_verifier_transaction.committed,
           "real cache recovery refused or omitted its payload: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     uint64_t after = file_size_or_zero(live);
@@ -1638,7 +1757,8 @@ static void test_real_cache_recovery_when_supplied(void) {
           !retry.storage_upgraded && !retry.cydia_privileges_repaired &&
           retry.cydia_privileges_verified && !retry.cydia_sources_added &&
           retry.cydia_sources_verified && !retry.apt_trust_installed &&
-          retry.apt_trust_verified && retry.rootfs.final_size == 0u,
+          retry.apt_trust_verified && retry.apt_verifier_staged &&
+          retry.rootfs.final_size == 0u,
           "cache-recovery retry rewrote the disk: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     printf("real-cydia-cache-recovery before=%llu after=%llu entries=%u\n",
@@ -1652,6 +1772,10 @@ static void test_real_apt_trust_when_supplied(void) {
         printf("real-apt-trust SKIP (existing machine path unset)\n");
         return;
     }
+    const char *packages = getenv("S5LBOX_GUEST_PACKAGE_DIR");
+    CHECK(packages && *packages,
+          "real APT-trust replay needs S5LBOX_GUEST_PACKAGE_DIR");
+    if (!packages || !*packages) return;
 
     char live[VM_GUEST_INSTALL_PATH_CAPACITY];
     CHECK(join_path(live, sizeof live, machine,
@@ -1678,20 +1802,24 @@ static void test_real_apt_trust_when_supplied(void) {
     vm_guest_install_build_result_t result;
     vm_guest_install_build_status_t status =
         vm_guest_install_build_from_directory(
-            machine, NULL, capture_progress, &progress,
+            machine, packages, capture_progress, &progress,
             &result, detail, sizeof detail);
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && result.already_installed &&
           !result.storage_upgraded && !result.cydia_privileges_repaired &&
           !result.cydia_sources_added && result.apt_trust_verified &&
           result.apt_trust_transaction.committed &&
+          result.apt_verifier_staged &&
+          result.apt_verifier_transaction.committed &&
           file_size_or_zero(live) == before,
           "real APT-trust migration refused or changed unrelated state: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     if (!before_transaction.committed) {
         CHECK(result.rootfs.published &&
-              result.rootfs.provision_entries >= 2u &&
+              result.rootfs.provision_entries >= 5u &&
               result.rootfs.provision_entries +
-                      result.rootfs.provision_reused_entries == 8u,
+                      result.rootfs.provision_reused_entries >= 11u &&
+              result.rootfs.provision_entries +
+                      result.rootfs.provision_reused_entries <= 12u,
               "real APT-trust migration omitted its bounded payload: %s",
               result.rootfs.detail);
     }
@@ -1718,7 +1846,8 @@ static void test_real_apt_trust_when_supplied(void) {
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
           !retry.storage_upgraded && !retry.cydia_privileges_repaired &&
           !retry.cydia_sources_added && !retry.apt_trust_installed &&
-          retry.apt_trust_verified && retry.rootfs.final_size == 0u &&
+          retry.apt_trust_verified && retry.apt_verifier_staged &&
+          retry.rootfs.final_size == 0u &&
           file_size_or_zero(live) == before,
           "real APT-trust retry rewrote the disk: %s / %s",
           vm_guest_install_build_status_text(status), detail);
@@ -1728,12 +1857,129 @@ static void test_real_apt_trust_when_supplied(void) {
            result.rootfs.provision_entries);
 }
 
+static void test_real_apt_verifier_when_supplied(void) {
+    const char *machine =
+        getenv("S5LBOX_EXISTING_APT_VERIFIER_MACHINE_DIR");
+    if (!machine || !*machine) {
+        printf("real-apt-verifier SKIP (existing machine path unset)\n");
+        return;
+    }
+    const char *packages = getenv("S5LBOX_GUEST_PACKAGE_DIR");
+    CHECK(packages && *packages,
+          "real APT-verifier replay needs S5LBOX_GUEST_PACKAGE_DIR");
+    if (!packages || !*packages) return;
+
+    char live[VM_GUEST_INSTALL_PATH_CAPACITY];
+    CHECK(join_path(live, sizeof live, machine,
+                    VM_GUEST_INSTALL_LIVE_FILE),
+          "real APT-verifier live path overflow");
+    uint64_t before = file_size_or_zero(live);
+    CHECK(before >= VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES,
+          "real APT-verifier source is smaller than the 2 GiB migration floor");
+    if (before < VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES) return;
+
+    uint8_t manifest[VM_GUEST_INSTALL_SHA256_SIZE];
+    char detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+    CHECK(vm_guest_install_probe(machine, manifest, detail, sizeof detail) ==
+              VM_GUEST_INSTALL_PROBE_VALID,
+          "real APT-verifier source has no valid install marker: %s", detail);
+    vm_guest_install_result_t transaction;
+    CHECK(vm_guest_apt_trust_recover(machine, &transaction,
+                                     detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed,
+          "real APT-verifier source lacks its trust migration: %s", detail);
+    CHECK(vm_guest_apt_verifier_recover(machine, &transaction,
+                                        detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && !transaction.committed,
+          "real APT-verifier source was already migrated: %s", detail);
+
+    vm_guest_install_build_result_t missing;
+    vm_guest_install_build_status_t status =
+        vm_guest_install_build_from_directory(
+            machine, NULL, NULL, NULL, &missing, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_ERR_ARGUMENT &&
+          file_size_or_zero(live) == before,
+          "missing verifier package was not requested without mutating the disk: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+
+    progress_log_t progress;
+    memset(&progress, 0, sizeof progress);
+    vm_guest_install_build_result_t result;
+    status = vm_guest_install_build_from_directory(
+        machine, packages, capture_progress, &progress,
+        &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_OK && result.already_installed &&
+          !result.storage_upgraded && !result.cydia_privileges_repaired &&
+          !result.cydia_sources_added && result.apt_trust_verified &&
+          result.apt_verifier_staged && !result.apt_verifier_verified &&
+          result.apt_verifier_transaction.committed &&
+          result.rootfs.published &&
+          result.rootfs.provision_entries >= 3u &&
+          result.rootfs.provision_entries +
+                  result.rootfs.provision_reused_entries == 9u &&
+          file_size_or_zero(live) == before,
+          "real APT-verifier migration refused or changed unrelated state: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+
+    rootfs_work_file_repair_t package_probe;
+    memset(&package_probe, 0, sizeof package_probe);
+    package_probe.path =
+        "/private/var/lib/s5lbox/apt-verifier-v1/"
+        "gnupg_1.4.8-4_iphoneos-arm.deb";
+    package_probe.expected_size = UINT64_C(470686);
+    static const uint8_t PACKAGE_SHA256[IOS3_SHA256_DIGEST_SIZE] = {
+        0x9eu, 0xadu, 0x71u, 0xf6u, 0x5au, 0xd6u, 0x2eu, 0x95u,
+        0xb3u, 0x1cu, 0xc8u, 0x21u, 0xddu, 0x6eu, 0x7bu, 0x6au,
+        0x3du, 0xbdu, 0x93u, 0x0au, 0x7au, 0x49u, 0xe9u, 0x6fu,
+        0x28u, 0x0au, 0x29u, 0x88u, 0x28u, 0x8fu, 0x51u, 0x87u
+    };
+    memcpy(package_probe.expected_sha256, PACKAGE_SHA256,
+           sizeof package_probe.expected_sha256);
+    package_probe.expected_permissions = 0644u;
+    package_probe.desired_permissions = 0644u;
+    rootfs_work_file_repair_state_t package_state =
+        ROOTFS_WORK_FILE_REPAIR_MISSING;
+    rootfs_work_result_t package_result;
+    CHECK(rootfs_work_probe_file_repair(
+              live, &package_probe, &package_state, &package_result) ==
+              ROOTFS_WORK_OK &&
+          package_state == ROOTFS_WORK_FILE_REPAIR_SATISFIED,
+          "published verifier package is not exact root:root 0644 data: %s at %s (%s)",
+          rootfs_work_status_name(package_result.status),
+          rootfs_work_stage_name(package_result.stage), package_result.detail);
+    CHECK(vm_guest_apt_verifier_recover(machine, &transaction,
+                                        detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          transaction.cleanup_complete && transaction.has_manifest &&
+          memcmp(transaction.manifest_sha256, manifest, sizeof manifest) == 0,
+          "real APT-verifier record is not recoverable: %s", detail);
+
+    vm_guest_install_build_result_t retry;
+    memset(&progress, 0, sizeof progress);
+    status = vm_guest_install_build_from_directory(
+        machine, NULL, capture_progress, &progress,
+        &retry, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
+          retry.apt_trust_verified && retry.apt_verifier_staged &&
+          !retry.apt_verifier_verified && retry.rootfs.final_size == 0u &&
+          file_size_or_zero(live) == before,
+          "real APT-verifier retry rewrote the disk: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+    printf("real-apt-verifier bytes=%llu entries=%u reused=%u\n",
+           (unsigned long long)before, result.rootfs.provision_entries,
+           result.rootfs.provision_reused_entries);
+}
+
 static void test_real_allocation_recovery_when_supplied(void) {
     const char *machine = getenv("S5LBOX_FREE_COUNT_RECOVERY_MACHINE_DIR");
     if (!machine || !*machine) {
         printf("real-allocation-recovery SKIP (disposable machine path unset)\n");
         return;
     }
+    const char *packages = getenv("S5LBOX_GUEST_PACKAGE_DIR");
+    CHECK(packages && *packages,
+          "real allocation-recovery replay needs S5LBOX_GUEST_PACKAGE_DIR");
+    if (!packages || !*packages) return;
 
     char live[VM_GUEST_INSTALL_PATH_CAPACITY];
     CHECK(join_path(live, sizeof live, machine,
@@ -1791,7 +2037,7 @@ static void test_real_allocation_recovery_when_supplied(void) {
     vm_guest_install_build_result_t result;
     vm_guest_install_build_status_t status =
         vm_guest_install_build_from_directory(
-            machine, NULL, capture_progress, &progress,
+            machine, packages, capture_progress, &progress,
             &result, detail, sizeof detail);
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && result.already_installed &&
           result.filesystem_repaired &&
@@ -1800,7 +2046,8 @@ static void test_real_allocation_recovery_when_supplied(void) {
           vm_guest_install_build_test_allocation_repair_proven(
               &mismatch, &result.filesystem_recovery, size) &&
           !result.storage_upgraded && !result.cydia_privileges_repaired &&
-          !result.cydia_sources_added,
+          !result.cydia_sources_added && result.apt_verifier_staged &&
+          result.apt_verifier_transaction.committed,
           "real allocation recovery refused or did not publish its proven repair: %s / %s",
           vm_guest_install_build_status_text(status), detail);
 
@@ -1829,7 +2076,7 @@ static void test_real_allocation_recovery_when_supplied(void) {
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
           !retry.filesystem_repaired && !retry.storage_upgraded &&
           !retry.cydia_privileges_repaired && !retry.cydia_sources_added &&
-          file_size_or_zero(live) == size,
+          retry.apt_verifier_staged && file_size_or_zero(live) == size,
           "real free-count recovery retry was not idempotent: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     printf("real-allocation-recovery size=%llu used=%u header=%u bits=%u free=%u\n",
@@ -1850,6 +2097,7 @@ int main(void) {
     test_allocation_repair_publication_proof();
     test_bigboss_cache_plan_avoids_stashed_system_paths();
     test_apt_trust_plan_is_exact_and_private();
+    test_apt_verifier_plan_uses_guest_dpkg();
     test_historical_snapshot_gate();
     test_existing_install_is_idempotent();
     test_snapshot_blocks_free_count_recovery();
@@ -1860,6 +2108,7 @@ int main(void) {
     test_real_privilege_repair_when_supplied();
     test_real_cache_recovery_when_supplied();
     test_real_apt_trust_when_supplied();
+    test_real_apt_verifier_when_supplied();
     test_real_allocation_recovery_when_supplied();
     test_real_build_when_supplied();
     clear_fixture();
