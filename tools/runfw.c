@@ -37,6 +37,7 @@ static const char *status_name(arm_status_t s) {
         case ARM_OK:        return "OK";
         case ARM_UNDEFINED: return "UNDEFINED INSTRUCTION";
         case ARM_HALT:      return "HALT";
+        case ARM_RESTART:   return "RESTART";
         default:            return "?";
     }
 }

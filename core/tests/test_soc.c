@@ -207,6 +207,138 @@ static void test_unmapped_access_counted(void) {
     s5l8900_free(&m);
 }
 
+static void test_watchdog_window_distinguishes_reboot_from_setup(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0u, 1u << 20), "watchdog machine init failed");
+
+    s5l_window_t windows[S5L_WINDOW_MAX];
+    unsigned count = s5l8900_windows(&m, windows, S5L_WINDOW_MAX);
+    unsigned watchdogs = 0u;
+    for (unsigned i = 0u; i < count && i < S5L_WINDOW_MAX; i++) {
+        if (windows[i].base == S5L8900_WDT_BASE &&
+            windows[i].size == S5L8900_DEV_SIZE &&
+            strcmp(windows[i].name, "wdt") == 0)
+            watchdogs++;
+    }
+    CHECK(watchdogs == 1u, "decoded watchdog windows=%u expect 1", watchdogs);
+    const s5l_window_t *conflict =
+        s5l8900_ram_conflict(S5L8900_WDT_BASE, 4u);
+    CHECK(conflict && strcmp(conflict->name, "wdt") == 0,
+          "RAM conflict did not identify the watchdog");
+    CHECK(!s5l8900_add_stub(&m, S5L8900_WDT_BASE, S5L8900_DEV_SIZE,
+                            "watchdog-shadow"),
+          "a stub was allowed to shadow the watchdog");
+
+    uint64_t reads = m.unmapped_reads;
+    uint64_t writes = m.unmapped_writes;
+    CHECK(m.bus.read32(m.bus.ctx, S5L8900_WDT_BASE) == 0u &&
+              m.unmapped_reads == reads,
+          "aligned watchdog read did not preserve the old zero answer");
+
+    m.bus.write32(m.bus.ctx, S5L8900_WDT_BASE, 0u);
+    m.bus.write32(m.bus.ctx, S5L8900_WDT_BASE, UINT32_C(0x001f4a00));
+    m.bus.write32(m.bus.ctx, S5L8900_WDT_BASE + 4u,
+                  S5L8900_WDT_RESTART_VALUE);
+    CHECK(!m.restart_requested && m.unmapped_writes == writes,
+          "ordinary watchdog traffic requested a reboot");
+
+    (void)m.bus.read16(m.bus.ctx, S5L8900_WDT_BASE);
+    m.bus.write16(m.bus.ctx, S5L8900_WDT_BASE,
+                  (uint16_t)S5L8900_WDT_RESTART_VALUE);
+    m.bus.write32(m.bus.ctx, S5L8900_WDT_BASE + 2u,
+                  S5L8900_WDT_RESTART_VALUE);
+    CHECK(!m.restart_requested && m.unmapped_reads == reads + 1u &&
+              m.unmapped_writes == writes + 2u,
+          "malformed watchdog accesses were accepted or requested reboot");
+
+    m.bus.write32(m.bus.ctx, S5L8900_WDT_BASE,
+                  S5L8900_WDT_RESTART_VALUE);
+    CHECK(m.restart_requested && m.unmapped_writes == writes + 2u,
+          "the exact watchdog reboot store was not recognized");
+    s5l8900_free(&m);
+}
+
+typedef struct {
+    s5l8900_t *machine;
+    unsigned calls;
+    bool succeed;
+    bool edge_was_cleared;
+} restart_host_fixture_t;
+
+static bool restart_host_probe(void *opaque) {
+    restart_host_fixture_t *fixture = (restart_host_fixture_t *)opaque;
+    if (!fixture || !fixture->machine) return false;
+    fixture->calls++;
+    fixture->edge_was_cleared = !fixture->machine->restart_requested;
+    if (fixture->succeed)
+        fixture->machine->cpu.r[15] = 0x100u;
+    return fixture->succeed;
+}
+
+static void load_watchdog_reboot_program(s5l8900_t *m) {
+    static const uint32_t program[] = {
+        UINT32_C(0xe59f0008), /* ldr r0,[pc,#8] -> watchdog base */
+        UINT32_C(0xe59f1008), /* ldr r1,[pc,#8] -> restart value */
+        UINT32_C(0xe5801000), /* str r1,[r0]                       */
+        UINT32_C(0xeafffffe), /* b .                               */
+        S5L8900_WDT_BASE,
+        S5L8900_WDT_RESTART_VALUE,
+    };
+    s5l8900_load(m, 0u, program, sizeof program);
+    m->cpu.r[15] = 0u;
+}
+
+static void test_watchdog_reboot_is_a_bounded_host_boundary(void) {
+    s5l8900_t m;
+    arm_status_t status = ARM_OK;
+
+    CHECK(!s5l8900_set_restart_host(NULL, restart_host_probe, NULL),
+          "NULL machine accepted a restart host");
+    CHECK(s5l8900_init(&m, 0u, 1u << 20), "restart machine init failed");
+    CHECK(!s5l8900_set_restart_host(&m, NULL, &m),
+          "partial restart-host clear was accepted");
+    load_watchdog_reboot_program(&m);
+    unsigned retired = s5l8900_run(&m, 3u, &status);
+    CHECK(retired == 3u && status == ARM_RESTART &&
+              !m.restart_requested && m.cpu.r[15] == 12u,
+          "callback-free reboot retired/status/edge/pc=%u/%d/%d/%08x",
+          retired, (int)status, (int)m.restart_requested, m.cpu.r[15]);
+    s5l8900_free(&m);
+
+    CHECK(s5l8900_init(&m, 0u, 1u << 20),
+          "callback restart machine init failed");
+    restart_host_fixture_t fixture = {
+        .machine = &m, .calls = 0u, .succeed = true,
+        .edge_was_cleared = false,
+    };
+    CHECK(s5l8900_set_restart_host(&m, restart_host_probe, &fixture),
+          "valid restart host was refused");
+    load_watchdog_reboot_program(&m);
+    status = ARM_UNDEFINED;
+    retired = s5l8900_run(&m, 3u, &status);
+    CHECK(retired == 3u && status == ARM_OK && fixture.calls == 1u &&
+              fixture.edge_was_cleared && !m.restart_requested &&
+              m.cpu.r[15] == 0x100u,
+          "successful host restart did not replace the terminal boundary");
+    s5l8900_free(&m);
+
+    CHECK(s5l8900_init(&m, 0u, 1u << 20),
+          "failed-callback restart machine init failed");
+    fixture.machine = &m;
+    fixture.calls = 0u;
+    fixture.succeed = false;
+    fixture.edge_was_cleared = false;
+    CHECK(s5l8900_set_restart_host(&m, restart_host_probe, &fixture),
+          "failing restart host was refused");
+    load_watchdog_reboot_program(&m);
+    status = ARM_OK;
+    retired = s5l8900_run(&m, 3u, &status);
+    CHECK(retired == 3u && status == ARM_HALT && fixture.calls == 1u &&
+              fixture.edge_was_cleared && !m.restart_requested,
+          "failed host restart was not surfaced as a bounded halt");
+    s5l8900_free(&m);
+}
+
 /*
  * The bare-metal payload. Hand-assembled ARM that loads the UART base from a
  * literal and pushes "HI\n" out the transmit register, then spins.
@@ -3245,7 +3377,7 @@ static void test_tvout_machine_routing_and_irq30(void) {
 
     s5l_window_t windows[S5L_WINDOW_MAX];
     unsigned nw = s5l8900_windows(&m, windows, S5L_WINDOW_MAX);
-    /* 22 fixed device windows: nor, clcd, the three tv-out banks, i2c0, i2c1,
+    /* 24 fixed device windows: nor, clcd, the three tv-out banks, mbx, i2c0, i2c1,
      * i2s0, i2s1, spi0, spi1, usb-otg, vic0, vic1, power, gpioic, gpio, uart0,
      * uart4, timer, dmac0, dmac1. This count is a tripwire for a window
      * silently vanishing from the table, so it moves only when a real device
@@ -3254,10 +3386,10 @@ static void test_tvout_machine_routing_and_irq30(void) {
      * did, from 17 to 18 when uart4 became the guest's PPP line, from 18 to 20
      * when the two I2S controllers landed with the WM8991 codec, and from 20 to
      * 22 with the two PL080 DMA controllers that feed those I2S FIFOs,
-     * and from 22 to 23 when the PowerVR MBX block was modelled so its
-     * kext could get past its reset handshake. */
-    CHECK(nw == m.stub_count + 23u,
-          "fixed device-window count=%u expect 23 (+%u stubs)",
+     * from 22 to 23 when the PowerVR MBX block was modelled so its kext could
+     * get past its reset handshake, and to 24 for the watchdog reset edge. */
+    CHECK(nw == m.stub_count + 24u,
+          "fixed device-window count=%u expect 24 (+%u stubs)",
           nw - m.stub_count, m.stub_count);
     bool have_ctrl = false, have_mixer = false, have_sdo = false;
     for (unsigned i = 0; i < nw && i < S5L_WINDOW_MAX; i++) {
@@ -6289,6 +6421,8 @@ int main(void) {
     test_uart_status_is_ready();
     test_unmapped_access_counted();
     test_bounds_check_cannot_overflow();
+    test_watchdog_window_distinguishes_reboot_from_setup();
+    test_watchdog_reboot_is_a_bounded_host_boundary();
     test_bare_metal_uart_hello();
     test_signed_static_a64_soc_oracle();
     test_signed_static_a64_store_oracle();

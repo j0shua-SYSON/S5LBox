@@ -79,6 +79,7 @@ static const s5l_window_t DEVICE_WINDOWS[] = {
      */
     { S5L8900_UART4_BASE, S5L8900_DEV_SIZE,   "uart4" },
     { S5L8900_TIMER_BASE, S5L8900_TIMER_SIZE, "timer" },
+    { S5L8900_WDT_BASE,   S5L8900_DEV_SIZE,   "wdt"   },
     /*
      * The two PL080 DMA controllers. Neither page was decoded or even declared
      * before, so AppleARMPL080DMAC::start mapped it, printed a base address,
@@ -391,6 +392,11 @@ static uint32_t bus_read(void *ctx, uint32_t addr, unsigned bytes) {
                            addr - S5L8900_TVOUT_SDO_BASE, bytes);
     } else if (in_timer(addr, bytes)) {
         v = s5l_timer_read(&m->timer, addr - S5L8900_TIMER_BASE);
+    } else if (mmio_word(addr, bytes, S5L8900_WDT_BASE,
+                         S5L8900_DEV_SIZE)) {
+        /* The shipped driver's reached path only stores. Zero preserves the
+         * old unmapped read value without leaving the page undeclared. */
+        v = 0u;
     } else if (in_power(addr, bytes)) {
         v = s5l_power_read(&m->power, addr - S5L8900_POWER_BASE);
     } else if (in_mbx(addr, bytes)) {
@@ -510,6 +516,13 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
     }
     if (in_timer(addr, bytes)) {
         s5l_timer_write(&m->timer, addr - S5L8900_TIMER_BASE, val);
+        return;
+    }
+    if (mmio_word(addr, bytes, S5L8900_WDT_BASE, S5L8900_DEV_SIZE)) {
+        note_device(m, addr, val, true);
+        if (addr == S5L8900_WDT_BASE &&
+            val == S5L8900_WDT_RESTART_VALUE)
+            m->restart_requested = true;
         return;
     }
     if (in_power(addr, bytes)) {
@@ -753,6 +766,15 @@ bool s5l8900_set_uart4_host(s5l8900_t *m, s5l_uart4_host_tx_fn tx,
     m->uart4_host_ctx = ctx;
     m->uart4_host_tx = tx;
     m->uart4_host_service = service;
+    return true;
+}
+
+bool s5l8900_set_restart_host(s5l8900_t *m,
+                              s5l_restart_host_service_fn service, void *ctx) {
+    if (!m) return false;
+    if (!service && ctx) return false;
+    m->restart_host_service = service;
+    m->restart_host_ctx = ctx;
     return true;
 }
 
@@ -2390,6 +2412,10 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
         }
     }
     while (n < max_steps) {
+        if (m->restart_requested) {
+            st = ARM_RESTART;
+            break;
+        }
         if (pre_step_target_matches(m, m->cpu.r[15])) {
             m->pre_step_matches++;
             if (m->pre_step_hook(m->pre_step_ctx)) {
@@ -2508,6 +2534,11 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
             break;
         }
     }
+    /* The reset store may be the final retirement allowed by this slice. Do
+     * not require a second public run call merely to observe an edge already
+     * reached at this boundary. */
+    if (st == ARM_OK && m->restart_requested)
+        st = ARM_RESTART;
     if (active_clock && active_pending_retired)
         (void)active_host_clock_sync(
             m, (uint32_t)active_pending_retired);
@@ -2517,6 +2548,15 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
 #endif
     if (m->uart4_host_service)
         m->uart4_host_service(m->uart4_host_ctx, n);
+    if (st == ARM_RESTART) {
+        /* Copy both before clearing the edge: a successful callback may free
+         * and rebuild the machine, and this function deliberately dereferences
+         * no machine field after invoking it. */
+        s5l_restart_host_service_fn service = m->restart_host_service;
+        void *ctx = m->restart_host_ctx;
+        m->restart_requested = false;
+        if (service) st = service(ctx) ? ARM_OK : ARM_HALT;
+    }
     if (status) *status = st;
     return n;
 }

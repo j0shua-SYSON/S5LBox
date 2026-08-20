@@ -170,7 +170,8 @@ typedef enum {
     ARM_OK = 0,          /* one instruction retired normally           */
     ARM_UNDEFINED,       /* unsupported encoding: stop for diagnosis    */
     ARM_HALT,            /* core requested halt (e.g. debug trap)       */
-    ARM_GUEST_UNDEFINED  /* architected Undefined exception: vector it  */
+    ARM_GUEST_UNDEFINED, /* architected Undefined exception: vector it  */
+    ARM_RESTART          /* board requested a host-level cold restart   */
 } arm_status_t;
 
 /*

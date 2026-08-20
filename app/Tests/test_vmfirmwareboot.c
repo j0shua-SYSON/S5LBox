@@ -482,6 +482,68 @@ static void test_saved_state_restore_fixture(void) {
 }
 
 /*
+ * Optional external-media lifecycle seam. A disposable work directory lets a
+ * maintainer exercise the exact app boot owner without committing firmware or
+ * a multi-gigabyte HFS image. The test does not run XNU to shutdown; core/tests
+ * pins the guest instruction and exact watchdog value. It starts a real
+ * firmware machine, raises that proven hardware edge through its bus, and
+ * requires the app owner to close the old media, rebuild the board, and arm
+ * the replacement for another reboot without returning a terminal status.
+ */
+static void test_guest_watchdog_restart_fixture(void) {
+    const char *fixture = getenv("S5LBOX_APP_REBOOT_FIXTURE");
+    if (!fixture || !*fixture) {
+        printf("SKIP: app watchdog restart needs "
+               "S5LBOX_APP_REBOOT_FIXTURE\n");
+        return;
+    }
+
+    vm_firmware_boot_paths_t paths;
+    CHECK(vm_firmware_boot_paths_split(
+              &paths, S5LBOX_FIRMWARE_DIR, fixture),
+          "watchdog restart fixture paths were refused");
+
+    s5l8900_t machine;
+    memset(&machine, 0, sizeof machine);
+    vm_firmware_boot_t *boot = vm_firmware_boot_create();
+    vm_firmware_boot_report_t report;
+    CHECK(boot != NULL, "could not create watchdog restart boot owner");
+    CHECK(s5l8900_init(&machine, S5L_BRINGUP_PHYS_BASE,
+                       S5L_BRINGUP_RAM_SIZE),
+          "watchdog restart machine init failed");
+    if (!boot || !machine.ram) {
+        if (machine.ram) s5l8900_free(&machine);
+        vm_firmware_boot_destroy(&boot);
+        return;
+    }
+
+    bool started = vm_firmware_boot_start(
+        boot, &machine, &paths, NULL, 0u, &report);
+    CHECK(started && report.ok,
+          "watchdog restart fixture could not boot: %s", report.detail);
+    if (started) {
+        machine.bus.write32(machine.bus.ctx, S5L8900_WDT_BASE,
+                            S5L8900_WDT_RESTART_VALUE);
+        arm_status_t status = ARM_UNDEFINED;
+        unsigned retired = s5l8900_run(&machine, 1u, &status);
+        CHECK(retired == 0u && status == ARM_OK &&
+                  machine.ram != NULL && machine.cpu.r[15] != 0u &&
+                  !machine.restart_requested &&
+                  machine.restart_host_service != NULL,
+              "watchdog restart did not return a runnable replacement "
+              "(retired/status/pc=%u/%d/%08x)",
+              retired, (int)status, machine.cpu.r[15]);
+        CHECK(machine.uart0.tx_len != 0u &&
+                  strstr(machine.uart0.tx,
+                         "[vm] guest watchdog reboot 1:") != NULL,
+              "watchdog restart did not publish its lifecycle witness");
+    }
+
+    s5l8900_free(&machine);
+    vm_firmware_boot_destroy(&boot);
+}
+
+/*
  * A second optional physical fixture covers the state ordinary CI cannot
  * manufacture: iPhone OS has flushed and unmounted /dev/md0, written the PMU
  * full-power-off command and entered its terminal branch. That CPU/RAM image
@@ -574,6 +636,7 @@ int main(void) {
 
     test_saved_state_restore_fixture();
     test_powered_off_checkpoint_fixture();
+    test_guest_watchdog_restart_fixture();
 
     {
         size_t klen = 0, tlen = 0;

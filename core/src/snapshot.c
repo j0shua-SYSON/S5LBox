@@ -207,10 +207,12 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * 127896 adds the Power lifecycle trace sequence/window (16) and thirty-two
  * fixed 32-byte host-only observations (1024). Like the MBX witnesses, this is
  * bounded diagnostic evidence and is deliberately absent from snap_mach().
- * SNAPSHOT_VERSION and the bytes on disk therefore do not move. The size below
- * must be read from the compiler's emitted `.space`, not inferred from source
- * padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         127896, "snap_mach");
+ * 127912 adds the watchdog's two host restart pointers (16); its transient
+ * request bit fits in existing padding beside level_dirty. They are likewise
+ * absent from snap_mach(), so SNAPSHOT_VERSION and the bytes on disk do not
+ * move. The size below must be read from the compiler's emitted `.space`, not
+ * inferred from source padding. */
+SNAP_SIZE_GUARD(s5l8900_t,         127912, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -1050,7 +1052,8 @@ static void snap_nor(sn_io_t *io, s5l_nor_t *n) {
  * pointers and callback contexts — a tool may have interposed on them),
  * `ram` (host allocation), `pre_step_hook`/its context, targets and counters,
  * and the interpreter tick-batching counters, MBX work ledger, uart4 host-peer
- * callbacks/context and WFI pacing callback/context/counters (live host
+ * callbacks/context, watchdog restart callback/context and WFI pacing
+ * callback/context/counters (live host
  * policy/measurement),
  * `nor.data` and `stubs[].regs`/`stubs[].name` (host allocations / string
  * literals). ram_base/ram_size live in GEOM.
@@ -1560,6 +1563,9 @@ static snapshot_status_t snap_apply(s5l8900_t *m, FILE *f,
      * this is what keeps it out of the file format — see `level_dirty` in
      * soc.h — and it is the safe direction: it costs one full refresh. */
     m->level_dirty = true;
+    /* A reset request is an edge between a guest store and a host lifecycle
+     * boundary. It can never travel through a guest-state snapshot. */
+    m->restart_requested = false;
     /* A yield belongs to the host run call that observed the wait, not to the
      * restored guest instant. The callback, context and accumulated evidence
      * remain the live frontend's, exactly like the other host-only fields. */

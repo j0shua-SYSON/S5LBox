@@ -98,6 +98,11 @@
 #define S5L8900_IRQ_UART4   28u   /* /arm-io/uart4 `interrupts` = {28} */
 #define S5L8900_VIC0_BASE   0x38e00000u
 #define S5L8900_TIMER_BASE  0x3e200000u
+/* /arm-io/wdt: AppleS5L8900XWatchDogTimer writes 0x00100000 to register zero
+ * from its PEHaltRestart reboot method. Ordinary setup writes 0x001f4a00 to
+ * the same register and must not be mistaken for a restart. */
+#define S5L8900_WDT_BASE          0x3e300000u
+#define S5L8900_WDT_RESTART_VALUE 0x00100000u
 #define S5L8900_CLOCK_BASE  0x3c500000u
 /*
  * GPIO. CONFIRMED against two independent sources: the shipped device tree's
@@ -3897,6 +3902,18 @@ typedef bool (*s5l_active_host_now_fn)(void *ctx, uint64_t *nanoseconds);
 typedef void (*s5l_uart4_host_tx_fn)(void *ctx, uint8_t byte);
 typedef void (*s5l_uart4_host_service_fn)(void *ctx, unsigned retired);
 
+/*
+ * Optional host restart service. The watchdog only identifies the board-level
+ * reset edge; rebuilding firmware, external media and frontend-owned services
+ * belongs to the owner that created them. The callback runs once at the END of
+ * a public s5l8900_run() slice, after clock/profile and uart4 service work, and
+ * may free and rebuild the machine. No machine field is touched after it
+ * returns. True means execution may continue on the replacement machine;
+ * false is surfaced as ARM_HALT. A callback-free frontend receives
+ * ARM_RESTART and can apply its own lifecycle policy.
+ */
+typedef bool (*s5l_restart_host_service_fn)(void *ctx);
+
 /* Do not hold an interactive execution slice inside WFI for longer than this.
  * Longer guest waits are advanced in real-time-sized pieces, yielding between
  * them so a frontend can drain input, stop requests and scanout. */
@@ -4087,6 +4104,12 @@ typedef struct {
      */
     bool       level_dirty;
 
+    /* Transient edge raised only by the watchdog's exact reboot store. It is
+     * host lifecycle state, not guest state: snapshot_load() clears it so a
+     * saved instant can never reboot merely because its writer was between the
+     * store and the host boundary. Kept in existing alignment padding. */
+    bool       restart_requested;
+
     /*
      * What the last full refresh saw on the three inputs a HOST can move
      * WITHOUT going through the bus, packed by ext_inputs() in machine.c.
@@ -4224,6 +4247,10 @@ typedef struct {
     s5l_uart4_host_tx_fn      uart4_host_tx;
     s5l_uart4_host_service_fn uart4_host_service;
     void                     *uart4_host_ctx;
+
+    /* Host lifecycle wiring, deliberately not serialized. */
+    s5l_restart_host_service_fn restart_host_service;
+    void                       *restart_host_ctx;
 } s5l8900_t;
 
 /*
@@ -4272,15 +4299,16 @@ typedef struct {
     const char *name;                 /* string literal; never owned */
 } s5l_window_t;
 
-/* Enough for every fixed device window plus every stub. The 22 is the length of
+/* Enough for every fixed device window plus every stub. The 24 is the length of
  * DEVICE_WINDOWS in core/src/soc/machine.c — nor, clcd, the three tv-out banks,
- * i2c0, i2c1, i2s0, i2s1, spi0, spi1, usb-otg, vic0, vic1, power, gpioic, gpio,
- * uart0, uart4, timer, dmac0, dmac1 — and there is no slack left in it, so a
+ * mbx, i2c0, i2c1, i2s0, i2s1, spi0, spi1, usb-otg, vic0, vic1, power, gpioic,
+ * gpio, uart0, uart4, timer, wdt, dmac0, dmac1 — and there is no slack left, so a
  * new device model has to raise this number too. It was 13 until spi0 and spi1
  * stopped being stubs, 15 until the two halves of /arm-io/gpio did, 17 until
  * uart4 was decoded, 20 until the two I2S windows were, and 22 with the two
- * PL080 DMA controllers. */
-#define S5L_WINDOW_MAX (S5L_STUB_MAX + 22u)
+ * PL080 DMA controllers. MBX raised the count to 23; decoding the watchdog
+ * reset edge raises it to 24. */
+#define S5L_WINDOW_MAX (S5L_STUB_MAX + 24u)
 
 /*
  * Every window this machine decodes: the modelled devices first, then the
@@ -4466,6 +4494,11 @@ bool s5l8900_set_active_clock_work_budget(s5l8900_t *m,
  */
 bool s5l8900_set_uart4_host(s5l8900_t *m, s5l_uart4_host_tx_fn tx,
                             s5l_uart4_host_service_fn service, void *ctx);
+
+/* Install or clear the host owner of a watchdog reboot edge. Installing and
+ * clearing are between-run operations; a partial clear is rejected. */
+bool s5l8900_set_restart_host(s5l8900_t *m,
+                              s5l_restart_host_service_fn service, void *ctx);
 
 /*
  * ram_base/ram_size define where RAM appears. Returns false on allocation

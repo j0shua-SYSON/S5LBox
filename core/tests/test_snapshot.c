@@ -62,6 +62,10 @@ static void snapshot_uart4_service_probe(void *ctx, unsigned retired) {
     (void)retired;
 }
 
+static bool snapshot_restart_probe(void *ctx) {
+    return ctx != NULL;
+}
+
 /* --------------------------------------------------------------- helpers --- */
 
 /* Save `a` to memory, restore it into a freshly initialised `b`. */
@@ -522,6 +526,11 @@ static void test_device_state_round_trips(void) {
               b, snapshot_uart4_tx_probe, snapshot_uart4_service_probe,
               &uart4_host_context),
           "could not install destination uart4 host peer");
+    int restart_host_context = 0;
+    CHECK(s5l8900_set_restart_host(
+              b, snapshot_restart_probe, &restart_host_context),
+          "could not install destination restart host");
+    b->restart_requested = true;
 
     CHECK(roundtrip(a, b), "device round trip");
     CHECK(b->mbx_telemetry.candidates_2d == 201u &&
@@ -574,6 +583,10 @@ static void test_device_state_round_trips(void) {
           b->uart4_host_service == snapshot_uart4_service_probe &&
           b->uart4_host_ctx == &uart4_host_context,
           "snapshot restore changed the live uart4 host peer");
+    CHECK(b->restart_host_service == snapshot_restart_probe &&
+              b->restart_host_ctx == &restart_host_context &&
+              !b->restart_requested,
+          "snapshot restore changed restart policy or retained a stale edge");
 
     SAME(uart0.ulcon); SAME(uart0.ucon); SAME(uart0.ufcon);
     SAME(uart0.umcon); SAME(uart0.ubrdiv); SAME(uart0.tx_len);

@@ -39,12 +39,27 @@ struct vm_firmware_boot {
     char              work_directory[VM_FW_BOOT_PATH_CAPACITY];
     uint64_t          media_size;
     vm_network_session_t *network;
+    /*
+     * A guest watchdog reset has to re-enter the SAME boot policy that created
+     * the running machine. Keep the validated caller inputs, not a second
+     * hand-maintained reconstruction of the resulting request. The callback is
+     * armed only after startup has crossed every fallible boundary.
+     */
+    s5l8900_t                 *restart_machine;
+    vm_firmware_boot_paths_t   restart_paths;
+    bool                       restart_options[VM_BOOT_OPTION_MAX];
+    unsigned                   restart_option_count;
+    bool                       restart_plan_ready;
+    bool                       restart_in_progress;
+    uint64_t                   restart_count;
 #if defined(S5LBOX_IOS3_HLE_EXPERIMENT)
     /* Pointer identity only. VMEngine frees the machine before this owner;
      * vm_firmware_hle_release() deliberately never dereferences it. */
     const s5l8900_t   *hle_machine;
 #endif
 };
+
+static bool vm_firmware_guest_restart(void *opaque);
 
 #if defined(S5LBOX_IOS_WFI_REALTIME_PACING)
 /*
@@ -641,6 +656,141 @@ void vm_firmware_boot_destroy(vm_firmware_boot_t **slot) {
     *slot = NULL;
 }
 
+static void append_host_console(s5l8900_t *machine, const char *text) {
+    if (!machine || !text || !*text ||
+        machine->uart0.tx_len >= (size_t)UART_TX_BUFFER - 1u)
+        return;
+    size_t available =
+        (size_t)UART_TX_BUFFER - 1u - machine->uart0.tx_len;
+    size_t length = strlen(text);
+    if (length > available) length = available;
+    memcpy(machine->uart0.tx + machine->uart0.tx_len, text, length);
+    machine->uart0.tx_len += length;
+    machine->uart0.tx[machine->uart0.tx_len] = '\0';
+}
+
+static bool arm_guest_restart_plan(
+        vm_firmware_boot_t *boot, s5l8900_t *machine,
+        const vm_firmware_boot_paths_t *paths,
+        const bool *options, unsigned option_count) {
+    if (!boot || !machine || !paths ||
+        (options && option_count > VM_BOOT_OPTION_MAX))
+        return false;
+
+    boot->restart_paths = *paths;
+    boot->restart_option_count = options ? option_count : 0u;
+    memset(boot->restart_options, 0, sizeof boot->restart_options);
+    if (options && option_count)
+        memcpy(boot->restart_options, options,
+               option_count * sizeof boot->restart_options[0]);
+    boot->restart_machine = machine;
+    boot->restart_plan_ready = true;
+    if (!s5l8900_set_restart_host(
+            machine, vm_firmware_guest_restart, boot)) {
+        boot->restart_machine = NULL;
+        boot->restart_plan_ready = false;
+        return false;
+    }
+    return true;
+}
+
+static bool guest_restart_failed(vm_firmware_boot_t *boot,
+                                 s5l8900_t *machine,
+                                 const char *detail) {
+    char line[VM_FW_BOOT_DETAIL_CAPACITY + 64u];
+    const char *reason = detail && *detail ? detail : "unknown failure";
+    (void)snprintf(line, sizeof line,
+                   "[vm] guest watchdog reboot failed: %.220s\n", reason);
+    line[sizeof line - 1u] = '\0';
+    append_host_console(machine, line);
+    (void)fprintf(stderr, "%s", line);
+    if (boot) boot->restart_in_progress = false;
+    return false;
+}
+
+/*
+ * End-of-slice watchdog handoff. This is deliberately a cold kernel boot:
+ * XNU has already flushed and unmounted the external root image before its
+ * PEHaltRestart write, while RAM, CPU and peripheral state are reset by real
+ * hardware. The emulator starts at the kernel boundary it actually supports.
+ *
+ * The old machine is freed before the block adapters close because the memory
+ * disk bridges borrow both its RAM and their descriptors. Every close is still
+ * attempted on error, but any durability failure stops instead of booting a
+ * disk whose last shutdown cannot be proven durable.
+ */
+static bool vm_firmware_guest_restart(void *opaque) {
+    vm_firmware_boot_t *boot = (vm_firmware_boot_t *)opaque;
+    if (!boot || !boot->restart_plan_ready || !boot->restart_machine)
+        return false;
+    s5l8900_t *machine = boot->restart_machine;
+    if (boot->restart_in_progress)
+        return guest_restart_failed(
+            boot, machine, "a second reset arrived during restart");
+
+    vm_firmware_boot_paths_t paths = boot->restart_paths;
+    bool options[VM_BOOT_OPTION_MAX];
+    memcpy(options, boot->restart_options, sizeof options);
+    unsigned option_count = boot->restart_option_count;
+
+    boot->restart_in_progress = true;
+    boot->restart_plan_ready = false;
+    boot->restart_machine = NULL;
+
+    vm_network_session_destroy(&boot->network);
+#if defined(S5LBOX_IOS3_HLE_EXPERIMENT)
+    if (boot->hle_machine) {
+        vm_firmware_hle_release(boot->hle_machine);
+        boot->hle_machine = NULL;
+    }
+#endif
+    s5l8900_free(machine);
+
+    bool durable = true;
+    if (boot->cow && vm_cow_close(&boot->cow) != VM_COW_OK)
+        durable = false;
+    if (file_block_is_open(boot->media)) {
+        if (file_block_flush(boot->media) != FILE_BLOCK_STATUS_OK)
+            durable = false;
+        if (file_block_close(boot->media) != FILE_BLOCK_STATUS_OK)
+            durable = false;
+    }
+    memset(boot->bridges, 0, sizeof *boot->bridges);
+    boot->work_directory[0] = '\0';
+    boot->media_size = 0u;
+
+    if (!durable)
+        return guest_restart_failed(
+            boot, machine,
+            "the root filesystem or snapshot overlay could not be flushed");
+
+    if (!s5l8900_init(machine, S5L_BRINGUP_PHYS_BASE,
+                      S5L_BRINGUP_RAM_SIZE))
+        return guest_restart_failed(
+            boot, machine,
+            "memory for the replacement machine could not be allocated");
+
+    vm_firmware_boot_report_t report;
+    const bool *option_values = option_count ? options : NULL;
+    if (!vm_firmware_boot_start(boot, machine, &paths, option_values,
+                                option_count, &report))
+        return guest_restart_failed(
+            boot, machine,
+            report.detail[0] ? report.detail : report.summary);
+
+    boot->restart_count++;
+    char line[160];
+    (void)snprintf(line, sizeof line,
+                   "[vm] guest watchdog reboot %llu: fresh firmware boot "
+                   "started\n",
+                   (unsigned long long)boot->restart_count);
+    line[sizeof line - 1u] = '\0';
+    append_host_console(machine, line);
+    (void)fprintf(stderr, "%s", line);
+    boot->restart_in_progress = false;
+    return true;
+}
+
 /*
  * A powered-off checkpoint is loaded only long enough to identify its PMU
  * state, then the machine is rebuilt for a fresh boot. s5l8900_init() restores
@@ -885,6 +1035,13 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     if (!boot || !boot->bridges || !boot->media || !machine || !paths) {
         set_detail(report->detail, sizeof report->detail,
                    "Internal error: the firmware boot path was not set up.");
+        set_detail(report->summary, sizeof report->summary, "internal error");
+        return false;
+    }
+    if (options && option_count > VM_BOOT_OPTION_MAX) {
+        set_detail(report->detail, sizeof report->detail,
+                   "Internal error: too many boot options were supplied to "
+                   "preserve across a guest restart.");
         set_detail(report->summary, sizeof report->summary, "internal error");
         return false;
     }
@@ -1500,6 +1657,20 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         return false;
     }
 #endif
+
+    /*
+     * Arm only after every guest service and execution policy has succeeded.
+     * A reboot re-enters this function with these exact caller inputs; it does
+     * not infer settings from the running machine or from mutable UI state.
+     */
+    if (!arm_guest_restart_plan(boot, machine, paths, options, option_count)) {
+        (void)file_block_close(boot->media);
+        set_detail(report->detail, sizeof report->detail,
+                   "The guest watchdog reboot boundary could not be armed.");
+        set_detail(report->summary, sizeof report->summary,
+                   "guest reboot unavailable");
+        return false;
+    }
 
     /* Consume only the request, not the checkpoint.  The state remains useful
      * for a controlled repeat, but it cannot roll a disk forward or backward a
