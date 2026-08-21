@@ -859,11 +859,35 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
                 "compact fallback outcome names drifted");
             [outsidePCs appendFormat:
                 @",compact_fallback_profile_events=%llu,"
-                 "compact_fallback_profile_witness_misses=%llu",
+                 "compact_fallback_profile_witness_misses=%llu,"
+                 "compact_fallback_profile_dread_hits=%llu,"
+                 "compact_fallback_profile_dread_misses=%llu,"
+                 "compact_fallback_profile_dwrite_hits=%llu,"
+                 "compact_fallback_profile_dwrite_misses=%llu,"
+                 "compact_fallback_profile_dread_events=%llu,"
+                 "compact_fallback_profile_dwrite_events=%llu,"
+                 "compact_fallback_profile_mixed_data_events=%llu,"
+                 "compact_fallback_profile_no_data_events=%llu",
                 (unsigned long long)
                     last->compact_fallback_profile_events,
                 (unsigned long long)
-                    last->compact_fallback_profile_witness_misses];
+                    last->compact_fallback_profile_witness_misses,
+                (unsigned long long)
+                    last->compact_fallback_profile_dread_hits,
+                (unsigned long long)
+                    last->compact_fallback_profile_dread_misses,
+                (unsigned long long)
+                    last->compact_fallback_profile_dwrite_hits,
+                (unsigned long long)
+                    last->compact_fallback_profile_dwrite_misses,
+                (unsigned long long)
+                    last->compact_fallback_profile_dread_events,
+                (unsigned long long)
+                    last->compact_fallback_profile_dwrite_events,
+                (unsigned long long)
+                    last->compact_fallback_profile_mixed_data_events,
+                (unsigned long long)
+                    last->compact_fallback_profile_no_data_events];
             for (unsigned i = 0u;
                  i < VM_COMPACT_FALLBACK_PROFILE_OUTCOME_COUNT; i++) {
                 [outsidePCs appendFormat:

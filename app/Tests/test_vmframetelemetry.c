@@ -186,6 +186,14 @@ static vm_execution_telemetry_observation_t execution_observation(
     }
     value.compact_fallback_profile_events = base + 125u;
     value.compact_fallback_profile_witness_misses = base + 126u;
+    value.compact_fallback_profile_dread_hits = base + 170u;
+    value.compact_fallback_profile_dread_misses = base + 171u;
+    value.compact_fallback_profile_dwrite_hits = base + 172u;
+    value.compact_fallback_profile_dwrite_misses = base + 173u;
+    value.compact_fallback_profile_dread_events = base + 174u;
+    value.compact_fallback_profile_dwrite_events = base + 175u;
+    value.compact_fallback_profile_mixed_data_events = base + 176u;
+    value.compact_fallback_profile_no_data_events = base + 177u;
     for (unsigned i = 0u;
          i < VM_COMPACT_FALLBACK_PROFILE_OUTCOME_COUNT; i++)
         value.compact_fallback_profile_outcome[i] = base + 130u + i;
@@ -514,6 +522,22 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.compact_fallback_profile_events == 2125u &&
            state.execution_last.compact_fallback_profile_witness_misses ==
                2126u &&
+           state.execution_last.compact_fallback_profile_dread_hits ==
+               2170u &&
+           state.execution_last.compact_fallback_profile_dread_misses ==
+               2171u &&
+           state.execution_last.compact_fallback_profile_dwrite_hits ==
+               2172u &&
+           state.execution_last.compact_fallback_profile_dwrite_misses ==
+               2173u &&
+           state.execution_last.compact_fallback_profile_dread_events ==
+               2174u &&
+           state.execution_last.compact_fallback_profile_dwrite_events ==
+               2175u &&
+           state.execution_last.compact_fallback_profile_mixed_data_events ==
+               2176u &&
+           state.execution_last.compact_fallback_profile_no_data_events ==
+               2177u &&
            state.execution_last.compact_fallback_profile_outcome[0] ==
                2130u &&
            state.execution_last.compact_fallback_profile_outcome[

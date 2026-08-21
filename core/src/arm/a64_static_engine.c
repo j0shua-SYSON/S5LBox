@@ -130,6 +130,14 @@ typedef struct {
     uint64_t compact_fallback_profile_witness_misses;
     uint64_t compact_fallback_profile_outcome[
         S5L_STATIC_A64_COMPACT_FALLBACK_OUTCOME_COUNT];
+    uint64_t compact_fallback_profile_dread_hits;
+    uint64_t compact_fallback_profile_dread_misses;
+    uint64_t compact_fallback_profile_dwrite_hits;
+    uint64_t compact_fallback_profile_dwrite_misses;
+    uint64_t compact_fallback_profile_dread_events;
+    uint64_t compact_fallback_profile_dwrite_events;
+    uint64_t compact_fallback_profile_mixed_data_events;
+    uint64_t compact_fallback_profile_no_data_events;
     static_a64_compact_fallback_hot_t compact_fallback_profile_hot[
         S5L_STATIC_A64_COMPACT_FALLBACK_HOT_COUNT];
     static_a64_entry_t cache[STATIC_A64_CACHE_ENTRIES];
@@ -150,11 +158,20 @@ static void compact_profile_counter_add(uint64_t *counter, uint64_t value) {
     else *counter += value;
 }
 
+typedef struct {
+    uint64_t dread_hits;
+    uint64_t dread_misses;
+    uint64_t dwrite_hits;
+    uint64_t dwrite_misses;
+    bool enabled;
+} static_a64_compact_fallback_data_probe_t;
+
 /* The profiler is an explicit diagnostic. Read only a still-live FETCH
  * witness and never refill or translate here: observing a fallback must not
  * make an otherwise unavailable native continuation possible. */
 static void compact_fallback_profile_note_current(
-        const s5l8900_t *m, static_a64_state_t *state) {
+        const s5l8900_t *m, static_a64_state_t *state,
+        static_a64_compact_fallback_data_probe_t *probe) {
     const arm_cpu_t *cpu;
     uint32_t pc;
     uint32_t fetch_block;
@@ -165,9 +182,17 @@ static void compact_fallback_profile_note_current(
     bool privileged;
     a64_compact_raw_admission_t outcome;
 
+    if (probe) memset(probe, 0, sizeof *probe);
     if (!m || !state || !state->compact_raw_pc_profile_enabled) return;
     compact_profile_counter_add(&state->compact_fallback_profile_events, 1u);
     cpu = &m->cpu;
+    if (probe) {
+        probe->dread_hits = cpu->dread_hits;
+        probe->dread_misses = cpu->dread_misses;
+        probe->dwrite_hits = cpu->dwrite_hits;
+        probe->dwrite_misses = cpu->dwrite_misses;
+        probe->enabled = true;
+    }
     pc = cpu->r[15];
     thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
     privileged = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
@@ -231,6 +256,57 @@ static void compact_fallback_profile_note_current(
     hot->error = prior;
     hot->thumb = thumb;
     hot->privileged = privileged;
+}
+
+static uint64_t compact_profile_counter_delta(uint64_t after,
+                                              uint64_t before) {
+    /* These counters cannot be reset inside one architectural arm_step().
+     * Treat impossible regression as no observation instead of manufacturing
+     * a near-UINT64_MAX delta in a diagnostic. */
+    return after >= before ? after - before : 0u;
+}
+
+static void compact_fallback_profile_note_data(
+        const s5l8900_t *m, static_a64_state_t *state,
+        const static_a64_compact_fallback_data_probe_t *probe) {
+    uint64_t dread_hits;
+    uint64_t dread_misses;
+    uint64_t dwrite_hits;
+    uint64_t dwrite_misses;
+    bool read_event;
+    bool write_event;
+
+    if (!m || !state || !probe || !probe->enabled) return;
+    dread_hits = compact_profile_counter_delta(m->cpu.dread_hits,
+                                               probe->dread_hits);
+    dread_misses = compact_profile_counter_delta(m->cpu.dread_misses,
+                                                 probe->dread_misses);
+    dwrite_hits = compact_profile_counter_delta(m->cpu.dwrite_hits,
+                                                probe->dwrite_hits);
+    dwrite_misses = compact_profile_counter_delta(m->cpu.dwrite_misses,
+                                                  probe->dwrite_misses);
+    compact_profile_counter_add(
+        &state->compact_fallback_profile_dread_hits, dread_hits);
+    compact_profile_counter_add(
+        &state->compact_fallback_profile_dread_misses, dread_misses);
+    compact_profile_counter_add(
+        &state->compact_fallback_profile_dwrite_hits, dwrite_hits);
+    compact_profile_counter_add(
+        &state->compact_fallback_profile_dwrite_misses, dwrite_misses);
+    read_event = dread_hits != 0u || dread_misses != 0u;
+    write_event = dwrite_hits != 0u || dwrite_misses != 0u;
+    if (read_event)
+        compact_profile_counter_add(
+            &state->compact_fallback_profile_dread_events, 1u);
+    if (write_event)
+        compact_profile_counter_add(
+            &state->compact_fallback_profile_dwrite_events, 1u);
+    if (read_event && write_event)
+        compact_profile_counter_add(
+            &state->compact_fallback_profile_mixed_data_events, 1u);
+    if (!read_event && !write_event)
+        compact_profile_counter_add(
+            &state->compact_fallback_profile_no_data_events, 1u);
 }
 #endif
 
@@ -838,6 +914,14 @@ bool s5l8900_static_a64_enable_compact_raw_pc_profile(s5l8900_t *m) {
     state->compact_fallback_profile_witness_misses = 0u;
     memset(state->compact_fallback_profile_outcome, 0,
            sizeof state->compact_fallback_profile_outcome);
+    state->compact_fallback_profile_dread_hits = 0u;
+    state->compact_fallback_profile_dread_misses = 0u;
+    state->compact_fallback_profile_dwrite_hits = 0u;
+    state->compact_fallback_profile_dwrite_misses = 0u;
+    state->compact_fallback_profile_dread_events = 0u;
+    state->compact_fallback_profile_dwrite_events = 0u;
+    state->compact_fallback_profile_mixed_data_events = 0u;
+    state->compact_fallback_profile_no_data_events = 0u;
     memset(state->compact_fallback_profile_hot, 0,
            sizeof state->compact_fallback_profile_hot);
     state->compact_raw_pc_profile_enabled = true;
@@ -889,6 +973,22 @@ void s5l8900_static_a64_compact_raw_pc_profile(
         memcpy(out->fallback_outcome,
                state->compact_fallback_profile_outcome,
                sizeof out->fallback_outcome);
+        out->fallback_dread_hits =
+            state->compact_fallback_profile_dread_hits;
+        out->fallback_dread_misses =
+            state->compact_fallback_profile_dread_misses;
+        out->fallback_dwrite_hits =
+            state->compact_fallback_profile_dwrite_hits;
+        out->fallback_dwrite_misses =
+            state->compact_fallback_profile_dwrite_misses;
+        out->fallback_dread_events =
+            state->compact_fallback_profile_dread_events;
+        out->fallback_dwrite_events =
+            state->compact_fallback_profile_dwrite_events;
+        out->fallback_mixed_data_events =
+            state->compact_fallback_profile_mixed_data_events;
+        out->fallback_no_data_events =
+            state->compact_fallback_profile_no_data_events;
         for (unsigned i = 0u;
              i < S5L_STATIC_A64_COMPACT_FALLBACK_HOT_COUNT; i++) {
             out->fallback_hot[i].pc =
@@ -1424,6 +1524,7 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
     bool priv;
     bool crossed;
     unsigned result;
+    static_a64_compact_fallback_data_probe_t data_probe;
 
     if (!context || !context->machine || !context->state || !next_window)
         return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
@@ -1509,9 +1610,12 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
         }
     }
 
-    compact_fallback_profile_note_current(context->machine, context->state);
+    compact_fallback_profile_note_current(context->machine, context->state,
+                                          &data_probe);
     result = s5l8900_static_a64_fallback_step(context->machine,
                                               &context->status);
+    compact_fallback_profile_note_data(context->machine, context->state,
+                                       &data_probe);
     if (result > A64_COMPACT_RAW_FALLBACK_RETIRE_STOP)
         return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
     if (result != A64_COMPACT_RAW_FALLBACK_RETIRE_CONTINUE)

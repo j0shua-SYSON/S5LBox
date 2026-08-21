@@ -4676,6 +4676,18 @@ typedef struct {
     uint64_t fallback_witness_misses;
     uint64_t fallback_outcome[
         S5L_STATIC_A64_COMPACT_FALLBACK_OUTCOME_COUNT];
+    /* Exact interpreter data-cache traffic caused by one resident fallback.
+     * Access totals count cache probes (multiword instructions can add more
+     * than one); event totals count callbacks that touched each direction.
+     * A no-data event changed none of the four cache counters. */
+    uint64_t fallback_dread_hits;
+    uint64_t fallback_dread_misses;
+    uint64_t fallback_dwrite_hits;
+    uint64_t fallback_dwrite_misses;
+    uint64_t fallback_dread_events;
+    uint64_t fallback_dwrite_events;
+    uint64_t fallback_mixed_data_events;
+    uint64_t fallback_no_data_events;
     s5l_static_a64_compact_fallback_hot_t
         fallback_hot[S5L_STATIC_A64_COMPACT_FALLBACK_HOT_COUNT];
 } s5l_static_a64_compact_pc_profile_t;
