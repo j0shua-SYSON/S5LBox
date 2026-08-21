@@ -6375,6 +6375,8 @@ typedef struct {
     arm_status_t status;
     unsigned calls;
     unsigned fast_refills;
+    unsigned data_refill_attempts;
+    unsigned data_fast_refills;
     unsigned stop_after;
     const uint8_t *code;
     uint32_t code_base;
@@ -6382,11 +6384,13 @@ typedef struct {
     uint32_t active_block;
     bool refuse_window;
     bool fast_refill_window;
+    bool fast_refill_data;
     unsigned omit_window_after;
 } compact_raw_resident_oracle_context_t;
 
 static a64_compact_raw_fallback_result_t compact_raw_resident_oracle_step(
-        void *opaque, a64_compact_raw_code_window_t *next_window) {
+        void *opaque, a64_compact_raw_code_window_t *next_window,
+        const a64_compact_raw_data_miss_t *data_miss) {
     compact_raw_resident_oracle_context_t *context =
         (compact_raw_resident_oracle_context_t *)opaque;
     uint32_t block;
@@ -6396,6 +6400,27 @@ static a64_compact_raw_fallback_result_t compact_raw_resident_oracle_step(
         return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
     block = context->cpu->r[15] & ~UINT32_C(0x3ff);
     offset = block - context->code_base;
+    if (context->fast_refill_data && data_miss &&
+        data_miss->valid == 1u) {
+        context->data_refill_attempts++;
+        if (data_miss->pc == context->cpu->r[15] &&
+            data_miss->tlb_gen == context->cpu->tlb_gen &&
+            data_miss->access <= (uint32_t)ARM_ACCESS_WRITE &&
+            data_miss->priv <= 1u && context->code &&
+            offset <= context->code_bytes &&
+            context->code_bytes - offset >= UINT32_C(0x400) &&
+            arm_data_cache_try_refill(
+                context->cpu, data_miss->va,
+                (arm_access_t)data_miss->access,
+                data_miss->priv != 0u)) {
+            next_window->code = context->code + offset;
+            next_window->code_base = block;
+            next_window->code_bytes = UINT32_C(0x400);
+            context->active_block = block;
+            context->data_fast_refills++;
+            return A64_COMPACT_RAW_FALLBACK_NO_RETIRE_CONTINUE;
+        }
+    }
     if (context->fast_refill_window && block != context->active_block) {
         if (!context->code ||
             (context->cpu->r[15] &
@@ -6551,6 +6576,115 @@ done:
     free(baseline);
     free(expected_ram);
     return ok;
+}
+
+static bool compact_raw_data_refill_case(const char *name,
+                                         uint32_t insn, bool thumb,
+                                         arm_access_t access) {
+    const uint32_t pc = thumb ? UINT32_C(0x1400) : UINT32_C(0x1000);
+    const unsigned width = thumb ? 2u : 4u;
+    arm_cpu_t initial, reference, resident;
+    arm_bus_t bus = g_bus;
+    compact_raw_resident_oracle_context_t context;
+    final_state_t reference_state, resident_state;
+    uint8_t *baseline = (uint8_t *)malloc(sizeof g_ram);
+    uint8_t *expected = (uint8_t *)malloc(sizeof g_ram);
+    uint32_t pa = UINT32_MAX;
+    arm_status_t status;
+    unsigned completed = UINT_MAX;
+    unsigned native_completed = UINT_MAX;
+    unsigned fallback_completed = UINT_MAX;
+    bool ok = false;
+
+    if (!baseline || !expected) {
+        fprintf(stderr,
+                "jitbench: compact raw data-refill allocation failed\n");
+        goto done;
+    }
+    if (access == ARM_ACCESS_WRITE) bus.host_ram_write = mem_host_ram;
+    if (thumb) {
+        const uint16_t thumb_insn = (uint16_t)insn;
+        seed_cpu_at(&initial, &thumb_insn, 1u, true, pc);
+    } else {
+        seed_cpu_at(&initial, &insn, 1u, false, pc);
+    }
+    initial.bus = &bus;
+    initial.r[0] = DATA_BASE;
+    initial.r[1] = UINT32_C(0x5aa5c33c);
+    mem_w32(NULL, DATA_BASE, UINT32_C(0x1234abcd));
+    mem_w32(NULL, UINT32_C(0x4000), (3u << 10) | 2u);
+    initial.cp15.ttbr0 = UINT32_C(0x4000);
+    initial.cp15.dacr = 1u;
+    initial.cp15.sctlr = ARM_SCTLR_M;
+    if (arm_mmu_translate(&initial, DATA_BASE, access, true, &pa) != 0u ||
+        pa != DATA_BASE) {
+        fprintf(stderr,
+                "jitbench: compact raw data-refill %s could not seed "
+                "TLB witness (pa=%08" PRIx32 ")\n", name, pa);
+        goto done;
+    }
+    reference = initial;
+    resident = initial;
+    memcpy(baseline, g_ram, sizeof g_ram);
+    status = arm_step(&reference);
+    capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
+    memcpy(expected, g_ram, sizeof g_ram);
+    memcpy(g_ram, baseline, sizeof g_ram);
+
+    memset(&context, 0, sizeof context);
+    context.cpu = &resident;
+    context.status = ARM_OK;
+    context.code = g_ram;
+    context.code_bytes = (uint32_t)sizeof g_ram;
+    context.active_block = pc & ~UINT32_C(0x3ff);
+    context.fast_refill_data = true;
+    if (!a64_compact_raw_run_code_window_resident(
+            &resident, &g_ram[context.active_block], context.active_block,
+            UINT32_C(0x400), 1u, compact_raw_resident_oracle_step, &context,
+            &completed, &native_completed, &fallback_completed)) {
+        fprintf(stderr,
+                "jitbench: compact raw data-refill %s contract refused\n",
+                name);
+        goto done;
+    }
+    capture_state(&resident_state, &resident, context.status, JIT_EXIT_NEXT);
+    if (status != ARM_OK || completed != 1u || native_completed != 1u ||
+        fallback_completed != 0u || context.calls != 0u ||
+        context.data_refill_attempts != 1u ||
+        context.data_fast_refills != 1u ||
+        resident.r[15] != pc + width ||
+        memcmp(expected, g_ram, sizeof g_ram) != 0 ||
+        !architectural_states_equal(&reference_state, &resident_state)) {
+        fprintf(stderr,
+                "jitbench: compact raw data-refill %s mismatch "
+                "(completed/native/fallback/calls/attempts/refills "
+                "%u/%u/%u/%u/%u/%u)\n",
+                name, completed, native_completed, fallback_completed,
+                context.calls, context.data_refill_attempts,
+                context.data_fast_refills);
+        goto done;
+    }
+    ok = true;
+
+done:
+    free(baseline);
+    free(expected);
+    return ok;
+}
+
+static bool validate_compact_raw_data_refill_oracle(void) {
+    if (!compact_raw_data_refill_case(
+            "a32-read", UINT32_C(0xe5901000), false, ARM_ACCESS_READ) ||
+        !compact_raw_data_refill_case(
+            "thumb-read", UINT32_C(0x6801), true, ARM_ACCESS_READ) ||
+        !compact_raw_data_refill_case(
+            "a32-write", UINT32_C(0xe5801000), false, ARM_ACCESS_WRITE))
+        return false;
+    printf("COMPACT-RAW-DATA-REFILL-ORACLE exact=yes cases=3 "
+           "a32-read=yes thumb-read=yes a32-write=yes mmu=on "
+           "tlb=preexisting no-walk=yes no-retire-continue=yes "
+           "fallback=zero transactional=yes runtime-codegen=no\n");
+    return true;
 }
 
 static bool compact_raw_vfp_run_pair(const char *name,
@@ -6761,10 +6895,12 @@ typedef struct {
 } compact_raw_vfp_fp_callback_context_t;
 
 static a64_compact_raw_fallback_result_t compact_raw_vfp_fp_callback(
-        void *opaque, a64_compact_raw_code_window_t *next_window) {
+        void *opaque, a64_compact_raw_code_window_t *next_window,
+        const a64_compact_raw_data_miss_t *data_miss) {
     compact_raw_vfp_fp_callback_context_t *context =
         (compact_raw_vfp_fp_callback_context_t *)opaque;
     (void)next_window;
+    (void)data_miss;
     if (!context)
         return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
     context->observed_restored =
@@ -9035,6 +9171,8 @@ static bool validate_compact_raw_oracles(void) {
     if (!compact_raw_window_compare("data-stop", window_data_stop, 2u,
                                     UINT32_C(0x4800), 1u, 2u, 1u))
         return false;
+    if (!validate_compact_raw_data_refill_oracle())
+        return false;
     if (!compact_raw_resident_compare(
             "continue", resident_mixed, 5u, false, UINT32_C(0x4c00),
             UINT32_C(0x4c00), 20u, 5u, 5u, 3u, 2u, 0u, true,
@@ -9364,6 +9502,8 @@ typedef struct {
     uint64_t compact_raw_window_reloads;
     uint64_t compact_raw_window_stops;
     uint64_t compact_raw_window_fast_refills;
+    uint64_t compact_raw_data_refill_attempts;
+    uint64_t compact_raw_data_fast_refills;
     uint64_t compact_raw_window_cache_hits;
     uint64_t compact_raw_privileged_window_refills;
     uint64_t compact_raw_privileged_boundary_retired;
@@ -9446,6 +9586,7 @@ typedef struct {
     bool fetch_refill_mix_workload;
     bool mmu_identity_workload;
     bool mmu_identity_privileged;
+    bool cold_data_after_warmup;
     unsigned fetch_refill_mix_long_insns;
 } soc_entry_setup_t;
 
@@ -9635,6 +9776,10 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     uint64_t compact_raw_window_stops_after;
     uint64_t compact_raw_window_fast_refills_before;
     uint64_t compact_raw_window_fast_refills_after;
+    uint64_t compact_raw_data_refill_attempts_before;
+    uint64_t compact_raw_data_refill_attempts_after;
+    uint64_t compact_raw_data_fast_refills_before;
+    uint64_t compact_raw_data_fast_refills_after;
     uint64_t compact_raw_window_cache_hits_before;
     uint64_t compact_raw_window_cache_hits_after;
     uint64_t compact_raw_privileged_window_refills_before;
@@ -9841,6 +9986,14 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
                 machine.cpu.r[15]);
         goto done;
     }
+    if (setup->cold_data_after_warmup) {
+        /* Keep the exact READ/WRITE TLB witnesses established by warmup while
+         * forcing the first measured compact access through the new
+         * pre-mutation data-refill callback. Derived host pointers are not
+         * architectural state and are intentionally absent from snapshots. */
+        memset(machine.cpu.dread, 0, sizeof machine.cpu.dread);
+        memset(machine.cpu.dwrite, 0, sizeof machine.cpu.dwrite);
+    }
 
     retired_before = s5l8900_static_a64_retired(&machine);
     chains_before = s5l8900_static_a64_chained_blocks(&machine);
@@ -9873,6 +10026,10 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         s5l8900_static_a64_compact_raw_window_stops(&machine);
     compact_raw_window_fast_refills_before =
         s5l8900_static_a64_compact_raw_window_fast_refills(&machine);
+    compact_raw_data_refill_attempts_before =
+        s5l8900_static_a64_compact_raw_data_refill_attempts(&machine);
+    compact_raw_data_fast_refills_before =
+        s5l8900_static_a64_compact_raw_data_fast_refills(&machine);
     compact_raw_window_cache_hits_before =
         s5l8900_static_a64_compact_raw_window_cache_hits(&machine);
     compact_raw_privileged_window_refills_before =
@@ -9920,6 +10077,10 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         s5l8900_static_a64_compact_raw_window_stops(&machine);
     compact_raw_window_fast_refills_after =
         s5l8900_static_a64_compact_raw_window_fast_refills(&machine);
+    compact_raw_data_refill_attempts_after =
+        s5l8900_static_a64_compact_raw_data_refill_attempts(&machine);
+    compact_raw_data_fast_refills_after =
+        s5l8900_static_a64_compact_raw_data_fast_refills(&machine);
     compact_raw_window_cache_hits_after =
         s5l8900_static_a64_compact_raw_window_cache_hits(&machine);
     compact_raw_privileged_window_refills_after =
@@ -9969,6 +10130,12 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     out->compact_raw_window_fast_refills =
         compact_raw_window_fast_refills_after -
         compact_raw_window_fast_refills_before;
+    out->compact_raw_data_refill_attempts =
+        compact_raw_data_refill_attempts_after -
+        compact_raw_data_refill_attempts_before;
+    out->compact_raw_data_fast_refills =
+        compact_raw_data_fast_refills_after -
+        compact_raw_data_fast_refills_before;
     out->compact_raw_window_cache_hits =
         compact_raw_window_cache_hits_after -
         compact_raw_window_cache_hits_before;
@@ -10008,6 +10175,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
             out->compact_raw_window_reloads != 0u ||
             out->compact_raw_window_stops != 0u ||
             out->compact_raw_window_fast_refills != 0u ||
+            out->compact_raw_data_refill_attempts != 0u ||
+            out->compact_raw_data_fast_refills != 0u ||
             out->compact_raw_window_cache_hits != 0u ||
             out->compact_raw_privileged_window_refills != 0u ||
             out->compact_raw_privileged_boundary_retired != 0u)) ||
@@ -10068,6 +10237,21 @@ static bool run_soc_compact_raw_path(const uint32_t *program,
     if (path != SOC_ENTRY_REFERENCE && path != SOC_ENTRY_COMPACT_RAW &&
         path != SOC_ENTRY_COMPACT_RAW_WINDOW_CACHE &&
         path != SOC_ENTRY_COMPACT_RAW_WINDOW_REFILL_OFF)
+        return false;
+    return run_soc_entry_configured(&setup, length, total, path, out);
+}
+
+static bool run_soc_compact_raw_cold_data_path(
+        const uint32_t *program, unsigned length, uint64_t total,
+        soc_entry_path_t path, soc_run_result_t *out) {
+    const soc_entry_setup_t setup = {
+        .program = program,
+        .length = length,
+        .seed_r7 = DATA_BASE,
+        .mmu_identity_workload = true,
+        .cold_data_after_warmup = true,
+    };
+    if (path != SOC_ENTRY_REFERENCE && path != SOC_ENTRY_COMPACT_RAW)
         return false;
     return run_soc_entry_configured(&setup, length, total, path, out);
 }
@@ -10809,6 +10993,88 @@ done:
     return ok;
 }
 
+/* Exercise the new refill through the app-facing machine runner, not only the
+ * public low-level helper. Warmup leaves exact User READ and WRITE TLB entries,
+ * then both derived data caches are cleared. The reference must take one
+ * literal miss per access class; the compact arm must publish two exact
+ * pre-mutation witnesses, refill them without a walk, and retire the same
+ * instruction stream with a byte-identical machine snapshot. */
+static bool validate_soc_compact_raw_data_refill(void) {
+    enum { LOOP_INSNS = 8u, TOTAL_INSNS = 8192u };
+    static const uint32_t PROGRAM[LOOP_INSNS] = {
+        UINT32_C(0xe2800001), /* native ADD r0,r0,#1 */
+        UINT32_C(0xe5870000), /* cold DWRITE STR r0,[r7,#0] */
+        UINT32_C(0xe2422001), /* native SUB r2,r2,#1 */
+        UINT32_C(0xe0000090), /* literal fallback MUL r0,r0,r0 */
+        UINT32_C(0xe2855001), /* native ADD r5,r5,#1 */
+        UINT32_C(0xe5971000), /* cold DREAD LDR r1,[r7,#0] */
+        UINT32_C(0xe0266001), /* native EOR r6,r6,r1 */
+        UINT32_C(0xeafffff7), /* native branch 0x1c -> 0x00 */
+    };
+    const uint64_t expected_accesses =
+        (uint64_t)TOTAL_INSNS / LOOP_INSNS;
+    const uint64_t expected_native =
+        (uint64_t)TOTAL_INSNS * 7u / LOOP_INSNS;
+    const uint64_t expected_fallback =
+        (uint64_t)TOTAL_INSNS / LOOP_INSNS;
+    soc_run_result_t reference = {0};
+    soc_run_result_t compact = {0};
+    bool ok = false;
+
+    if (!run_soc_compact_raw_cold_data_path(
+            PROGRAM, LOOP_INSNS, TOTAL_INSNS, SOC_ENTRY_REFERENCE,
+            &reference) ||
+        !run_soc_compact_raw_cold_data_path(
+            PROGRAM, LOOP_INSNS, TOTAL_INSNS, SOC_ENTRY_COMPACT_RAW,
+            &compact) ||
+        !reference.snapshot || !compact.snapshot ||
+        reference.snapshot_len != compact.snapshot_len ||
+        memcmp(reference.snapshot, compact.snapshot,
+               reference.snapshot_len) != 0 ||
+        reference.dread_hits != expected_accesses - 1u ||
+        reference.dread_misses != 1u ||
+        reference.dwrite_hits != expected_accesses - 1u ||
+        reference.dwrite_misses != 1u ||
+        reference.compact_raw_data_refill_attempts != 0u ||
+        reference.compact_raw_data_fast_refills != 0u ||
+        compact.dread_hits != expected_accesses ||
+        compact.dread_misses != 0u ||
+        compact.dwrite_hits != expected_accesses ||
+        compact.dwrite_misses != 0u ||
+        compact.compact_raw_data_refill_attempts != 2u ||
+        compact.compact_raw_data_fast_refills != 2u ||
+        compact.compact_raw_retired != expected_native ||
+        compact.compact_raw_fallback_retired != expected_fallback ||
+        compact.signed_retired != expected_native) {
+        fprintf(stderr,
+                "jitbench: SoC compact data-refill oracle failed "
+                "attempts/refills=%" PRIu64 "/%" PRIu64
+                " dread=%" PRIu64 "/%" PRIu64
+                " dwrite=%" PRIu64 "/%" PRIu64
+                " native/fallback=%" PRIu64 "/%" PRIu64 "\n",
+                compact.compact_raw_data_refill_attempts,
+                compact.compact_raw_data_fast_refills,
+                compact.dread_hits, compact.dread_misses,
+                compact.dwrite_hits, compact.dwrite_misses,
+                compact.compact_raw_retired,
+                compact.compact_raw_fallback_retired);
+        goto done;
+    }
+    printf("SOC-COMPACT-RAW-DATA-REFILL-ORACLE exact=yes "
+           "guest-insns=%u mmu=on tlb=warm caches=cold "
+           "attempts=2 refills=2 read=yes write=yes no-walk=yes "
+           "no-retire-continue=yes unsupported-fallback=yes "
+           "timebase-bounded=yes device-tick=yes "
+           "serialized-machine=yes runtime-codegen=no\n",
+           TOTAL_INSNS);
+    ok = true;
+
+done:
+    free_soc_run_result(&reference);
+    free_soc_run_result(&compact);
+    return ok;
+}
+
 /* Force the real timebase-bounded machine path across a 1 KiB fetch boundary
  * in both directions. The control interprets the first instruction in each
  * newly reached window. The enabled arm instead consumes the exact warm FETCH
@@ -11102,6 +11368,7 @@ static bool bench_soc_compact_raw(uint64_t requested, unsigned reps) {
     if (!validate_soc_compact_raw_privileged_prefix() ||
         !validate_soc_compact_raw_thumb_halfword_entry() ||
         !validate_soc_compact_raw_resident() ||
+        !validate_soc_compact_raw_data_refill() ||
         !validate_soc_compact_raw_windows() ||
         !validate_soc_compact_raw_privileged_windows())
         return false;

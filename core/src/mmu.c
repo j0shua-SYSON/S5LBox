@@ -346,6 +346,73 @@ bool arm_fetch_cache_try_refill(arm_cpu_t *c, uint32_t va, bool priv) {
     return true;
 }
 
+bool arm_data_cache_try_refill(arm_cpu_t *c, uint32_t va,
+                               arm_access_t access, bool priv) {
+    uint32_t pa_block;
+    const uint32_t va_block = va & ~ARM_DREAD_BLK_MASK;
+    const unsigned cache_slot =
+        (unsigned)(((va >> 10) +
+                    (priv ? ARM_DREAD_ENTRIES / 2u : 0u)) &
+                   (ARM_DREAD_ENTRIES - 1u));
+    const uint32_t cache_tag = va_block | (priv ? 1u : 0u);
+    uint8_t *host;
+    bool count_tlb_hit = false;
+    const bool mmu_enabled = (c && (c->cp15.sctlr & ARM_SCTLR_M) != 0u);
+
+    if (!c || !c->bus ||
+        (access != ARM_ACCESS_READ && access != ARM_ACCESS_WRITE))
+        return false;
+    if (mmu_enabled &&
+        (c->tlb_gen == 0u || !mmu_stamp_matches(c)))
+        return false;
+#ifdef S5LBOX_NO_DREAD
+    if (access == ARM_ACCESS_READ) return false;
+#endif
+    if (access == ARM_ACCESS_READ) {
+        if (!c->bus->host_ram) return false;
+        if (mmu_enabled && c->dread[cache_slot].host &&
+            c->dread[cache_slot].tag == cache_tag &&
+            c->dread[cache_slot].gen == c->tlb_gen)
+            return true;
+    } else {
+        if (!c->bus->host_ram_write) return false;
+        if (mmu_enabled && c->dwrite[cache_slot].host &&
+            c->dwrite[cache_slot].tag == cache_tag &&
+            c->dwrite[cache_slot].gen == c->tlb_gen)
+            return true;
+    }
+
+    if (!mmu_enabled) {
+        pa_block = va_block;
+    } else {
+        const uint32_t tag = mmu_tlb_tag(va, access, priv);
+        const unsigned slot = mmu_tlb_slot(va, access);
+        if (c->tlb[slot].gen != c->tlb_gen ||
+            c->tlb[slot].tag != tag || c->tlb[slot].fsr != 0u)
+            return false;
+        pa_block = c->tlb[slot].pa;
+        count_tlb_hit = true;
+    }
+
+    host = access == ARM_ACCESS_READ
+        ? c->bus->host_ram(c->bus->ctx, pa_block,
+                           ARM_DREAD_BLK_MASK + 1u)
+        : c->bus->host_ram_write(c->bus->ctx, pa_block,
+                                 ARM_DREAD_BLK_MASK + 1u);
+    if (!host) return false;
+    if (access == ARM_ACCESS_READ) {
+        c->dread[cache_slot].host = host;
+        c->dread[cache_slot].tag = cache_tag;
+        c->dread[cache_slot].gen = c->tlb_gen;
+    } else {
+        c->dwrite[cache_slot].host = host;
+        c->dwrite[cache_slot].tag = cache_tag;
+        c->dwrite[cache_slot].gen = c->tlb_gen;
+    }
+    if (count_tlb_hit) c->tlb_hits++;
+    return true;
+}
+
 static uint32_t mmu_walk(arm_cpu_t *c, uint32_t va, arm_access_t acc,
                          bool priv, uint32_t *pa) {
     /* Only a store sets WnR. A fetch is checked against XN, never against WnR:

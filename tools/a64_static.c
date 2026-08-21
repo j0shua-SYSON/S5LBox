@@ -2000,6 +2000,7 @@ typedef struct {
     a64_compact_raw_code_window_t current_window;
     a64_compact_raw_code_window_t
         window_cache[A64_COMPACT_RAW_WINDOW_CACHE_ENTRIES];
+    a64_compact_raw_data_miss_t data_miss;
 } a64_compact_raw_context_t;
 
 _Static_assert(sizeof(void *) == 8u,
@@ -2040,7 +2041,9 @@ _Static_assert(offsetof(a64_compact_raw_context_t, flat_ram) == 0u &&
                             current_window) == 176u &&
                    offsetof(a64_compact_raw_context_t,
                             window_cache) == 192u &&
-                   sizeof(a64_compact_raw_context_t) == 320u,
+                   offsetof(a64_compact_raw_context_t,
+                            data_miss) == 320u &&
+                   sizeof(a64_compact_raw_context_t) == 344u,
                "compact raw native context layout drifted");
 _Static_assert(offsetof(arm_cp15_t, tpidrurw) == 52u &&
                    offsetof(arm_cp15_t, tpidruro) == 56u &&

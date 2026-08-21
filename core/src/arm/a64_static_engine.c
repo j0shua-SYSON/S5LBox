@@ -118,6 +118,8 @@ typedef struct {
     uint64_t compact_raw_window_reloads;
     uint64_t compact_raw_window_stops;
     uint64_t compact_raw_window_fast_refills;
+    uint64_t compact_raw_data_refill_attempts;
+    uint64_t compact_raw_data_fast_refills;
     uint64_t compact_raw_window_cache_hits;
     uint64_t compact_raw_privileged_window_refills;
     uint64_t compact_raw_privileged_boundary_retired;
@@ -1468,6 +1470,28 @@ uint64_t s5l8900_static_a64_compact_raw_window_fast_refills(
 #endif
 }
 
+uint64_t s5l8900_static_a64_compact_raw_data_refill_attempts(
+        const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_raw_data_refill_attempts : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
+uint64_t s5l8900_static_a64_compact_raw_data_fast_refills(
+        const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_raw_data_fast_refills : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
 uint64_t s5l8900_static_a64_compact_raw_window_cache_hits(
         const s5l8900_t *m) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
@@ -1586,7 +1610,8 @@ typedef struct {
 } compact_raw_fallback_context_t;
 
 static a64_compact_raw_fallback_result_t compact_raw_fallback(
-        void *opaque, a64_compact_raw_code_window_t *next_window) {
+        void *opaque, a64_compact_raw_code_window_t *next_window,
+        const a64_compact_raw_data_miss_t *data_miss) {
     compact_raw_fallback_context_t *context =
         (compact_raw_fallback_context_t *)opaque;
     arm_cpu_t *cpu;
@@ -1609,6 +1634,34 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
     thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
     priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
     width = thumb ? 2u : 4u;
+
+    /* The native loop publishes this witness only after an admitted data
+     * access misses DREAD/DWRITE and before any architectural mutation. Reuse
+     * is deliberately narrower than arm_step(): the PC, invocation TLB
+     * generation and access metadata must still match; the fetch window must
+     * remain live; and the data block must come from an exact current TLB hit
+     * (or MMU-off identity mapping) plus the appropriate host-RAM capability.
+     * Any refusal falls through to the literal interpreter, which remains the
+     * sole owner of walks, faults, MMIO and write observers. */
+    if (data_miss && data_miss->valid == 1u) {
+        context->state->compact_raw_data_refill_attempts++;
+        if (data_miss->pc == cpu->r[15] &&
+            data_miss->tlb_gen == cpu->tlb_gen &&
+            data_miss->access <= (uint32_t)ARM_ACCESS_WRITE &&
+            data_miss->priv <= 1u &&
+            step_block == context->fetch_block &&
+            (cpu->r[15] & (width - 1u)) == 0u &&
+            arm_fetch_cache_try_refill(cpu, cpu->r[15], priv) &&
+            arm_data_cache_try_refill(
+                cpu, data_miss->va, (arm_access_t)data_miss->access,
+                data_miss->priv != 0u)) {
+            next_window->code = cpu->fetch_host;
+            next_window->code_base = step_block;
+            next_window->code_bytes = UINT32_C(0x400);
+            context->state->compact_raw_data_fast_refills++;
+            return A64_COMPACT_RAW_FALLBACK_NO_RETIRE_CONTINUE;
+        }
+    }
 
     /* A window exit does not itself require an architectural step. User mode
      * can reuse an exact FETCH witness immediately. A privileged prefix first

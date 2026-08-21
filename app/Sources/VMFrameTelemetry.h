@@ -199,6 +199,8 @@ typedef struct {
     uint64_t compact_window_crossings;
     uint64_t compact_window_reloads;
     uint64_t compact_window_fast_refills;
+    uint64_t compact_data_refill_attempts;
+    uint64_t compact_data_fast_refills;
     uint64_t compact_window_stops;
     uint64_t compact_refused_guard;
     uint64_t compact_refused_privileged;

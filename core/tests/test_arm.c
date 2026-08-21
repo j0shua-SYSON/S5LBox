@@ -2364,6 +2364,134 @@ static void test_fetch_cache_refill_requires_an_exact_live_witness(void) {
           "non-RAM translation produced a direct fetch pointer");
 }
 
+static void test_data_cache_refill_requires_an_exact_live_witness(void) {
+    arm_bus_t bus = g_bus;
+    arm_cpu_t c;
+    uint32_t pa = 0u;
+    uint64_t hits, misses, dread_hits, dread_misses;
+    uint64_t dwrite_hits, dwrite_misses;
+    const uint32_t mapped_va = UINT32_C(0x80000420);
+    const unsigned read_slot =
+        (unsigned)(((mapped_va >> 10) + ARM_DREAD_ENTRIES / 2u) &
+                   (ARM_DREAD_ENTRIES - 1u));
+
+    bus.host_ram = m_host_ram;
+    bus.host_ram_write = m_host_ram_write;
+    memset(g_ram, 0, sizeof g_ram);
+    arm_reset(&c, &bus);
+
+    /* MMU-off identity refill is derived state only: it installs the exact
+     * block without inventing TLB or data-cache traffic. */
+    hits = c.tlb_hits;
+    dread_hits = c.dread_hits;
+    dread_misses = c.dread_misses;
+    CHECK(arm_data_cache_try_refill(&c, 0x420u, ARM_ACCESS_READ, true) &&
+          c.dread[(0x420u >> 10) + ARM_DREAD_ENTRIES / 2u].host ==
+              g_ram + 0x400u &&
+          c.tlb_hits == hits && c.dread_hits == dread_hits &&
+          c.dread_misses == dread_misses,
+          "MMU-off data refill did not install the identity READ block");
+    CHECK(!arm_data_cache_try_refill(&c, 0x420u, ARM_ACCESS_FETCH, true),
+          "data refill accepted a FETCH access");
+
+    /* Seed one exact privileged READ translation, then prove that neither a
+     * different access class nor privilege can borrow it. */
+    memset(g_ram, 0, sizeof g_ram);
+    m_w32(NULL, 0x4000u + (0x800u << 2),
+          (3u << 10) | 2u);                 /* VA 0x80000000 -> PA 0 */
+    arm_reset(&c, &bus);
+    c.cp15.ttbr0 = 0x4000u;
+    c.cp15.dacr = 1u;
+    c.cp15.sctlr = ARM_SCTLR_M;
+    CHECK(arm_mmu_translate(&c, mapped_va, ARM_ACCESS_READ, true, &pa) == 0u &&
+          pa == 0x420u,
+          "could not seed data READ TLB witness: pa=%08x", pa);
+    memset(&c.dread[read_slot], 0, sizeof c.dread[read_slot]);
+    hits = c.tlb_hits;
+    misses = c.tlb_misses;
+    dread_hits = c.dread_hits;
+    dread_misses = c.dread_misses;
+    CHECK(arm_data_cache_try_refill(&c, mapped_va, ARM_ACCESS_READ, true) &&
+          c.dread[read_slot].host == g_ram + 0x400u &&
+          c.dread[read_slot].tag ==
+              ((mapped_va & ~ARM_DREAD_BLK_MASK) | 1u) &&
+          c.dread[read_slot].gen == c.tlb_gen,
+          "exact READ TLB witness did not refill DREAD");
+    CHECK(c.tlb_hits == hits + 1u && c.tlb_misses == misses &&
+          c.dread_hits == dread_hits && c.dread_misses == dread_misses,
+          "READ refill changed anything beyond one displaced TLB hit");
+    hits = c.tlb_hits;
+    CHECK(arm_data_cache_try_refill(&c, mapped_va, ARM_ACCESS_READ, true) &&
+          c.tlb_hits == hits,
+          "already-live DREAD block counted another TLB hit");
+
+    memset(&c.dread[read_slot], 0, sizeof c.dread[read_slot]);
+    hits = c.tlb_hits;
+    misses = c.tlb_misses;
+    CHECK(!arm_data_cache_try_refill(&c, mapped_va, ARM_ACCESS_READ, false) &&
+          !c.dread[(mapped_va >> 10) & (ARM_DREAD_ENTRIES - 1u)].host &&
+          c.tlb_hits == hits && c.tlb_misses == misses,
+          "privileged READ witness was reused as unprivileged");
+    dwrite_hits = c.dwrite_hits;
+    dwrite_misses = c.dwrite_misses;
+    CHECK(!arm_data_cache_try_refill(&c, mapped_va, ARM_ACCESS_WRITE, true) &&
+          !c.dwrite[read_slot].host && c.tlb_hits == hits &&
+          c.tlb_misses == misses && c.dwrite_hits == dwrite_hits &&
+          c.dwrite_misses == dwrite_misses,
+          "READ witness was reused as WRITE or changed counters");
+
+    /* A current WRITE witness still requires live observer-bypass consent. */
+    CHECK(arm_mmu_translate(&c, mapped_va, ARM_ACCESS_WRITE, true, &pa) == 0u,
+          "could not seed data WRITE TLB witness");
+    hits = c.tlb_hits;
+    bus.host_ram_write = NULL;
+    CHECK(!arm_data_cache_try_refill(&c, mapped_va, ARM_ACCESS_WRITE, true) &&
+          !c.dwrite[read_slot].host && c.tlb_hits == hits,
+          "WRITE refill ignored revoked host_ram_write consent");
+    bus.host_ram_write = m_host_ram_write;
+    CHECK(arm_data_cache_try_refill(&c, mapped_va, ARM_ACCESS_WRITE, true) &&
+          c.dwrite[read_slot].host == g_ram + 0x400u &&
+          c.tlb_hits == hits + 1u,
+          "exact WRITE witness did not refill DWRITE");
+
+    /* Missing, faulting, stale-register and non-RAM witnesses all refuse
+     * without a walk, cache mutation or counter change. */
+    memset(&c.dread[read_slot], 0, sizeof c.dread[read_slot]);
+    hits = c.tlb_hits;
+    misses = c.tlb_misses;
+    CHECK(!arm_data_cache_try_refill(&c, 0x80000820u,
+                                     ARM_ACCESS_READ, true) &&
+          c.tlb_hits == hits && c.tlb_misses == misses,
+          "lookup-only data refill walked a missing TLB entry");
+    pa = 0xdeadbeefu;
+    CHECK(arm_mmu_translate(&c, 0x90000420u,
+                            ARM_ACCESS_READ, true, &pa) != 0u &&
+          pa == 0xdeadbeefu,
+          "could not seed a cached data fault");
+    hits = c.tlb_hits;
+    CHECK(!arm_data_cache_try_refill(&c, 0x90000420u,
+                                     ARM_ACCESS_READ, true) &&
+          c.tlb_hits == hits,
+          "cached data fault was consumed or double-counted");
+    c.cp15.context_id ^= 1u;
+    CHECK(!arm_data_cache_try_refill(&c, mapped_va, ARM_ACCESS_READ, true) &&
+          c.tlb_hits == hits,
+          "stale MMU register stamp was accepted for data refill");
+    c.cp15.context_id ^= 1u;
+    m_w32(NULL, 0x4000u + (0xa00u << 2),
+          UINT32_C(0x00200000) | (3u << 10) | 2u);
+    arm_mmu_tlb_flush(&c);
+    CHECK(arm_mmu_translate(&c, 0xa0000420u,
+                            ARM_ACCESS_READ, true, &pa) == 0u &&
+          pa == 0x00200420u,
+          "could not seed non-RAM data translation: pa=%08x", pa);
+    hits = c.tlb_hits;
+    CHECK(!arm_data_cache_try_refill(&c, 0xa0000420u,
+                                     ARM_ACCESS_READ, true) &&
+          c.tlb_hits == hits,
+          "non-RAM data translation produced a direct pointer");
+}
+
 static void test_abort_restores_base_register(void) {
     /* Base Restored Abort Model: after a data abort the base and destination
      * registers must be unchanged so the handler can retry the instruction. */
@@ -5806,6 +5934,7 @@ int main(void) {
     test_page_translation_fault_precedes_page_domain_fault();
     test_force_access_flag_faults_precede_domain_permissions();
     test_fetch_cache_refill_requires_an_exact_live_witness();
+    test_data_cache_refill_requires_an_exact_live_witness();
     test_abort_restores_base_register();
     test_sctlr_a_faults_ordinary_unaligned_accesses();
     test_sctlr_u_selects_legacy_or_armv6_unaligned_data();

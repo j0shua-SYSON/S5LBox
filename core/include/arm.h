@@ -372,6 +372,7 @@ typedef enum {
  * set, and unlike the 4096-entry TLB it caches only plain RAM.
  */
 #define ARM_DREAD_ENTRIES 64u
+#define ARM_DREAD_BLK_MASK 0x3ffu
 
 typedef struct arm_cpu {
     uint32_t r[16];      /* r0–r15; r15 is PC (address of current instruction) */
@@ -603,6 +604,17 @@ uint32_t arm_mmu_translate(arm_cpu_t *cpu, uint32_t va, arm_access_t acc,
  * would have recorded. Every refusal leaves the fetch cache and counters
  * untouched, so the caller can fall back to arm_step() for faults or MMIO. */
 bool arm_fetch_cache_try_refill(arm_cpu_t *cpu, uint32_t va, bool priv);
+
+/* Rebuild one 1 KiB data-cache host pointer without walking page tables,
+ * raising a guest fault or entering a bus read/write callback. With the MMU
+ * enabled, the exact current non-faulting READ/WRITE TLB entry must already
+ * exist; with it disabled, the mapping is the architectural identity map.
+ * READ requires host_ram and WRITE separately requires host_ram_write. The
+ * native instruction retry owns data-cache hit accounting; this administrative
+ * refill accounts only for an MMU-on TLB hit that displaced arm_step() would
+ * have consumed. Every refusal leaves caches and counters untouched. */
+bool arm_data_cache_try_refill(arm_cpu_t *cpu, uint32_t va,
+                               arm_access_t access, bool priv);
 
 /*
  * Drop every cached translation. Call this wherever the guest does something

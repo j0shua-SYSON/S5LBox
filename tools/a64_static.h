@@ -229,6 +229,20 @@ typedef struct {
     uint32_t code_bytes;
 } a64_compact_raw_code_window_t;
 
+/* Exact pre-mutation reason for a native data-cache refusal. `valid` is one
+ * only when the compact runner reached a semantically admitted memory access
+ * and its live DREAD/DWRITE lookup failed. The remaining fields bind that
+ * refusal to the unchanged architectural PC and invocation TLB generation.
+ * This is an input witness, not permission to walk or touch a device. */
+typedef struct {
+    uint32_t valid;
+    uint32_t va;
+    uint32_t pc;
+    uint32_t access;
+    uint32_t priv;
+    uint32_t tlb_gen;
+} a64_compact_raw_data_miss_t;
+
 /* A resident code-window invocation may hand an instruction it cannot execute
  * to the architectural interpreter without returning through the outer SoC
  * loop. The callback normally owns that one instruction's complete semantics
@@ -247,7 +261,8 @@ typedef enum {
 
 typedef a64_compact_raw_fallback_result_t
     (*a64_compact_raw_fallback_fn)(
-        void *opaque, a64_compact_raw_code_window_t *next_window);
+        void *opaque, a64_compact_raw_code_window_t *next_window,
+        const a64_compact_raw_data_miss_t *data_miss);
 
 /* Keep one build-time-linked AArch64 invocation resident across exact
  * interpreter fallbacks. The caller still proves the live virtual-code window

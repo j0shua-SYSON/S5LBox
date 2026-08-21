@@ -447,6 +447,8 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
              "compact_privileged_boundary_retired=%llu,"
              "compact_window_crossings=%llu,compact_window_reloads=%llu,"
              "compact_window_fast_refills=%llu,"
+             "compact_data_refill_attempts=%llu,"
+             "compact_data_fast_refills=%llu,"
              "compact_window_cache_hits=%llu,compact_window_stops=%llu,"
              "compact_refused_guard=%llu,"
              "compact_refused_privileged=%llu,"
@@ -523,6 +525,8 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
             (unsigned long long)VM_EXEC_DELTA(compact_window_crossings),
             (unsigned long long)VM_EXEC_DELTA(compact_window_reloads),
             (unsigned long long)VM_EXEC_DELTA(compact_window_fast_refills),
+            (unsigned long long)VM_EXEC_DELTA(compact_data_refill_attempts),
+            (unsigned long long)VM_EXEC_DELTA(compact_data_fast_refills),
             (unsigned long long)VM_EXEC_DELTA(compact_window_cache_hits),
             (unsigned long long)VM_EXEC_DELTA(compact_window_stops),
             (unsigned long long)VM_EXEC_DELTA(compact_refused_guard),

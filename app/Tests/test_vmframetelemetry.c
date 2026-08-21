@@ -55,6 +55,8 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.compact_window_crossings = base + 12u;
     value.compact_window_reloads = base + 13u;
     value.compact_window_fast_refills = base + 14u;
+    value.compact_data_refill_attempts = base + 125u;
+    value.compact_data_fast_refills = base + 126u;
     value.compact_window_stops = base + 15u;
     value.compact_refused_guard = base + 16u;
     value.compact_refused_privileged = base + 17u;
@@ -405,6 +407,8 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.mtz2_pending_frame_bytes == 42u &&
            state.execution_first.compact_refused_privileged == 1017u &&
            state.execution_last.compact_window_fast_refills == 2014u &&
+           state.execution_last.compact_data_refill_attempts == 2125u &&
+           state.execution_last.compact_data_fast_refills == 2126u &&
            state.execution_last.fetch_refill_skips == 2024u &&
            state.execution_last.known_negative_bypasses == 2025u &&
            state.execution_last.mbx_2d_degraded == 2118u &&

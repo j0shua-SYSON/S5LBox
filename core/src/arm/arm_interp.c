@@ -209,8 +209,6 @@ static void mem_write_crossing(arm_cpu_t *c, uint32_t va, unsigned n, uint32_t v
  * The data-read block cache. See the dread[] comment in arm.h for why this is
  * reads-only and why privilege is in the index as well as the tag.
  */
-#define ARM_DREAD_BLK_MASK 0x3ffu
-
 static inline unsigned dread_slot(uint32_t va, bool priv) {
     return (unsigned)(((va >> 10) + (priv ? ARM_DREAD_ENTRIES / 2u : 0u))
                       & (ARM_DREAD_ENTRIES - 1u));
