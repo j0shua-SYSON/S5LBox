@@ -867,7 +867,17 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
                  "compact_fallback_profile_dread_events=%llu,"
                  "compact_fallback_profile_dwrite_events=%llu,"
                  "compact_fallback_profile_mixed_data_events=%llu,"
-                 "compact_fallback_profile_no_data_events=%llu",
+                 "compact_fallback_profile_no_data_events=%llu,"
+                 "compact_fallback_profile_admitted_data_miss_events=%llu,"
+                 "compact_fallback_profile_admitted_data_tlb_hits=%llu,"
+                 "compact_fallback_profile_admitted_data_tlb_misses=%llu,"
+                 "compact_fallback_profile_admitted_data_tlb_hit_only_events="
+                 "%llu,"
+                 "compact_fallback_profile_admitted_data_tlb_miss_only_events="
+                 "%llu,"
+                 "compact_fallback_profile_admitted_data_tlb_mixed_events="
+                 "%llu,"
+                 "compact_fallback_profile_admitted_data_no_tlb_events=%llu",
                 (unsigned long long)
                     last->compact_fallback_profile_events,
                 (unsigned long long)
@@ -887,7 +897,21 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
                 (unsigned long long)
                     last->compact_fallback_profile_mixed_data_events,
                 (unsigned long long)
-                    last->compact_fallback_profile_no_data_events];
+                    last->compact_fallback_profile_no_data_events,
+                (unsigned long long)
+                    last->compact_fallback_profile_admitted_data_miss_events,
+                (unsigned long long)
+                    last->compact_fallback_profile_admitted_data_tlb_hits,
+                (unsigned long long)
+                    last->compact_fallback_profile_admitted_data_tlb_misses,
+                (unsigned long long)
+                    last->compact_fallback_profile_admitted_data_tlb_hit_only_events,
+                (unsigned long long)
+                    last->compact_fallback_profile_admitted_data_tlb_miss_only_events,
+                (unsigned long long)
+                    last->compact_fallback_profile_admitted_data_tlb_mixed_events,
+                (unsigned long long)
+                    last->compact_fallback_profile_admitted_data_no_tlb_events];
             for (unsigned i = 0u;
                  i < VM_COMPACT_FALLBACK_PROFILE_OUTCOME_COUNT; i++) {
                 [outsidePCs appendFormat:

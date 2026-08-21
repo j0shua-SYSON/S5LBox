@@ -575,6 +575,20 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                 pc_profile.fallback_mixed_data_events;
             execution.compact_fallback_profile_no_data_events =
                 pc_profile.fallback_no_data_events;
+            execution.compact_fallback_profile_admitted_data_miss_events =
+                pc_profile.fallback_admitted_data_miss_events;
+            execution.compact_fallback_profile_admitted_data_tlb_hits =
+                pc_profile.fallback_admitted_data_tlb_hits;
+            execution.compact_fallback_profile_admitted_data_tlb_misses =
+                pc_profile.fallback_admitted_data_tlb_misses;
+            execution.compact_fallback_profile_admitted_data_tlb_hit_only_events =
+                pc_profile.fallback_admitted_data_tlb_hit_only_events;
+            execution.compact_fallback_profile_admitted_data_tlb_miss_only_events =
+                pc_profile.fallback_admitted_data_tlb_miss_only_events;
+            execution.compact_fallback_profile_admitted_data_tlb_mixed_events =
+                pc_profile.fallback_admitted_data_tlb_mixed_events;
+            execution.compact_fallback_profile_admitted_data_no_tlb_events =
+                pc_profile.fallback_admitted_data_no_tlb_events;
             for (unsigned i = 0u;
                  i < VM_COMPACT_FALLBACK_PROFILE_HOT_COUNT; i++) {
                 execution.compact_fallback_profile_hot_pc[i] =

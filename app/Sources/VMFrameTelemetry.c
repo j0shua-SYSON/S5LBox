@@ -252,7 +252,21 @@ static bool vm_execution_telemetry_not_before(
            VM_EXEC_NOT_BEFORE(compact_fallback_profile_dread_events) &&
            VM_EXEC_NOT_BEFORE(compact_fallback_profile_dwrite_events) &&
            VM_EXEC_NOT_BEFORE(compact_fallback_profile_mixed_data_events) &&
-           VM_EXEC_NOT_BEFORE(compact_fallback_profile_no_data_events);
+           VM_EXEC_NOT_BEFORE(compact_fallback_profile_no_data_events) &&
+           VM_EXEC_NOT_BEFORE(
+               compact_fallback_profile_admitted_data_miss_events) &&
+           VM_EXEC_NOT_BEFORE(
+               compact_fallback_profile_admitted_data_tlb_hits) &&
+           VM_EXEC_NOT_BEFORE(
+               compact_fallback_profile_admitted_data_tlb_misses) &&
+           VM_EXEC_NOT_BEFORE(
+               compact_fallback_profile_admitted_data_tlb_hit_only_events) &&
+           VM_EXEC_NOT_BEFORE(
+               compact_fallback_profile_admitted_data_tlb_miss_only_events) &&
+           VM_EXEC_NOT_BEFORE(
+               compact_fallback_profile_admitted_data_tlb_mixed_events) &&
+           VM_EXEC_NOT_BEFORE(
+               compact_fallback_profile_admitted_data_no_tlb_events);
 #undef VM_EXEC_NOT_BEFORE
 }
 

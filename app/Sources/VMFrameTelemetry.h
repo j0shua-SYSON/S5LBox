@@ -299,6 +299,13 @@ typedef struct {
     uint64_t compact_fallback_profile_dwrite_events;
     uint64_t compact_fallback_profile_mixed_data_events;
     uint64_t compact_fallback_profile_no_data_events;
+    uint64_t compact_fallback_profile_admitted_data_miss_events;
+    uint64_t compact_fallback_profile_admitted_data_tlb_hits;
+    uint64_t compact_fallback_profile_admitted_data_tlb_misses;
+    uint64_t compact_fallback_profile_admitted_data_tlb_hit_only_events;
+    uint64_t compact_fallback_profile_admitted_data_tlb_miss_only_events;
+    uint64_t compact_fallback_profile_admitted_data_tlb_mixed_events;
+    uint64_t compact_fallback_profile_admitted_data_no_tlb_events;
     uint32_t compact_fallback_profile_hot_pc[
         VM_COMPACT_FALLBACK_PROFILE_HOT_COUNT];
     uint32_t compact_fallback_profile_hot_insn[

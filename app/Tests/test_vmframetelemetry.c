@@ -194,6 +194,16 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.compact_fallback_profile_dwrite_events = base + 175u;
     value.compact_fallback_profile_mixed_data_events = base + 176u;
     value.compact_fallback_profile_no_data_events = base + 177u;
+    value.compact_fallback_profile_admitted_data_miss_events = base + 178u;
+    value.compact_fallback_profile_admitted_data_tlb_hits = base + 179u;
+    value.compact_fallback_profile_admitted_data_tlb_misses = base + 180u;
+    value.compact_fallback_profile_admitted_data_tlb_hit_only_events =
+        base + 181u;
+    value.compact_fallback_profile_admitted_data_tlb_miss_only_events =
+        base + 182u;
+    value.compact_fallback_profile_admitted_data_tlb_mixed_events =
+        base + 183u;
+    value.compact_fallback_profile_admitted_data_no_tlb_events = base + 184u;
     for (unsigned i = 0u;
          i < VM_COMPACT_FALLBACK_PROFILE_OUTCOME_COUNT; i++)
         value.compact_fallback_profile_outcome[i] = base + 130u + i;
@@ -538,6 +548,27 @@ static void test_boundaries_and_sampled_changes(void) {
                2176u &&
            state.execution_last.compact_fallback_profile_no_data_events ==
                2177u &&
+           state.execution_last.
+                   compact_fallback_profile_admitted_data_miss_events ==
+               2178u &&
+           state.execution_last.
+                   compact_fallback_profile_admitted_data_tlb_hits ==
+               2179u &&
+           state.execution_last.
+                   compact_fallback_profile_admitted_data_tlb_misses ==
+               2180u &&
+           state.execution_last.
+                   compact_fallback_profile_admitted_data_tlb_hit_only_events ==
+               2181u &&
+           state.execution_last.
+                   compact_fallback_profile_admitted_data_tlb_miss_only_events ==
+               2182u &&
+           state.execution_last.
+                   compact_fallback_profile_admitted_data_tlb_mixed_events ==
+               2183u &&
+           state.execution_last.
+                   compact_fallback_profile_admitted_data_no_tlb_events ==
+               2184u &&
            state.execution_last.compact_fallback_profile_outcome[0] ==
                2130u &&
            state.execution_last.compact_fallback_profile_outcome[

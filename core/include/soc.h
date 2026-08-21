@@ -4688,6 +4688,18 @@ typedef struct {
     uint64_t fallback_dwrite_events;
     uint64_t fallback_mixed_data_events;
     uint64_t fallback_no_data_events;
+    /* A supported native instruction can still fall back when its data
+     * witness is cold. Restrict this correlation to callbacks whose FETCH
+     * witness and semantic admission were both exact, then separate reuse of
+     * an existing TLB translation from a required page-table walk. The four
+     * event buckets sum to fallback_admitted_data_miss_events. */
+    uint64_t fallback_admitted_data_miss_events;
+    uint64_t fallback_admitted_data_tlb_hits;
+    uint64_t fallback_admitted_data_tlb_misses;
+    uint64_t fallback_admitted_data_tlb_hit_only_events;
+    uint64_t fallback_admitted_data_tlb_miss_only_events;
+    uint64_t fallback_admitted_data_tlb_mixed_events;
+    uint64_t fallback_admitted_data_no_tlb_events;
     s5l_static_a64_compact_fallback_hot_t
         fallback_hot[S5L_STATIC_A64_COMPACT_FALLBACK_HOT_COUNT];
 } s5l_static_a64_compact_pc_profile_t;
