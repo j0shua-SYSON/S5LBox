@@ -179,6 +179,10 @@ typedef struct {
     uint32_t active_host_clock_enabled;
     uint32_t active_clock_input_guard_active;
     uint32_t active_clock_deadline_shield_active;
+    /* Current Z2 handoff state. These are witnesses like the CPU state above,
+     * not monotonic counters, so consistency deliberately ignores them. */
+    uint32_t mtz2_attention_pending;
+    uint32_t mtz2_pending_frame_bytes;
     uint64_t cpu_retired;
     uint64_t interpreter_tick_batches;
     uint64_t interpreter_tick_batched_retired;
@@ -230,6 +234,13 @@ typedef struct {
     uint64_t active_clock_input_guards;
     uint64_t active_clock_input_guard_quiesces;
     uint64_t active_clock_deadline_shields;
+    /* Controller-side boundaries distinguish an app queue delay from guest
+     * driver backpressure without changing either side's behaviour. */
+    uint64_t mtz2_frames_queued;
+    uint64_t mtz2_frames_read;
+    uint64_t mtz2_length_reads;
+    uint64_t mtz2_data_reads;
+    uint64_t mtz2_injects_refused;
     uint64_t wfi_paced_waits;
     uint64_t wfi_paced_wait_ns;
     uint64_t wfi_paced_partial_advances;

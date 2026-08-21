@@ -39,6 +39,8 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.active_host_clock_enabled = 1u;
     value.active_clock_input_guard_active = 1u;
     value.active_clock_deadline_shield_active = 1u;
+    value.mtz2_attention_pending = 1u;
+    value.mtz2_pending_frame_bytes = 42u;
     value.cpu_retired = base + 1u;
     value.interpreter_tick_batches = base + 2u;
     value.interpreter_tick_batched_retired = base + 3u;
@@ -118,6 +120,11 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.active_clock_input_guards = base + 100u;
     value.active_clock_input_guard_quiesces = base + 101u;
     value.active_clock_deadline_shields = base + 102u;
+    value.mtz2_frames_queued = base + 120u;
+    value.mtz2_frames_read = base + 121u;
+    value.mtz2_length_reads = base + 122u;
+    value.mtz2_data_reads = base + 123u;
+    value.mtz2_injects_refused = base + 124u;
     value.wfi_paced_waits = base + 82u;
     value.wfi_paced_wait_ns = base + 83u;
     value.wfi_paced_partial_advances = base + 84u;
@@ -359,6 +366,8 @@ static void test_boundaries_and_sampled_changes(void) {
             state.execution_last.active_host_clock_enabled == 1u &&
             state.execution_last.active_clock_input_guard_active == 1u &&
             state.execution_last.active_clock_deadline_shield_active == 1u &&
+           state.execution_last.mtz2_attention_pending == 1u &&
+           state.execution_last.mtz2_pending_frame_bytes == 42u &&
            state.execution_first.compact_refused_privileged == 1017u &&
            state.execution_last.compact_window_fast_refills == 2014u &&
            state.execution_last.fetch_refill_skips == 2024u &&
@@ -418,6 +427,11 @@ static void test_boundaries_and_sampled_changes(void) {
             state.execution_last.active_clock_input_guards == 2100u &&
             state.execution_last.active_clock_input_guard_quiesces == 2101u &&
             state.execution_last.active_clock_deadline_shields == 2102u &&
+           state.execution_last.mtz2_frames_queued == 2120u &&
+           state.execution_last.mtz2_frames_read == 2121u &&
+           state.execution_last.mtz2_length_reads == 2122u &&
+           state.execution_last.mtz2_data_reads == 2123u &&
+           state.execution_last.mtz2_injects_refused == 2124u &&
            state.execution_last.wfi_paced_waits == 2082u &&
            state.execution_last.wfi_paced_wait_ns == 2083u &&
            state.execution_last.wfi_paced_partial_advances == 2084u &&

@@ -155,6 +155,7 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
 - (void)attachToEmulator:(EmulatorViewController *)emulator;
 - (void)driveTouchPlan;
 - (void)updateFrameTelemetry;
+- (VMEngine *)currentEngine;
 @end
 
 @implementation VMDeviceAutomation {
@@ -601,6 +602,23 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
             (unsigned long long)VM_EXEC_DELTA(
                 compact_pc_profile_fallback),
             (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_exit)];
+
+        /* Touch latency has three independent boundaries: UIKit queues a
+         * report, the device accepts it, and the guest clocks it out. The
+         * first two app counters are appended below; these core counters make
+         * the last boundary visible without changing guest behaviour. */
+        execution = [execution stringByAppendingFormat:
+            @",mtz2_attention_pending=%u,mtz2_pending_frame_bytes=%u,"
+             "mtz2_frames_queued=%llu,mtz2_frames_read=%llu,"
+             "mtz2_length_reads=%llu,mtz2_data_reads=%llu,"
+             "mtz2_injects_refused=%llu",
+            last->mtz2_attention_pending,
+            last->mtz2_pending_frame_bytes,
+            (unsigned long long)VM_EXEC_DELTA(mtz2_frames_queued),
+            (unsigned long long)VM_EXEC_DELTA(mtz2_frames_read),
+            (unsigned long long)VM_EXEC_DELTA(mtz2_length_reads),
+            (unsigned long long)VM_EXEC_DELTA(mtz2_data_reads),
+            (unsigned long long)VM_EXEC_DELTA(mtz2_injects_refused)];
 #undef VM_EXEC_DELTA
 
         /* Compact but lossless field order for each ring entry:
@@ -937,6 +955,19 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
                 (unsigned long long)entry->content_hash];
         }
         value = [value stringByAppendingString:writes];
+    }
+    VMEngine *engine = [self currentEngine];
+    if (engine) {
+        uint64_t queued = 0u, delivered = 0u, coalesced = 0u, dropped = 0u;
+        [engine touchCountersQueued:&queued delivered:&delivered
+                          coalesced:&coalesced dropped:&dropped];
+        value = [value stringByAppendingFormat:
+            @",touch_ui_queued=%llu,touch_controller_accepted=%llu,"
+             "touch_ui_coalesced=%llu,touch_ui_dropped=%llu",
+            (unsigned long long)queued,
+            (unsigned long long)delivered,
+            (unsigned long long)coalesced,
+            (unsigned long long)dropped];
     }
     if ([screen isKindOfClass:[UIView class]])
         screen.accessibilityValue = value;

@@ -366,6 +366,8 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                 m->wfi_host_sleep ? 1u : 0u;
             execution.active_host_clock_enabled =
                 m->active_host_now ? 1u : 0u;
+            execution.mtz2_attention_pending = m->mtz2.atn ? 1u : 0u;
+            execution.mtz2_pending_frame_bytes = m->mtz2.frame_len;
             execution.cpu_retired = m->cpu.cycles;
             execution.interpreter_tick_batches =
                 s5l8900_interpreter_tick_batches(m);
@@ -452,6 +454,11 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                 m->active_clock_input_guard_quiesces;
             execution.active_clock_deadline_shields =
                 m->active_clock_deadline_shields;
+            execution.mtz2_frames_queued = m->mtz2.frames_queued;
+            execution.mtz2_frames_read = m->mtz2.frames_read;
+            execution.mtz2_length_reads = m->mtz2.length_reads;
+            execution.mtz2_data_reads = m->mtz2.data_reads;
+            execution.mtz2_injects_refused = m->mtz2.injects_refused;
             execution.active_clock_input_guard_active =
                 m->active_clock_input_guard ? 1u : 0u;
             execution.active_clock_deadline_shield_active =
