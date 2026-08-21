@@ -6,8 +6,10 @@
  * way AppleMBXMMU::map does, routes every command word through the real machine
  * aperture, and checks the two facts that make completion honest: translated
  * pixels moved, and bit 10 rose only after AppleMBX's separate ring+0 submit
- * store. Unknown packet modes and incomplete GARTs must move nothing and
- * complete nothing.
+ * store. Unknown packet modes and incomplete GARTs must move nothing and,
+ * under the strict default, complete nothing. The separate product-liveness
+ * test proves that an explicit degraded policy can release the driver without
+ * rewriting that strict result into a rendered frame.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
@@ -207,6 +209,80 @@ static void test_unknown_packet_and_bad_gart_are_atomic(void) {
           "late missing PTE left a partially written rectangle");
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
           "bad GART raised completion");
+
+    s5l8900_free(&m);
+}
+
+static void test_degraded_completion_is_explicit_and_nonrendering(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE), "machine init failed");
+    if (!m.ram) return;
+
+    CHECK(!m.mbx.complete_rejected_submits,
+          "a new machine enabled degraded completion by default");
+    CHECK(!s5l_mbx_set_degraded_completion(NULL, true),
+          "a NULL MBX accepted a host liveness policy");
+    CHECK(s5l_mbx_set_degraded_completion(&m.mbx, true) &&
+              m.mbx.complete_rejected_submits,
+          "the explicit degraded-completion policy was not installed");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, GART_TABLE);
+    m.bus.write32(m.bus.ctx, GART_TABLE + 0x00u, 0x08020000u);
+    m.bus.write32(m.bus.ctx, GART_TABLE + 0x04u, 0x08021000u);
+    m.bus.write32(m.bus.ctx, GART_TABLE + 0x44u, 0x08040000u);
+    m.bus.write32(m.bus.ctx, GART_TABLE + 0x48u, 0x08050000u);
+
+    uint32_t unknown[16];
+    memcpy(unknown, PACKET, sizeof unknown);
+    unknown[5] ^= 1u;
+    const uint32_t destination = 0x08040e14u;
+    m.bus.write32(m.bus.ctx, destination, 0xa5a5a5a5u);
+    write_packet(&m, RING + 0x40u, unknown, 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+
+    CHECK(m.bus.read32(m.bus.ctx, destination) == 0xa5a5a5a5u,
+          "degraded 2D completion changed a destination pixel");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
+          "degraded 2D submit did not release the driver's bit-10 wait");
+    CHECK(m.mbx_telemetry.candidates_2d == 1u &&
+              m.mbx_telemetry.rejected_2d == 1u &&
+              m.mbx_telemetry.degraded_2d == 1u &&
+              m.mbx_telemetry.completed_2d == 0u &&
+              m.mbx_telemetry.bytes_2d == 0u,
+          "degraded 2D submit was counted as rendered work");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
+
+    /* An exact STARTRENDER with no known object is rejected by every strict
+     * decoder. Product liveness supplies only the three ISR events; no target
+     * or accepted-render ledger entry is invented. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+          "degraded 3D submit did not release all three driver waits");
+    CHECK(m.mbx_telemetry.candidates_3d == 1u &&
+              m.mbx_telemetry.rejected_3d == 1u &&
+              m.mbx_telemetry.degraded_3d == 1u &&
+              m.mbx_telemetry.completed_3d == 0u &&
+              m.mbx_telemetry.pixels_3d == 0u &&
+              m.mbx_telemetry.target_3d_ledger[0].completed == 0u,
+          "degraded 3D submit was counted as a rendered frame");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+
+    CHECK(s5l_mbx_set_degraded_completion(&m.mbx, false) &&
+              !m.mbx.complete_rejected_submits,
+          "degraded completion could not be disabled");
+    write_packet(&m, RING + 0x80u, unknown, 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
+              m.mbx_telemetry.rejected_2d == 2u &&
+              m.mbx_telemetry.degraded_2d == 1u,
+          "disabling the policy did not restore strict fail-closed behavior");
+
+    CHECK(s5l_mbx_set_degraded_completion(&m.mbx, true),
+          "could not re-enable policy before reset");
+    s5l_mbx_reset(&m.mbx);
+    CHECK(m.mbx.complete_rejected_submits && m.mbx.edram != NULL &&
+              m.mbx.status == 0u,
+          "device reset lost host policy or retained guest completion state");
 
     s5l8900_free(&m);
 }
@@ -7074,6 +7150,7 @@ int main(void) {
     printf("PowerVR MBX2D tests\n");
     test_translated_copy_and_completion_boundary();
     test_unknown_packet_and_bad_gart_are_atomic();
+    test_degraded_completion_is_explicit_and_nonrendering();
     test_wallpaper_argb1555_simple_copy();
     test_full_lower_surface_opaque_fill();
     test_safari_tabs_opaque_fill_batch();

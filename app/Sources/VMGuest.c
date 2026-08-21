@@ -419,6 +419,7 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
             execution.mbx_2d_candidates = m->mbx_telemetry.candidates_2d;
             execution.mbx_2d_completed = m->mbx_telemetry.completed_2d;
             execution.mbx_2d_rejected = m->mbx_telemetry.rejected_2d;
+            execution.mbx_2d_degraded = m->mbx_telemetry.degraded_2d;
             execution.mbx_2d_bytes = m->mbx_telemetry.bytes_2d;
             execution.mbx_2d_last_rejected_ring_offset =
                 m->mbx_telemetry.last_rejected_2d_ring_offset;
@@ -429,6 +430,7 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
             execution.mbx_3d_candidates = m->mbx_telemetry.candidates_3d;
             execution.mbx_3d_completed = m->mbx_telemetry.completed_3d;
             execution.mbx_3d_rejected = m->mbx_telemetry.rejected_3d;
+            execution.mbx_3d_degraded = m->mbx_telemetry.degraded_3d;
             execution.mbx_3d_pixels = m->mbx_telemetry.pixels_3d;
             memcpy(execution.mbx_3d_rejection_history,
                    m->mbx_telemetry.rejected_3d_history,

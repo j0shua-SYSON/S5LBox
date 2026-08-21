@@ -991,6 +991,22 @@ typedef struct {
     uint32_t status;          /* 0x12c W1S; write-one-to-clear via 0x134   */
     bool     reset_done;      /* set by a reset REQUEST, never self-asserted */
     /*
+     * HOST LIVENESS POLICY, NOT A RENDERER CLAIM.
+     *
+     * The strict decoder leaves an unknown submit incomplete so retained
+     * diagnostics can expose the exact unsupported form.  That is the right
+     * default for harnesses, but it makes Apple's driver wait for its graphics
+     * watchdog whenever an opt-in MBX app reaches a form the renderer does not
+     * yet understand.  The product frontend may enable this flag to deliver
+     * the real completion interrupt after recording the rejection, without
+     * changing a single target pixel or incrementing a rendered-work counter.
+     *
+     * It is deliberately absent from snap_mbx(): a saved guest cannot choose
+     * the restoring host's safety policy.  It occupies existing padding before
+     * `edram`, so the device-state layout and snapshot bytes do not move.
+     */
+    bool     complete_rejected_submits;
+    /*
      * Owned by the machine, exactly as m->ram is, and NOT part of this struct's
      * bytes -- 16 MB inside a snapshot-guarded struct would be absurd. Survives
      * s5l_mbx_reset(), which zeroes the contents rather than dropping them.
@@ -1105,6 +1121,7 @@ typedef struct {
     uint64_t candidates_2d;
     uint64_t completed_2d;
     uint64_t rejected_2d;
+    uint64_t degraded_2d;
     uint64_t bytes_2d;
     /* Raw identity of the most recent failed atomic 2D submission. These are
      * endpoints, not monotonic counters: a frontend must pair them with an
@@ -1116,6 +1133,7 @@ typedef struct {
     uint64_t candidates_3d;
     uint64_t completed_3d;
     uint64_t rejected_3d;
+    uint64_t degraded_3d;
     uint64_t pixels_3d;
     s5l_mbx_3d_rejection_witness_t rejected_3d_history[
         S5L_MBX_3D_REJECTION_HISTORY];
@@ -1126,6 +1144,12 @@ typedef struct {
 } s5l_mbx_telemetry_t;
 
 void     s5l_mbx_reset(s5l_mbx_t *m);
+/* Select the host's policy for an exact 2D/3D submit which the strict
+ * renderer rejects. Disabled is the diagnostic default. Enabled records the
+ * rejection and raises completion without modifying pixels; `degraded_*`
+ * counts those non-rendering completions separately. The setting survives a
+ * device reset and is never loaded from a guest snapshot. */
+bool     s5l_mbx_set_degraded_completion(s5l_mbx_t *m, bool enabled);
 uint32_t s5l_mbx_read(s5l_mbx_t *m, uint32_t off);
 void     s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val);
 /* Called immediately before s5l_mbx_write() for the same store. TA command

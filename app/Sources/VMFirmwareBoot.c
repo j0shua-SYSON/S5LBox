@@ -1549,6 +1549,30 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     free(kernel);
     free(tree);
 
+    /*
+     * MBX remains an explicit opt-in, but an opt-in product session must not
+     * freeze for the driver's multi-second recovery interval every time the
+     * strict software decoder encounters a new command form. Keep the core's
+     * harness default fail-closed; only the app's effective MBX row enables a
+     * completion-without-rendering safety net. Rejections and their raw
+     * witnesses remain intact, while rendered counters and pixels do not move.
+     *
+     * Apply this after every restore/fresh-boot branch. The policy is host
+     * state and deliberately does not travel in a guest snapshot.
+     */
+    int mbx_index = vm_option_index("mbx");
+    bool mbx_effective = mbx_index >= 0 &&
+        (unsigned)mbx_index < report->options.count &&
+        report->options.row[mbx_index].effective;
+    if (!s5l_mbx_set_degraded_completion(&machine->mbx, mbx_effective)) {
+        (void)file_block_close(boot->media);
+        set_detail(report->detail, sizeof report->detail,
+                   "The MBX liveness policy could not be applied.");
+        set_detail(report->summary, sizeof report->summary,
+                   "MBX liveness unavailable");
+        return false;
+    }
+
 #if defined(S5LBOX_IOS_ACTIVE_REALTIME_CLOCK)
     /*
      * Arm this after restore so the first host sample anchors the restored

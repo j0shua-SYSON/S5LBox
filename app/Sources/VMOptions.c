@@ -21,7 +21,9 @@
     "On only in the separately labelled S5LBox MBX phone experiment. It " \
     "uses a separate app container so its first machine gets a fresh MBX work " \
     "image rather than silently reusing the normal app's CPU-renderer image. " \
-    "The path is still experimental: no phone run has proved 30 fps."
+    "An undecoded submit is recorded and completed without pixels instead of " \
+    "stalling in AppleMBX's watchdog; that is a liveness fallback, not " \
+    "renderer coverage. No phone run has proved 30 fps."
 #define VM_CA_RENDER_DETAIL \
     "Off only in the separately labelled S5LBox MBX phone experiment, paired " \
     "with MBX on before its first work image is created. The normal app keeps " \
@@ -34,8 +36,9 @@
     "Off by default pending final cold-boot and 30 fps acceptance. On leaves " \
     "the PowerVR driver matched and uses the VM's reset, ring, 2D and 3D " \
     "models. A live checkpoint completed 1,388/1,388 2D jobs and 8,888/8,888 " \
-    "3D renders with no decoder rejection or recovery, but that is not yet " \
-    "a cold product-level proof."
+    "3D renders with no decoder rejection or recovery. An undecoded submit is " \
+    "recorded and completed without pixels instead of stalling in the driver " \
+    "watchdog; that favors liveness for one frame and is not a render claim."
 #define VM_CA_RENDER_DETAIL \
     "On is the conservative default, applied when the work image is made: " \
     "CA_ENABLE_MBX2D=0 selects Apple's CPU renderer while MBX remains off. " \

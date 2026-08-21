@@ -67,6 +67,7 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.mbx_2d_candidates = base + 26u;
     value.mbx_2d_completed = base + 27u;
     value.mbx_2d_rejected = base + 28u;
+    value.mbx_2d_degraded = base + 118u;
     value.mbx_2d_bytes = base + 29u;
     value.mbx_2d_last_rejected_ring_offset = base + 76u;
     value.mbx_2d_last_rejected_count = base + 77u;
@@ -74,6 +75,7 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.mbx_3d_candidates = base + 30u;
     value.mbx_3d_completed = base + 31u;
     value.mbx_3d_rejected = base + 32u;
+    value.mbx_3d_degraded = base + 119u;
     value.mbx_3d_pixels = base + 33u;
     value.mbx_3d_rejection_history[0].sequence = base + 79u;
     value.mbx_3d_rejection_history[0].sprite_reason_hash = base + 80u;
@@ -361,11 +363,13 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.compact_window_fast_refills == 2014u &&
            state.execution_last.fetch_refill_skips == 2024u &&
            state.execution_last.known_negative_bypasses == 2025u &&
+           state.execution_last.mbx_2d_degraded == 2118u &&
            state.execution_last.mbx_2d_bytes == 2029u &&
            state.execution_last.mbx_2d_last_rejected_ring_offset == 2076u &&
            state.execution_last.mbx_2d_last_rejected_count == 2077u &&
            state.execution_last.mbx_2d_last_rejected_reason_hash == 2078u &&
            state.execution_last.mbx_3d_pixels == 2033u &&
+           state.execution_last.mbx_3d_degraded == 2119u &&
            state.execution_last.mbx_3d_rejection_history[0].sequence ==
                2079u &&
            state.execution_last.mbx_3d_rejection_history[0].
@@ -549,10 +553,12 @@ static void test_worst_scanout_gap_keeps_its_work_witness(void) {
               state.scanout_max_gap_mbx_2d_candidates == 100u &&
               state.scanout_max_gap_mbx_2d_completed == 100u &&
               state.scanout_max_gap_mbx_2d_rejected == 100u &&
+              state.scanout_max_gap_mbx_2d_degraded == 100u &&
               state.scanout_max_gap_mbx_2d_bytes == 100u &&
               state.scanout_max_gap_mbx_3d_candidates == 100u &&
               state.scanout_max_gap_mbx_3d_completed == 100u &&
               state.scanout_max_gap_mbx_3d_rejected == 100u &&
+              state.scanout_max_gap_mbx_3d_degraded == 100u &&
               state.scanout_max_gap_mbx_3d_pixels == 100u,
               "worst scanout gap did not retain its exact execution/MBX delta");
     }

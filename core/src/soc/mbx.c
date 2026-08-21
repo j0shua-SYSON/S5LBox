@@ -43,7 +43,9 @@
  * exact cold snapshots. Premultiplied source-over, filtered unity sprites and
  * one uniformly minified form are decoded; unknown formats, perspective,
  * nonuniform scaling, blend equations and geometry are rejected without
- * completion. Everything else remains a fresh question to
+ * completion under the strict default. An explicit host liveness policy may
+ * complete that rejected transaction without touching pixels, while retaining
+ * the rejection as rejection. Everything else remains a fresh question to
  * answer the same way -- observe it, read its producer, then model it. A
  * driver that needs an unknown operation must stop loudly instead of quietly
  * proceeding on fabricated pixels.
@@ -1273,6 +1275,26 @@ bool s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
             fprintf(stderr, "MBX2D reject ring+0x%04x (%u commands): %s\n",
                     packet_off - S5L_MBX_2D_RING_BASE,
                     metric_count, why);
+        /*
+         * Decoder coverage and device liveness are two different facts.  In
+         * the product's explicit MBX mode, do not make AppleMBX spend seconds
+         * in its watchdog merely because this software renderer could not
+         * reproduce a submitted frame.  The destination remains byte-exactly
+         * unchanged, completed_2d/bytes_2d remain untouched, and the rejection
+         * witness above remains the diagnostic authority.  Only the hardware
+         * completion edge is supplied, and its separate degraded counter says
+         * exactly how often that compromise occurred.
+         */
+        if (m->complete_rejected_submits) {
+            m->status |= S5L_MBX_STATUS_2D_SYNC;
+            if (telemetry)
+                mbx_counter_add(&telemetry->degraded_2d, metric_count);
+            if (mbx_trace_state == 1)
+                fprintf(stderr,
+                        "MBX2D degraded completion ring+0x%04x "
+                        "(%u commands): no pixels rendered\n",
+                        packet_off - S5L_MBX_2D_RING_BASE, metric_count);
+        }
         return false;
     }
 
@@ -5247,6 +5269,21 @@ bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
                 fputc('\n', stderr);
             }
         }
+        /* See the 2D counterpart above.  The three bits are the independently
+         * observed ISR events AppleMBX requires to leave 3D busy state.  They
+         * are raised only after the rejection witness is captured, and no
+         * accepted-render witness, pixel count, or target-ledger entry is
+         * manufactured for this non-rendering completion. */
+        if (m->complete_rejected_submits) {
+            m->status |= S5L_MBX_STATUS_ISP |
+                         S5L_MBX_STATUS_RENDER_COMPLETE |
+                         S5L_MBX_STATUS_EVM_DALLOC;
+            if (telemetry) mbx_counter_add(&telemetry->degraded_3d, 1u);
+            if (mbx_trace_state == 1)
+                fprintf(stderr,
+                        "MBX3D degraded completion STARTRENDER: "
+                        "no pixels rendered\n");
+        }
         return false;
     }
 
@@ -5268,6 +5305,12 @@ bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
     return true;
 }
 
+bool s5l_mbx_set_degraded_completion(s5l_mbx_t *m, bool enabled) {
+    if (!m) return false;
+    m->complete_rejected_submits = enabled;
+    return true;
+}
+
 void s5l_mbx_reset(s5l_mbx_t *m) {
     if (!m) return;
     /*
@@ -5282,8 +5325,10 @@ void s5l_mbx_reset(s5l_mbx_t *m) {
      * CONTENTS are cleared, which is what a powered-down edram holds.
      */
     uint8_t *edram = m->edram;
+    bool complete_rejected_submits = m->complete_rejected_submits;
     memset(m, 0, sizeof *m);
     m->edram = edram;
+    m->complete_rejected_submits = complete_rejected_submits;
     if (edram) memset(edram, 0, S5L_MBX_EDRAM_SIZE);
 }
 

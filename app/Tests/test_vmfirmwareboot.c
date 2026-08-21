@@ -380,6 +380,8 @@ static void test_saved_state_restore_fixture(void) {
     CHECK(ok, "app restore was refused: %s", report.detail);
     CHECK(report.ok == ok, "restore report.ok disagrees with return value");
     if (ok) {
+        CHECK(machine.mbx.complete_rejected_submits,
+              "an effective MBX restore did not arm product liveness policy");
         CHECK(machine.cpu.cycles == UINT64_C(7320000000),
               "restored at %llu instructions, expected 7320000000",
               (unsigned long long)machine.cpu.cycles);
@@ -517,11 +519,32 @@ static void test_guest_watchdog_restart_fixture(void) {
         return;
     }
 
+    /* Exercise the product's opt-in graphics policy across the replacement,
+     * not merely the conservative CPU-renderer default. No guest instruction
+     * is needed for this lifecycle seam. */
+    bool values[VM_BOOT_OPTION_MAX];
+    for (unsigned i = 0; i < VM_BOOT_OPTION_MAX; i++) values[i] = false;
+    for (unsigned i = 0; i < vm_option_count() && i < VM_BOOT_OPTION_MAX; i++)
+        values[i] = vm_option_at(i)->def;
+    int requested_mbx = vm_option_index("mbx");
+    int ca = vm_option_index("ca-software-render");
+    CHECK(requested_mbx >= 0 && ca >= 0,
+          "watchdog fixture graphics options are absent");
+    if (requested_mbx >= 0) values[(unsigned)requested_mbx] = true;
+    if (ca >= 0) values[(unsigned)ca] = false;
+
     bool started = vm_firmware_boot_start(
-        boot, &machine, &paths, NULL, 0u, &report);
+        boot, &machine, &paths, values, vm_option_count(), &report);
     CHECK(started && report.ok,
           "watchdog restart fixture could not boot: %s", report.detail);
     if (started) {
+        int mbx = vm_option_index("mbx");
+        bool expect_mbx_liveness = mbx >= 0 &&
+            (unsigned)mbx < report.options.count &&
+            report.options.row[mbx].effective;
+        CHECK(machine.mbx.complete_rejected_submits ==
+                  expect_mbx_liveness,
+              "initial watchdog fixture MBX policy disagrees with its report");
         machine.bus.write32(machine.bus.ctx, S5L8900_WDT_BASE,
                             S5L8900_WDT_RESTART_VALUE);
         arm_status_t status = ARM_UNDEFINED;
@@ -529,9 +552,11 @@ static void test_guest_watchdog_restart_fixture(void) {
         CHECK(retired == 0u && status == ARM_OK &&
                   machine.ram != NULL && machine.cpu.r[15] != 0u &&
                   !machine.restart_requested &&
-                  machine.restart_host_service != NULL,
+                  machine.restart_host_service != NULL &&
+                  machine.mbx.complete_rejected_submits ==
+                      expect_mbx_liveness,
               "watchdog restart did not return a runnable replacement "
-              "(retired/status/pc=%u/%d/%08x)",
+              "with the same MBX policy (retired/status/pc=%u/%d/%08x)",
               retired, (int)status, machine.cpu.r[15]);
         CHECK(machine.uart0.tx_len != 0u &&
                   strstr(machine.uart0.tx,

@@ -207,6 +207,7 @@ typedef struct {
     uint64_t mbx_2d_candidates;
     uint64_t mbx_2d_completed;
     uint64_t mbx_2d_rejected;
+    uint64_t mbx_2d_degraded;
     uint64_t mbx_2d_bytes;
     uint64_t mbx_2d_last_rejected_ring_offset;
     uint64_t mbx_2d_last_rejected_count;
@@ -214,6 +215,7 @@ typedef struct {
     uint64_t mbx_3d_candidates;
     uint64_t mbx_3d_completed;
     uint64_t mbx_3d_rejected;
+    uint64_t mbx_3d_degraded;
     uint64_t mbx_3d_pixels;
     vm_mbx_3d_rejection_witness_t mbx_3d_rejection_history[
         VM_MBX_3D_REJECTION_HISTORY];
@@ -319,10 +321,12 @@ typedef struct {
     uint64_t scanout_max_gap_mbx_2d_candidates;
     uint64_t scanout_max_gap_mbx_2d_completed;
     uint64_t scanout_max_gap_mbx_2d_rejected;
+    uint64_t scanout_max_gap_mbx_2d_degraded;
     uint64_t scanout_max_gap_mbx_2d_bytes;
     uint64_t scanout_max_gap_mbx_3d_candidates;
     uint64_t scanout_max_gap_mbx_3d_completed;
     uint64_t scanout_max_gap_mbx_3d_rejected;
+    uint64_t scanout_max_gap_mbx_3d_degraded;
     uint64_t scanout_max_gap_mbx_3d_pixels;
 
     uint64_t layer_attempts;

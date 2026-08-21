@@ -446,6 +446,7 @@ static void test_device_state_round_trips(void) {
     a->mbx_telemetry.candidates_2d = 101u;
     a->mbx_telemetry.completed_2d = 102u;
     a->mbx_telemetry.rejected_2d = 103u;
+    a->mbx_telemetry.degraded_2d = 120u;
     a->mbx_telemetry.bytes_2d = 104u;
     a->mbx_telemetry.last_rejected_2d_ring_offset = 105u;
     a->mbx_telemetry.last_rejected_2d_count = 106u;
@@ -453,6 +454,7 @@ static void test_device_state_round_trips(void) {
     a->mbx_telemetry.candidates_3d = 108u;
     a->mbx_telemetry.completed_3d = 109u;
     a->mbx_telemetry.rejected_3d = 110u;
+    a->mbx_telemetry.degraded_3d = 121u;
     a->mbx_telemetry.pixels_3d = 111u;
     a->mbx_telemetry.rejected_3d_history[2].sequence = 112u;
     a->mbx_telemetry.rejected_3d_history[2].record_words[43] = 113u;
@@ -465,6 +467,7 @@ static void test_device_state_round_trips(void) {
     b->mbx_telemetry.candidates_2d = 201u;
     b->mbx_telemetry.completed_2d = 202u;
     b->mbx_telemetry.rejected_2d = 203u;
+    b->mbx_telemetry.degraded_2d = 220u;
     b->mbx_telemetry.bytes_2d = 204u;
     b->mbx_telemetry.last_rejected_2d_ring_offset = 205u;
     b->mbx_telemetry.last_rejected_2d_count = 206u;
@@ -472,6 +475,7 @@ static void test_device_state_round_trips(void) {
     b->mbx_telemetry.candidates_3d = 208u;
     b->mbx_telemetry.completed_3d = 209u;
     b->mbx_telemetry.rejected_3d = 210u;
+    b->mbx_telemetry.degraded_3d = 221u;
     b->mbx_telemetry.pixels_3d = 211u;
     b->mbx_telemetry.rejected_3d_history[2].sequence = 212u;
     b->mbx_telemetry.rejected_3d_history[2].record_words[43] = 213u;
@@ -481,6 +485,8 @@ static void test_device_state_round_trips(void) {
     b->mbx_telemetry.target_3d_ledger[4].completed = 217u;
     b->mbx_telemetry.target_3d_ledger[4].pixels = 218u;
     b->mbx_telemetry.target_3d_ledger[4].target_physical = 219u;
+    CHECK(s5l_mbx_set_degraded_completion(&b->mbx, true),
+          "could not install destination MBX liveness policy");
 
     /* Interactive pacing is live host policy. The destination's callback,
      * context and running evidence must survive a guest restore, while a
@@ -536,6 +542,7 @@ static void test_device_state_round_trips(void) {
     CHECK(b->mbx_telemetry.candidates_2d == 201u &&
           b->mbx_telemetry.completed_2d == 202u &&
           b->mbx_telemetry.rejected_2d == 203u &&
+          b->mbx_telemetry.degraded_2d == 220u &&
           b->mbx_telemetry.bytes_2d == 204u &&
           b->mbx_telemetry.last_rejected_2d_ring_offset == 205u &&
           b->mbx_telemetry.last_rejected_2d_count == 206u &&
@@ -543,6 +550,7 @@ static void test_device_state_round_trips(void) {
           b->mbx_telemetry.candidates_3d == 208u &&
           b->mbx_telemetry.completed_3d == 209u &&
           b->mbx_telemetry.rejected_3d == 210u &&
+          b->mbx_telemetry.degraded_3d == 221u &&
           b->mbx_telemetry.pixels_3d == 211u &&
           b->mbx_telemetry.rejected_3d_history[2].sequence == 212u &&
           b->mbx_telemetry.rejected_3d_history[2].record_words[43] == 213u &&
@@ -551,8 +559,10 @@ static void test_device_state_round_trips(void) {
           b->mbx_telemetry.target_3d_ledger[4].last_sequence == 216u &&
           b->mbx_telemetry.target_3d_ledger[4].completed == 217u &&
           b->mbx_telemetry.target_3d_ledger[4].pixels == 218u &&
-          b->mbx_telemetry.target_3d_ledger[4].target_physical == 219u,
-          "snapshot restore changed the live host-only MBX work ledger");
+          b->mbx_telemetry.target_3d_ledger[4].target_physical == 219u &&
+          b->mbx.complete_rejected_submits,
+          "snapshot restore changed the live host-only MBX policy or work "
+          "ledger");
     CHECK(b->wfi_host_sleep == snapshot_wfi_sleep_probe &&
           b->wfi_host_sleep_ctx == &pacing_context &&
           b->wfi_paced_waits == 301u && b->wfi_paced_wait_ns == 302u &&

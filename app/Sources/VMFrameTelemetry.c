@@ -189,10 +189,12 @@ static bool vm_execution_telemetry_not_before(
            VM_EXEC_NOT_BEFORE(mbx_2d_candidates) &&
            VM_EXEC_NOT_BEFORE(mbx_2d_completed) &&
            VM_EXEC_NOT_BEFORE(mbx_2d_rejected) &&
+           VM_EXEC_NOT_BEFORE(mbx_2d_degraded) &&
            VM_EXEC_NOT_BEFORE(mbx_2d_bytes) &&
            VM_EXEC_NOT_BEFORE(mbx_3d_candidates) &&
            VM_EXEC_NOT_BEFORE(mbx_3d_completed) &&
            VM_EXEC_NOT_BEFORE(mbx_3d_rejected) &&
+           VM_EXEC_NOT_BEFORE(mbx_3d_degraded) &&
            VM_EXEC_NOT_BEFORE(mbx_3d_pixels) &&
            VM_EXEC_NOT_BEFORE(active_clock_updates) &&
            VM_EXEC_NOT_BEFORE(active_clock_added_ticks) &&
@@ -330,6 +332,8 @@ void vm_frame_telemetry_note_scanout(
                 VM_STALL_DELTA(mbx_2d_completed);
             state->scanout_max_gap_mbx_2d_rejected =
                 VM_STALL_DELTA(mbx_2d_rejected);
+            state->scanout_max_gap_mbx_2d_degraded =
+                VM_STALL_DELTA(mbx_2d_degraded);
             state->scanout_max_gap_mbx_2d_bytes =
                 VM_STALL_DELTA(mbx_2d_bytes);
             state->scanout_max_gap_mbx_3d_candidates =
@@ -338,6 +342,8 @@ void vm_frame_telemetry_note_scanout(
                 VM_STALL_DELTA(mbx_3d_completed);
             state->scanout_max_gap_mbx_3d_rejected =
                 VM_STALL_DELTA(mbx_3d_rejected);
+            state->scanout_max_gap_mbx_3d_degraded =
+                VM_STALL_DELTA(mbx_3d_degraded);
             state->scanout_max_gap_mbx_3d_pixels =
                 VM_STALL_DELTA(mbx_3d_pixels);
 #undef VM_STALL_DELTA

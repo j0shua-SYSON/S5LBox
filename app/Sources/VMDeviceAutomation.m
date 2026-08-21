@@ -455,12 +455,14 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
              "fetch_refill_attempts=%llu,fetch_refill_hits=%llu,"
              "fetch_refill_skips=%llu,known_negative_bypasses=%llu,"
              "mbx_2d_candidates=%llu,mbx_2d_completed=%llu,"
-             "mbx_2d_rejected=%llu,mbx_2d_bytes=%llu,"
+             "mbx_2d_rejected=%llu,mbx_2d_degraded=%llu,"
+             "mbx_2d_bytes=%llu,"
              "mbx_2d_last_rejected_ring_offset=%llu,"
              "mbx_2d_last_rejected_count=%llu,"
              "mbx_2d_last_rejected_reason_hash=%016llx,"
              "mbx_3d_candidates=%llu,mbx_3d_completed=%llu,"
-              "mbx_3d_rejected=%llu,mbx_3d_pixels=%llu,"
+              "mbx_3d_rejected=%llu,mbx_3d_degraded=%llu,"
+              "mbx_3d_pixels=%llu,"
               "active_clock_updates=%llu,active_clock_added_ticks=%llu,"
               "active_clock_clamps=%llu,active_clock_failures=%llu,"
               "active_clock_input_guards=%llu,"
@@ -536,6 +538,7 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
             (unsigned long long)VM_EXEC_DELTA(mbx_2d_candidates),
             (unsigned long long)VM_EXEC_DELTA(mbx_2d_completed),
             (unsigned long long)VM_EXEC_DELTA(mbx_2d_rejected),
+            (unsigned long long)VM_EXEC_DELTA(mbx_2d_degraded),
             (unsigned long long)VM_EXEC_DELTA(mbx_2d_bytes),
             (unsigned long long)last->mbx_2d_last_rejected_ring_offset,
             (unsigned long long)last->mbx_2d_last_rejected_count,
@@ -543,6 +546,7 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
             (unsigned long long)VM_EXEC_DELTA(mbx_3d_candidates),
             (unsigned long long)VM_EXEC_DELTA(mbx_3d_completed),
             (unsigned long long)VM_EXEC_DELTA(mbx_3d_rejected),
+            (unsigned long long)VM_EXEC_DELTA(mbx_3d_degraded),
             (unsigned long long)VM_EXEC_DELTA(mbx_3d_pixels),
             (unsigned long long)VM_EXEC_DELTA(active_clock_updates),
             (unsigned long long)VM_EXEC_DELTA(active_clock_added_ticks),
@@ -826,19 +830,23 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
              "scanout_stall_mbx_2d_candidates=%llu,"
              "scanout_stall_mbx_2d_completed=%llu,"
              "scanout_stall_mbx_2d_rejected=%llu,"
+             "scanout_stall_mbx_2d_degraded=%llu,"
              "scanout_stall_mbx_2d_bytes=%llu,"
              "scanout_stall_mbx_3d_candidates=%llu,"
              "scanout_stall_mbx_3d_completed=%llu,"
              "scanout_stall_mbx_3d_rejected=%llu,"
+             "scanout_stall_mbx_3d_degraded=%llu,"
              "scanout_stall_mbx_3d_pixels=%llu",
             (unsigned long long)state.scanout_max_gap_cpu_retired,
             (unsigned long long)state.scanout_max_gap_mbx_2d_candidates,
             (unsigned long long)state.scanout_max_gap_mbx_2d_completed,
             (unsigned long long)state.scanout_max_gap_mbx_2d_rejected,
+            (unsigned long long)state.scanout_max_gap_mbx_2d_degraded,
             (unsigned long long)state.scanout_max_gap_mbx_2d_bytes,
             (unsigned long long)state.scanout_max_gap_mbx_3d_candidates,
             (unsigned long long)state.scanout_max_gap_mbx_3d_completed,
             (unsigned long long)state.scanout_max_gap_mbx_3d_rejected,
+            (unsigned long long)state.scanout_max_gap_mbx_3d_degraded,
             (unsigned long long)state.scanout_max_gap_mbx_3d_pixels]
         : @"scanout_stall_execution_captured=0";
 

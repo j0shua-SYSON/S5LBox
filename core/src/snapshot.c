@@ -210,9 +210,12 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * 127912 adds the watchdog's two host restart pointers (16); its transient
  * request bit fits in existing padding beside level_dirty. They are likewise
  * absent from snap_mach(), so SNAPSHOT_VERSION and the bytes on disk do not
- * move. The size below must be read from the compiler's emitted `.space`, not
- * inferred from source padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         127912, "snap_mach");
+ * move. 127928 adds the MBX ledger's two degraded-completion counters (16).
+ * They are host evidence and are not serialized; the MBX policy flag itself
+ * fits existing padding before its edram pointer and also stays out of
+ * snap_mbx(). The size below must be read from the compiler's emitted `.space`,
+ * not inferred from source padding. */
+SNAP_SIZE_GUARD(s5l8900_t,         127928, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
