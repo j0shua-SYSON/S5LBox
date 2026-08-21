@@ -837,6 +837,59 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
                     i, imageName,
                     i, symbolName];
             }
+            static NSString * const fallbackOutcomeNames[] = {
+                @"admit_execute",
+                @"admit_condition_skip",
+                @"reject_thumb",
+                @"reject_nv",
+                @"reject_dp_pc",
+                @"reject_dp_test_without_s",
+                @"reject_dp_register_shift",
+                @"reject_dp_rm_pc",
+                @"reject_memory_form",
+                @"reject_memory_pc",
+                @"reject_memory_alignment",
+                @"reject_vfp",
+                @"reject_class",
+            };
+            _Static_assert(
+                sizeof fallbackOutcomeNames /
+                        sizeof fallbackOutcomeNames[0] ==
+                    VM_COMPACT_FALLBACK_PROFILE_OUTCOME_COUNT,
+                "compact fallback outcome names drifted");
+            [outsidePCs appendFormat:
+                @",compact_fallback_profile_events=%llu,"
+                 "compact_fallback_profile_witness_misses=%llu",
+                (unsigned long long)
+                    last->compact_fallback_profile_events,
+                (unsigned long long)
+                    last->compact_fallback_profile_witness_misses];
+            for (unsigned i = 0u;
+                 i < VM_COMPACT_FALLBACK_PROFILE_OUTCOME_COUNT; i++) {
+                [outsidePCs appendFormat:
+                    @",compact_fallback_profile_%@=%llu",
+                    fallbackOutcomeNames[i],
+                    (unsigned long long)
+                        last->compact_fallback_profile_outcome[i]];
+            }
+            for (unsigned i = 0u;
+                 i < VM_COMPACT_FALLBACK_PROFILE_HOT_COUNT; i++) {
+                [outsidePCs appendFormat:
+                    @",compact_fallback_profile_hot%u_pc=%08x,"
+                     "compact_fallback_profile_hot%u_insn=%08x,"
+                     "compact_fallback_profile_hot%u_events=%llu,"
+                     "compact_fallback_profile_hot%u_error=%llu,"
+                     "compact_fallback_profile_hot%u_thumb=%u,"
+                     "compact_fallback_profile_hot%u_privileged=%u",
+                    i, last->compact_fallback_profile_hot_pc[i],
+                    i, last->compact_fallback_profile_hot_insn[i],
+                    i, (unsigned long long)
+                        last->compact_fallback_profile_hot_events[i],
+                    i, (unsigned long long)
+                        last->compact_fallback_profile_hot_error[i],
+                    i, last->compact_fallback_profile_hot_thumb[i],
+                    i, last->compact_fallback_profile_hot_privileged[i]];
+            }
             execution = [execution stringByAppendingString:outsidePCs];
         }
     }

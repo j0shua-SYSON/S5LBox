@@ -184,6 +184,23 @@ static vm_execution_telemetry_observation_t execution_observation(
             UINT64_C(0x200000000) + base + (uint64_t)i * UINT64_C(0x100);
         value.compact_pc_profile_outside_hot_samples[i] = base + 55u + i;
     }
+    value.compact_fallback_profile_events = base + 125u;
+    value.compact_fallback_profile_witness_misses = base + 126u;
+    for (unsigned i = 0u;
+         i < VM_COMPACT_FALLBACK_PROFILE_OUTCOME_COUNT; i++)
+        value.compact_fallback_profile_outcome[i] = base + 130u + i;
+    for (unsigned i = 0u;
+         i < VM_COMPACT_FALLBACK_PROFILE_HOT_COUNT; i++) {
+        value.compact_fallback_profile_hot_pc[i] =
+            UINT32_C(0x30000000) + (uint32_t)base + i * UINT32_C(0x100);
+        value.compact_fallback_profile_hot_insn[i] =
+            UINT32_C(0xe0000000) + (uint32_t)base + i;
+        value.compact_fallback_profile_hot_events[i] = base + 150u + i;
+        value.compact_fallback_profile_hot_error[i] = base + 160u + i;
+        value.compact_fallback_profile_hot_thumb[i] = (uint8_t)(i & 1u);
+        value.compact_fallback_profile_hot_privileged[i] =
+            (uint8_t)((i + 1u) & 1u);
+    }
     return value;
 }
 
@@ -493,7 +510,25 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.compact_pc_profile_outside_hot_pc[7] ==
                UINT64_C(0x200000000) + 2000u + UINT64_C(0x700) &&
            state.execution_last.compact_pc_profile_outside_hot_samples[7] ==
-               2062u,
+               2062u &&
+           state.execution_last.compact_fallback_profile_events == 2125u &&
+           state.execution_last.compact_fallback_profile_witness_misses ==
+               2126u &&
+           state.execution_last.compact_fallback_profile_outcome[0] ==
+               2130u &&
+           state.execution_last.compact_fallback_profile_outcome[
+               VM_COMPACT_FALLBACK_PROFILE_OUTCOME_COUNT - 1u] == 2142u &&
+           state.execution_last.compact_fallback_profile_hot_pc[0] ==
+               UINT32_C(0x30000000) + 2000u &&
+           state.execution_last.compact_fallback_profile_hot_insn[7] ==
+               UINT32_C(0xe0000000) + 2007u &&
+           state.execution_last.compact_fallback_profile_hot_events[7] ==
+               2157u &&
+           state.execution_last.compact_fallback_profile_hot_error[7] ==
+               2167u &&
+           state.execution_last.compact_fallback_profile_hot_thumb[7] == 1u &&
+           state.execution_last.compact_fallback_profile_hot_privileged[7] ==
+               0u,
           "execution counter endpoints are wrong");
 
     CHECK(state.layer_attempts == 4u && state.layer_accepted == 3u &&

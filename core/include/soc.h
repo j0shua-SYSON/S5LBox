@@ -4636,10 +4636,27 @@ typedef enum {
 
 #define S5L_STATIC_A64_COMPACT_PC_HOT_COUNT 8u
 
+/* Exact events observed at the compact runner's architectural fallback
+ * boundary while the opt-in PC profiler is active. The outcome ordering is
+ * pinned to a64_compact_raw_admission_t by a compile-time assertion in the
+ * engine wrapper; keeping the public shape numeric avoids making soc.h depend
+ * on the build tool's private decoder header. */
+#define S5L_STATIC_A64_COMPACT_FALLBACK_OUTCOME_COUNT 13u
+#define S5L_STATIC_A64_COMPACT_FALLBACK_HOT_COUNT 8u
+
 typedef struct {
     uint64_t pc;
     uint64_t samples;
 } s5l_static_a64_compact_pc_hot_t;
+
+typedef struct {
+    uint32_t pc;
+    uint32_t insn;
+    uint64_t events;
+    uint64_t error;
+    bool thumb;
+    bool privileged;
+} s5l_static_a64_compact_fallback_hot_t;
 
 typedef struct {
     bool enabled;
@@ -4655,6 +4672,12 @@ typedef struct {
     uint64_t outside_pc_dropped;
     s5l_static_a64_compact_pc_hot_t
         outside_hot[S5L_STATIC_A64_COMPACT_PC_HOT_COUNT];
+    uint64_t fallback_events;
+    uint64_t fallback_witness_misses;
+    uint64_t fallback_outcome[
+        S5L_STATIC_A64_COMPACT_FALLBACK_OUTCOME_COUNT];
+    s5l_static_a64_compact_fallback_hot_t
+        fallback_hot[S5L_STATIC_A64_COMPACT_FALLBACK_HOT_COUNT];
 } s5l_static_a64_compact_pc_profile_t;
 
 void s5l8900_static_a64_compact_raw_pc_profile(

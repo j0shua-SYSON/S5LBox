@@ -546,6 +546,34 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                 execution.compact_pc_profile_outside_hot_samples[i] =
                     pc_profile.outside_hot[i].samples;
             }
+            _Static_assert(VM_COMPACT_FALLBACK_PROFILE_OUTCOME_COUNT ==
+                               S5L_STATIC_A64_COMPACT_FALLBACK_OUTCOME_COUNT,
+                           "compact fallback outcome count drifted");
+            _Static_assert(VM_COMPACT_FALLBACK_PROFILE_HOT_COUNT ==
+                               S5L_STATIC_A64_COMPACT_FALLBACK_HOT_COUNT,
+                           "compact fallback hot count drifted");
+            execution.compact_fallback_profile_events =
+                pc_profile.fallback_events;
+            execution.compact_fallback_profile_witness_misses =
+                pc_profile.fallback_witness_misses;
+            memcpy(execution.compact_fallback_profile_outcome,
+                   pc_profile.fallback_outcome,
+                   sizeof execution.compact_fallback_profile_outcome);
+            for (unsigned i = 0u;
+                 i < VM_COMPACT_FALLBACK_PROFILE_HOT_COUNT; i++) {
+                execution.compact_fallback_profile_hot_pc[i] =
+                    pc_profile.fallback_hot[i].pc;
+                execution.compact_fallback_profile_hot_insn[i] =
+                    pc_profile.fallback_hot[i].insn;
+                execution.compact_fallback_profile_hot_events[i] =
+                    pc_profile.fallback_hot[i].events;
+                execution.compact_fallback_profile_hot_error[i] =
+                    pc_profile.fallback_hot[i].error;
+                execution.compact_fallback_profile_hot_thumb[i] =
+                    pc_profile.fallback_hot[i].thumb ? 1u : 0u;
+                execution.compact_fallback_profile_hot_privileged[i] =
+                    pc_profile.fallback_hot[i].privileged ? 1u : 0u;
+            }
             vm_frame_telemetry_note_execution(&execution);
         }
     }

@@ -74,6 +74,8 @@ typedef struct {
  * keeps diagnostics out of the instruction hot path while still exposing
  * whether a signed invocation retired useful work or failed an entry gate. */
 #define VM_COMPACT_PC_PROFILE_HOT_COUNT 8u
+#define VM_COMPACT_FALLBACK_PROFILE_OUTCOME_COUNT 13u
+#define VM_COMPACT_FALLBACK_PROFILE_HOT_COUNT 8u
 #define VM_MBX_3D_REJECTION_HISTORY 4u
 #define VM_MBX_3D_REJECTION_RECORD_WORDS 44u
 #define VM_MBX_3D_REJECTION_TA_WORDS 64u
@@ -285,6 +287,22 @@ typedef struct {
         VM_COMPACT_PC_PROFILE_HOT_COUNT];
     uint64_t compact_pc_profile_outside_hot_samples[
         VM_COMPACT_PC_PROFILE_HOT_COUNT];
+    uint64_t compact_fallback_profile_events;
+    uint64_t compact_fallback_profile_witness_misses;
+    uint64_t compact_fallback_profile_outcome[
+        VM_COMPACT_FALLBACK_PROFILE_OUTCOME_COUNT];
+    uint32_t compact_fallback_profile_hot_pc[
+        VM_COMPACT_FALLBACK_PROFILE_HOT_COUNT];
+    uint32_t compact_fallback_profile_hot_insn[
+        VM_COMPACT_FALLBACK_PROFILE_HOT_COUNT];
+    uint64_t compact_fallback_profile_hot_events[
+        VM_COMPACT_FALLBACK_PROFILE_HOT_COUNT];
+    uint64_t compact_fallback_profile_hot_error[
+        VM_COMPACT_FALLBACK_PROFILE_HOT_COUNT];
+    uint8_t compact_fallback_profile_hot_thumb[
+        VM_COMPACT_FALLBACK_PROFILE_HOT_COUNT];
+    uint8_t compact_fallback_profile_hot_privileged[
+        VM_COMPACT_FALLBACK_PROFILE_HOT_COUNT];
 } vm_execution_telemetry_observation_t;
 
 typedef struct {

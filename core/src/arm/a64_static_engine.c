@@ -74,6 +74,15 @@ typedef struct {
 } static_a64_compact_pending_t;
 
 typedef struct {
+    uint32_t pc;
+    uint32_t insn;
+    uint64_t events;
+    uint64_t error;
+    bool thumb;
+    bool privileged;
+} static_a64_compact_fallback_hot_t;
+
+typedef struct {
     bool enabled;
     bool persistent;
     bool graph_enabled;
@@ -117,6 +126,12 @@ typedef struct {
     uint64_t fetch_refill_hits;
     uint64_t fetch_refill_skips;
     uint64_t known_negative_bypasses;
+    uint64_t compact_fallback_profile_events;
+    uint64_t compact_fallback_profile_witness_misses;
+    uint64_t compact_fallback_profile_outcome[
+        S5L_STATIC_A64_COMPACT_FALLBACK_OUTCOME_COUNT];
+    static_a64_compact_fallback_hot_t compact_fallback_profile_hot[
+        S5L_STATIC_A64_COMPACT_FALLBACK_HOT_COUNT];
     static_a64_entry_t cache[STATIC_A64_CACHE_ENTRIES];
     static_a64_refill_predictor_t
         refill_predictor[STATIC_A64_CACHE_ENTRIES];
@@ -127,6 +142,97 @@ typedef struct {
 static static_a64_state_t *static_state(const s5l8900_t *m) {
     return m ? (static_a64_state_t *)m->static_a64_state : NULL;
 }
+
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+static void compact_profile_counter_add(uint64_t *counter, uint64_t value) {
+    if (!counter) return;
+    if (UINT64_MAX - *counter < value) *counter = UINT64_MAX;
+    else *counter += value;
+}
+
+/* The profiler is an explicit diagnostic. Read only a still-live FETCH
+ * witness and never refill or translate here: observing a fallback must not
+ * make an otherwise unavailable native continuation possible. */
+static void compact_fallback_profile_note_current(
+        const s5l8900_t *m, static_a64_state_t *state) {
+    const arm_cpu_t *cpu;
+    uint32_t pc;
+    uint32_t fetch_block;
+    uint32_t insn;
+    unsigned width;
+    unsigned offset;
+    bool thumb;
+    bool privileged;
+    a64_compact_raw_admission_t outcome;
+
+    if (!m || !state || !state->compact_raw_pc_profile_enabled) return;
+    compact_profile_counter_add(&state->compact_fallback_profile_events, 1u);
+    cpu = &m->cpu;
+    pc = cpu->r[15];
+    thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
+    privileged = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    width = thumb ? 2u : 4u;
+    fetch_block = pc & ~UINT32_C(0x3ff);
+    if ((pc & (width - 1u)) != 0u || !cpu->fetch_host ||
+        cpu->fetch_blk != fetch_block || cpu->fetch_gen != cpu->tlb_gen ||
+        cpu->fetch_priv != privileged) {
+        compact_profile_counter_add(
+            &state->compact_fallback_profile_witness_misses, 1u);
+        return;
+    }
+    offset = pc - fetch_block;
+    if (offset > UINT32_C(0x400) - width) {
+        compact_profile_counter_add(
+            &state->compact_fallback_profile_witness_misses, 1u);
+        return;
+    }
+    insn = (uint32_t)cpu->fetch_host[offset] |
+           ((uint32_t)cpu->fetch_host[offset + 1u] << 8);
+    if (!thumb) {
+        insn |= (uint32_t)cpu->fetch_host[offset + 2u] << 16;
+        insn |= (uint32_t)cpu->fetch_host[offset + 3u] << 24;
+    }
+    outcome = a64_compact_raw_classify_instruction(cpu, insn, thumb);
+    _Static_assert(A64_COMPACT_RAW_ADMISSION_COUNT ==
+                       S5L_STATIC_A64_COMPACT_FALLBACK_OUTCOME_COUNT,
+                   "compact fallback outcome count drifted");
+    if ((unsigned)outcome <
+        S5L_STATIC_A64_COMPACT_FALLBACK_OUTCOME_COUNT) {
+        compact_profile_counter_add(
+            &state->compact_fallback_profile_outcome[outcome], 1u);
+    }
+
+    unsigned empty = S5L_STATIC_A64_COMPACT_FALLBACK_HOT_COUNT;
+    unsigned minimum = 0u;
+    for (unsigned i = 0u;
+         i < S5L_STATIC_A64_COMPACT_FALLBACK_HOT_COUNT; i++) {
+        static_a64_compact_fallback_hot_t *hot =
+            &state->compact_fallback_profile_hot[i];
+        if (hot->events && hot->pc == pc && hot->insn == insn &&
+            hot->thumb == thumb && hot->privileged == privileged) {
+            compact_profile_counter_add(&hot->events, 1u);
+            return;
+        }
+        if (!hot->events && empty == S5L_STATIC_A64_COMPACT_FALLBACK_HOT_COUNT)
+            empty = i;
+        if (hot->events <
+            state->compact_fallback_profile_hot[minimum].events)
+            minimum = i;
+    }
+
+    unsigned slot = empty < S5L_STATIC_A64_COMPACT_FALLBACK_HOT_COUNT
+        ? empty : minimum;
+    static_a64_compact_fallback_hot_t *hot =
+        &state->compact_fallback_profile_hot[slot];
+    uint64_t prior = hot->events;
+    hot->pc = pc;
+    hot->insn = insn;
+    hot->events = prior == UINT64_MAX ? UINT64_MAX : prior + 1u;
+    hot->error = prior;
+    hot->thumb = thumb;
+    hot->privileged = privileged;
+}
+#endif
 
 /* A registered host replacement is a hard block boundary.  Only decode pays
  * this scan: hot graph traversal sees no node at the target and returns to the
@@ -728,6 +834,12 @@ bool s5l8900_static_a64_enable_compact_raw_pc_profile(s5l8900_t *m) {
         !a64_static_host_available() ||
         !a64_compact_raw_pc_profile_enable())
         return false;
+    state->compact_fallback_profile_events = 0u;
+    state->compact_fallback_profile_witness_misses = 0u;
+    memset(state->compact_fallback_profile_outcome, 0,
+           sizeof state->compact_fallback_profile_outcome);
+    memset(state->compact_fallback_profile_hot, 0,
+           sizeof state->compact_fallback_profile_hot);
     state->compact_raw_pc_profile_enabled = true;
     return true;
 #else
@@ -770,6 +882,27 @@ void s5l8900_static_a64_compact_raw_pc_profile(
                 (uint64_t)native.outside_hot[i].pc;
             out->outside_hot[i].samples =
                 native.outside_hot[i].samples;
+        }
+        out->fallback_events = state->compact_fallback_profile_events;
+        out->fallback_witness_misses =
+            state->compact_fallback_profile_witness_misses;
+        memcpy(out->fallback_outcome,
+               state->compact_fallback_profile_outcome,
+               sizeof out->fallback_outcome);
+        for (unsigned i = 0u;
+             i < S5L_STATIC_A64_COMPACT_FALLBACK_HOT_COUNT; i++) {
+            out->fallback_hot[i].pc =
+                state->compact_fallback_profile_hot[i].pc;
+            out->fallback_hot[i].insn =
+                state->compact_fallback_profile_hot[i].insn;
+            out->fallback_hot[i].events =
+                state->compact_fallback_profile_hot[i].events;
+            out->fallback_hot[i].error =
+                state->compact_fallback_profile_hot[i].error;
+            out->fallback_hot[i].thumb =
+                state->compact_fallback_profile_hot[i].thumb;
+            out->fallback_hot[i].privileged =
+                state->compact_fallback_profile_hot[i].privileged;
         }
     }
 #else
@@ -1376,6 +1509,7 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
         }
     }
 
+    compact_fallback_profile_note_current(context->machine, context->state);
     result = s5l8900_static_a64_fallback_step(context->machine,
                                               &context->status);
     if (result > A64_COMPACT_RAW_FALLBACK_RETIRE_STOP)
