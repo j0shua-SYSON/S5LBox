@@ -62,6 +62,10 @@ static void snapshot_uart4_service_probe(void *ctx, unsigned retired) {
     (void)retired;
 }
 
+static void snapshot_uart4_refill_probe(void *ctx) {
+    (void)ctx;
+}
+
 static bool snapshot_restart_probe(void *ctx) {
     return ctx != NULL;
 }
@@ -530,7 +534,7 @@ static void test_device_state_round_trips(void) {
     int uart4_host_context = 0;
     CHECK(s5l8900_set_uart4_host(
               b, snapshot_uart4_tx_probe, snapshot_uart4_service_probe,
-              &uart4_host_context),
+              snapshot_uart4_refill_probe, &uart4_host_context),
           "could not install destination uart4 host peer");
     int restart_host_context = 0;
     CHECK(s5l8900_set_restart_host(
@@ -591,6 +595,7 @@ static void test_device_state_round_trips(void) {
           "a stale anchor/interaction guard");
     CHECK(b->uart4_host_tx == snapshot_uart4_tx_probe &&
           b->uart4_host_service == snapshot_uart4_service_probe &&
+          b->uart4_host_refill == snapshot_uart4_refill_probe &&
           b->uart4_host_ctx == &uart4_host_context,
           "snapshot restore changed the live uart4 host peer");
     CHECK(b->restart_host_service == snapshot_restart_probe &&

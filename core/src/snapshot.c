@@ -213,9 +213,11 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * move. 127928 adds the MBX ledger's two degraded-completion counters (16).
  * They are host evidence and are not serialized; the MBX policy flag itself
  * fits existing padding before its edram pointer and also stays out of
- * snap_mbx(). The size below must be read from the compiler's emitted `.space`,
- * not inferred from source padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         127928, "snap_mach");
+ * snap_mbx(). 127936 adds uart4's host-only demand-refill callback pointer;
+ * like its existing peer callbacks it is retained from the live destination
+ * and does not change the snapshot stream. The size below must be read from the
+ * compiler's emitted `.space`, not inferred from source padding. */
+SNAP_SIZE_GUARD(s5l8900_t,         127936, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */

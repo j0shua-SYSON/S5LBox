@@ -412,6 +412,7 @@ static void test_saved_state_restore_fixture(void) {
         }
         CHECK((machine.uart4_host_tx != NULL) == expect_ppp &&
               (machine.uart4_host_service != NULL) == expect_ppp &&
+              (machine.uart4_host_refill != NULL) == expect_ppp &&
               (machine.uart4_host_ctx != NULL) == expect_ppp,
               "the live uart4 host peer disagrees with the PPP record");
         CHECK(mentions(report.summary, ", PPP/NAT") == expect_ppp,

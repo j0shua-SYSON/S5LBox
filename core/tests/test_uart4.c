@@ -113,6 +113,7 @@ static const uint8_t LCP_CONFREQ_PREFIX[6] = {
 typedef struct {
     uint64_t tx_calls;
     uint64_t service_calls;
+    uint64_t refill_calls;
     uint64_t retired;
     uint8_t  last_tx;
 } uart4_host_probe_t;
@@ -129,6 +130,11 @@ static void uart4_host_service_probe(void *ctx, unsigned retired) {
     if (!probe) return;
     probe->service_calls++;
     probe->retired += retired;
+}
+
+static void uart4_host_refill_probe(void *ctx) {
+    uart4_host_probe_t *probe = (uart4_host_probe_t *)ctx;
+    if (probe) probe->refill_calls++;
 }
 
 /*
@@ -408,12 +414,15 @@ static void test_host_peer_sees_the_live_stream_and_run_boundary(void) {
     CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
 
     CHECK(!s5l8900_set_uart4_host(NULL, uart4_host_tx_probe,
-                                  uart4_host_service_probe, &probe),
+                                  uart4_host_service_probe,
+                                  uart4_host_refill_probe, &probe),
           "a NULL machine accepted a uart4 host peer");
-    CHECK(!s5l8900_set_uart4_host(&m, uart4_host_tx_probe, NULL, &probe),
+    CHECK(!s5l8900_set_uart4_host(&m, uart4_host_tx_probe, NULL,
+                                  uart4_host_refill_probe, &probe),
           "a partial uart4 host peer was accepted");
     CHECK(s5l8900_set_uart4_host(&m, uart4_host_tx_probe,
-                                 uart4_host_service_probe, &probe),
+                                 uart4_host_service_probe,
+                                 uart4_host_refill_probe, &probe),
           "a complete uart4 host peer was refused");
 
     /* Configuration and uart0 traffic are not bytes on this peer's wire. */
@@ -447,13 +456,26 @@ static void test_host_peer_sees_the_live_stream_and_run_boundary(void) {
           (unsigned long long)probe.service_calls,
           (unsigned long long)probe.retired);
 
-    CHECK(!s5l8900_set_uart4_host(&m, NULL, NULL, &probe),
+    CHECK(s5l_uart_rx_push(&m.uart4, 0x5au),
+          "could not seed uart4 RX for the refill edge");
+    CHECK(m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_URXH) == 0x5au &&
+          probe.refill_calls == 1u,
+          "successful URXH read produced %llu refill callbacks, expected 1",
+          (unsigned long long)probe.refill_calls);
+    (void)m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_URXH);
+    (void)m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_UFSTAT);
+    CHECK(probe.refill_calls == 1u,
+          "empty/non-data uart4 reads invented refill callbacks (%llu)",
+          (unsigned long long)probe.refill_calls);
+
+    CHECK(!s5l8900_set_uart4_host(&m, NULL, NULL, NULL, &probe),
           "detach with a live context was accepted");
     CHECK(m.uart4_host_tx == uart4_host_tx_probe &&
           m.uart4_host_service == uart4_host_service_probe &&
+          m.uart4_host_refill == uart4_host_refill_probe &&
           m.uart4_host_ctx == &probe,
           "a rejected detach changed the live peer");
-    CHECK(s5l8900_set_uart4_host(&m, NULL, NULL, NULL),
+    CHECK(s5l8900_set_uart4_host(&m, NULL, NULL, NULL, NULL),
           "complete uart4 host detach was refused");
     m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTXH, 0xa5u);
     (void)s5l8900_run(&m, 0u, &status);

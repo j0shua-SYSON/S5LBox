@@ -357,7 +357,12 @@ static uint32_t bus_read(void *ctx, uint32_t addr, unsigned bytes) {
         /* Same access widths as uart0's, for the same reason: the console
          * driver reaches this register file with byte, halfword and word
          * loads, and the two ports run the same driver. */
-        v = s5l_uart_read(&m->uart4, addr - S5L8900_UART4_BASE);
+        uint32_t off = addr - S5L8900_UART4_BASE;
+        unsigned rx_before = m->uart4.rx_count;
+        v = s5l_uart_read(&m->uart4, off);
+        if (off == UART_URXH && m->uart4.rx_count < rx_before &&
+            m->uart4_host_refill)
+            m->uart4_host_refill(m->uart4_host_ctx);
     } else if (mmio_word(addr, bytes, S5L8900_VIC0_BASE, S5L8900_DEV_SIZE)) {
         uint32_t off = addr - S5L8900_VIC0_BASE;
         /* VIC0's VICADDRESS surfaces its own sources first, then daisy-chains
@@ -750,22 +755,25 @@ bool s5l8900_set_active_clock_work_budget(s5l8900_t *m,
 }
 
 bool s5l8900_set_uart4_host(s5l8900_t *m, s5l_uart4_host_tx_fn tx,
-                            s5l_uart4_host_service_fn service, void *ctx) {
+                            s5l_uart4_host_service_fn service,
+                            s5l_uart4_host_refill_fn refill, void *ctx) {
     if (!m) return false;
-    if (!tx && !service) {
+    if (!tx && !service && !refill) {
         if (ctx) return false;
         /* Clear the callable fields first, then their borrowed context. */
         m->uart4_host_tx = NULL;
         m->uart4_host_service = NULL;
+        m->uart4_host_refill = NULL;
         m->uart4_host_ctx = NULL;
         return true;
     }
-    if (!tx || !service) return false;
+    if (!tx || !service || !refill) return false;
 
     /* Publish the context before either callback becomes callable. */
     m->uart4_host_ctx = ctx;
     m->uart4_host_tx = tx;
     m->uart4_host_service = service;
+    m->uart4_host_refill = refill;
     return true;
 }
 

@@ -34,6 +34,7 @@ typedef struct {
     bool     lcp_open;
     bool     ipcp_open;
     uint64_t service_calls;
+    uint64_t refill_calls;
     uint64_t retired_since_open;
     uint64_t guest_tx_bytes;
     uint64_t guest_rx_bytes;

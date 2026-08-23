@@ -70,9 +70,23 @@ static void test_ppp_attachment_closes_the_uart_loop(void) {
           (unsigned long long)status.guest_rx_bytes,
           machine.uart4.rx_count);
 
+    /* The physical FIFO remains sixteen bytes, but consuming it must expose
+     * the rest of the already-framed PPP response without waiting for another
+     * 100,000-instruction frontend slice. */
+    for (unsigned reads = 0u; reads < 256u && machine.uart4.rx_count; reads++)
+        (void)machine.bus.read32(machine.bus.ctx,
+                                 S5L8900_UART4_BASE + UART_URXH);
+    vm_network_session_status(session, &status);
+    CHECK(status.refill_calls > 0u && status.guest_rx_bytes > UART_RX_FIFO,
+          "demand refill did not stream past one hardware FIFO "
+          "(calls/rx=%llu/%llu)",
+          (unsigned long long)status.refill_calls,
+          (unsigned long long)status.guest_rx_bytes);
+
     vm_network_session_destroy(&session);
     CHECK(session == NULL && machine.uart4_host_tx == NULL &&
           machine.uart4_host_service == NULL &&
+          machine.uart4_host_refill == NULL &&
           machine.uart4_host_ctx == NULL,
           "destroy did not detach the uart4 host peer");
     s5l8900_free(&machine);

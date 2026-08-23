@@ -24,6 +24,7 @@ struct vm_network_session {
     bool          lcp_reported;
     bool          ipcp_reported;
     uint64_t      service_calls;
+    uint64_t      refill_calls;
     uint64_t      retired_since_open;
     uint64_t      guest_tx_bytes;
     uint64_t      guest_rx_bytes;
@@ -101,6 +102,28 @@ static void drain_guest_ip(vm_network_session_t *session) {
     }
 }
 
+/* Move only bytes already framed by PPP. This function deliberately performs
+ * no socket or protocol work: it is also called from the guest's URXH read
+ * path, where re-entering the network stack once per byte would merely replace
+ * the old throughput bug with an avoidable CPU cost. */
+static void refill_uart4(vm_network_session_t *session) {
+    if (!session || !session->machine || !session->peer) return;
+    unsigned room = s5l_uart_rx_space(&session->machine->uart4);
+    while (room--) {
+        int byte = ppp_output_byte(session->peer);
+        if (byte < 0) break;
+        if (!s5l_uart_rx_push(&session->machine->uart4, (uint8_t)byte)) break;
+        session->guest_rx_bytes++;
+    }
+}
+
+static void uart4_host_refill(void *ctx) {
+    vm_network_session_t *session = (vm_network_session_t *)ctx;
+    if (!session) return;
+    session->refill_calls++;
+    refill_uart4(session);
+}
+
 static void uart4_host_service(void *ctx, unsigned retired) {
     vm_network_session_t *session = (vm_network_session_t *)ctx;
     if (!session || !session->machine || !session->peer) return;
@@ -157,14 +180,8 @@ static void uart4_host_service(void *ctx, unsigned retired) {
                       "gateway 10.0.2.2, DNS 10.0.2.3\n");
     }
 
-    unsigned room = s5l_uart_rx_space(&session->machine->uart4);
     uint64_t before = session->guest_rx_bytes;
-    while (room--) {
-        int byte = ppp_output_byte(session->peer);
-        if (byte < 0) break;
-        if (!s5l_uart_rx_push(&session->machine->uart4, (uint8_t)byte)) break;
-        session->guest_rx_bytes++;
-    }
+    refill_uart4(session);
     if (session->guest_rx_bytes != before)
         s5l8900_tick(session->machine, 0u);
 }
@@ -215,7 +232,8 @@ vm_network_session_t *vm_network_session_create(
     }
 
     if (!s5l8900_set_uart4_host(machine, uart4_guest_tx,
-                                uart4_host_service, session)) {
+                                uart4_host_service, uart4_host_refill,
+                                session)) {
         set_detail(detail, detail_capacity,
                    "The uart4 host peer could not be attached.");
         vm_network_session_destroy(&session);
@@ -238,6 +256,7 @@ void vm_network_session_status(const vm_network_session_t *session,
     out->nat_enabled = session->nat_enabled;
     out->peer_opened = session->peer_opened;
     out->service_calls = session->service_calls;
+    out->refill_calls = session->refill_calls;
     out->retired_since_open = session->retired_since_open;
     out->guest_tx_bytes = session->guest_tx_bytes;
     out->guest_rx_bytes = session->guest_rx_bytes;
@@ -279,8 +298,9 @@ void vm_network_session_destroy(vm_network_session_t **slot) {
     if (session->machine &&
         session->machine->uart4_host_tx == uart4_guest_tx &&
         session->machine->uart4_host_service == uart4_host_service &&
+        session->machine->uart4_host_refill == uart4_host_refill &&
         session->machine->uart4_host_ctx == session)
-        (void)s5l8900_set_uart4_host(session->machine, NULL, NULL, NULL);
+        (void)s5l8900_set_uart4_host(session->machine, NULL, NULL, NULL, NULL);
     if (session->net) net_reset(session->net);
     net_host_close(session->host);
     free(session->net);

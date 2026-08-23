@@ -3920,11 +3920,20 @@ typedef bool (*s5l_active_host_now_fn)(void *ctx, uint64_t *nanoseconds);
  * FIFO through s5l_uart_rx_push() and then call s5l8900_tick(machine, 0) to
  * refresh the interrupt line. It must not call s5l8900_run() recursively.
  *
+ * `refill` runs after a successful guest read from uart4's URXH has freed one
+ * receive-FIFO slot. It may only move already-queued host bytes into uart4
+ * through s5l_uart_rx_push(); socket polling and protocol work remain at the
+ * between-slices `service` boundary. This demand edge is what prevents a
+ * 16-byte hardware FIFO from accidentally becoming a 16-byte-per-run-slice
+ * throughput limit. bus_read() has already marked interrupt levels dirty, so
+ * refill must not tick or run the machine recursively.
+ *
  * Both callbacks run synchronously on the machine-owning thread. Generic
  * frontends leave them NULL, preserving the historical machine exactly.
  */
 typedef void (*s5l_uart4_host_tx_fn)(void *ctx, uint8_t byte);
 typedef void (*s5l_uart4_host_service_fn)(void *ctx, unsigned retired);
+typedef void (*s5l_uart4_host_refill_fn)(void *ctx);
 
 /*
  * Optional host restart service. The watchdog only identifies the board-level
@@ -4264,12 +4273,13 @@ typedef struct {
 
     /*
      * uart4's optional host peer. Host wiring, never guest state: snapshot
-     * visitors deliberately leave all three fields untouched, so restoring a
+     * visitors deliberately leave all four fields untouched, so restoring a
      * guest underneath a live frontend retains that frontend's peer rather
      * than importing a stale pointer from the snapshot writer.
      */
     s5l_uart4_host_tx_fn      uart4_host_tx;
     s5l_uart4_host_service_fn uart4_host_service;
+    s5l_uart4_host_refill_fn  uart4_host_refill;
     void                     *uart4_host_ctx;
 
     /* Host lifecycle wiring, deliberately not serialized. */
@@ -4512,12 +4522,13 @@ bool s5l8900_set_active_clock_work_budget(s5l8900_t *m,
                                           uint32_t ticks_per_retirement);
 
 /*
- * Attach or detach uart4's host peer. Attaching requires both callbacks; the
- * context may be NULL. Passing all three as NULL detaches. A partial request
- * is rejected without changing the live attachment.
+ * Attach or detach uart4's host peer. Attaching requires all three callbacks;
+ * the context may be NULL. Passing all four arguments as NULL detaches. A
+ * partial request is rejected without changing the live attachment.
  */
 bool s5l8900_set_uart4_host(s5l8900_t *m, s5l_uart4_host_tx_fn tx,
-                            s5l_uart4_host_service_fn service, void *ctx);
+                            s5l_uart4_host_service_fn service,
+                            s5l_uart4_host_refill_fn refill, void *ctx);
 
 /* Install or clear the host owner of a watchdog reboot edge. Installing and
  * clearing are between-run operations; a partial clear is rejected. */
