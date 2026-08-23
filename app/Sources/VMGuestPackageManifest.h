@@ -28,7 +28,13 @@ typedef enum {
 
     /* Its gzip data member also seeds the staged disk on the host. These are
      * the tools required for the old guest dpkg to run in the first place. */
-    VM_GUEST_PACKAGE_FOUNDATION = 1u << 1
+    VM_GUEST_PACKAGE_FOUNDATION = 1u << 1,
+
+    /* Keep the authenticated archive out of dpkg's package database. The
+     * first-boot job extracts its ABI-matched APT command-line helpers into
+     * /usr/libexec solely to refresh and validate Cydia's caches outside the
+     * foreground application watchdog. */
+    VM_GUEST_PACKAGE_APT_CACHE_TOOL = 1u << 2
 } vm_guest_package_role_t;
 
 typedef struct {

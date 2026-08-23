@@ -378,6 +378,11 @@ static void clear_fixture(void) {
     (void)remove(next);
     (void)remove_directory(stage);
     (void)join_path(stage, sizeof stage, FIXTURE_DIR,
+                    VM_GUEST_CYDIA_CACHE_STAGE_DIRECTORY);
+    (void)join_path(next, sizeof next, stage, VM_GUEST_INSTALL_NEXT_FILE);
+    (void)remove(next);
+    (void)remove_directory(stage);
+    (void)join_path(stage, sizeof stage, FIXTURE_DIR,
                     VM_GUEST_RECOVERY_STAGE_DIRECTORY);
     (void)join_path(next, sizeof next, stage, VM_GUEST_INSTALL_NEXT_FILE);
     (void)remove(next);
@@ -419,6 +424,11 @@ static void clear_fixture(void) {
         VM_GUEST_APT_VERIFIER_MARKER_TMP,
         VM_GUEST_APT_VERIFIER_JOURNAL_FILE,
         VM_GUEST_APT_VERIFIER_JOURNAL_TMP,
+        VM_GUEST_CYDIA_CACHE_BACKUP_FILE,
+        VM_GUEST_CYDIA_CACHE_MARKER_FILE,
+        VM_GUEST_CYDIA_CACHE_MARKER_TMP,
+        VM_GUEST_CYDIA_CACHE_JOURNAL_FILE,
+        VM_GUEST_CYDIA_CACHE_JOURNAL_TMP,
         VM_GUEST_RECOVERY_BACKUP_FILE,
         VM_GUEST_RECOVERY_MARKER_FILE,
         VM_GUEST_RECOVERY_MARKER_TMP,
@@ -758,6 +768,96 @@ static void test_apt_verifier_plan_uses_guest_dpkg(void) {
           "APT-verifier launchd job does not call the private helper");
 }
 
+static void test_cydia_cache_plan_builds_outside_watchdog(void) {
+    static const uint8_t PACKAGE[] = {0x21u, 0x3cu, 0x61u, 0x72u};
+    rootfs_work_entry_t entries[9];
+    rootfs_work_entry_t sentinel[8];
+    memset(entries, 0, sizeof entries);
+    memset(sentinel, 0xa5, sizeof sentinel);
+    CHECK(vm_guest_install_build_test_cydia_cache_entries(
+              sentinel, 8u, PACKAGE, sizeof PACKAGE) == 9u &&
+          ((const unsigned char *)sentinel)[0] == 0xa5u,
+          "a short Cydia-cache plan buffer was modified");
+    size_t count = vm_guest_install_build_test_cydia_cache_entries(
+        entries, 9u, PACKAGE, sizeof PACKAGE);
+    CHECK(count == 9u,
+          "Cydia-cache plan has %zu entries, expected 9", count);
+
+    const rootfs_work_entry_t *package_entry = NULL;
+    const rootfs_work_entry_t *helper_entry = NULL;
+    const rootfs_work_entry_t *plist_entry = NULL;
+    for (size_t i = 0u; i < count; i++) {
+        CHECK(entries[i].path != NULL,
+              "Cydia-cache plan entry %zu has no path", i);
+        if (!entries[i].path) continue;
+        if (strcmp(entries[i].path,
+                   "/private/var/lib/s5lbox/cydia-cache-v3/"
+                   "apt7_0.7.20.2-1_iphoneos-arm.deb") == 0)
+            package_entry = &entries[i];
+        if (strcmp(entries[i].path,
+                   "/private/var/lib/s5lbox/cydia-cache-v3-run") == 0)
+            helper_entry = &entries[i];
+        if (strcmp(entries[i].path,
+                   "/System/Library/LaunchDaemons/"
+                   "com.j0shua.s5lbox.cydia-cache-v3.plist") == 0)
+            plist_entry = &entries[i];
+    }
+    CHECK(package_entry &&
+              package_entry->kind == ROOTFS_WORK_ENTRY_FILE &&
+              package_entry->permissions == 0644u &&
+              package_entry->content == PACKAGE &&
+              package_entry->content_size == sizeof PACKAGE,
+          "Cydia-cache plan does not retain the exact caller-owned package");
+    const char *script = helper_entry
+        ? (const char *)helper_entry->content : NULL;
+    const char *gated = script
+        ? strstr(script, "/bin/chmod 0600 \"$cydia\" || exit 1") : NULL;
+    const char *extracted = script
+        ? strstr(script,
+                 "/usr/bin/dpkg-deb --extract \"$package\" \"$stage\" || exit 1")
+        : NULL;
+    const char *updated = script
+        ? strstr(script,
+                 "\"$apt_get\" -o Acquire::http::Timeout=30 -o Acquire::Retries=3 update && break")
+        : NULL;
+    const char *generated = script
+        ? strstr(script, "\"$apt_cache\" gencaches || exit 1") : NULL;
+    const char *validated = script
+        ? strstr(script, "\"$apt_cache\" stats >/dev/null 2>&1 || exit 1")
+        : NULL;
+    const char *restored = script
+        ? strstr(script, "/bin/chmod 6755 \"$cydia\" || exit 1") : NULL;
+    const char *published = script
+        ? strstr(script, "/bin/mv -f \"$marker.partial\" \"$marker\" || exit 1")
+        : NULL;
+    const char *removed = script
+        ? strstr(script, "/bin/rm -f \"$package\" || exit 1") : NULL;
+    CHECK(helper_entry && helper_entry->kind == ROOTFS_WORK_ENTRY_FILE &&
+              helper_entry->permissions == 0755u && gated && extracted &&
+              updated && generated && validated && restored && published &&
+              removed && gated < extracted && extracted < updated &&
+              updated < generated && generated < validated &&
+              validated < restored && restored < published &&
+              published < removed,
+          "Cydia-cache helper does not gate, build, validate, restore, and publish in order");
+    CHECK(script && strstr(script, "pkgcache.bin") != NULL &&
+              strstr(script, "srcpkgcache.bin") != NULL &&
+              strstr(script, "allow-unauthenticated") == NULL &&
+              strstr(script, "AllowInsecureRepositories") == NULL &&
+              strstr(script, "trusted=yes") == NULL,
+          "Cydia-cache helper omits cache validation or weakens authentication");
+    CHECK(plist_entry && plist_entry->kind == ROOTFS_WORK_ENTRY_FILE &&
+              plist_entry->permissions == 0644u &&
+              plist_entry->content_size != 0u &&
+              strstr((const char *)plist_entry->content,
+                     "/private/var/lib/s5lbox/cydia-cache-v3-run") != NULL &&
+              strstr((const char *)plist_entry->content,
+                     "<key>KeepAlive</key>") != NULL &&
+              strstr((const char *)plist_entry->content,
+                     "<key>SuccessfulExit</key>") != NULL,
+          "Cydia-cache launchd job is not retryable after a failed cache build");
+}
+
 static void test_historical_snapshot_gate(void) {
     clear_fixture();
     char live[VM_GUEST_INSTALL_PATH_CAPACITY];
@@ -851,6 +951,11 @@ static void test_existing_install_is_idempotent(void) {
               VM_GUEST_INSTALL_OK && transaction.committed,
           "could not seed an already-completed APT-verifier migration: %s",
           detail);
+    CHECK(vm_guest_cydia_cache_confirm(FIXTURE_DIR, digest, &transaction,
+                                       detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed,
+          "could not seed an already-staged Cydia-cache migration: %s",
+          detail);
     CHECK(resize_sparse(live, VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES),
           "could not make the committed fixture represent a 2 GiB disk");
 
@@ -911,6 +1016,9 @@ static void test_snapshot_blocks_free_count_recovery(void) {
               VM_GUEST_INSTALL_OK && transaction.committed &&
           vm_guest_apt_verifier_confirm(FIXTURE_DIR, digest, &transaction,
                                         detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_cydia_cache_confirm(FIXTURE_DIR, digest, &transaction,
+                                       detail, sizeof detail) ==
               VM_GUEST_INSTALL_OK && transaction.committed,
           "could not commit free-count snapshot fixture: %s", detail);
 
@@ -1012,6 +1120,9 @@ static void test_committed_maintenance_cleanup_blocks_new_transaction(void) {
               VM_GUEST_INSTALL_OK && transaction.committed &&
           vm_guest_apt_verifier_confirm(FIXTURE_DIR, digest, &transaction,
                                         detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_cydia_cache_confirm(FIXTURE_DIR, digest, &transaction,
+                                       detail, sizeof detail) ==
               VM_GUEST_INSTALL_OK && transaction.committed &&
           resize_sparse(live, VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES),
           "could not commit cleanup-residue fixture: %s", detail);
@@ -1135,6 +1246,18 @@ static void test_dirty_existing_install_refuses_before_stage(void) {
         VM_GUEST_APT_TRUST_MARKER_TMP,
         VM_GUEST_APT_TRUST_JOURNAL_FILE,
         VM_GUEST_APT_TRUST_JOURNAL_TMP,
+        VM_GUEST_APT_VERIFIER_BACKUP_FILE,
+        VM_GUEST_APT_VERIFIER_STAGE_DIRECTORY,
+        VM_GUEST_APT_VERIFIER_MARKER_FILE,
+        VM_GUEST_APT_VERIFIER_MARKER_TMP,
+        VM_GUEST_APT_VERIFIER_JOURNAL_FILE,
+        VM_GUEST_APT_VERIFIER_JOURNAL_TMP,
+        VM_GUEST_CYDIA_CACHE_BACKUP_FILE,
+        VM_GUEST_CYDIA_CACHE_STAGE_DIRECTORY,
+        VM_GUEST_CYDIA_CACHE_MARKER_FILE,
+        VM_GUEST_CYDIA_CACHE_MARKER_TMP,
+        VM_GUEST_CYDIA_CACHE_JOURNAL_FILE,
+        VM_GUEST_CYDIA_CACHE_JOURNAL_TMP,
         VM_GUEST_RECOVERY_BACKUP_FILE,
         VM_GUEST_RECOVERY_STAGE_DIRECTORY,
         VM_GUEST_RECOVERY_MARKER_FILE,
@@ -1197,6 +1320,9 @@ static void test_powered_off_checkpoint_allows_only_dirty_bit(void) {
               VM_GUEST_INSTALL_OK && transaction.committed &&
           vm_guest_apt_verifier_confirm(FIXTURE_DIR, digest, &transaction,
                                         detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_cydia_cache_confirm(FIXTURE_DIR, digest, &transaction,
+                                       detail, sizeof detail) ==
               VM_GUEST_INSTALL_OK && transaction.committed,
           "could not commit checkpoint-gate fixture: %s", detail);
 
@@ -1302,11 +1428,13 @@ static void test_real_build_when_supplied(void) {
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK &&
           result.transaction.committed && !result.already_installed &&
           result.apt_verifier_staged &&
-          result.apt_verifier_transaction.committed,
+          result.apt_verifier_transaction.committed &&
+          result.cydia_cache_staged &&
+          result.cydia_cache_transaction.committed,
           "real install build refused: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     CHECK(result.rootfs.final_size > base.final_size &&
-          result.plan.packages == 29u &&
+          result.plan.packages == 30u &&
           result.plan.foundation_packages == 14u,
           "real build result is incomplete");
     CHECK(result.rootfs.final_size ==
@@ -1325,6 +1453,7 @@ static void test_real_build_when_supplied(void) {
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
           !retry.storage_upgraded && retry.transaction.committed &&
           retry.apt_verifier_staged &&
+          retry.cydia_cache_staged &&
           retry.rootfs.final_size == 0u,
           "2 GiB install was rewritten or not idempotent: %s / %s",
           vm_guest_install_build_status_text(status), detail);
@@ -1382,7 +1511,9 @@ static void test_real_storage_upgrade_when_supplied(void) {
           result.storage_upgraded && result.transaction.committed &&
           result.storage_transaction.committed &&
           result.apt_verifier_transaction.committed &&
-          (result.apt_verifier_staged || result.apt_verifier_verified),
+          (result.apt_verifier_staged || result.apt_verifier_verified) &&
+          result.cydia_cache_staged &&
+          result.cydia_cache_transaction.committed,
           "real storage upgrade refused: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     uint64_t after = file_size_or_zero(live);
@@ -1420,6 +1551,7 @@ static void test_real_storage_upgrade_when_supplied(void) {
         &retry, detail, sizeof detail);
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
           !retry.storage_upgraded && retry.apt_verifier_staged &&
+          retry.cydia_cache_staged &&
           retry.rootfs.final_size == 0u,
           "real storage-upgrade retry rewrote the disk: %s / %s",
           vm_guest_install_build_status_text(status), detail);
@@ -1594,18 +1726,20 @@ static void test_real_privilege_repair_when_supplied(void) {
           result.apt_trust_installed &&
           result.apt_trust_verified &&
           result.apt_verifier_staged &&
+          result.cydia_cache_staged &&
           result.rootfs.file_repairs_applied == 1u &&
-          result.rootfs.provision_entries >= 7u &&
+          result.rootfs.provision_entries >= 10u &&
           result.rootfs.provision_entries +
                   result.rootfs.provision_reused_entries >=
-              13u &&
+              17u &&
           result.rootfs.provision_entries +
                   result.rootfs.provision_reused_entries <=
-              15u &&
+              19u &&
           result.privilege_transaction.committed &&
           result.sources_v2_transaction.committed &&
           result.apt_trust_transaction.committed &&
-          result.apt_verifier_transaction.committed,
+          result.apt_verifier_transaction.committed &&
+          result.cydia_cache_transaction.committed,
           "combined Cydia repair/source/trust/verifier migration refused or did not apply: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     uint64_t after = file_size_or_zero(live);
@@ -1675,6 +1809,7 @@ static void test_real_privilege_repair_when_supplied(void) {
           retry.cydia_privileges_verified && !retry.cydia_sources_added &&
           retry.cydia_sources_verified && !retry.apt_trust_installed &&
           retry.apt_trust_verified && retry.apt_verifier_staged &&
+          retry.cydia_cache_staged &&
           retry.rootfs.final_size == 0u,
           "real privilege-repair retry rewrote the disk: %s / %s",
           vm_guest_install_build_status_text(status), detail);
@@ -1721,18 +1856,19 @@ static void test_real_cache_recovery_when_supplied(void) {
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && result.already_installed &&
           result.storage_upgraded == expect_storage_growth &&
           result.cydia_privileges_verified &&
-          result.cydia_sources_added && result.cydia_sources_verified &&
-          result.apt_trust_installed && result.apt_trust_verified &&
-          result.apt_verifier_staged &&
-          result.rootfs.provision_entries >= 7u &&
+          result.cydia_sources_verified && result.apt_trust_verified &&
+          result.apt_verifier_staged && result.cydia_cache_staged &&
+          result.rootfs.published &&
+          result.rootfs.provision_entries >= 3u &&
           result.rootfs.provision_entries +
-                  result.rootfs.provision_reused_entries >= 13u &&
+                  result.rootfs.provision_reused_entries >= 9u &&
           result.rootfs.provision_entries +
-                  result.rootfs.provision_reused_entries <= 15u &&
+                  result.rootfs.provision_reused_entries <= 19u &&
           result.sources_transaction.committed &&
           result.sources_v2_transaction.committed &&
           result.apt_trust_transaction.committed &&
-          result.apt_verifier_transaction.committed,
+          result.apt_verifier_transaction.committed &&
+          result.cydia_cache_transaction.committed,
           "real cache recovery refused or omitted its payload: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     uint64_t after = file_size_or_zero(live);
@@ -1741,13 +1877,42 @@ static void test_real_cache_recovery_when_supplied(void) {
           "cache recovery published %llu bytes from a %llu-byte source",
           (unsigned long long)after, (unsigned long long)before);
 
+    rootfs_work_file_repair_t cache_package_probe;
+    memset(&cache_package_probe, 0, sizeof cache_package_probe);
+    cache_package_probe.path =
+        "/private/var/lib/s5lbox/cydia-cache-v3/"
+        "apt7_0.7.20.2-1_iphoneos-arm.deb";
+    cache_package_probe.expected_size = UINT64_C(664620);
+    static const uint8_t CACHE_PACKAGE_SHA256[
+        IOS3_SHA256_DIGEST_SIZE] = {
+        0x38u, 0x64u, 0xacu, 0x75u, 0x42u, 0xffu, 0x2cu, 0x28u,
+        0xbcu, 0x0eu, 0x49u, 0x15u, 0xc0u, 0x78u, 0x1du, 0x8au,
+        0x68u, 0x0au, 0xe5u, 0x57u, 0xc6u, 0x15u, 0x05u, 0x63u,
+        0x83u, 0x1fu, 0x47u, 0x6eu, 0x70u, 0x1au, 0xa1u, 0xa8u
+    };
+    memcpy(cache_package_probe.expected_sha256, CACHE_PACKAGE_SHA256,
+           sizeof cache_package_probe.expected_sha256);
+    cache_package_probe.expected_permissions = 0644u;
+    cache_package_probe.desired_permissions = 0644u;
+    rootfs_work_file_repair_state_t cache_package_state =
+        ROOTFS_WORK_FILE_REPAIR_MISSING;
+    rootfs_work_result_t cache_package_result;
+    CHECK(rootfs_work_probe_file_repair(
+              live, &cache_package_probe, &cache_package_state,
+              &cache_package_result) == ROOTFS_WORK_OK &&
+          cache_package_state == ROOTFS_WORK_FILE_REPAIR_SATISFIED,
+          "published cache-tool package is not exact root:root 0644 data: %s at %s (%s)",
+          rootfs_work_status_name(cache_package_result.status),
+          rootfs_work_stage_name(cache_package_result.stage),
+          cache_package_result.detail);
+
     vm_guest_install_result_t recovered;
-    CHECK(vm_guest_sources_v2_recover(machine, &recovered,
-                                      detail, sizeof detail) ==
+    CHECK(vm_guest_cydia_cache_recover(machine, &recovered,
+                                       detail, sizeof detail) ==
               VM_GUEST_INSTALL_OK && recovered.committed &&
           recovered.has_manifest &&
           memcmp(recovered.manifest_sha256, manifest, sizeof manifest) == 0,
-          "cache-recovery transaction is not recoverable: %s", detail);
+          "Cydia cache-builder transaction is not recoverable: %s", detail);
 
     vm_guest_install_build_result_t retry;
     status = vm_guest_install_build_from_directory(
@@ -1758,12 +1923,14 @@ static void test_real_cache_recovery_when_supplied(void) {
           retry.cydia_privileges_verified && !retry.cydia_sources_added &&
           retry.cydia_sources_verified && !retry.apt_trust_installed &&
           retry.apt_trust_verified && retry.apt_verifier_staged &&
+          retry.cydia_cache_staged &&
           retry.rootfs.final_size == 0u,
           "cache-recovery retry rewrote the disk: %s / %s",
           vm_guest_install_build_status_text(status), detail);
-    printf("real-cydia-cache-recovery before=%llu after=%llu entries=%u\n",
+    printf("real-cydia-cache-recovery before=%llu after=%llu entries=%u reused=%u\n",
            (unsigned long long)before, (unsigned long long)after,
-           result.rootfs.provision_entries);
+           result.rootfs.provision_entries,
+           result.rootfs.provision_reused_entries);
 }
 
 static void test_real_apt_trust_when_supplied(void) {
@@ -1810,16 +1977,18 @@ static void test_real_apt_trust_when_supplied(void) {
           result.apt_trust_transaction.committed &&
           result.apt_verifier_staged &&
           result.apt_verifier_transaction.committed &&
+          result.cydia_cache_staged &&
+          result.cydia_cache_transaction.committed &&
           file_size_or_zero(live) == before,
           "real APT-trust migration refused or changed unrelated state: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     if (!before_transaction.committed) {
         CHECK(result.rootfs.published &&
-              result.rootfs.provision_entries >= 5u &&
+              result.rootfs.provision_entries >= 8u &&
               result.rootfs.provision_entries +
-                      result.rootfs.provision_reused_entries >= 11u &&
+                      result.rootfs.provision_reused_entries >= 15u &&
               result.rootfs.provision_entries +
-                      result.rootfs.provision_reused_entries <= 12u,
+                      result.rootfs.provision_reused_entries <= 16u,
               "real APT-trust migration omitted its bounded payload: %s",
               result.rootfs.detail);
     }
@@ -1847,6 +2016,7 @@ static void test_real_apt_trust_when_supplied(void) {
           !retry.storage_upgraded && !retry.cydia_privileges_repaired &&
           !retry.cydia_sources_added && !retry.apt_trust_installed &&
           retry.apt_trust_verified && retry.apt_verifier_staged &&
+          retry.cydia_cache_staged &&
           retry.rootfs.final_size == 0u &&
           file_size_or_zero(live) == before,
           "real APT-trust retry rewrote the disk: %s / %s",
@@ -1913,10 +2083,12 @@ static void test_real_apt_verifier_when_supplied(void) {
           !result.cydia_sources_added && result.apt_trust_verified &&
           result.apt_verifier_staged && !result.apt_verifier_verified &&
           result.apt_verifier_transaction.committed &&
+          result.cydia_cache_staged &&
+          result.cydia_cache_transaction.committed &&
           result.rootfs.published &&
           result.rootfs.provision_entries >= 3u &&
           result.rootfs.provision_entries +
-                  result.rootfs.provision_reused_entries == 9u &&
+                  result.rootfs.provision_reused_entries == 13u &&
           file_size_or_zero(live) == before,
           "real APT-verifier migration refused or changed unrelated state: %s / %s",
           vm_guest_install_build_status_text(status), detail);
@@ -1961,6 +2133,7 @@ static void test_real_apt_verifier_when_supplied(void) {
         &retry, detail, sizeof detail);
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
           retry.apt_trust_verified && retry.apt_verifier_staged &&
+          retry.cydia_cache_staged &&
           !retry.apt_verifier_verified && retry.rootfs.final_size == 0u &&
           file_size_or_zero(live) == before,
           "real APT-verifier retry rewrote the disk: %s / %s",
@@ -2047,7 +2220,9 @@ static void test_real_allocation_recovery_when_supplied(void) {
               &mismatch, &result.filesystem_recovery, size) &&
           !result.storage_upgraded && !result.cydia_privileges_repaired &&
           !result.cydia_sources_added && result.apt_verifier_staged &&
-          result.apt_verifier_transaction.committed,
+          result.apt_verifier_transaction.committed &&
+          result.cydia_cache_staged &&
+          result.cydia_cache_transaction.committed,
           "real allocation recovery refused or did not publish its proven repair: %s / %s",
           vm_guest_install_build_status_text(status), detail);
 
@@ -2076,7 +2251,8 @@ static void test_real_allocation_recovery_when_supplied(void) {
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
           !retry.filesystem_repaired && !retry.storage_upgraded &&
           !retry.cydia_privileges_repaired && !retry.cydia_sources_added &&
-          retry.apt_verifier_staged && file_size_or_zero(live) == size,
+          retry.apt_verifier_staged && retry.cydia_cache_staged &&
+          file_size_or_zero(live) == size,
           "real free-count recovery retry was not idempotent: %s / %s",
           vm_guest_install_build_status_text(status), detail);
     printf("real-allocation-recovery size=%llu used=%u header=%u bits=%u free=%u\n",
@@ -2098,6 +2274,7 @@ int main(void) {
     test_bigboss_cache_plan_avoids_stashed_system_paths();
     test_apt_trust_plan_is_exact_and_private();
     test_apt_verifier_plan_uses_guest_dpkg();
+    test_cydia_cache_plan_builds_outside_watchdog();
     test_historical_snapshot_gate();
     test_existing_install_is_idempotent();
     test_snapshot_blocks_free_count_recovery();

@@ -64,6 +64,10 @@ typedef struct {
     bool apt_trust_verified;
     bool apt_verifier_staged;
     bool apt_verifier_verified;
+    /* The exact legacy APT tools and retryable boot job are on disk. This is
+     * deliberately not named "verified": guest cache completion is runtime
+     * evidence and cannot be inferred from the host disk transaction. */
+    bool cydia_cache_staged;
     bool filesystem_repaired;
     bool powered_off_checkpoint_witnessed;
     size_t historical_snapshots;
@@ -82,6 +86,8 @@ typedef struct {
     vm_guest_install_result_t apt_trust_transaction;
     /* Exact legacy gnupg package and one-shot guest-dpkg transaction. */
     vm_guest_install_result_t apt_verifier_transaction;
+    /* Out-of-process cache-builder deployment; not guest completion proof. */
+    vm_guest_install_result_t cydia_cache_transaction;
     uint8_t manifest_sha256[VM_GUEST_INSTALL_SHA256_SIZE];
 } vm_guest_install_build_result_t;
 
@@ -166,6 +172,9 @@ size_t vm_guest_install_build_test_bigboss_source_entries(
 size_t vm_guest_install_build_test_apt_trust_entries(
     rootfs_work_entry_t *entries, size_t capacity, bool create_keyring);
 size_t vm_guest_install_build_test_apt_verifier_entries(
+    rootfs_work_entry_t *entries, size_t capacity,
+    const uint8_t *package, size_t package_size);
+size_t vm_guest_install_build_test_cydia_cache_entries(
     rootfs_work_entry_t *entries, size_t capacity,
     const uint8_t *package, size_t package_size);
 #endif

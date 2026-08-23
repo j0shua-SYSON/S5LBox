@@ -268,14 +268,25 @@ static void test_complete_synthetic_plan(void) {
     deb_fixture_t deb;
     CHECK(make_deb(&deb), "could not build synthetic package");
     vm_guest_package_t package;
+    vm_guest_package_t cache_tool;
     char sha[VM_GUEST_PACKAGE_SHA256_HEX_SIZE];
+    char cache_tool_sha[VM_GUEST_PACKAGE_SHA256_HEX_SIZE];
     char url[256];
+    char cache_tool_url[256];
     make_package(&package, sha, url, &deb);
-    vm_guest_package_input_t input = {&package, deb.bytes, deb.size};
+    make_named_package(&cache_tool, cache_tool_sha, cache_tool_url, &deb,
+                       "apt7", "0.7.20.2-1",
+                       "apt7_0.7.20.2-1_iphoneos-arm.deb");
+    cache_tool.roles = VM_GUEST_PACKAGE_APT_CACHE_TOOL;
+    vm_guest_package_input_t inputs[] = {
+        {&package, deb.bytes, deb.size},
+        {&cache_tool, deb.bytes, deb.size}
+    };
     char detail[VM_GUEST_ROOTFS_DETAIL_CAPACITY];
     vm_guest_rootfs_status_t status = VM_GUEST_ROOTFS_ERR_ARGUMENT;
     vm_guest_rootfs_plan_t *plan = vm_guest_rootfs_plan_open(
-        &input, 1u, &status, detail, sizeof detail);
+        inputs, sizeof inputs / sizeof inputs[0],
+        &status, detail, sizeof detail);
     CHECK(plan != NULL && status == VM_GUEST_ROOTFS_OK,
           "valid plan refused: %s / %s",
           vm_guest_rootfs_status_text(status), detail);
@@ -386,6 +397,16 @@ static void test_complete_synthetic_plan(void) {
     deb.bytes[0] ^= 0xffu;
     CHECK(cached && cached->content[0] == first,
           "the plan aliases caller-owned package memory");
+    char cache_tool_path[ROOTFS_WORK_MAX_PATH];
+    written = snprintf(cache_tool_path, sizeof cache_tool_path, "%s/%s",
+                       VM_GUEST_ROOTFS_PACKAGE_DIRECTORY,
+                       cache_tool.filename);
+    CHECK(written > 0 && (size_t)written < sizeof cache_tool_path,
+          "cache-tool path was truncated");
+    const rootfs_work_entry_t *cached_tool =
+        find_entry(plan, cache_tool_path);
+    CHECK(cached_tool && cached_tool->content_size == deb.size,
+          "the authenticated APT cache-tool archive was not staged");
 
     const rootfs_work_entry_t *script =
         find_entry(plan, VM_GUEST_ROOTFS_INSTALL_SCRIPT);
@@ -396,6 +417,20 @@ static void test_complete_synthetic_plan(void) {
           strstr((const char *)script->content,
                  "testpkg_1-1_iphoneos-arm.deb") != NULL,
           "the first-boot script does not install the fixture package");
+    CHECK(script &&
+          strstr((const char *)script->content,
+                 "install_one \"$packages/apt7_0.7.20.2-1_iphoneos-arm.deb\"") == NULL &&
+          strstr((const char *)script->content,
+                 "cache_archive=\"$packages/apt7_0.7.20.2-1_iphoneos-arm.deb\"") != NULL &&
+          strstr((const char *)script->content,
+                 "/usr/bin/dpkg-deb --extract \"$cache_archive\" \"$cache_stage\" || exit 1") != NULL &&
+          strstr((const char *)script->content,
+                 "\"$apt_get\" -o Acquire::http::Timeout=30 -o Acquire::Retries=3 update") != NULL &&
+          strstr((const char *)script->content,
+                 "\"$apt_cache\" gencaches || exit 1") != NULL &&
+          strstr((const char *)script->content,
+                 "\"$apt_cache\" stats >/dev/null 2>&1 || exit 1") != NULL,
+          "the tool-only APT archive is installed or does not build and validate caches");
     CHECK(plist && plist->content_size != 0u &&
           strstr((const char *)plist->content,
                  "com.j0shua.s5lbox.guest-install") != NULL,
@@ -412,6 +447,10 @@ static void test_complete_synthetic_plan(void) {
         ? strstr((const char *)script->content,
                  "/usr/bin/dpkg --force-depends --configure -a || exit 1")
         : NULL;
+    const char *apt_cache_ready = script
+        ? strstr((const char *)script->content,
+                 "Cydia APT caches built outside the application watchdog")
+        : NULL;
     const char *cydia_owner = script
         ? strstr((const char *)script->content,
                  "/bin/chown 0:0 \"$cydia\" || exit 1")
@@ -424,10 +463,11 @@ static void test_complete_synthetic_plan(void) {
         ? strstr((const char *)script->content,
                  "[ -u \"$cydia\" ] && [ -g \"$cydia\" ] || exit 1")
         : NULL;
-    CHECK(configured && cydia_owner && cydia_mode && cydia_mode_check &&
-          configured < cydia_owner && cydia_owner < cydia_mode &&
+    CHECK(configured && apt_cache_ready && cydia_owner && cydia_mode &&
+          cydia_mode_check && configured < apt_cache_ready &&
+          apt_cache_ready < cydia_owner && cydia_owner < cydia_mode &&
           cydia_mode < cydia_mode_check,
-          "the configured Cydia executable is not restored to root 6755");
+          "Cydia caches are not validated before its root 6755 executable is published");
     const char *mobile_cache = script
         ? strstr((const char *)script->content,
                  "/bin/grep -aq 'com.saurik.Cydia' \"$cache\" || exit 1")
@@ -463,9 +503,10 @@ static void test_complete_synthetic_plan(void) {
 
     vm_guest_rootfs_stats_t stats;
     vm_guest_rootfs_plan_get_stats(plan, &stats);
-    CHECK(stats.packages == 1u && stats.foundation_packages == 1u &&
+    CHECK(stats.packages == 2u && stats.foundation_packages == 1u &&
           stats.entries == vm_guest_rootfs_plan_entry_count(plan) &&
-          stats.download_bytes == package.size && stats.files != 0u &&
+          stats.download_bytes == package.size + cache_tool.size &&
+          stats.files != 0u &&
           stats.directories != 0u && stats.symlinks == 1u,
           "unexpected plan stats: packages=%zu foundation=%zu entries=%zu",
           stats.packages, stats.foundation_packages, stats.entries);
@@ -473,10 +514,10 @@ static void test_complete_synthetic_plan(void) {
     CHECK(vm_guest_rootfs_plan_manifest_sha256(plan, digest),
           "plan manifest identity was not produced");
     static const uint8_t EXPECTED[VM_GUEST_PACKAGE_SHA256_SIZE] = {
-        0x00u, 0x2fu, 0xb0u, 0xacu, 0x36u, 0xabu, 0xb9u, 0x16u,
-        0xdeu, 0x16u, 0xb8u, 0x11u, 0xf7u, 0xcau, 0x39u, 0x16u,
-        0x99u, 0xefu, 0x33u, 0x15u, 0xe1u, 0x5cu, 0x08u, 0x89u,
-        0x07u, 0x31u, 0x3au, 0xbfu, 0x21u, 0x97u, 0x80u, 0xd1u
+        0x92u, 0x65u, 0x69u, 0x54u, 0x56u, 0x99u, 0x66u, 0x4cu,
+        0x09u, 0xccu, 0x8bu, 0x5fu, 0x80u, 0xe1u, 0x87u, 0x0cu,
+        0xeeu, 0xf7u, 0xebu, 0xf7u, 0x11u, 0x9eu, 0x29u, 0xb5u,
+        0x6eu, 0xb0u, 0x35u, 0x4cu, 0x3cu, 0x98u, 0x6du, 0x1eu
     };
     CHECK(memcmp(digest, EXPECTED, sizeof digest) == 0,
           "synthetic plan identity changed");
@@ -592,7 +633,7 @@ static void test_real_packages_when_supplied(void) {
     if (!plan) return;
     vm_guest_rootfs_stats_t stats;
     vm_guest_rootfs_plan_get_stats(plan, &stats);
-    CHECK(stats.packages == 29u && stats.foundation_packages == 14u,
+    CHECK(stats.packages == 30u && stats.foundation_packages == 14u,
           "real plan has %zu packages / %zu foundation packages",
           stats.packages, stats.foundation_packages);
     CHECK(stats.entries != 0u && stats.entries <= ROOTFS_WORK_MAX_ENTRIES,
@@ -602,6 +643,11 @@ static void test_real_packages_when_supplied(void) {
           find_entry(plan, "/usr/lib/_ncurses/libcurses.dylib") == NULL &&
           find_entry(plan, "/usr/lib/_ncurses/libncurses.dylib") == NULL,
           "the real ncurses plan violates its preinst alias invariant");
+    CHECK(find_entry(
+              plan,
+              VM_GUEST_ROOTFS_PACKAGE_DIRECTORY
+              "/apt7_0.7.20.2-1_iphoneos-arm.deb") != NULL,
+          "the real plan did not stage its authenticated APT cache tool");
     printf("real-package-plan packages=%zu foundation=%zu entries=%zu "
            "deduplicated=%zu payload-bytes=%llu\n",
            stats.packages, stats.foundation_packages, stats.entries,

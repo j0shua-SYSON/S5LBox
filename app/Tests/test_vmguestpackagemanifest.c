@@ -23,10 +23,10 @@ static void test_shipping_manifest(void) {
     char why[256];
     CHECK(vm_guest_package_manifest_validate(why, sizeof why),
           "shipping manifest refused: %s", why);
-    CHECK(vm_guest_package_count() == 29u, "package count is %zu, expected 29",
+    CHECK(vm_guest_package_count() == 30u, "package count is %zu, expected 30",
           vm_guest_package_count());
-    CHECK(vm_guest_package_total_download_bytes() == UINT64_C(9575788),
-          "download total is %llu, expected 9575788",
+    CHECK(vm_guest_package_total_download_bytes() == UINT64_C(10240408),
+          "download total is %llu, expected 10240408",
           (unsigned long long)vm_guest_package_total_download_bytes());
     CHECK(vm_guest_package_at(vm_guest_package_count()) == NULL,
           "out-of-range package lookup succeeded");
@@ -39,8 +39,10 @@ static void test_shipping_manifest(void) {
     for (size_t i = 0u; i < vm_guest_package_count(); i++) {
         const vm_guest_package_t *package = vm_guest_package_at(i);
         CHECK(package != NULL &&
-              (package->roles & VM_GUEST_PACKAGE_INSTALL) != 0u,
-              "entry %zu is not installable", i);
+              (((package->roles & VM_GUEST_PACKAGE_INSTALL) != 0u) !=
+               ((package->roles &
+                 VM_GUEST_PACKAGE_APT_CACHE_TOOL) != 0u)),
+              "entry %zu has no unique provisioning role", i);
         if (package &&
             (package->roles & VM_GUEST_PACKAGE_FOUNDATION) != 0u) {
             foundation++;
@@ -52,6 +54,7 @@ static void test_shipping_manifest(void) {
           (unsigned long long)foundation_bytes);
 
     const vm_guest_package_t *dpkg = vm_guest_package_find("dpkg");
+    const vm_guest_package_t *apt_tool = vm_guest_package_find("apt7");
     const vm_guest_package_t *apt = vm_guest_package_find("apt7-lib");
     const vm_guest_package_t *cydia = vm_guest_package_find("cydia");
     const vm_guest_package_t *gnupg = vm_guest_package_find("gnupg");
@@ -59,6 +62,12 @@ static void test_shipping_manifest(void) {
           "bootstrap dpkg revision drifted");
     CHECK(apt && strcmp(apt->version, "0.7.20.2-1") == 0,
           "apt revision no longer matches dpkg -8");
+    CHECK(apt_tool && strcmp(apt_tool->version, "0.7.20.2-1") == 0 &&
+          apt_tool->roles == VM_GUEST_PACKAGE_APT_CACHE_TOOL &&
+          apt_tool->size == UINT64_C(664620) &&
+          strcmp(apt_tool->sha256_hex,
+                 "3864ac7542ff2c28bc0e4915c0781d8a680ae557c6150563831f476e701aa1a8") == 0,
+          "the ABI-matched APT cache-tool identity drifted");
     CHECK(cydia && cydia->size == UINT64_C(629500) &&
           strcmp(cydia->sha256_hex,
                  "94769b67e88198012cd1e45163f2f8bd949b4aa927dab1503a03d62a8ee3dba9") == 0,
@@ -103,6 +112,19 @@ static void test_entry_refusals(void) {
           "foundation without install role was accepted");
 
     changed = *shipping;
+    changed.roles = VM_GUEST_PACKAGE_APT_CACHE_TOOL;
+    CHECK(vm_guest_package_validate_entry(&changed, why, sizeof why),
+          "a tool-only authenticated archive was refused: %s", why);
+    changed.roles = VM_GUEST_PACKAGE_INSTALL |
+                    VM_GUEST_PACKAGE_APT_CACHE_TOOL;
+    CHECK(!vm_guest_package_validate_entry(&changed, why, sizeof why),
+          "one archive was allowed to be both installed and tool-only");
+    changed.roles = VM_GUEST_PACKAGE_FOUNDATION |
+                    VM_GUEST_PACKAGE_APT_CACHE_TOOL;
+    CHECK(!vm_guest_package_validate_entry(&changed, why, sizeof why),
+          "a tool-only archive was allowed to seed the foundation");
+
+    changed = *shipping;
     changed.size = 0u;
     CHECK(!vm_guest_package_validate_entry(&changed, why, sizeof why),
           "zero-byte package was accepted");
@@ -127,10 +149,10 @@ static void test_digest_and_download_match(void) {
     CHECK(vm_guest_package_manifest_sha256(manifest),
           "manifest digest failed");
     static const uint8_t EXPECTED[VM_GUEST_PACKAGE_SHA256_SIZE] = {
-        0x05u, 0x06u, 0x22u, 0x69u, 0x5eu, 0x47u, 0x37u, 0x91u,
-        0x26u, 0xefu, 0x6cu, 0xc1u, 0xdau, 0x5eu, 0xaau, 0x0cu,
-        0x72u, 0x18u, 0x53u, 0x16u, 0x67u, 0xd4u, 0x86u, 0xc0u,
-        0x22u, 0x75u, 0xdau, 0xb7u, 0xd6u, 0xd2u, 0xbeu, 0xd3u
+        0xafu, 0x7cu, 0x33u, 0x0du, 0xe7u, 0xcfu, 0x78u, 0x3bu,
+        0x61u, 0xddu, 0xf0u, 0x2au, 0xfcu, 0x7bu, 0xe3u, 0x9cu,
+        0xa1u, 0x6au, 0x3fu, 0x7fu, 0xf0u, 0xd8u, 0xbdu, 0x14u,
+        0x3eu, 0x94u, 0x9fu, 0x78u, 0x7bu, 0x91u, 0x3cu, 0x81u
     };
     CHECK(memcmp(manifest, EXPECTED, sizeof manifest) == 0,
           "manifest identity changed");

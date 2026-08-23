@@ -279,14 +279,103 @@ static const uint8_t VM_APT_VERIFIER_INSTALL_PLIST[] =
     "</dict>\n"
     "</plist>\n";
 
-enum { VM_CYDIA_MAINTENANCE_MAX_ENTRIES = 15u };
+#define VM_CYDIA_CACHE_STATE_DIRECTORY \
+    "/private/var/lib/s5lbox/cydia-cache-v3"
+#define VM_CYDIA_CACHE_PACKAGE_PATH \
+    VM_CYDIA_CACHE_STATE_DIRECTORY "/apt7_0.7.20.2-1_iphoneos-arm.deb"
+#define VM_CYDIA_CACHE_RUN_PATH \
+    "/private/var/lib/s5lbox/cydia-cache-v3-run"
+
+static const uint8_t VM_CYDIA_CACHE_RUN[] =
+    "#!/bin/sh\n"
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin\n"
+    "export PATH\n"
+    "state=" VM_CYDIA_CACHE_STATE_DIRECTORY "\n"
+    "marker=$state/complete\n"
+    "[ -e \"$marker\" ] && exit 0\n"
+    "package=" VM_CYDIA_CACHE_PACKAGE_PATH "\n"
+    "stage=$state/extract.partial\n"
+    "apt_get=$state/apt-get\n"
+    "apt_cache=$state/apt-cache\n"
+    "cydia=/Applications/Cydia.app/Cydia_\n"
+    "log=/private/var/log/s5lbox-cydia-cache-v3.log\n"
+    "exec >>\"$log\" 2>&1\n"
+    "echo 'building Cydia caches outside the application watchdog'\n"
+    "[ -f \"$cydia\" ] || exit 1\n"
+    "/bin/chown 0:0 \"$cydia\" || exit 1\n"
+    "/bin/chmod 0600 \"$cydia\" || exit 1\n"
+    "if [ -f \"$package\" ]; then\n"
+    "    /bin/rm -rf \"$stage\" || exit 1\n"
+    "    /bin/mkdir -p \"$stage\" || exit 1\n"
+    "    /usr/bin/dpkg-deb --extract \"$package\" \"$stage\" || exit 1\n"
+    "    [ -x \"$stage/usr/bin/apt-get\" ] || exit 1\n"
+    "    [ -x \"$stage/usr/bin/apt-cache\" ] || exit 1\n"
+    "    /bin/cp \"$stage/usr/bin/apt-get\" \"$apt_get.partial\" || exit 1\n"
+    "    /bin/cp \"$stage/usr/bin/apt-cache\" \"$apt_cache.partial\" || exit 1\n"
+    "    /bin/chown 0:0 \"$apt_get.partial\" \"$apt_cache.partial\" || exit 1\n"
+    "    /bin/chmod 0755 \"$apt_get.partial\" \"$apt_cache.partial\" || exit 1\n"
+    "    /bin/mv -f \"$apt_get.partial\" \"$apt_get\" || exit 1\n"
+    "    /bin/mv -f \"$apt_cache.partial\" \"$apt_cache\" || exit 1\n"
+    "    /bin/rm -rf \"$stage\" || exit 1\n"
+    "fi\n"
+    "[ -x \"$apt_get\" ] && [ -x \"$apt_cache\" ] || exit 1\n"
+    "/bin/rm -f /private/var/cache/apt/pkgcache.bin /private/var/cache/apt/srcpkgcache.bin || exit 1\n"
+    "attempt=0\n"
+    "while [ \"$attempt\" -lt 3 ]; do\n"
+    "    \"$apt_get\" -o Acquire::http::Timeout=30 -o Acquire::Retries=3 update && break\n"
+    "    attempt=$((attempt + 1))\n"
+    "    /bin/sleep 10\n"
+    "done\n"
+    "[ \"$attempt\" -lt 3 ] || echo 'APT refresh incomplete; trying authenticated retained lists'\n"
+    "/bin/rm -f /private/var/cache/apt/pkgcache.bin /private/var/cache/apt/srcpkgcache.bin || exit 1\n"
+    "\"$apt_cache\" gencaches || exit 1\n"
+    "[ -s /private/var/cache/apt/pkgcache.bin ] || exit 1\n"
+    "[ -s /private/var/cache/apt/srcpkgcache.bin ] || exit 1\n"
+    "\"$apt_cache\" stats >/dev/null 2>&1 || exit 1\n"
+    "/bin/chown 0:0 \"$cydia\" || exit 1\n"
+    "/bin/chmod 6755 \"$cydia\" || exit 1\n"
+    "[ -u \"$cydia\" ] && [ -g \"$cydia\" ] || exit 1\n"
+    ": >\"$marker.partial\" || exit 1\n"
+    "/bin/sync\n"
+    "/bin/mv -f \"$marker.partial\" \"$marker\" || exit 1\n"
+    "/bin/sync\n"
+    "/bin/rm -f \"$package\" || exit 1\n"
+    "echo 'Cydia cache build complete'\n"
+    "exit 0\n";
+
+static const uint8_t VM_CYDIA_CACHE_RUN_PLIST[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\">\n"
+    "<dict>\n"
+    "  <key>Label</key>\n"
+    "  <string>com.j0shua.s5lbox.cydia-cache-v3</string>\n"
+    "  <key>ProgramArguments</key>\n"
+    "  <array>\n"
+    "    <string>" VM_CYDIA_CACHE_RUN_PATH "</string>\n"
+    "  </array>\n"
+    "  <key>RunAtLoad</key>\n"
+    "  <true/>\n"
+    "  <key>KeepAlive</key>\n"
+    "  <dict>\n"
+    "    <key>SuccessfulExit</key>\n"
+    "    <false/>\n"
+    "  </dict>\n"
+    "  <key>ThrottleInterval</key>\n"
+    "  <integer>30</integer>\n"
+    "</dict>\n"
+    "</plist>\n";
+
+enum { VM_CYDIA_MAINTENANCE_MAX_ENTRIES = 19u };
 
 static size_t build_cydia_maintenance_entries(
     rootfs_work_entry_t *entries, size_t capacity,
     bool include_source, bool create_source,
     bool include_trust, bool create_keyring,
     bool include_verifier, const uint8_t *verifier_package,
-    size_t verifier_package_size) {
+    size_t verifier_package_size,
+    bool include_cache, const uint8_t *cache_package,
+    size_t cache_package_size) {
     static const char *directories[] = {
         "/private/etc/apt",
         "/private/etc/apt/sources.list.d",
@@ -299,9 +388,12 @@ static size_t build_cydia_maintenance_entries(
     const size_t required = directory_count +
         (include_source ? 2u + (create_source ? 1u : 0u) : 0u) +
         (include_trust ? 2u + (create_keyring ? 1u : 0u) : 0u) +
-        (include_verifier ? 4u : 0u);
+        (include_verifier ? 4u : 0u) +
+        (include_cache ? 4u : 0u);
     if (include_verifier &&
         (!verifier_package || verifier_package_size == 0u))
+        return required;
+    if (include_cache && (!cache_package || cache_package_size == 0u))
         return required;
     if (!entries || capacity < required) return required;
     memset(entries, 0, required * sizeof entries[0]);
@@ -400,6 +492,35 @@ static size_t build_cydia_maintenance_entries(
         entries[count].permissions = 0644u;
         count++;
     }
+    if (include_cache) {
+        entries[count].kind = ROOTFS_WORK_ENTRY_DIRECTORY;
+        entries[count].path = VM_CYDIA_CACHE_STATE_DIRECTORY;
+        entries[count].permissions = 0755u;
+        entries[count].existing_policy =
+            ROOTFS_WORK_EXISTING_REUSE_DIRECTORY;
+        count++;
+        entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
+        entries[count].path = VM_CYDIA_CACHE_PACKAGE_PATH;
+        entries[count].content = cache_package;
+        entries[count].content_size = cache_package_size;
+        entries[count].permissions = 0644u;
+        count++;
+        entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
+        entries[count].path = VM_CYDIA_CACHE_RUN_PATH;
+        entries[count].content = VM_CYDIA_CACHE_RUN;
+        entries[count].content_size = sizeof VM_CYDIA_CACHE_RUN - 1u;
+        entries[count].permissions = 0755u;
+        count++;
+        entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
+        entries[count].path =
+            "/System/Library/LaunchDaemons/"
+            "com.j0shua.s5lbox.cydia-cache-v3.plist";
+        entries[count].content = VM_CYDIA_CACHE_RUN_PLIST;
+        entries[count].content_size =
+            sizeof VM_CYDIA_CACHE_RUN_PLIST - 1u;
+        entries[count].permissions = 0644u;
+        count++;
+    }
     return count;
 }
 
@@ -407,14 +528,14 @@ static size_t build_bigboss_source_entries(
     rootfs_work_entry_t *entries, size_t capacity, bool create_source) {
     return build_cydia_maintenance_entries(
         entries, capacity, true, create_source, false, false,
-        false, NULL, 0u);
+        false, NULL, 0u, false, NULL, 0u);
 }
 
 static size_t build_apt_trust_entries(
     rootfs_work_entry_t *entries, size_t capacity, bool create_keyring) {
     return build_cydia_maintenance_entries(
         entries, capacity, false, false, true, create_keyring,
-        false, NULL, 0u);
+        false, NULL, 0u, false, NULL, 0u);
 }
 
 static size_t build_apt_verifier_entries(
@@ -422,7 +543,15 @@ static size_t build_apt_verifier_entries(
     const uint8_t *package, size_t package_size) {
     return build_cydia_maintenance_entries(
         entries, capacity, false, false, false, false,
-        true, package, package_size);
+        true, package, package_size, false, NULL, 0u);
+}
+
+static size_t build_cydia_cache_entries(
+    rootfs_work_entry_t *entries, size_t capacity,
+    const uint8_t *package, size_t package_size) {
+    return build_cydia_maintenance_entries(
+        entries, capacity, false, false, false, false,
+        false, NULL, 0u, true, package, package_size);
 }
 
 #if defined(S5LBOX_GUEST_INSTALL_TESTING)
@@ -440,6 +569,13 @@ size_t vm_guest_install_build_test_apt_verifier_entries(
     rootfs_work_entry_t *entries, size_t capacity,
     const uint8_t *package, size_t package_size) {
     return build_apt_verifier_entries(
+        entries, capacity, package, package_size);
+}
+
+size_t vm_guest_install_build_test_cydia_cache_entries(
+    rootfs_work_entry_t *entries, size_t capacity,
+    const uint8_t *package, size_t package_size) {
+    return build_cydia_cache_entries(
         entries, capacity, package, package_size);
 }
 #endif
@@ -550,6 +686,67 @@ static uint8_t *build_load_apt_verifier_package(
         free(bytes);
         build_detail(detail, detail_capacity,
                      "The APT signature-verifier package changed while it was being read.");
+        return NULL;
+    }
+    *out_size = size;
+    return bytes;
+}
+
+static uint8_t *build_load_cydia_cache_package(
+    const char *package_directory, size_t *out_size,
+    char *detail, size_t detail_capacity) {
+    if (out_size) *out_size = 0u;
+    const vm_guest_package_t *package = vm_guest_package_find("apt7");
+    if (!package_directory || !*package_directory || !out_size || !package ||
+        strcmp(package->version, "0.7.20.2-1") != 0 ||
+        strcmp(package->filename,
+               "apt7_0.7.20.2-1_iphoneos-arm.deb") != 0 ||
+        package->roles != VM_GUEST_PACKAGE_APT_CACHE_TOOL ||
+        package->size == 0u || package->size > SIZE_MAX) {
+        build_detail(detail, detail_capacity,
+                     "The pinned Cydia cache-tool package is unavailable.");
+        return NULL;
+    }
+    char path[VM_GUEST_INSTALL_PATH_CAPACITY];
+    if (!build_join(path, package_directory, package->filename)) {
+        build_detail(detail, detail_capacity,
+                     "The Cydia cache-tool package path is too long.");
+        return NULL;
+    }
+    size_t size = (size_t)package->size;
+    uint8_t *bytes = (uint8_t *)malloc(size);
+    if (!bytes) {
+        build_detail(detail, detail_capacity,
+                     "The Cydia cache-tool package could not be retained in memory.");
+        return NULL;
+    }
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        free(bytes);
+        build_detail(detail, detail_capacity,
+                     "The downloaded Cydia cache-tool package cannot be opened.");
+        return NULL;
+    }
+    size_t used = 0u;
+    bool read_ok = true;
+    while (read_ok && used < size) {
+        size_t amount = fread(bytes + used, 1u, size - used, file);
+        if (amount == 0u) {
+            read_ok = false;
+            break;
+        }
+        used += amount;
+    }
+    int extra = read_ok ? fgetc(file) : EOF;
+    if ((read_ok && extra != EOF) || ferror(file) || fclose(file) != 0)
+        read_ok = false;
+    uint8_t digest[VM_GUEST_PACKAGE_SHA256_SIZE];
+    if (!read_ok || used != size ||
+        !ios3_sha256(bytes, size, digest) ||
+        !vm_guest_package_download_matches(package, size, digest)) {
+        free(bytes);
+        build_detail(detail, detail_capacity,
+                     "The Cydia cache-tool package changed while it was being read.");
         return NULL;
     }
     *out_size = size;
@@ -876,18 +1073,20 @@ static vm_guest_install_build_status_t build_maintain_install(
     const vm_guest_install_result_t *sources_v2,
     const vm_guest_install_result_t *apt_trust,
     const vm_guest_install_result_t *apt_verifier,
+    const vm_guest_install_result_t *cydia_cache,
     vm_guest_install_build_progress_t progress, void *progress_context,
     vm_guest_install_build_result_t *result,
     char *detail, size_t detail_capacity) {
     if (!install || !install->committed || !install->has_manifest ||
         !storage || !privilege || !sources || !sources_v2 || !apt_trust ||
-        !apt_verifier ||
+        !apt_verifier || !cydia_cache ||
         !build_transaction_matches_install(storage, install) ||
         !build_transaction_matches_install(privilege, install) ||
         !build_transaction_matches_install(sources, install) ||
         !build_transaction_matches_install(sources_v2, install) ||
         !build_transaction_matches_install(apt_trust, install) ||
-        !build_transaction_matches_install(apt_verifier, install)) {
+        !build_transaction_matches_install(apt_verifier, install) ||
+        !build_transaction_matches_install(cydia_cache, install)) {
         build_detail(detail, detail_capacity,
                      "A guest-disk maintenance record does not match the committed installation.");
         return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
@@ -898,7 +1097,8 @@ static vm_guest_install_build_status_t build_maintain_install(
         (sources->committed && !sources->cleanup_complete) ||
         (sources_v2->committed && !sources_v2->cleanup_complete) ||
         (apt_trust->committed && !apt_trust->cleanup_complete) ||
-        (apt_verifier->committed && !apt_verifier->cleanup_complete)) {
+        (apt_verifier->committed && !apt_verifier->cleanup_complete) ||
+        (cydia_cache->committed && !cydia_cache->cleanup_complete)) {
         build_detail(detail, detail_capacity,
                      "A committed guest-disk transaction still has cleanup residue; no new maintenance transaction was started.");
         return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
@@ -970,6 +1170,7 @@ static vm_guest_install_build_status_t build_maintain_install(
     bool source_needed = false;
     bool trust_needed = false;
     bool verifier_needed = false;
+    bool cache_needed = false;
     bool trust_create = false;
     bool source_preflighted = false;
     char transaction_detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
@@ -1148,8 +1349,14 @@ static vm_guest_install_build_status_t build_maintain_install(
         }
     }
 
+    if (cydia_cache->committed) {
+        if (result) result->cydia_cache_staged = true;
+    } else {
+        cache_needed = true;
+    }
+
     if (!grow_storage && !repair_needed && !source_needed && !trust_needed &&
-        !verifier_needed) {
+        !verifier_needed && !cache_needed) {
         build_progress(progress, progress_context,
                        VM_GUEST_INSTALL_BUILD_COMPLETE, 1u, 1u);
         return VM_GUEST_INSTALL_BUILD_OK;
@@ -1157,6 +1364,8 @@ static vm_guest_install_build_status_t build_maintain_install(
 
     uint8_t *verifier_package = NULL;
     size_t verifier_package_size = 0u;
+    uint8_t *cache_package = NULL;
+    size_t cache_package_size = 0u;
     if (verifier_needed) {
         if (!package_directory || !*package_directory) {
             build_detail(detail, detail_capacity,
@@ -1169,12 +1378,28 @@ static vm_guest_install_build_status_t build_maintain_install(
         if (!verifier_package)
             return VM_GUEST_INSTALL_BUILD_ERR_PACKAGES;
     }
+    if (cache_needed) {
+        if (!package_directory || !*package_directory) {
+            free(verifier_package);
+            build_detail(detail, detail_capacity,
+                         "The exact legacy Cydia cache-tool package must be downloaded before this guest can be repaired.");
+            return VM_GUEST_INSTALL_BUILD_ERR_ARGUMENT;
+        }
+        cache_package = build_load_cydia_cache_package(
+            package_directory, &cache_package_size,
+            detail, detail_capacity);
+        if (!cache_package) {
+            free(verifier_package);
+            return VM_GUEST_INSTALL_BUILD_ERR_PACKAGES;
+        }
+    }
 
     if (!snapshot_gate_passed) {
         vm_guest_install_build_status_t snapshot_gate = build_snapshot_gate(
             work_directory, result, detail, detail_capacity);
         if (snapshot_gate != VM_GUEST_INSTALL_BUILD_OK) {
             free(verifier_package);
+            free(cache_package);
             return snapshot_gate;
         }
     }
@@ -1186,6 +1411,7 @@ static vm_guest_install_build_status_t build_maintain_install(
         if (result) result->rootfs = preflight;
         if (preflight_status != ROOTFS_WORK_OK) {
             free(verifier_package);
+            free(cache_package);
             return build_rootfs_refusal(preflight_status, &preflight,
                                         detail, detail_capacity);
         }
@@ -1211,13 +1437,18 @@ static vm_guest_install_build_status_t build_maintain_install(
         preparation = vm_guest_apt_trust_prepare_stage(
             work_directory, &prepared, transaction_detail,
             sizeof transaction_detail);
-    } else {
+    } else if (verifier_needed) {
         preparation = vm_guest_apt_verifier_prepare_stage(
+            work_directory, &prepared, transaction_detail,
+            sizeof transaction_detail);
+    } else {
+        preparation = vm_guest_cydia_cache_prepare_stage(
             work_directory, &prepared, transaction_detail,
             sizeof transaction_detail);
     }
     if (preparation != VM_GUEST_INSTALL_OK || prepared.committed) {
         free(verifier_package);
+        free(cache_package);
         build_detail(detail, detail_capacity,
                      preparation == VM_GUEST_INSTALL_OK
                          ? "Guest-disk maintenance became committed while its disk was being prepared."
@@ -1241,12 +1472,16 @@ static vm_guest_install_build_status_t build_maintain_install(
     } else if (trust_needed) {
         stage_ok = vm_guest_apt_trust_stage_image_path(
             stage, sizeof stage, work_directory);
-    } else {
+    } else if (verifier_needed) {
         stage_ok = vm_guest_apt_verifier_stage_image_path(
+            stage, sizeof stage, work_directory);
+    } else {
+        stage_ok = vm_guest_cydia_cache_stage_image_path(
             stage, sizeof stage, work_directory);
     }
     if (!stage_ok) {
         free(verifier_package);
+        free(cache_package);
         build_detail(detail, detail_capacity,
                      "The guest-disk maintenance stage path is too long.");
         return VM_GUEST_INSTALL_BUILD_ERR_PATH;
@@ -1260,7 +1495,8 @@ static vm_guest_install_build_status_t build_maintain_install(
     options.allow_unclean_source = allow_unclean_source;
     options.repair_catalog_backlinks =
         allow_unclean_source &&
-        (repair_needed || source_needed || trust_needed || verifier_needed);
+        (repair_needed || source_needed || trust_needed || verifier_needed ||
+         cache_needed);
     if (grow_storage)
         options.minimum_volume_bytes = VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES;
     if (repair_needed) {
@@ -1270,11 +1506,12 @@ static vm_guest_install_build_status_t build_maintain_install(
     rootfs_work_entry_t
         maintenance_entries[VM_CYDIA_MAINTENANCE_MAX_ENTRIES];
     size_t maintenance_entry_count = 0u;
-    if (source_needed || trust_needed || verifier_needed) {
+    if (source_needed || trust_needed || verifier_needed || cache_needed) {
         maintenance_entry_count = build_cydia_maintenance_entries(
             maintenance_entries, VM_CYDIA_MAINTENANCE_MAX_ENTRIES,
             source_needed, source_create, trust_needed, trust_create,
-            verifier_needed, verifier_package, verifier_package_size);
+            verifier_needed, verifier_package, verifier_package_size,
+            cache_needed, cache_package, cache_package_size);
         options.entries = maintenance_entries;
         options.entry_count = maintenance_entry_count;
     }
@@ -1286,16 +1523,19 @@ static vm_guest_install_build_status_t build_maintain_install(
         live, stage, &options, &rootfs);
     free(verifier_package);
     verifier_package = NULL;
+    free(cache_package);
+    cache_package = NULL;
     if (result) result->rootfs = rootfs;
     if (rootfs_status != ROOTFS_WORK_OK || !rootfs.published ||
         (grow_storage &&
          rootfs.final_size < VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES) ||
         (repair_needed && rootfs.file_repairs_applied != 1u) ||
-        ((source_needed || trust_needed || verifier_needed) &&
+        ((source_needed || trust_needed || verifier_needed || cache_needed) &&
          (rootfs.provision_entries <
               2u * ((source_needed ? 1u : 0u) +
                     (trust_needed ? 1u : 0u)) +
-                  (verifier_needed ? 3u : 0u) ||
+                  (verifier_needed ? 3u : 0u) +
+                  (cache_needed ? 3u : 0u) ||
           rootfs.provision_entries + rootfs.provision_reused_entries !=
               maintenance_entry_count))) {
         if (rootfs_status == ROOTFS_WORK_OK) {
@@ -1327,8 +1567,12 @@ static vm_guest_install_build_status_t build_maintain_install(
         publication = vm_guest_apt_trust_publish(
             work_directory, install->manifest_sha256, &published,
             transaction_detail, sizeof transaction_detail);
-    } else {
+    } else if (verifier_needed) {
         publication = vm_guest_apt_verifier_publish(
+            work_directory, install->manifest_sha256, &published,
+            transaction_detail, sizeof transaction_detail);
+    } else {
+        publication = vm_guest_cydia_cache_publish(
             work_directory, install->manifest_sha256, &published,
             transaction_detail, sizeof transaction_detail);
     }
@@ -1340,8 +1584,10 @@ static vm_guest_install_build_status_t build_maintain_install(
         result->sources_v2_transaction = published;
     } else if (trust_needed && result) {
         result->apt_trust_transaction = published;
-    } else if (result) {
+    } else if (verifier_needed && result) {
         result->apt_verifier_transaction = published;
+    } else if (result) {
+        result->cydia_cache_transaction = published;
     }
     if (publication != VM_GUEST_INSTALL_OK || !published.committed) {
         build_detail(detail, detail_capacity,
@@ -1446,6 +1692,27 @@ static vm_guest_install_build_status_t build_maintain_install(
             }
         }
     }
+    if (cache_needed) {
+        if (result) result->cydia_cache_staged = true;
+        if (grow_storage || repair_needed || source_needed || trust_needed ||
+            verifier_needed) {
+            vm_guest_install_result_t confirmed;
+            vm_guest_install_status_t confirmation =
+                vm_guest_cydia_cache_confirm(
+                    work_directory, install->manifest_sha256, &confirmed,
+                    transaction_detail, sizeof transaction_detail);
+            if (result) result->cydia_cache_transaction = confirmed;
+            if (confirmation != VM_GUEST_INSTALL_OK ||
+                !confirmed.committed) {
+                build_detail(
+                    detail, detail_capacity,
+                    transaction_detail[0]
+                        ? transaction_detail
+                        : vm_guest_install_status_text(confirmation));
+                return VM_GUEST_INSTALL_BUILD_ERR_PUBLISH;
+            }
+        }
+    }
     build_progress(progress, progress_context,
                    VM_GUEST_INSTALL_BUILD_PUBLISHING, 1u, 1u);
     build_progress(progress, progress_context,
@@ -1468,7 +1735,7 @@ vm_guest_install_build_from_directory(
     }
 
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 0u, 6u);
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 0u, 7u);
     vm_guest_install_result_t privilege;
     vm_guest_install_result_t storage;
     vm_guest_install_result_t sources;
@@ -1490,7 +1757,7 @@ vm_guest_install_build_from_directory(
         result->sources_transaction = sources;
     }
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 2u, 6u);
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 2u, 7u);
     vm_guest_install_result_t sources_v2;
     maintenance_recovery = vm_guest_sources_v2_recover(
         work_directory, &sources_v2, transaction_detail,
@@ -1504,7 +1771,7 @@ vm_guest_install_build_from_directory(
     }
     if (result) result->sources_v2_transaction = sources_v2;
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 3u, 6u);
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 3u, 7u);
     vm_guest_install_result_t apt_trust;
     maintenance_recovery = vm_guest_apt_trust_recover(
         work_directory, &apt_trust, transaction_detail,
@@ -1518,7 +1785,7 @@ vm_guest_install_build_from_directory(
     }
     if (result) result->apt_trust_transaction = apt_trust;
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 4u, 6u);
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 4u, 7u);
     vm_guest_install_result_t apt_verifier;
     maintenance_recovery = vm_guest_apt_verifier_recover(
         work_directory, &apt_verifier, transaction_detail,
@@ -1532,7 +1799,21 @@ vm_guest_install_build_from_directory(
     }
     if (result) result->apt_verifier_transaction = apt_verifier;
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 5u, 6u);
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 5u, 7u);
+    vm_guest_install_result_t cydia_cache;
+    maintenance_recovery = vm_guest_cydia_cache_recover(
+        work_directory, &cydia_cache, transaction_detail,
+        sizeof transaction_detail);
+    if (maintenance_recovery != VM_GUEST_INSTALL_OK) {
+        build_detail(detail, detail_capacity,
+                     transaction_detail[0]
+                         ? transaction_detail
+                         : vm_guest_install_status_text(maintenance_recovery));
+        return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
+    }
+    if (result) result->cydia_cache_transaction = cydia_cache;
+    build_progress(progress, progress_context,
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 6u, 7u);
     vm_guest_install_result_t recovered;
     vm_guest_install_status_t recovery = vm_guest_install_recover(
         work_directory, &recovered, transaction_detail,
@@ -1545,7 +1826,7 @@ vm_guest_install_build_from_directory(
     }
     if (result) result->transaction = recovered;
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 6u, 6u);
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 7u, 7u);
     if (recovered.committed) {
         if (result) {
             result->already_installed = true;
@@ -1556,11 +1837,12 @@ vm_guest_install_build_from_directory(
         return build_maintain_install(
             work_directory, package_directory, &recovered, &storage,
             &privilege, &sources, &sources_v2, &apt_trust, &apt_verifier,
+            &cydia_cache,
             progress, progress_context, result, detail, detail_capacity);
     }
     if (storage.committed || privilege.committed || sources.committed ||
         sources_v2.committed || apt_trust.committed ||
-        apt_verifier.committed) {
+        apt_verifier.committed || cydia_cache.committed) {
         build_detail(detail, detail_capacity,
                      "A guest-disk maintenance record exists without a committed guest installation.");
         return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
@@ -1722,11 +2004,27 @@ vm_guest_install_build_from_directory(
                 : vm_guest_install_status_text(verifier_confirmation));
         return VM_GUEST_INSTALL_BUILD_ERR_PUBLISH;
     }
+    vm_guest_install_result_t cache_confirmed;
+    vm_guest_install_status_t cache_confirmation =
+        vm_guest_cydia_cache_confirm(
+            work_directory, manifest, &cache_confirmed,
+            transaction_detail, sizeof transaction_detail);
+    if (result) result->cydia_cache_transaction = cache_confirmed;
+    if (cache_confirmation != VM_GUEST_INSTALL_OK ||
+        !cache_confirmed.committed) {
+        build_detail(
+            detail, detail_capacity,
+            transaction_detail[0]
+                ? transaction_detail
+                : vm_guest_install_status_text(cache_confirmation));
+        return VM_GUEST_INSTALL_BUILD_ERR_PUBLISH;
+    }
     if (result) {
         result->cydia_sources_verified = true;
         result->apt_trust_installed = true;
         result->apt_trust_verified = true;
         result->apt_verifier_staged = true;
+        result->cydia_cache_staged = true;
     }
     build_progress(progress, progress_context,
                    VM_GUEST_INSTALL_BUILD_PUBLISHING, 1u, 1u);

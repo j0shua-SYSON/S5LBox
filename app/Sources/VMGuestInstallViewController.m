@@ -220,19 +220,21 @@ static void VMGuestInstallBuildProgress(
                cydiaPrivilegesRepaired:(BOOL)cydiaPrivilegesRepaired
                     cydiaSourcesAdded:(BOOL)cydiaSourcesAdded
                     aptTrustInstalled:(BOOL)aptTrustInstalled
-                    aptVerifierStaged:(BOOL)aptVerifierStaged {
+                    aptVerifierStaged:(BOOL)aptVerifierStaged
+                      cydiaCacheStaged:(BOOL)cydiaCacheStaged {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (self->_finished) return;
         self->_finished = YES;
         [self endBackgroundTime];
         [self->_progressBar setProgress:1.0f animated:YES];
-        self->_headline.text = aptVerifierStaged ? @"Cydia verifier ready"
+        self->_headline.text = cydiaCacheStaged ? @"Cydia cache job ready"
+                              : (aptVerifierStaged ? @"Cydia verifier ready"
                               : (cydiaPrivilegesRepaired ? @"Cydia repaired"
                               : (cydiaSourcesAdded ? @"Cydia repositories ready"
                               : (aptTrustInstalled ? @"Cydia trust ready"
                               : (storageUpgraded ? @"Storage upgraded"
                               : (alreadyPresent ? @"Jailbreak already installed"
-                                                : @"Jailbreak ready")))));
+                                                : @"Jailbreak ready"))))));
         NSString *baseDetail = cydiaPrivilegesRepaired && cydiaSourcesAdded
             ? (storageUpgraded
                 ? @"Starting iPhone OS with a 2 GiB guest disk. Cydia's executable permissions were repaired and the period-compatible BigBoss repository was added without removing existing data."
@@ -252,10 +254,14 @@ static void VMGuestInstallBuildProgress(
             ? [baseDetail stringByAppendingString:
                 @" BigBoss's verified legacy public key was installed; APT signature checks remain enabled."]
             : baseDetail;
-        self->_detail.text = aptVerifierStaged
+        NSString *verifierDetail = aptVerifierStaged
             ? [trustDetail stringByAppendingString:
                 @" Signature-verifier support is provisioned; guest dpkg completes it during boot if needed."]
             : trustDetail;
+        self->_detail.text = cydiaCacheStaged
+            ? [verifierDetail stringByAppendingString:
+                @" A retryable boot job will build and validate Cydia's package caches before enabling Cydia; this screen proves staging, not guest-side completion."]
+            : verifierDetail;
         void (^ready)(void) = [self.readyHandler copy];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                      (int64_t)(0.8 * NSEC_PER_SEC)),
@@ -293,7 +299,8 @@ static void VMGuestInstallBuildProgress(
                              result.cydia_privileges_repaired
                               cydiaSourcesAdded:result.cydia_sources_added
                               aptTrustInstalled:result.apt_trust_installed
-                              aptVerifierStaged:result.apt_verifier_staged];
+                              aptVerifierStaged:result.apt_verifier_staged
+                                cydiaCacheStaged:result.cydia_cache_staged];
             return;
         }
         if (status != VM_GUEST_INSTALL_BUILD_ERR_ARGUMENT) {
@@ -361,7 +368,8 @@ static void VMGuestInstallBuildProgress(
                          result.cydia_privileges_repaired
                           cydiaSourcesAdded:result.cydia_sources_added
                           aptTrustInstalled:result.apt_trust_installed
-                          aptVerifierStaged:result.apt_verifier_staged];
+                          aptVerifierStaged:result.apt_verifier_staged
+                            cydiaCacheStaged:result.cydia_cache_staged];
     });
 }
 

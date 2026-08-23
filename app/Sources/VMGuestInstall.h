@@ -82,6 +82,17 @@ extern "C" {
 #define VM_GUEST_APT_VERIFIER_MARKER_TMP      "guest.apt-verifier-v1.partial"
 #define VM_GUEST_APT_VERIFIER_JOURNAL_FILE    "guest.apt-verifier-v1.transaction"
 #define VM_GUEST_APT_VERIFIER_JOURNAL_TMP     "guest.apt-verifier-v1.transaction.partial"
+/* Cache cleanup alone did not solve current repository growth: old Cydia can
+ * be watchdog-killed while libapt builds its cache, leaving partial cache
+ * files that later crash in libapt. This independent v3 namespace stages an
+ * ABI-matched command-line cache builder for a boot daemon, without claiming
+ * that the guest-side job has completed merely because the disk was published. */
+#define VM_GUEST_CYDIA_CACHE_BACKUP_FILE     "rootfs-work.pre-cydia-cache-v3"
+#define VM_GUEST_CYDIA_CACHE_STAGE_DIRECTORY "guest.cydia-cache-v3.stage"
+#define VM_GUEST_CYDIA_CACHE_MARKER_FILE     "guest.cydia-cache-v3"
+#define VM_GUEST_CYDIA_CACHE_MARKER_TMP      "guest.cydia-cache-v3.partial"
+#define VM_GUEST_CYDIA_CACHE_JOURNAL_FILE    "guest.cydia-cache-v3.transaction"
+#define VM_GUEST_CYDIA_CACHE_JOURNAL_TMP     "guest.cydia-cache-v3.transaction.partial"
 /* Powered-off filesystem repair is repeatable, so its commit record is only a
  * crash-recovery boundary. It is removed after the backup, journal, and stage
  * are durably cleaned instead of becoming permanent boot policy. */
@@ -315,6 +326,33 @@ vm_guest_apt_verifier_confirm(const char *work_directory,
                                   VM_GUEST_INSTALL_SHA256_SIZE],
                               vm_guest_install_result_t *result,
                               char *detail, size_t detail_capacity);
+
+/* Versioned deployment of the out-of-process Cydia cache builder. A committed
+ * host record proves only that the exact archive and retryable boot job were
+ * staged atomically. Guest cache files and the guest completion marker remain
+ * separate runtime evidence. */
+bool vm_guest_cydia_cache_stage_image_path(char *out, size_t capacity,
+                                           const char *work_directory);
+vm_guest_install_status_t
+vm_guest_cydia_cache_prepare_stage(const char *work_directory,
+                                   vm_guest_install_result_t *result,
+                                   char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_cydia_cache_recover(const char *work_directory,
+                             vm_guest_install_result_t *result,
+                             char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_cydia_cache_publish(const char *work_directory,
+                             const uint8_t manifest_sha256[
+                                 VM_GUEST_INSTALL_SHA256_SIZE],
+                             vm_guest_install_result_t *result,
+                             char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_cydia_cache_confirm(const char *work_directory,
+                             const uint8_t manifest_sha256[
+                                 VM_GUEST_INSTALL_SHA256_SIZE],
+                             vm_guest_install_result_t *result,
+                             char *detail, size_t detail_capacity);
 
 /* Crash-safe publication of an unpublished powered-off filesystem repair.
  * prepare_stage() creates an empty same-directory stage after recovering every

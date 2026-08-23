@@ -151,8 +151,10 @@ static const char SCRIPT_HEADER[] =
     "    /bin/rm -f \"$1\" || return 1\n"
     "}\n";
 
+static const char SCRIPT_CONFIGURE[] =
+    "/usr/bin/dpkg --force-depends --configure -a || exit 1\n";
+
 static const char SCRIPT_FOOTER[] =
-    "/usr/bin/dpkg --force-depends --configure -a || exit 1\n"
     "cydia=/Applications/Cydia.app/Cydia_\n"
     "[ -f \"$cydia\" ] || exit 1\n"
     "/bin/chown 0:0 \"$cydia\" || exit 1\n"
@@ -415,17 +417,67 @@ static bool plan_script_package(vm_guest_rootfs_plan_t *plan,
            plan_script_append(plan, "\" || exit 1\n");
 }
 
+static bool plan_script_apt_cache_tool(
+    vm_guest_rootfs_plan_t *plan,
+    const vm_guest_package_t *package) {
+    return plan_script_append(plan, "cache_archive=\"$packages/") &&
+           plan_script_append(plan, package->filename) &&
+           plan_script_append(plan, "\"\n") &&
+           plan_script_append(
+               plan,
+               "cache_stage=\"$state/apt-cache-tool.stage\"\n"
+               "apt_get=/usr/libexec/s5lbox-apt-get\n"
+               "apt_cache=/usr/libexec/s5lbox-apt-cache\n"
+               "if [ -f \"$cache_archive\" ]; then\n"
+               "    /bin/rm -rf \"$cache_stage\" || exit 1\n"
+               "    /bin/mkdir -p \"$cache_stage\" || exit 1\n"
+               "    /usr/bin/dpkg-deb --extract \"$cache_archive\" \"$cache_stage\" || exit 1\n"
+               "    [ -x \"$cache_stage/usr/bin/apt-get\" ] || exit 1\n"
+               "    [ -x \"$cache_stage/usr/bin/apt-cache\" ] || exit 1\n"
+               "    /bin/cp \"$cache_stage/usr/bin/apt-get\" \"$apt_get.partial\" || exit 1\n"
+               "    /bin/cp \"$cache_stage/usr/bin/apt-cache\" \"$apt_cache.partial\" || exit 1\n"
+               "    /bin/chown 0:0 \"$apt_get.partial\" \"$apt_cache.partial\" || exit 1\n"
+               "    /bin/chmod 0755 \"$apt_get.partial\" \"$apt_cache.partial\" || exit 1\n"
+               "    /bin/mv -f \"$apt_get.partial\" \"$apt_get\" || exit 1\n"
+               "    /bin/mv -f \"$apt_cache.partial\" \"$apt_cache\" || exit 1\n"
+               "    /bin/rm -rf \"$cache_stage\" || exit 1\n"
+               "fi\n"
+               "[ -x \"$apt_get\" ] && [ -x \"$apt_cache\" ] || exit 1\n"
+               "/bin/rm -f /private/var/cache/apt/pkgcache.bin /private/var/cache/apt/srcpkgcache.bin || exit 1\n"
+               "\"$apt_get\" -o Acquire::http::Timeout=30 -o Acquire::Retries=3 update || echo 'APT refresh incomplete; rebuilding from authenticated retained lists'\n"
+               "/bin/rm -f /private/var/cache/apt/pkgcache.bin /private/var/cache/apt/srcpkgcache.bin || exit 1\n"
+               "\"$apt_cache\" gencaches || exit 1\n"
+               "[ -s /private/var/cache/apt/pkgcache.bin ] || exit 1\n"
+               "[ -s /private/var/cache/apt/srcpkgcache.bin ] || exit 1\n"
+               "\"$apt_cache\" stats >/dev/null 2>&1 || exit 1\n"
+               "/bin/sync\n"
+               "/bin/rm -f \"$cache_archive\" || exit 1\n"
+               "echo 'Cydia APT caches built outside the application watchdog'\n");
+}
+
 static bool plan_build_script(vm_guest_rootfs_plan_t *plan,
                               const vm_guest_package_input_t *inputs,
                               size_t input_count) {
     if (!plan_script_append(plan, SCRIPT_HEADER)) return false;
     for (unsigned pass = 0u; pass < 2u; pass++) {
         for (size_t i = 0u; i < input_count; i++) {
+            if ((inputs[i].package->roles & VM_GUEST_PACKAGE_INSTALL) == 0u)
+                continue;
             bool foundation =
                 (inputs[i].package->roles & VM_GUEST_PACKAGE_FOUNDATION) != 0u;
             if (foundation != (pass == 0u)) continue;
             if (!plan_script_package(plan, inputs[i].package)) return false;
         }
+    }
+    if (!plan_script_append(plan, SCRIPT_CONFIGURE)) return false;
+    size_t cache_tools = 0u;
+    for (size_t i = 0u; i < input_count; i++) {
+        if ((inputs[i].package->roles &
+             VM_GUEST_PACKAGE_APT_CACHE_TOOL) == 0u)
+            continue;
+        if (++cache_tools != 1u ||
+            !plan_script_apt_cache_tool(plan, inputs[i].package))
+            return false;
     }
     return plan_script_append(plan, SCRIPT_FOOTER);
 }
@@ -522,7 +574,7 @@ static bool plan_compute_manifest(vm_guest_rootfs_plan_t *plan,
                                   size_t input_count) {
     ios3_sha256_context_t context;
     if (!ios3_sha256_init(&context) ||
-        !plan_hash_text(&context, "s5lbox-guest-rootfs-plan 6\n") ||
+        !plan_hash_text(&context, "s5lbox-guest-rootfs-plan 7\n") ||
         !plan_hash_text(&context,
                         "aliases /etc=/private/etc /var=/private/var\n") ||
         !plan_hash_text(

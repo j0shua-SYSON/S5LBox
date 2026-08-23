@@ -13,6 +13,7 @@
 
 #define INSTALL VM_GUEST_PACKAGE_INSTALL
 #define FOUNDATION (VM_GUEST_PACKAGE_INSTALL | VM_GUEST_PACKAGE_FOUNDATION)
+#define APT_CACHE_TOOL VM_GUEST_PACKAGE_APT_CACHE_TOOL
 
 /*
  * This is deliberately a compatibility set, not "newest versions as of some
@@ -35,6 +36,10 @@ static const vm_guest_package_t PACKAGES[] = {
             "apt7-lib_0.7.20.2-1_iphoneos-arm.deb", 433484,
             "b8fb485c786e5a83abf4710778fb5c89bd9f6dcd9ced56fc50f363169f9132b7",
             INSTALL),
+    PACKAGE("apt7", "0.7.20.2-1",
+            "apt7_0.7.20.2-1_iphoneos-arm.deb", 664620,
+            "3864ac7542ff2c28bc0e4915c0781d8a680ae557c6150563831f476e701aa1a8",
+            APT_CACHE_TOOL),
     PACKAGE("base", "1-3", "base_1-3_iphoneos-arm.deb", 1580,
             "8b000fc5e70efb177ae1e76ce927d0d0922e94c92a56097b3d1d609683c49e2f",
             INSTALL),
@@ -126,6 +131,7 @@ static const vm_guest_package_t PACKAGES[] = {
 
 #undef FOUNDATION
 #undef INSTALL
+#undef APT_CACHE_TOOL
 #undef PACKAGE
 
 static const size_t PACKAGE_COUNT = sizeof PACKAGES / sizeof PACKAGES[0];
@@ -215,9 +221,15 @@ bool vm_guest_package_validate_entry(const vm_guest_package_t *package,
         }
     }
     const uint32_t allowed = VM_GUEST_PACKAGE_INSTALL |
-                             VM_GUEST_PACKAGE_FOUNDATION;
-    if ((package->roles & VM_GUEST_PACKAGE_INSTALL) == 0u ||
-        (package->roles & ~allowed) != 0u) {
+                             VM_GUEST_PACKAGE_FOUNDATION |
+                             VM_GUEST_PACKAGE_APT_CACHE_TOOL;
+    const bool installed =
+        (package->roles & VM_GUEST_PACKAGE_INSTALL) != 0u;
+    const bool cache_tool =
+        (package->roles & VM_GUEST_PACKAGE_APT_CACHE_TOOL) != 0u;
+    if ((package->roles & ~allowed) != 0u || installed == cache_tool ||
+        ((package->roles & VM_GUEST_PACKAGE_FOUNDATION) != 0u &&
+         !installed)) {
         package_reason(why, why_capacity, package->package,
                        "has invalid install roles");
         return false;
