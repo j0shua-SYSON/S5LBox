@@ -414,16 +414,15 @@ void vm_boot_options_reconcile_network(vm_boot_options_report_t *report,
                                        bool ppp_provisioned) {
     /*
      * This is runtime policy derived from the WORK IMAGE, not from today's
-     * PPP switch. The launchd job can outlive a later settings change, and the
-     * exact physical failure when this was omitted was pppd timing out every
-     * LCP Configure-Request: AppleS5L8900XSerial took its advertised DMA path,
-     * so no UTXH store reached the attached host peer. bootkernel's --ppp path
-     * has always carried the same driver escape. Keep the app path identical.
+     * PPP switch. The launchd job can outlive a later settings change.
+     *
+     * Do not rewrite the kernel command line here. The former
+     * `uart4_dma_enable=0` escape forced AppleS5L8900XSerial to copy every PPP
+     * byte through CPU-driven PIO. The emulated PL080 now follows the device
+     * tree's crossed UART endpoints and routes UART4's logical DMA traffic to
+     * the host peer, so the stock DMA path is both visible and lossless.
      */
-    if (request && ppp_provisioned) {
-        request->cmdline = S5L_BRINGUP_DEFAULT_CMDLINE
-                           " uart4_dma_enable=0";
-    }
+    (void)request;
     if (!report) return;
     int ppp = vm_option_index("ppp");
     int nat = vm_option_index("nat");

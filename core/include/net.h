@@ -72,12 +72,13 @@
 
 /*
  * Per-flow buffers. tx is bytes travelling toward the guest that are not yet
- * acknowledged plus bytes not yet sent; rx is bytes the guest sent that the
- * host socket has not yet accepted. Both are the TCP receive window we
- * advertise and the back-pressure we apply, so they are the one tuning knob
- * that changes throughput.
+ * acknowledged plus bytes not yet sent; it is additionally bounded by the
+ * receive window the guest advertises. rx is bytes the guest sent that the
+ * host socket has not yet accepted, and its free space is the receive window
+ * we advertise. Keeping the two directions separate prevents a bulk-download
+ * window from needlessly increasing guest-upload buffering as well.
  */
-#define NET_TCP_TXBUF    4096u
+#define NET_TCP_TXBUF    (64u * 1024u)
 #define NET_TCP_RXBUF    4096u
 
 /*

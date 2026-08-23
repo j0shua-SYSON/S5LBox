@@ -485,6 +485,76 @@ static void test_host_peer_sees_the_live_stream_and_run_boundary(void) {
     s5l8900_free(&m);
 }
 
+static void test_crossed_dma_endpoint_reaches_only_the_uart4_peer(void) {
+    s5l8900_t m;
+    uart4_host_probe_t probe = {0};
+    CHECK(s5l8900_init(&m, 0u, 1u << 20), "machine init failed");
+    CHECK(s5l8900_set_uart4_host(&m, uart4_host_tx_probe,
+                                 uart4_host_service_probe,
+                                 uart4_host_refill_probe, &probe),
+          "a complete uart4 host peer was refused");
+
+    for (size_t i = 0; i < sizeof LCP_CONFREQ_PREFIX; i++)
+        m.bus.write8(m.bus.ctx, 0x200u + (uint32_t)i,
+                     LCP_CONFREQ_PREFIX[i]);
+
+    const uint32_t ch0 = S5L8900_DMAC0_BASE + PL080_CHAN_BASE;
+    m.bus.write32(m.bus.ctx, ch0 + PL080_CH_SRC, 0x200u);
+    /* This is uart4's literal +0xac DMA destination in the shipped tree. */
+    m.bus.write32(m.bus.ctx, ch0 + PL080_CH_DST,
+                  S5L8900_UART0_BASE + UART_UTXH);
+    m.bus.write32(m.bus.ctx, ch0 + PL080_CH_LLI, 0u);
+    m.bus.write32(m.bus.ctx, ch0 + PL080_CH_CTRL,
+                  PL080_CTRL_SI | PL080_CTRL_I |
+                  (uint32_t)sizeof LCP_CONFREQ_PREFIX);
+    m.bus.write32(m.bus.ctx, ch0 + PL080_CH_CFG,
+                  (1u << PL080_CFG_FLOW_SHIFT) | PL080_CFG_ITC |
+                  PL080_CFG_EN);
+    m.bus.write32(m.bus.ctx, S5L8900_DMAC0_BASE + PL080_CONFIG,
+                  PL080_CONFIG_EN);
+    s5l8900_tick(&m, 1u);
+
+    CHECK(probe.tx_calls == sizeof LCP_CONFREQ_PREFIX &&
+          probe.last_tx == LCP_CONFREQ_PREFIX[sizeof LCP_CONFREQ_PREFIX - 1u],
+          "DMA uart4 TX reached the peer as %llu bytes/last %02x",
+          (unsigned long long)probe.tx_calls, probe.last_tx);
+    CHECK(m.uart4.tx_len == sizeof LCP_CONFREQ_PREFIX &&
+          memcmp(m.uart4.tx, LCP_CONFREQ_PREFIX,
+                 sizeof LCP_CONFREQ_PREFIX) == 0,
+          "crossed DMA traffic did not stay in uart4's logical capture");
+    CHECK(m.uart0.tx_len == 0u,
+          "PPP DMA traffic leaked into the console capture (%zu bytes)",
+          m.uart0.tx_len);
+
+    /* uart0's record crosses the other way. A DMA store to physical uart4
+     * UTXH is console traffic, while a CPU/PIO store there remains PPP. */
+    const uint32_t ch1 = ch0 + PL080_CHAN_STRIDE;
+    m.bus.write8(m.bus.ctx, 0x300u, 0x55u);
+    m.bus.write32(m.bus.ctx, ch1 + PL080_CH_SRC, 0x300u);
+    m.bus.write32(m.bus.ctx, ch1 + PL080_CH_DST,
+                  S5L8900_UART4_BASE + UART_UTXH);
+    m.bus.write32(m.bus.ctx, ch1 + PL080_CH_LLI, 0u);
+    m.bus.write32(m.bus.ctx, ch1 + PL080_CH_CTRL,
+                  PL080_CTRL_SI | PL080_CTRL_I | 1u);
+    m.bus.write32(m.bus.ctx, ch1 + PL080_CH_CFG,
+                  (1u << PL080_CFG_FLOW_SHIFT) | PL080_CFG_ITC |
+                  PL080_CFG_EN);
+    s5l8900_tick(&m, 1u);
+    CHECK(probe.tx_calls == sizeof LCP_CONFREQ_PREFIX,
+          "uart0's crossed DMA byte was spliced into PPP");
+    CHECK(m.uart0.tx_len == 1u && (uint8_t)m.uart0.tx[0] == 0x55u,
+          "uart0's crossed DMA byte did not reach the console capture");
+
+    m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTXH, 0xa5u);
+    CHECK(probe.tx_calls == sizeof LCP_CONFREQ_PREFIX + 1u &&
+          probe.last_tx == 0xa5u,
+          "PIO uart4 traffic stopped reaching PPP after DMA routing");
+    CHECK(!m.dma_access_active,
+          "the transient DMA bus-origin scope escaped the tick");
+
+    s5l8900_free(&m);
+}
+
 static void test_transmitting_alone_raises_no_interrupt_line(void) {
     s5l8900_t m;
     CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
@@ -1410,6 +1480,7 @@ int main(void) {
     test_the_two_captures_do_not_alias();
     test_uart4_registers_route_through_the_bus();
     test_host_peer_sees_the_live_stream_and_run_boundary();
+    test_crossed_dma_endpoint_reaches_only_the_uart4_peer();
     test_transmitting_alone_raises_no_interrupt_line();
     test_no_host_peer_means_no_receive_anything();
     test_receive_fifo_is_ordered_and_bounded();

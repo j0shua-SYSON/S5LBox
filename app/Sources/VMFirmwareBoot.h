@@ -22,6 +22,7 @@
 
 #include "VMGuestInstall.h"
 #include "VMBootOptions.h"
+#include "VMNetworkSession.h"
 #include "bringup.h"
 #include "soc.h"
 
@@ -340,6 +341,18 @@ bool vm_firmware_boot_flush_overlay(vm_firmware_boot_t *boot);
 
 bool vm_firmware_boot_arm_overlay(vm_firmware_boot_t *boot,
                                   const char *overlay_path);
+
+/*
+ * Copy the live PPP/NAT counters without exposing the boot owner's private
+ * session pointer. Like vm_network_session_status(), this is lock-free and may
+ * only be called by the machine's owner thread between execution slices.
+ *
+ * Returns true only while the UART peer is attached. `out` is still zeroed on
+ * every false result, so a caller cannot accidentally publish stale rates from
+ * a machine that has restarted or stopped.
+ */
+bool vm_firmware_boot_network_status(const vm_firmware_boot_t *boot,
+                                     vm_network_status_t *out);
 
 void vm_firmware_boot_destroy(vm_firmware_boot_t **boot);
 

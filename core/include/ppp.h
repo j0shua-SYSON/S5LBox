@@ -100,11 +100,15 @@
  * The transmit ring. Worst case for one frame is every octet escaped: two
  * flags plus twice the frame. One frame's worth would be enough for lockstep
  * request/reply, but a peer that is retransmitting while the guest is also
- * asking questions can have two or three in flight, so the ring is sized for
- * four maximum frames and overflow is counted rather than silently truncating a
- * frame into an FCS error at the far end.
+ * asking questions can have two or three in flight. Bulk TCP needs a deeper
+ * bound: the host socket and TCP bridge can prepare one 32-datagram window at
+ * each frontend service boundary, and making the PPP ring hold that window
+ * avoids turning a 100,000-instruction frontend slice into a four-frame rate
+ * limiter. Overflow is still counted rather than silently truncating a frame
+ * into an FCS error at the far end.
  */
-#define PPP_TX_RING      ((2u * PPP_MAX_FRAME + 2u) * 4u)
+#define PPP_TX_BULK_FRAMES 32u
+#define PPP_TX_RING      ((2u * PPP_MAX_FRAME + 2u) * PPP_TX_BULK_FRAMES)
 
 /*
  * Restart timer and counters, RFC 1661 §4.6: Restart timer 3 seconds,

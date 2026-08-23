@@ -317,9 +317,15 @@ static bool run_item(s5l_pl080_t *d, unsigned c, const arm_bus_t *bus,
          * The enable bit is left set and Control[11:0] already carries the
          * remaining count, so the next tick resumes precisely here.
          */
-        if (pend_bytes == 0u && ready && !ready(ready_ctx, ch->dst, dwidth)) {
-            if (stalled) *stalled = true;
-            return false;
+        if (pend_bytes == 0u && ready) {
+            bool source_ready = flow < 2u ||
+                ready(ready_ctx, ch->src, swidth, true);
+            bool destination_ready = (flow & 1u) == 0u ||
+                ready(ready_ctx, ch->dst, dwidth, false);
+            if (!source_ready || !destination_ready) {
+                if (stalled) *stalled = true;
+                return false;
+            }
         }
         pend |= (uint64_t)bus_load(bus, ch->src, swidth) << (8u * pend_bytes);
         pend_bytes += swidth;

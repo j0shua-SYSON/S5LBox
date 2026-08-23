@@ -49,7 +49,7 @@ static int g_pass, g_fail;
 #define TCP_PSH 0x08u
 #define TCP_ACK 0x10u
 
-/* The struct is a quarter of a megabyte; net.h says allocate it. */
+/* The struct is deliberately heap-scale in production; keep one static here. */
 static net_stack_t g_ns;
 
 /* ==========================================================================
@@ -1083,6 +1083,46 @@ static void test_a_bigboss_sized_stream_arrives_byte_exact(void) {
           (unsigned long long)g_ns.stats.out_dropped);
 }
 
+/*
+ * A frontend services host sockets once per bounded CPU slice. Before the bulk
+ * buffers existed, one service could expose only 4 KiB to the guest, imposing
+ * a hard ceiling of about 0.8 MB/s on a 20 M-insn/s phone with 100k slices no
+ * matter how fast its Wi-Fi or host socket was. This is not a wall-clock
+ * benchmark; it pins the architectural prerequisite that one service can fill
+ * a substantial advertised TCP window without loss or an unbounded queue.
+ */
+static void test_one_tick_can_fill_a_bulk_guest_window(void) {
+    pkt_t r;
+    uint32_t gseq;
+    start(true, false);
+    uint32_t ours = handshake(50017u, &gseq);
+    CHECK(ours != 0u, "the bulk-window handshake did not complete");
+    drain();
+
+    /* Window updates carry no payload but immediately replace snd_wnd. */
+    send_tcp(PEER_IP, 50017u, 80u, gseq, ours, TCP_ACK, 65535u,
+             NULL, 0u, NULL, 0u);
+    drain();
+
+    g_mock.h[0].stream_left = 64u * 1024u;
+    g_mock.h[0].recv_err = NET_EG_WOULDBLOCK;
+    net_tick(&g_ns, 10u);
+
+    size_t queued = net_output_pending(&g_ns);
+    size_t payload = 0u;
+    while (take(&r)) payload += r.paylen;
+    CHECK(queued == NET_OUT_SLOTS,
+          "the bulk service queued %zu of %u bounded datagrams", queued,
+          (unsigned)NET_OUT_SLOTS);
+    CHECK(payload >= 32u * 1024u,
+          "one host service exposed only %zu bulk octets", payload);
+    CHECK(g_ns.stats.tcp_bytes_to_guest == payload,
+          "the bulk byte counter/report disagree: %llu/%zu",
+          (unsigned long long)g_ns.stats.tcp_bytes_to_guest, payload);
+    CHECK(g_ns.stats.out_dropped >= 1u,
+          "the full bounded queue did not report TCP backpressure");
+}
+
 /* A full bounded queue is backpressure, not evidence that bytes reached the
  * guest. Once room returns, TCP must send immediately rather than waiting an
  * emulated-second RTO for data it only imagined it had emitted. */
@@ -1646,6 +1686,7 @@ int main(void) {
     RUN(test_a_refused_connect_resets_rather_than_hanging);
     RUN(test_data_crosses_in_both_directions);
     RUN(test_a_bigboss_sized_stream_arrives_byte_exact);
+    RUN(test_one_tick_can_fill_a_bulk_guest_window);
     RUN(test_a_full_output_queue_does_not_strand_tcp_data);
     RUN(test_the_guests_window_bounds_what_we_send);
     RUN(test_a_small_mss_from_the_guest_is_honoured);

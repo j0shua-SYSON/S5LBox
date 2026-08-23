@@ -1571,6 +1571,10 @@ static snapshot_status_t snap_apply(s5l8900_t *m, FILE *f,
     /* A reset request is an edge between a guest store and a host lifecycle
      * boundary. It can never travel through a guest-state snapshot. */
     m->restart_requested = false;
+    /* DMA bus origin is a synchronous host routing scope. A snapshot is taken
+     * only between run slices, and a restored instant never resumes inside a
+     * host C call. */
+    m->dma_access_active = false;
     /* A yield belongs to the host run call that observed the wait, not to the
      * restored guest instant. The callback, context and accumulated evidence
      * remain the live frontend's, exactly like the other host-only fields. */

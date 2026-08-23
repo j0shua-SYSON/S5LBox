@@ -969,6 +969,12 @@ int main(void) {
         vm_firmware_boot_report_t report;
         s5l8900_t machine;
         if (boot) {
+            vm_network_status_t network;
+            memset(&network, 0xa5, sizeof network);
+            CHECK(!vm_firmware_boot_network_status(boot, &network) &&
+                  !network.attached && network.tcp_bytes_to_guest == 0u &&
+                  network.tcp_bytes_to_host == 0u,
+                  "a new boot owner published a stale network session");
             CHECK(s5l8900_init(&machine, S5L_BRINGUP_PHYS_BASE,
                                S5L_BRINGUP_RAM_SIZE),
                   "s5l8900_init failed");
@@ -983,6 +989,13 @@ int main(void) {
             s5l8900_free(&machine);
             vm_firmware_boot_destroy(&boot);
         }
+        vm_network_status_t network;
+        memset(&network, 0xa5, sizeof network);
+        CHECK(!vm_firmware_boot_network_status(NULL, &network) &&
+              !network.attached && network.host_bytes_in == 0u,
+              "a NULL boot owner did not clear its network report");
+        CHECK(!vm_firmware_boot_network_status(NULL, NULL),
+              "a NULL network report was accepted");
     }
 
     remove_file(VM_FW_BOOT_KERNEL_FILE);

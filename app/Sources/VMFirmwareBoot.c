@@ -656,6 +656,13 @@ void vm_firmware_boot_destroy(vm_firmware_boot_t **slot) {
     *slot = NULL;
 }
 
+bool vm_firmware_boot_network_status(const vm_firmware_boot_t *boot,
+                                     vm_network_status_t *out) {
+    if (!out) return false;
+    vm_network_session_status(boot ? boot->network : NULL, out);
+    return out->attached;
+}
+
 static void append_host_console(s5l8900_t *machine, const char *text) {
     if (!machine || !text || !*text ||
         machine->uart0.tx_len >= (size_t)UART_TX_BUFFER - 1u)

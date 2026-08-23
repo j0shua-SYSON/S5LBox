@@ -56,6 +56,11 @@ static const unsigned kVMChunkInstructions = 100000;
 // would only copy the same pixels twice.
 static const double kVMPublishInterval = 1.0 / 30.0;
 
+/* TCP payload goodput, not UART framing or host socket bytes. A one-second
+ * window rejects the short buffering spikes that made earlier network claims
+ * look much better than sustained guest downloads actually were. */
+static const double kVMNetworkRateInterval = 1.0;
+
 // Cap on UART bytes held for the UI. The view controller drains this every
 // frame and keeps the real scrollback; this bound only matters if the UI
 // stops draining (backgrounded, say) while the guest keeps printing.
@@ -234,6 +239,14 @@ static double vm_engine_now_seconds(void) {
     NSMutableString *_pending;
     uint64_t         _retired;
     double           _rate;          // instructions per second, smoothed
+    /* Live PPP/NAT payload counters, sampled on the emulator thread and
+     * published under this lock. Rates are bytes per second. */
+    BOOL             _networkStatusValid;
+    uint64_t         _networkDownBaseline;
+    uint64_t         _networkUpBaseline;
+    double           _networkWindowStart;
+    double           _networkDownRate;
+    double           _networkUpRate;
     NSString        *_status;
     VMEngineState    _state;
     BOOL             _stopRequested;
@@ -771,6 +784,12 @@ static double vm_engine_now_seconds(void) {
     _snapshotBlank = NO;
     _retired = 0;
     _rate = 0.0;
+    _networkStatusValid = NO;
+    _networkDownBaseline = 0u;
+    _networkUpBaseline = 0u;
+    _networkWindowStart = 0.0;
+    _networkDownRate = 0.0;
+    _networkUpRate = 0.0;
     /* A restart must not inherit the previous machine's pending finger, nor
      * its counters — the status line reads them as claims about THIS run. */
     vm_touch_queue_reset(&_touch);
@@ -961,6 +980,9 @@ static double vm_engine_now_seconds(void) {
         _state = VMEngineStateCheckpointing;
         _status = @"saving checkpoint";
         _rate = 0.0;
+        _networkDownRate = 0.0;
+        _networkUpRate = 0.0;
+        _networkWindowStart = 0.0;
     }
     pthread_mutex_unlock(&_lock);
 
@@ -988,6 +1010,12 @@ static double vm_engine_now_seconds(void) {
      * saying "halted" rather than being relabelled as merely paused. */
     if (_state == VMEngineStateRunning && paused != _paused) {
         _rate = 0.0;
+        /* Service is intentionally stopped while the guest is paused. A rate
+         * from the last active one-second window would otherwise remain on
+         * screen and claim that bytes are still crossing the guest boundary. */
+        _networkDownRate = 0.0;
+        _networkUpRate = 0.0;
+        _networkWindowStart = 0.0;
         if (paused) {
             _pauseReason = reason.length ? [reason copy] : @"requested";
             _status = [NSString stringWithFormat:@"paused (%@)", _pauseReason];
@@ -1850,6 +1878,12 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     _checkpointRequested = NO;
     _machineReady = NO;
     _thread = nil;
+    _networkStatusValid = NO;
+    _networkDownBaseline = 0u;
+    _networkUpBaseline = 0u;
+    _networkWindowStart = 0.0;
+    _networkDownRate = 0.0;
+    _networkUpRate = 0.0;
     if (stoppedByRequest) {
         [self publishBlankSnapshotLocked];
         _status = @"stopped";
@@ -1882,6 +1916,11 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
 - (void)publishRetired:(uint64_t)retired
                   rate:(double)instantRate
                 status:(arm_status_t)status {
+    vm_network_status_t networkStatus;
+    BOOL haveNetwork = vm_firmware_boot_network_status(
+        _firmwareBoot, &networkStatus) ? YES : NO;
+    double nowSec = vm_engine_now_seconds();
+
     // Ask the display controller where the framebuffer is and how it is laid
     // out, rather than assuming. vm_guest_display() validates that the reported
     // buffer is inside DRAM and no larger than VM_FB_BYTES before returning it.
@@ -1938,7 +1977,6 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
             _fbSignatureValid = YES;
             _fpsWindowFrames++;
         }
-        double nowSec = vm_engine_now_seconds();
         if (_fpsWindowStart <= 0.0) {
             _fpsWindowStart = nowSec;
         } else if (nowSec - _fpsWindowStart >= 0.5) {
@@ -1970,6 +2008,39 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
             NSMakeRange(0, _pending.length - kVMConsoleLimit)];
     }
     _retired = retired;
+    if (haveNetwork) {
+        uint64_t down = networkStatus.tcp_bytes_to_guest;
+        uint64_t up = networkStatus.tcp_bytes_to_host;
+        BOOL counterReset = down < _networkDownBaseline ||
+                            up < _networkUpBaseline;
+        if (!_networkStatusValid || counterReset || nowSec <= 0.0 ||
+            _networkWindowStart <= 0.0 || nowSec < _networkWindowStart) {
+            _networkStatusValid = YES;
+            _networkDownBaseline = down;
+            _networkUpBaseline = up;
+            _networkWindowStart = nowSec;
+            _networkDownRate = 0.0;
+            _networkUpRate = 0.0;
+        } else {
+            double elapsed = nowSec - _networkWindowStart;
+            if (elapsed >= kVMNetworkRateInterval) {
+                _networkDownRate =
+                    (double)(down - _networkDownBaseline) / elapsed;
+                _networkUpRate =
+                    (double)(up - _networkUpBaseline) / elapsed;
+                _networkDownBaseline = down;
+                _networkUpBaseline = up;
+                _networkWindowStart = nowSec;
+            }
+        }
+    } else {
+        _networkStatusValid = NO;
+        _networkDownBaseline = 0u;
+        _networkUpBaseline = 0u;
+        _networkWindowStart = 0.0;
+        _networkDownRate = 0.0;
+        _networkUpRate = 0.0;
+    }
     // Smooth the rate: a per-chunk figure jitters too much to read.
     if (_paused && _state == VMEngineStateRunning) {
         /* A pause can land while s5l8900_run() is inside its bounded chunk.
@@ -2049,6 +2120,9 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     NSString *mode = _mode;
     double fps = _fps;
     BOOL haveFps = _fbSignatureValid;
+    BOOL haveNetwork = _networkStatusValid;
+    double networkDownRate = _networkDownRate;
+    double networkUpRate = _networkUpRate;
     pthread_mutex_unlock(&_lock);
 
     /* "--" until a frame has actually been published. Printing "0 fps" before
@@ -2056,13 +2130,18 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     NSString *fpsText = haveFps ? [NSString stringWithFormat:@"%.0f fps", fps]
                                 : @"-- fps";
     double footprintMB = [VMEngine physFootprintBytes] / 1048576.0;
+    NSString *networkText = haveNetwork
+        ? [NSString stringWithFormat:@"  ·  net D %.2f U %.2f MB/s",
+             networkDownRate / 1.0e6, networkUpRate / 1.0e6]
+        : @"";
     /* The mode leads, because "3.2 M insn/s" means something different
      * depending on what is retiring them, and a user who cannot see which
      * guest is running has no way to tell. */
     return [NSString stringWithFormat:
-            @"%@%@  ·  %.1f M insn  ·  %.2f M insn/s  ·  %@  ·  %.0f MB",
+            @"%@%@  ·  %.1f M insn  ·  %.2f M insn/s  ·  %@  ·  %.0f MB%@",
             mode.length ? [mode stringByAppendingString:@"  ·  "] : @"",
-            status, retired / 1.0e6, rate / 1.0e6, fpsText, footprintMB];
+            status, retired / 1.0e6, rate / 1.0e6, fpsText, footprintMB,
+            networkText];
 }
 
 - (NSString *)statusDescription {

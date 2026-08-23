@@ -70,18 +70,39 @@ static void test_ppp_attachment_closes_the_uart_loop(void) {
           (unsigned long long)status.guest_rx_bytes,
           machine.uart4.rx_count);
 
-    /* The physical FIFO remains sixteen bytes, but consuming it must expose
-     * the rest of the already-framed PPP response without waiting for another
-     * 100,000-instruction frontend slice. */
-    for (unsigned reads = 0u; reads < 256u && machine.uart4.rx_count; reads++)
-        (void)machine.bus.read32(machine.bus.ctx,
-                                 S5L8900_UART4_BASE + UART_URXH);
+    /* The physical FIFO remains sixteen bytes, but a receive DMA command must
+     * consume beyond it in ONE tick. Each successful URXH load exposes the
+     * next already-framed byte, while source readiness prevents the PL080 from
+     * inventing zeroes if that queue ever runs dry. Seventeen is deliberate:
+     * it is the smallest transfer that cannot pass by draining only the FIFO
+     * initially visible at the run boundary. */
+    const uint32_t dma = S5L8900_DMAC0_BASE + PL080_CHAN_BASE;
+    machine.bus.write32(machine.bus.ctx, dma + PL080_CH_SRC,
+                        S5L8900_UART4_BASE + UART_URXH);
+    machine.bus.write32(machine.bus.ctx, dma + PL080_CH_DST, 0x400u);
+    machine.bus.write32(machine.bus.ctx, dma + PL080_CH_LLI, 0u);
+    machine.bus.write32(machine.bus.ctx, dma + PL080_CH_CTRL,
+                        PL080_CTRL_DI | PL080_CTRL_I | 17u);
+    machine.bus.write32(machine.bus.ctx, dma + PL080_CH_CFG,
+                        (2u << PL080_CFG_FLOW_SHIFT) | PL080_CFG_ITC |
+                        PL080_CFG_EN);
+    machine.bus.write32(machine.bus.ctx,
+                        S5L8900_DMAC0_BASE + PL080_CONFIG,
+                        PL080_CONFIG_EN);
+    s5l8900_tick(&machine, 0u);
     vm_network_session_status(session, &status);
     CHECK(status.refill_calls > 0u && status.guest_rx_bytes > UART_RX_FIFO,
-          "demand refill did not stream past one hardware FIFO "
+          "DMA demand refill did not stream past one hardware FIFO "
           "(calls/rx=%llu/%llu)",
           (unsigned long long)status.refill_calls,
           (unsigned long long)status.guest_rx_bytes);
+    CHECK((machine.dmac[0].ch[0].cfg & PL080_CFG_EN) == 0u &&
+          machine.dmac[0].bytes_moved == 17u &&
+          machine.uart4.rx_underruns == 0u,
+          "DMA moved %llu bytes/enabled=%u/underruns=%llu, expected 17/0/0",
+          (unsigned long long)machine.dmac[0].bytes_moved,
+          (machine.dmac[0].ch[0].cfg & PL080_CFG_EN) != 0u,
+          (unsigned long long)machine.uart4.rx_underruns);
 
     vm_network_session_destroy(&session);
     CHECK(session == NULL && machine.uart4_host_tx == NULL &&

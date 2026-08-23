@@ -469,17 +469,37 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
     m->level_dirty = true;      /* a device store; see bus_read() */
     if ((bytes == 1u || bytes == 2u || bytes == 4u) && (addr & 3u) == 0u &&
         in_dev(addr, bytes, S5L8900_UART0_BASE)) {
+        uint32_t off = addr - S5L8900_UART0_BASE;
         note_device(m, addr, val, true);
-        s5l_uart_write(&m->uart0, addr - S5L8900_UART0_BASE, val);
+        /* uart4's DMA transmit endpoint is uart0 UTXH in the shipped tree.
+         * Ordinary uart0 writes remain the kernel console and never enter
+         * PPP; only the PL080-owned access is the logical uart4 stream. Keep
+         * its capture with uart4 too, or megabytes of framed PPP would appear
+         * as garbage in the console merely because the hardware endpoint is
+         * crossed. */
+        if (m->dma_access_active && off == UART_UTXH) {
+            s5l_uart_write(&m->uart4, off, val);
+            if (m->uart4_host_tx)
+                m->uart4_host_tx(m->uart4_host_ctx, (uint8_t)val);
+        } else {
+            s5l_uart_write(&m->uart0, off, val);
+        }
         return;
     }
     if ((bytes == 1u || bytes == 2u || bytes == 4u) && (addr & 3u) == 0u &&
         in_dev(addr, bytes, S5L8900_UART4_BASE)) {
         note_device(m, addr, val, true);
         uint32_t off = addr - S5L8900_UART4_BASE;
-        s5l_uart_write(&m->uart4, off, val);
-        if (off == UART_UTXH && m->uart4_host_tx)
-            m->uart4_host_tx(m->uart4_host_ctx, (uint8_t)val);
+        /* PIO uart4 writes are PPP. A PL080 write here is uart0's crossed DMA
+         * endpoint and must not splice console traffic into the PPP peer. Keep
+         * that byte in uart0's capture for the same logical-routing reason. */
+        if (m->dma_access_active && off == UART_UTXH) {
+            s5l_uart_write(&m->uart0, off, val);
+        } else {
+            s5l_uart_write(&m->uart4, off, val);
+            if (off == UART_UTXH && m->uart4_host_tx)
+                m->uart4_host_tx(m->uart4_host_ctx, (uint8_t)val);
+        }
         return;
     }
     if (mmio_word(addr, bytes, S5L8900_VIC0_BASE, S5L8900_DEV_SIZE)) {
@@ -651,19 +671,35 @@ static uint8_t  r8 (void *c, uint32_t a) { return (uint8_t) bus_read(c, a, 1); }
  * driver had armed the port -- `tx-drops 54140`. Real hardware cannot do that,
  * because the SPI only raises its request when it has room.
  *
- * Only the transmit FIFOs are gated. Everything else -- memory, control
- * registers, devices with no FIFO -- is always ready, which is both true of the
- * hardware and the behaviour every existing test was written against.
+ * SPI transmit space and UART/SPI receive availability are gated. Everything
+ * else -- memory, control registers, devices with no modelled FIFO -- is always
+ * ready, which preserves the behaviour every existing test was written against.
  */
-static bool dma_dst_ready(void *ctx, uint32_t dst, unsigned width) {
+static bool dma_request_ready(void *ctx, uint32_t address, unsigned width,
+                              bool source) {
     const s5l8900_t *m = ctx;
     (void)width;
+    if (source) {
+        if (address == S5L8900_UART0_BASE + UART_URXH)
+            return m->uart0.rx_count != 0u;
+        if (address == S5L8900_UART4_BASE + UART_URXH)
+            return m->uart4.rx_count != 0u;
+        for (unsigned i = 0; i < S5L8900_SPI_COUNT; i++) {
+            static const uint32_t base[] = {
+                S5L8900_SPI0_BASE, S5L8900_SPI1_BASE, S5L8900_SPI2_BASE
+            };
+            if (i >= sizeof base / sizeof base[0]) break;
+            if (address == base[i] + SPI_RXDATA)
+                return m->spi[i].rx_level != 0u;
+        }
+        return true;
+    }
     for (unsigned i = 0; i < S5L8900_SPI_COUNT; i++) {
         static const uint32_t base[] = {
             S5L8900_SPI0_BASE, S5L8900_SPI1_BASE, S5L8900_SPI2_BASE
         };
         if (i >= sizeof base / sizeof base[0]) break;
-        if (dst == base[i] + SPI_TXDATA)
+        if (address == base[i] + SPI_TXDATA)
             return m->spi[i].tx_level < S5L_SPI_FIFO_DEPTH;
     }
     return true;
@@ -2019,7 +2055,10 @@ static void s5l8900_refresh(s5l8900_t *m, uint32_t tb) {
     for (unsigned i = 0; i < S5L8900_SPI_COUNT; i++) s5l_spi_step(&m->spi[i]);
 
     for (unsigned i = 0; i < S5L8900_DMAC_COUNT; i++) {
-        bool dmac_irq = s5l_pl080_run(&m->dmac[i], &m->bus, dma_dst_ready, m);
+        m->dma_access_active = true;
+        bool dmac_irq = s5l_pl080_run(&m->dmac[i], &m->bus,
+                                      dma_request_ready, m);
+        m->dma_access_active = false;
         s5l_vic_set_line(&m->vic[0],
                          i == 0u ? S5L8900_IRQ_DMAC0 : S5L8900_IRQ_DMAC1,
                          dmac_irq);

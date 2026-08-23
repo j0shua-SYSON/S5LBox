@@ -3842,11 +3842,13 @@ bool     s5l_pl080_irq(const s5l_pl080_t *d);
  * copy could invalidate. Passing a null bus does nothing and moves nothing.
  */
 /*
- * DESTINATION PACING, which is what a PL080's request lines do.
+ * PERIPHERAL PACING, which is what a PL080's request lines do.
  *
- * `ready` is asked, before every destination transfer, whether the thing at
- * that address can accept one. NULL means "always", which is the right answer
- * for a memory destination and was this model's only behaviour until run116.
+ * `ready` is asked at a lossless source-transfer boundary whether a peripheral
+ * endpoint is ready. `source` says which end is being queried. Flow 0 asks
+ * neither end, flow 1 asks the destination, flow 2 asks the source, and flow 3
+ * asks both. NULL means "always", which is the right answer for memory and was
+ * this model's only behaviour until run116.
  *
  * It is not a refinement. This controller completes a whole channel inside one
  * s5l8900_tick() -- see the note at the top of pl080.c, which defends that as
@@ -3866,7 +3868,8 @@ bool     s5l_pl080_irq(const s5l_pl080_t *d);
  * where it stopped. That is also what the driver's own progress reporting
  * expects to see.
  */
-typedef bool (*s5l_pl080_ready_fn)(void *ctx, uint32_t dst, unsigned width);
+typedef bool (*s5l_pl080_ready_fn)(void *ctx, uint32_t address,
+                                   unsigned width, bool source);
 
 bool     s5l_pl080_run(s5l_pl080_t *d, const arm_bus_t *bus,
                        s5l_pl080_ready_fn ready, void *ready_ctx);
@@ -4142,6 +4145,24 @@ typedef struct {
      * saved instant can never reboot merely because its writer was between the
      * store and the host boundary. Kept in existing alignment padding. */
     bool       restart_requested;
+
+    /*
+     * True only while a PL080 is synchronously accessing the shared bus.
+     *
+     * UART4's shipped 32-byte DMA record is not symmetric: direction "in"
+     * reads 0x3cc10024 (uart4 URXH), while direction "out" writes
+     * 0x3cc00020 (uart0 UTXH). AppleARMPL080DMAC::_initDMAChannel copies the
+     * record verbatim to fields +0xa0..+0xbc (0xc070f0d0..0xc070f0e4), and
+     * startDMACommand selects +0xa8 as the peripheral source and +0xac as the
+     * peripheral destination (0xc070e4b0..0xc070e4ec). PIO still uses uart4's
+     * own UTXH. The host PPP peer therefore needs the access origin as well as
+     * the physical address to keep uart0 console bytes out of PPP.
+     *
+     * This is transient host routing state, never guest state. It occupies
+     * existing padding beside level_dirty/restart_requested, is false between
+     * public run slices, and snapshot restore clears it explicitly.
+     */
+    bool       dma_access_active;
 
     /*
      * What the last full refresh saw on the three inputs a HOST can move

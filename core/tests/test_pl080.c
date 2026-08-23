@@ -329,6 +329,59 @@ static void test_a_peripheral_to_memory_transfer_runs_the_other_way(void) {
           "the receive channel did not latch its terminal count");
 }
 
+static void test_uart_receive_dma_waits_for_real_source_bytes(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0u, 1u << 16), "init failed");
+
+    CHECK(s5l_uart_rx_push(&m.uart4, 0xa1u) &&
+          s5l_uart_rx_push(&m.uart4, 0xb2u),
+          "could not seed the first two receive bytes");
+
+    const uint32_t ch = S5L8900_DMAC0_BASE + PL080_CHAN_BASE;
+    m.bus.write32(m.bus.ctx, ch + PL080_CH_SRC,
+                  S5L8900_UART4_BASE + UART_URXH);
+    m.bus.write32(m.bus.ctx, ch + PL080_CH_DST, 0x200u);
+    m.bus.write32(m.bus.ctx, ch + PL080_CH_LLI, 0u);
+    m.bus.write32(m.bus.ctx, ch + PL080_CH_CTRL,
+                  PL080_CTRL_DI | PL080_CTRL_I | 4u);
+    m.bus.write32(m.bus.ctx, ch + PL080_CH_CFG,
+                  (2u << PL080_CFG_FLOW_SHIFT) | PL080_CFG_ITC |
+                  PL080_CFG_EN);
+    m.bus.write32(m.bus.ctx, S5L8900_DMAC0_BASE + PL080_CONFIG,
+                  PL080_CONFIG_EN);
+
+    s5l8900_tick(&m, 1u);
+    CHECK(m.bus.read8(m.bus.ctx, 0x200u) == 0xa1u &&
+          m.bus.read8(m.bus.ctx, 0x201u) == 0xb2u,
+          "the available UART bytes did not reach memory");
+    CHECK((m.dmac[0].ch[0].ctrl & PL080_CTRL_SIZE_MASK) == 2u &&
+          (m.dmac[0].ch[0].cfg & PL080_CFG_EN) != 0u,
+          "source starvation did not leave two enabled transfers pending");
+    CHECK(m.uart4.rx_underruns == 0u,
+          "DMA fabricated %llu empty-URXH reads instead of waiting",
+          (unsigned long long)m.uart4.rx_underruns);
+    CHECK(m.dmac[0].bytes_moved == 2u && m.dmac[0].completions == 0u,
+          "a partial receive reported %llu bytes/%llu completions",
+          (unsigned long long)m.dmac[0].bytes_moved,
+          (unsigned long long)m.dmac[0].completions);
+
+    CHECK(s5l_uart_rx_push(&m.uart4, 0xc3u) &&
+          s5l_uart_rx_push(&m.uart4, 0xd4u),
+          "could not seed the remaining receive bytes");
+    s5l8900_tick(&m, 0u);
+    CHECK(m.bus.read8(m.bus.ctx, 0x202u) == 0xc3u &&
+          m.bus.read8(m.bus.ctx, 0x203u) == 0xd4u,
+          "the resumed UART bytes did not reach memory");
+    CHECK((m.dmac[0].ch[0].cfg & PL080_CFG_EN) == 0u &&
+          (m.dmac[0].raw_tc & 1u) != 0u &&
+          m.dmac[0].bytes_moved == 4u,
+          "the resumed receive did not complete exactly once");
+    CHECK(!m.dma_access_active,
+          "the transient DMA bus-origin scope escaped the tick");
+
+    s5l8900_free(&m);
+}
+
 static void test_a_linked_list_is_followed_and_reloaded_from_memory(void) {
     s5l_pl080_t d;
     fake_t f;
@@ -1048,6 +1101,7 @@ int main(void) {
     test_the_active_bit_is_read_only_and_reads_zero();
     test_a_memory_to_peripheral_transfer_moves_the_exact_bytes();
     test_a_peripheral_to_memory_transfer_runs_the_other_way();
+    test_uart_receive_dma_waits_for_real_source_bytes();
     test_a_linked_list_is_followed_and_reloaded_from_memory();
     test_mismatched_widths_pack_through_the_channel();
     test_a_channel_disables_itself_at_the_end_of_the_chain();
