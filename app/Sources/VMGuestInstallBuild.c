@@ -467,26 +467,193 @@ static const uint8_t VM_CYDIA_CACHE_RUN[] =
     "echo 'Cydia cache build complete'\n"
     "exit 0\n";
 
-static const uint8_t VM_CYDIA_CACHE_RUN_PLIST[] =
+static const uint8_t VM_CYDIA_CACHE_V4_SUPERSEDED[] =
+    "#!/bin/sh\n"
+    "# Superseded by the offline-first cydia-cache-v5 worker.\n"
+    "exit 0\n";
+
+#define VM_CYDIA_CACHE_V5_STATE_DIRECTORY \
+    "/private/var/lib/s5lbox/cydia-cache-v5"
+#define VM_CYDIA_CACHE_V5_PACKAGE_PATH \
+    VM_CYDIA_CACHE_V5_STATE_DIRECTORY "/apt7_0.7.20.2-1_iphoneos-arm.deb"
+#define VM_CYDIA_CACHE_V5_RUN_PATH \
+    "/private/var/lib/s5lbox/cydia-cache-v5-run"
+
+static const uint8_t VM_CYDIA_CACHE_V5_RUN_HEAD[] =
+    "#!/bin/sh\n"
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin\n"
+    "export PATH\n"
+    "state=" VM_CYDIA_CACHE_V5_STATE_DIRECTORY "\n"
+    "marker=$state/complete\n"
+    "[ -e \"$marker\" ] && exit 0\n"
+    "package=" VM_CYDIA_CACHE_V5_PACKAGE_PATH "\n"
+    "stage=$state/extract.partial\n"
+    "apt_get=$state/apt-get\n"
+    "apt_cache=$state/apt-cache\n"
+    "cydia=/Applications/Cydia.app/Cydia_\n"
+    "live_pkgcache=/private/var/cache/apt/pkgcache.bin\n"
+    "live_srcpkgcache=/private/var/cache/apt/srcpkgcache.bin\n"
+    "staged_pkgcache=$state/pkgcache.bin.partial\n"
+    "staged_srcpkgcache=$state/srcpkgcache.bin.partial\n"
+    "backup_pkgcache=$state/pkgcache.bin.backup\n"
+    "backup_srcpkgcache=$state/srcpkgcache.bin.backup\n"
+    "log=/private/var/log/s5lbox-cydia-cache-v5.log\n"
+    "exec >>\"$log\" 2>&1\n"
+    "echo 'recovering Cydia caches from retained repository lists first'\n"
+    "[ -f \"$cydia\" ] || exit 1\n"
+    "/bin/chown 0:0 \"$cydia\" || exit 1\n"
+    "/bin/chmod 6755 \"$cydia\" || exit 1\n"
+    "[ -u \"$cydia\" ] && [ -g \"$cydia\" ] || exit 1\n"
+    "if [ -f \"$package\" ]; then\n"
+    "    /bin/rm -rf \"$stage\" || exit 1\n"
+    "    /bin/mkdir -p \"$stage\" || exit 1\n"
+    "    /usr/bin/dpkg-deb --extract \"$package\" \"$stage\" || exit 1\n"
+    "    [ -x \"$stage/usr/bin/apt-get\" ] || exit 1\n"
+    "    [ -x \"$stage/usr/bin/apt-cache\" ] || exit 1\n"
+    "    /bin/cp \"$stage/usr/bin/apt-get\" \"$apt_get.partial\" || exit 1\n"
+    "    /bin/cp \"$stage/usr/bin/apt-cache\" \"$apt_cache.partial\" || exit 1\n"
+    "    /bin/chown 0:0 \"$apt_get.partial\" \"$apt_cache.partial\" || exit 1\n"
+    "    /bin/chmod 0755 \"$apt_get.partial\" \"$apt_cache.partial\" || exit 1\n"
+    "    /bin/mv -f \"$apt_get.partial\" \"$apt_get\" || exit 1\n"
+    "    /bin/mv -f \"$apt_cache.partial\" \"$apt_cache\" || exit 1\n"
+    "    /bin/rm -rf \"$stage\" || exit 1\n"
+    "fi\n"
+    "[ -x \"$apt_get\" ] && [ -x \"$apt_cache\" ] || exit 1\n"
+    "for cache in /private/var/lib/apt/lists/partial/* /private/var/lib/apt/lists/apt.thebigboss.org_*Packages.diff_Index* /private/var/lib/apt/lists/*.FAILED; do\n"
+    "    [ -f \"$cache\" ] || continue\n"
+    "    /bin/rm -f \"$cache\" || exit 1\n"
+    "done\n"
+    "cache_valid() {\n"
+    "    [ -s \"$1\" ] || return 1\n"
+    "    [ -s \"$2\" ] || return 1\n"
+    "    \"$apt_cache\" -o Dir::Cache::pkgcache=\"$1\" -o Dir::Cache::srcpkgcache=\"$2\" stats >/dev/null 2>&1 || return 1\n"
+    "    found_list=0\n"
+    "    for cache in /private/var/lib/apt/lists/*_Packages; do\n"
+    "        [ -s \"$cache\" ] && found_list=1\n"
+    "    done\n"
+    "    [ \"$found_list\" -eq 1 ] || return 1\n"
+    "    return 0\n"
+    "}\n"
+    "generate_caches() {\n"
+    "    /bin/rm -f \"$staged_pkgcache\" \"$staged_srcpkgcache\" || return 1\n"
+    "    \"$apt_cache\" -o Dir::Cache::pkgcache=\"$staged_pkgcache\" -o Dir::Cache::srcpkgcache=\"$staged_srcpkgcache\" gencaches || return 1\n"
+    "    cache_valid \"$staged_pkgcache\" \"$staged_srcpkgcache\"\n"
+    "}\n"
+    "restore_caches() {\n"
+    "    if [ -s \"$backup_pkgcache\" ] && [ -s \"$backup_srcpkgcache\" ]; then\n"
+    "        /bin/mv -f \"$backup_pkgcache\" \"$live_pkgcache\" || return 1\n"
+    "        /bin/mv -f \"$backup_srcpkgcache\" \"$live_srcpkgcache\" || return 1\n"
+    "    else\n"
+    "        /bin/rm -f \"$live_pkgcache\" \"$live_srcpkgcache\" || return 1\n"
+    "    fi\n"
+    "    return 0\n"
+    "}\n"
+    "publish_caches() {\n"
+    "    /bin/mkdir -p /private/var/cache/apt || return 1\n"
+    "    /bin/rm -f \"$backup_pkgcache\" \"$backup_srcpkgcache\" || return 1\n"
+    "    if cache_valid \"$live_pkgcache\" \"$live_srcpkgcache\"; then\n"
+    "        /bin/cp \"$live_pkgcache\" \"$backup_pkgcache\" || return 1\n"
+    "        /bin/cp \"$live_srcpkgcache\" \"$backup_srcpkgcache\" || return 1\n"
+    "    fi\n"
+    "    /bin/mv -f \"$staged_pkgcache\" \"$live_pkgcache\" || return 1\n"
+    "    if ! /bin/mv -f \"$staged_srcpkgcache\" \"$live_srcpkgcache\"; then\n"
+    "        restore_caches || true\n"
+    "        return 1\n"
+    "    fi\n"
+    "    if ! cache_valid \"$live_pkgcache\" \"$live_srcpkgcache\"; then\n"
+    "        restore_caches || true\n"
+    "        return 1\n"
+    "    fi\n"
+    "    /bin/rm -f \"$backup_pkgcache\" \"$backup_srcpkgcache\" || return 1\n"
+    "    return 0\n"
+    "}\n";
+
+static const uint8_t VM_CYDIA_CACHE_V5_RUN_TAIL[] =
+    "run_apt_update() {\n"
+    "    update_token=\"$state/apt-update.$$.running\"\n"
+    "    /bin/rm -f \"$update_token\"\n"
+    "    (\n"
+    "        exec \"$apt_get\" -o Acquire::PDiffs=false -o Acquire::http::Timeout=30 -o Acquire::Retries=1 update\n"
+    "    ) &\n"
+    "    apt_pid=$!\n"
+    "    : >\"$update_token\" || { kill -TERM \"$apt_pid\" >/dev/null 2>&1; wait \"$apt_pid\" >/dev/null 2>&1; return 1; }\n"
+    "    (\n"
+    "        /bin/sleep 180\n"
+    "        [ -e \"$update_token\" ] || exit 0\n"
+    "        echo 'APT refresh exceeded 180 guest seconds; terminating it once'\n"
+    "        kill -TERM \"$apt_pid\" >/dev/null 2>&1 || exit 0\n"
+    "        /bin/sleep 5\n"
+    "        [ -e \"$update_token\" ] || exit 0\n"
+    "        kill -KILL \"$apt_pid\" >/dev/null 2>&1 || true\n"
+    "    ) &\n"
+    "    watchdog_pid=$!\n"
+    "    wait \"$apt_pid\"\n"
+    "    apt_status=$?\n"
+    "    /bin/rm -f \"$update_token\"\n"
+    "    kill -TERM \"$watchdog_pid\" >/dev/null 2>&1 || true\n"
+    "    wait \"$watchdog_pid\" >/dev/null 2>&1 || true\n"
+    "    return \"$apt_status\"\n"
+    "}\n"
+    "if generate_caches; then\n"
+    "    publish_caches || exit 1\n"
+    "    echo 'retained repository lists produced valid Cydia caches'\n"
+    "else\n"
+    "    echo 'retained lists were insufficient; attempting one bounded repository refresh'\n"
+    "    if run_apt_update; then\n"
+    "        echo 'bounded repository refresh completed'\n"
+    "    else\n"
+    "        echo 'bounded repository refresh incomplete; rebuilding from every usable retained list'\n"
+    "    fi\n"
+    "    generate_caches || exit 1\n"
+    "    publish_caches || exit 1\n"
+    "fi\n"
+    "list_count=0\n"
+    "for cache in /private/var/lib/apt/lists/*_Packages; do\n"
+    "    [ -s \"$cache\" ] || continue\n"
+    "    list_count=$((list_count + 1))\n"
+    "done\n"
+    "echo \"usable repository package lists: $list_count\"\n"
+    "[ \"$list_count\" -gt 0 ] || exit 1\n"
+    "/bin/rm -f \"$package\" || exit 1\n"
+    ": >\"$marker.partial\" || exit 1\n"
+    "/bin/sync\n"
+    "/bin/mv -f \"$marker.partial\" \"$marker\" || exit 1\n"
+    "/bin/sync\n"
+    "echo 'Cydia cache recovery complete'\n"
+    "exit 0\n";
+
+enum {
+    VM_CYDIA_CACHE_V5_RUN_SIZE =
+        sizeof VM_CYDIA_CACHE_V5_RUN_HEAD - 1u +
+        sizeof VM_CYDIA_CACHE_V5_RUN_TAIL - 1u
+};
+
+static bool build_cydia_v5_run(uint8_t *buffer, size_t capacity,
+                               size_t *size_out) {
+    if (size_out) *size_out = VM_CYDIA_CACHE_V5_RUN_SIZE;
+    if (!buffer || capacity < VM_CYDIA_CACHE_V5_RUN_SIZE + 1u)
+        return false;
+    size_t offset = sizeof VM_CYDIA_CACHE_V5_RUN_HEAD - 1u;
+    memcpy(buffer, VM_CYDIA_CACHE_V5_RUN_HEAD, offset);
+    memcpy(buffer + offset, VM_CYDIA_CACHE_V5_RUN_TAIL,
+           sizeof VM_CYDIA_CACHE_V5_RUN_TAIL - 1u);
+    buffer[VM_CYDIA_CACHE_V5_RUN_SIZE] = '\0';
+    return true;
+}
+
+static const uint8_t VM_CYDIA_CACHE_V5_RUN_PLIST[] =
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
     "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
     "<plist version=\"1.0\">\n"
     "<dict>\n"
     "  <key>Label</key>\n"
-    "  <string>com.j0shua.s5lbox.cydia-cache-v4</string>\n"
+    "  <string>com.j0shua.s5lbox.cydia-cache-v5</string>\n"
     "  <key>ProgramArguments</key>\n"
     "  <array>\n"
-    "    <string>" VM_CYDIA_CACHE_RUN_PATH "</string>\n"
+    "    <string>" VM_CYDIA_CACHE_V5_RUN_PATH "</string>\n"
     "  </array>\n"
     "  <key>RunAtLoad</key>\n"
     "  <true/>\n"
-    "  <key>KeepAlive</key>\n"
-    "  <dict>\n"
-    "    <key>SuccessfulExit</key>\n"
-    "    <false/>\n"
-    "  </dict>\n"
-    "  <key>ThrottleInterval</key>\n"
-    "  <integer>30</integer>\n"
     "</dict>\n"
     "</plist>\n";
 
@@ -504,6 +671,20 @@ static void build_cydia_v3_supersede_rewrite(
     rewrite->permissions = 0755u;
 }
 
+static void build_cydia_v4_supersede_rewrite(
+    rootfs_work_file_rewrite_t *rewrite) {
+    memset(rewrite, 0, sizeof *rewrite);
+    rewrite->path = VM_CYDIA_CACHE_RUN_PATH;
+    rewrite->expected_content = VM_CYDIA_CACHE_RUN;
+    rewrite->expected_content_size = sizeof VM_CYDIA_CACHE_RUN - 1u;
+    rewrite->desired_content = VM_CYDIA_CACHE_V4_SUPERSEDED;
+    rewrite->desired_content_size =
+        sizeof VM_CYDIA_CACHE_V4_SUPERSEDED - 1u;
+    rewrite->owner_id = 0u;
+    rewrite->group_id = 0u;
+    rewrite->permissions = 0755u;
+}
+
 enum { VM_CYDIA_MAINTENANCE_MAX_ENTRIES = 22u };
 
 static size_t build_cydia_maintenance_entries(
@@ -513,7 +694,8 @@ static size_t build_cydia_maintenance_entries(
     bool include_verifier, const uint8_t *verifier_package,
     size_t verifier_package_size,
     bool include_cache, const uint8_t *cache_package,
-    size_t cache_package_size,
+    size_t cache_package_size, const uint8_t *cache_run,
+    size_t cache_run_size,
     bool create_ios3_source, bool create_apt_compat) {
     static const char *directories[] = {
         "/private/etc/apt",
@@ -533,7 +715,9 @@ static size_t build_cydia_maintenance_entries(
     if (include_verifier &&
         (!verifier_package || verifier_package_size == 0u))
         return required;
-    if (include_cache && (!cache_package || cache_package_size == 0u))
+    if (include_cache &&
+        (!cache_package || cache_package_size == 0u ||
+         !cache_run || cache_run_size == 0u))
         return required;
     if (!entries || capacity < required) return required;
     memset(entries, 0, required * sizeof entries[0]);
@@ -657,30 +841,30 @@ static size_t build_cydia_maintenance_entries(
             count++;
         }
         entries[count].kind = ROOTFS_WORK_ENTRY_DIRECTORY;
-        entries[count].path = VM_CYDIA_CACHE_STATE_DIRECTORY;
+        entries[count].path = VM_CYDIA_CACHE_V5_STATE_DIRECTORY;
         entries[count].permissions = 0755u;
         entries[count].existing_policy =
             ROOTFS_WORK_EXISTING_REUSE_DIRECTORY;
         count++;
         entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
-        entries[count].path = VM_CYDIA_CACHE_PACKAGE_PATH;
+        entries[count].path = VM_CYDIA_CACHE_V5_PACKAGE_PATH;
         entries[count].content = cache_package;
         entries[count].content_size = cache_package_size;
         entries[count].permissions = 0644u;
         count++;
         entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
-        entries[count].path = VM_CYDIA_CACHE_RUN_PATH;
-        entries[count].content = VM_CYDIA_CACHE_RUN;
-        entries[count].content_size = sizeof VM_CYDIA_CACHE_RUN - 1u;
+        entries[count].path = VM_CYDIA_CACHE_V5_RUN_PATH;
+        entries[count].content = cache_run;
+        entries[count].content_size = cache_run_size;
         entries[count].permissions = 0755u;
         count++;
         entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
         entries[count].path =
             "/System/Library/LaunchDaemons/"
-            "com.j0shua.s5lbox.cydia-cache-v4.plist";
-        entries[count].content = VM_CYDIA_CACHE_RUN_PLIST;
+            "com.j0shua.s5lbox.cydia-cache-v5.plist";
+        entries[count].content = VM_CYDIA_CACHE_V5_RUN_PLIST;
         entries[count].content_size =
-            sizeof VM_CYDIA_CACHE_RUN_PLIST - 1u;
+            sizeof VM_CYDIA_CACHE_V5_RUN_PLIST - 1u;
         entries[count].permissions = 0644u;
         count++;
     }
@@ -691,14 +875,14 @@ static size_t build_bigboss_source_entries(
     rootfs_work_entry_t *entries, size_t capacity, bool create_source) {
     return build_cydia_maintenance_entries(
         entries, capacity, true, create_source, false, false,
-        false, NULL, 0u, false, NULL, 0u, false, false);
+        false, NULL, 0u, false, NULL, 0u, NULL, 0u, false, false);
 }
 
 static size_t build_apt_trust_entries(
     rootfs_work_entry_t *entries, size_t capacity, bool create_keyring) {
     return build_cydia_maintenance_entries(
         entries, capacity, false, false, true, create_keyring,
-        false, NULL, 0u, false, NULL, 0u, false, false);
+        false, NULL, 0u, false, NULL, 0u, NULL, 0u, false, false);
 }
 
 static size_t build_apt_verifier_entries(
@@ -706,16 +890,23 @@ static size_t build_apt_verifier_entries(
     const uint8_t *package, size_t package_size) {
     return build_cydia_maintenance_entries(
         entries, capacity, false, false, false, false,
-        true, package, package_size, false, NULL, 0u, false, false);
+        true, package, package_size, false, NULL, 0u, NULL, 0u,
+        false, false);
 }
 
 static size_t build_cydia_cache_entries(
     rootfs_work_entry_t *entries, size_t capacity,
     const uint8_t *package, size_t package_size,
     bool create_ios3_source, bool create_apt_compat) {
+    static uint8_t test_cache_run[VM_CYDIA_CACHE_V5_RUN_SIZE + 1u];
+    size_t test_cache_run_size = 0u;
+    if (!build_cydia_v5_run(test_cache_run, sizeof test_cache_run,
+                            &test_cache_run_size))
+        return 0u;
     return build_cydia_maintenance_entries(
         entries, capacity, false, false, false, false,
         false, NULL, 0u, true, package, package_size,
+        test_cache_run, test_cache_run_size,
         create_ios3_source, create_apt_compat);
 }
 
@@ -750,6 +941,12 @@ void vm_guest_install_build_test_cydia_v3_rewrite(
     rootfs_work_file_rewrite_t *rewrite) {
     if (!rewrite) return;
     build_cydia_v3_supersede_rewrite(rewrite);
+}
+
+void vm_guest_install_build_test_cydia_v4_rewrite(
+    rootfs_work_file_rewrite_t *rewrite) {
+    if (!rewrite) return;
+    build_cydia_v4_supersede_rewrite(rewrite);
 }
 #endif
 
@@ -1365,9 +1562,12 @@ static vm_guest_install_build_status_t build_maintain_install(
     bool cache_ios3_source_create = false;
     bool cache_apt_compat_create = false;
     bool cache_v3_rewrite_needed = false;
+    bool cache_v4_rewrite_needed = false;
     bool trust_create = false;
     rootfs_work_file_rewrite_t cache_v3_rewrite;
+    rootfs_work_file_rewrite_t cache_v4_rewrite;
     build_cydia_v3_supersede_rewrite(&cache_v3_rewrite);
+    build_cydia_v4_supersede_rewrite(&cache_v4_rewrite);
     bool source_preflighted = false;
     char transaction_detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
 
@@ -1625,6 +1825,29 @@ static vm_guest_install_build_status_t build_maintain_install(
                          "The legacy Cydia cache worker has unsupported contents or metadata.");
             return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
         }
+
+        rootfs_work_file_rewrite_state_t cache_v4_rewrite_state =
+            ROOTFS_WORK_FILE_REWRITE_MISSING;
+        rootfs_work_result_t cache_v4_rewrite_result;
+        rootfs_work_status_t cache_v4_rewrite_status =
+            build_probe_file_rewrite(
+                work_directory, live, live_size, &cache_v4_rewrite,
+                &cache_v4_rewrite_state, &allow_unclean_source,
+                result, &cache_v4_rewrite_result);
+        if (result) result->rootfs = cache_v4_rewrite_result;
+        if (cache_v4_rewrite_status != ROOTFS_WORK_OK)
+            return build_rootfs_refusal(cache_v4_rewrite_status,
+                                        &cache_v4_rewrite_result,
+                                        detail, detail_capacity);
+        cache_v4_rewrite_needed =
+            cache_v4_rewrite_state == ROOTFS_WORK_FILE_REWRITE_NEEDED;
+        if (!cache_v4_rewrite_needed &&
+            cache_v4_rewrite_state != ROOTFS_WORK_FILE_REWRITE_MISSING &&
+            cache_v4_rewrite_state != ROOTFS_WORK_FILE_REWRITE_SATISFIED) {
+            build_detail(detail, detail_capacity,
+                         "The bounded v4 Cydia cache worker has unsupported contents or metadata.");
+            return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
+        }
         source_preflighted = true;
         cache_needed = true;
     }
@@ -1777,12 +2000,28 @@ static vm_guest_install_build_status_t build_maintain_install(
         options.file_repairs = &repair;
         options.file_repair_count = 1u;
     }
-    if (cache_v3_rewrite_needed) {
-        options.file_rewrites = &cache_v3_rewrite;
-        options.file_rewrite_count = 1u;
+    rootfs_work_file_rewrite_t cache_rewrites[2];
+    size_t cache_rewrite_count = 0u;
+    if (cache_v3_rewrite_needed)
+        cache_rewrites[cache_rewrite_count++] = cache_v3_rewrite;
+    if (cache_v4_rewrite_needed)
+        cache_rewrites[cache_rewrite_count++] = cache_v4_rewrite;
+    if (cache_rewrite_count != 0u) {
+        options.file_rewrites = cache_rewrites;
+        options.file_rewrite_count = cache_rewrite_count;
     }
     rootfs_work_entry_t
         maintenance_entries[VM_CYDIA_MAINTENANCE_MAX_ENTRIES];
+    uint8_t cache_run[VM_CYDIA_CACHE_V5_RUN_SIZE + 1u];
+    size_t cache_run_size = 0u;
+    if (cache_needed &&
+        !build_cydia_v5_run(cache_run, sizeof cache_run, &cache_run_size)) {
+        free(verifier_package);
+        free(cache_package);
+        build_detail(detail, detail_capacity,
+                     "The Cydia cache recovery helper could not be assembled.");
+        return VM_GUEST_INSTALL_BUILD_ERR_ARGUMENT;
+    }
     size_t maintenance_entry_count = 0u;
     if (source_needed || trust_needed || verifier_needed || cache_needed) {
         maintenance_entry_count = build_cydia_maintenance_entries(
@@ -1790,6 +2029,7 @@ static vm_guest_install_build_status_t build_maintain_install(
             source_needed, source_create, trust_needed, trust_create,
             verifier_needed, verifier_package, verifier_package_size,
             cache_needed, cache_package, cache_package_size,
+            cache_run, cache_run_size,
             cache_ios3_source_create, cache_apt_compat_create);
         options.entries = maintenance_entries;
         options.entry_count = maintenance_entry_count;
@@ -1809,8 +2049,8 @@ static vm_guest_install_build_status_t build_maintain_install(
         (grow_storage &&
          rootfs.final_size < VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES) ||
         (repair_needed && rootfs.file_repairs_applied != 1u) ||
-        (cache_v3_rewrite_needed &&
-         rootfs.file_rewrites_applied != 1u) ||
+        (cache_rewrite_count != 0u &&
+         rootfs.file_rewrites_applied != cache_rewrite_count) ||
         ((source_needed || trust_needed || verifier_needed || cache_needed) &&
          (rootfs.provision_entries <
               2u * ((source_needed ? 1u : 0u) +

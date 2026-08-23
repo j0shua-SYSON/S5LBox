@@ -90,15 +90,25 @@ extern "C" {
 #define VM_GUEST_CYDIA_CACHE_V3_MARKER_TMP      "guest.cydia-cache-v3.partial"
 #define VM_GUEST_CYDIA_CACHE_V3_JOURNAL_FILE    "guest.cydia-cache-v3.transaction"
 #define VM_GUEST_CYDIA_CACHE_V3_JOURNAL_TMP     "guest.cydia-cache-v3.transaction.partial"
-/* v4 replaces the unbounded cache worker, disables broken repository PDiffs,
- * and adds the dedicated iPhone OS 3 source. A committed host record still
- * proves only atomic staging, never guest-side network or cache completion. */
-#define VM_GUEST_CYDIA_CACHE_BACKUP_FILE     "rootfs-work.pre-cydia-cache-v4"
-#define VM_GUEST_CYDIA_CACHE_STAGE_DIRECTORY "guest.cydia-cache-v4.stage"
-#define VM_GUEST_CYDIA_CACHE_MARKER_FILE     "guest.cydia-cache-v4"
-#define VM_GUEST_CYDIA_CACHE_MARKER_TMP      "guest.cydia-cache-v4.partial"
-#define VM_GUEST_CYDIA_CACHE_JOURNAL_FILE    "guest.cydia-cache-v4.transaction"
-#define VM_GUEST_CYDIA_CACHE_JOURNAL_TMP     "guest.cydia-cache-v4.transaction.partial"
+/* Retain v4 as a recovery namespace. Its bounded worker still held Cydia
+ * disabled while repeatedly refreshing every repository, so v5 must also
+ * replace the exact v4 helper bytes before it can own the live disk. */
+#define VM_GUEST_CYDIA_CACHE_V4_BACKUP_FILE     "rootfs-work.pre-cydia-cache-v4"
+#define VM_GUEST_CYDIA_CACHE_V4_STAGE_DIRECTORY "guest.cydia-cache-v4.stage"
+#define VM_GUEST_CYDIA_CACHE_V4_MARKER_FILE     "guest.cydia-cache-v4"
+#define VM_GUEST_CYDIA_CACHE_V4_MARKER_TMP      "guest.cydia-cache-v4.partial"
+#define VM_GUEST_CYDIA_CACHE_V4_JOURNAL_FILE    "guest.cydia-cache-v4.transaction"
+#define VM_GUEST_CYDIA_CACHE_V4_JOURNAL_TMP     "guest.cydia-cache-v4.transaction.partial"
+/* v5 recovers valid retained lists before attempting any network refresh.
+ * One slow or dead repository therefore cannot repeatedly disable Cydia or
+ * erase the last usable cache. A committed host record still proves only
+ * atomic staging, never guest-side cache completion. */
+#define VM_GUEST_CYDIA_CACHE_BACKUP_FILE     "rootfs-work.pre-cydia-cache-v5"
+#define VM_GUEST_CYDIA_CACHE_STAGE_DIRECTORY "guest.cydia-cache-v5.stage"
+#define VM_GUEST_CYDIA_CACHE_MARKER_FILE     "guest.cydia-cache-v5"
+#define VM_GUEST_CYDIA_CACHE_MARKER_TMP      "guest.cydia-cache-v5.partial"
+#define VM_GUEST_CYDIA_CACHE_JOURNAL_FILE    "guest.cydia-cache-v5.transaction"
+#define VM_GUEST_CYDIA_CACHE_JOURNAL_TMP     "guest.cydia-cache-v5.transaction.partial"
 /* Powered-off filesystem repair is repeatable, so its commit record is only a
  * crash-recovery boundary. It is removed after the backup, journal, and stage
  * are durably cleaned instead of becoming permanent boot policy. */

@@ -180,6 +180,8 @@ size_t vm_guest_install_build_test_cydia_cache_entries(
     bool create_ios3_source, bool create_apt_compat);
 void vm_guest_install_build_test_cydia_v3_rewrite(
     rootfs_work_file_rewrite_t *rewrite);
+void vm_guest_install_build_test_cydia_v4_rewrite(
+    rootfs_work_file_rewrite_t *rewrite);
 #endif
 
 const char *vm_guest_install_build_status_text(

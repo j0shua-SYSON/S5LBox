@@ -430,6 +430,12 @@ static void clear_fixture(void) {
         VM_GUEST_CYDIA_CACHE_V3_MARKER_TMP,
         VM_GUEST_CYDIA_CACHE_V3_JOURNAL_FILE,
         VM_GUEST_CYDIA_CACHE_V3_JOURNAL_TMP,
+        VM_GUEST_CYDIA_CACHE_V4_BACKUP_FILE,
+        VM_GUEST_CYDIA_CACHE_V4_STAGE_DIRECTORY,
+        VM_GUEST_CYDIA_CACHE_V4_MARKER_FILE,
+        VM_GUEST_CYDIA_CACHE_V4_MARKER_TMP,
+        VM_GUEST_CYDIA_CACHE_V4_JOURNAL_FILE,
+        VM_GUEST_CYDIA_CACHE_V4_JOURNAL_TMP,
         VM_GUEST_CYDIA_CACHE_BACKUP_FILE,
         VM_GUEST_CYDIA_CACHE_MARKER_FILE,
         VM_GUEST_CYDIA_CACHE_MARKER_TMP,
@@ -792,6 +798,24 @@ static void test_cydia_cache_plan_builds_outside_watchdog(void) {
               v3_rewrite.owner_id == 0u && v3_rewrite.group_id == 0u &&
               v3_rewrite.permissions == 0755u,
           "the exact unbounded v3 worker is not safely superseded");
+    rootfs_work_file_rewrite_t v4_rewrite;
+    vm_guest_install_build_test_cydia_v4_rewrite(&v4_rewrite);
+    CHECK(v4_rewrite.path &&
+              strcmp(v4_rewrite.path,
+                     "/private/var/lib/s5lbox/cydia-cache-v4-run") == 0 &&
+              v4_rewrite.expected_content &&
+              strstr((const char *)v4_rewrite.expected_content,
+                     "while [ \"$attempt\" -le 3 ]") != NULL &&
+              strstr((const char *)v4_rewrite.expected_content,
+                     "run_apt_update \"$attempt\"") != NULL &&
+              v4_rewrite.desired_content &&
+              strstr((const char *)v4_rewrite.desired_content,
+                     "Superseded by the offline-first cydia-cache-v5 worker") != NULL &&
+              v4_rewrite.desired_content_size <
+                  v4_rewrite.expected_content_size &&
+              v4_rewrite.owner_id == 0u && v4_rewrite.group_id == 0u &&
+              v4_rewrite.permissions == 0755u,
+          "the exact retrying v4 worker is not safely superseded");
     rootfs_work_entry_t entries[12];
     rootfs_work_entry_t sentinel[11];
     memset(entries, 0, sizeof entries);
@@ -815,15 +839,15 @@ static void test_cydia_cache_plan_builds_outside_watchdog(void) {
               "Cydia-cache plan entry %zu has no path", i);
         if (!entries[i].path) continue;
         if (strcmp(entries[i].path,
-                   "/private/var/lib/s5lbox/cydia-cache-v4/"
+                   "/private/var/lib/s5lbox/cydia-cache-v5/"
                    "apt7_0.7.20.2-1_iphoneos-arm.deb") == 0)
             package_entry = &entries[i];
         if (strcmp(entries[i].path,
-                   "/private/var/lib/s5lbox/cydia-cache-v4-run") == 0)
+                   "/private/var/lib/s5lbox/cydia-cache-v5-run") == 0)
             helper_entry = &entries[i];
         if (strcmp(entries[i].path,
                    "/System/Library/LaunchDaemons/"
-                   "com.j0shua.s5lbox.cydia-cache-v4.plist") == 0)
+                   "com.j0shua.s5lbox.cydia-cache-v5.plist") == 0)
             plist_entry = &entries[i];
         if (strcmp(entries[i].path,
                    VM_GUEST_ROOTFS_IOS3_PARTY_SOURCE_PATH) == 0)
@@ -840,41 +864,62 @@ static void test_cydia_cache_plan_builds_outside_watchdog(void) {
           "Cydia-cache plan does not retain the exact caller-owned package");
     const char *script = helper_entry
         ? (const char *)helper_entry->content : NULL;
-    const char *gated = script
-        ? strstr(script, "/bin/chmod 0600 \"$cydia\" || exit 1") : NULL;
+    const char *privileged = script
+        ? strstr(script, "/bin/chmod 6755 \"$cydia\" || exit 1") : NULL;
     const char *extracted = script
         ? strstr(script,
                  "/usr/bin/dpkg-deb --extract \"$package\" \"$stage\" || exit 1")
         : NULL;
+    const char *generated = script
+        ? strstr(script,
+                 "-o Dir::Cache::srcpkgcache=\"$staged_srcpkgcache\" gencaches || return 1")
+        : NULL;
+    const char *validated = script
+        ? strstr(script,
+                 "-o Dir::Cache::srcpkgcache=\"$2\" stats >/dev/null 2>&1 || return 1")
+        : NULL;
+    const char *cache_published = script
+        ? strstr(script,
+                 "/bin/mv -f \"$staged_srcpkgcache\" \"$live_srcpkgcache\"")
+        : NULL;
+    const char *cache_rollback = script
+        ? strstr(script, "restore_caches || true") : NULL;
     const char *updated = script
         ? strstr(script,
                  "exec \"$apt_get\" -o Acquire::PDiffs=false -o Acquire::http::Timeout=30 -o Acquire::Retries=1 update")
         : NULL;
     const char *watchdog = script
-        ? strstr(script, "exceeded 180 seconds; terminating it") : NULL;
-    const char *generated = script
-        ? strstr(script, "\"$apt_cache\" gencaches || exit 1") : NULL;
-    const char *validated = script
-        ? strstr(script, "\"$apt_cache\" stats >/dev/null 2>&1 || exit 1")
+        ? strstr(script,
+                 "exceeded 180 guest seconds; terminating it once") : NULL;
+    const char *offline_first = script
+        ? strstr(script,
+                 "if generate_caches; then\n    publish_caches || exit 1\n    echo 'retained repository lists produced valid Cydia caches'")
         : NULL;
-    const char *restored = script
-        ? strstr(script, "/bin/chmod 6755 \"$cydia\" || exit 1") : NULL;
+    const char *single_refresh = script
+        ? strstr(script,
+                 "retained lists were insufficient; attempting one bounded repository refresh")
+        : NULL;
     const char *published = script
         ? strstr(script, "/bin/mv -f \"$marker.partial\" \"$marker\" || exit 1")
         : NULL;
     const char *removed = script
         ? strstr(script, "/bin/rm -f \"$package\" || exit 1") : NULL;
     CHECK(helper_entry && helper_entry->kind == ROOTFS_WORK_ENTRY_FILE &&
-              helper_entry->permissions == 0755u && gated && extracted &&
-              updated && watchdog && generated && validated && restored &&
-              published && removed && gated < extracted && extracted < updated &&
-              updated < generated && generated < validated &&
-              validated < restored && restored < published &&
-              published < removed,
-          "Cydia-cache helper does not gate, build, validate, restore, and publish in order");
+              helper_entry->permissions == 0755u && privileged && extracted &&
+              generated && validated && cache_published && cache_rollback &&
+              updated && watchdog && offline_first && single_refresh &&
+              published && removed && privileged < extracted &&
+              extracted < validated && validated < generated &&
+              generated < cache_published && cache_published < updated &&
+              updated < offline_first && offline_first < removed &&
+              removed < published,
+          "Cydia-cache helper does not preserve access, stage caches, bound one refresh, roll back, and publish in order");
     CHECK(script && strstr(script, "pkgcache.bin") != NULL &&
               strstr(script, "srcpkgcache.bin") != NULL &&
+              strstr(script, "/bin/chmod 0600 \"$cydia\"") == NULL &&
               strstr(script, "Acquire::Retries=3 update && break") == NULL &&
+              strstr(script, "while [ \"$attempt\" -le 3 ]") == NULL &&
+              strstr(script, "usable repository package lists") != NULL &&
               strstr(script, "allow-unauthenticated") == NULL &&
               strstr(script, "AllowInsecureRepositories") == NULL &&
               strstr(script, "trusted=yes") == NULL,
@@ -903,12 +948,14 @@ static void test_cydia_cache_plan_builds_outside_watchdog(void) {
               plist_entry->permissions == 0644u &&
               plist_entry->content_size != 0u &&
               strstr((const char *)plist_entry->content,
-                     "/private/var/lib/s5lbox/cydia-cache-v4-run") != NULL &&
+                     "/private/var/lib/s5lbox/cydia-cache-v5-run") != NULL &&
               strstr((const char *)plist_entry->content,
-                     "<key>KeepAlive</key>") != NULL &&
+                     "<key>RunAtLoad</key>") != NULL &&
               strstr((const char *)plist_entry->content,
-                     "<key>SuccessfulExit</key>") != NULL,
-          "Cydia-cache launchd job is not retryable after a failed cache build");
+                     "<key>KeepAlive</key>") == NULL &&
+              strstr((const char *)plist_entry->content,
+                     "<key>SuccessfulExit</key>") == NULL,
+          "Cydia-cache launchd job can retry a failed network/cache build in a boot loop");
 }
 
 static void test_historical_snapshot_gate(void) {
@@ -1305,6 +1352,18 @@ static void test_dirty_existing_install_refuses_before_stage(void) {
         VM_GUEST_APT_VERIFIER_MARKER_TMP,
         VM_GUEST_APT_VERIFIER_JOURNAL_FILE,
         VM_GUEST_APT_VERIFIER_JOURNAL_TMP,
+        VM_GUEST_CYDIA_CACHE_V3_BACKUP_FILE,
+        VM_GUEST_CYDIA_CACHE_V3_STAGE_DIRECTORY,
+        VM_GUEST_CYDIA_CACHE_V3_MARKER_FILE,
+        VM_GUEST_CYDIA_CACHE_V3_MARKER_TMP,
+        VM_GUEST_CYDIA_CACHE_V3_JOURNAL_FILE,
+        VM_GUEST_CYDIA_CACHE_V3_JOURNAL_TMP,
+        VM_GUEST_CYDIA_CACHE_V4_BACKUP_FILE,
+        VM_GUEST_CYDIA_CACHE_V4_STAGE_DIRECTORY,
+        VM_GUEST_CYDIA_CACHE_V4_MARKER_FILE,
+        VM_GUEST_CYDIA_CACHE_V4_MARKER_TMP,
+        VM_GUEST_CYDIA_CACHE_V4_JOURNAL_FILE,
+        VM_GUEST_CYDIA_CACHE_V4_JOURNAL_TMP,
         VM_GUEST_CYDIA_CACHE_BACKUP_FILE,
         VM_GUEST_CYDIA_CACHE_STAGE_DIRECTORY,
         VM_GUEST_CYDIA_CACHE_MARKER_FILE,
@@ -1933,7 +1992,7 @@ static void test_real_cache_recovery_when_supplied(void) {
     rootfs_work_file_repair_t cache_package_probe;
     memset(&cache_package_probe, 0, sizeof cache_package_probe);
     cache_package_probe.path =
-        "/private/var/lib/s5lbox/cydia-cache-v4/"
+        "/private/var/lib/s5lbox/cydia-cache-v5/"
         "apt7_0.7.20.2-1_iphoneos-arm.deb";
     cache_package_probe.expected_size = UINT64_C(664620);
     static const uint8_t CACHE_PACKAGE_SHA256[

@@ -460,12 +460,22 @@ static void test_complete_synthetic_plan(void) {
           strstr((const char *)script->content,
                  "exec \"$apt_get\" -o Acquire::PDiffs=false -o Acquire::http::Timeout=30 -o Acquire::Retries=1 update") != NULL &&
           strstr((const char *)script->content,
-                 "exceeded 180 seconds; terminating it") != NULL &&
+                 "exceeded 180 guest seconds; terminating it once") != NULL &&
           strstr((const char *)script->content,
-                 "\"$apt_cache\" gencaches || exit 1") != NULL &&
+                 "-o Dir::Cache::srcpkgcache=\"$staged_srcpkgcache\" gencaches || return 1") != NULL &&
           strstr((const char *)script->content,
-                 "\"$apt_cache\" stats >/dev/null 2>&1 || exit 1") != NULL,
-          "the tool-only APT archive is installed or does not build and validate caches");
+                 "-o Dir::Cache::srcpkgcache=\"$2\" stats >/dev/null 2>&1 || return 1") != NULL &&
+          strstr((const char *)script->content,
+                 "/bin/mv -f \"$staged_srcpkgcache\" \"$live_srcpkgcache\"") != NULL &&
+          strstr((const char *)script->content,
+                 "restore_caches || true") != NULL &&
+          strstr((const char *)script->content,
+                 "retained repository lists produced valid Cydia caches") != NULL &&
+          strstr((const char *)script->content,
+                 "existing caches were left untouched") != NULL &&
+          strstr((const char *)script->content,
+                 "while [ \"$attempt\" -le 3 ]") == NULL,
+          "the tool-only APT archive is installed or does not stage, validate, and preserve caches around one bounded refresh");
     CHECK(plist && plist->content_size != 0u &&
           strstr((const char *)plist->content,
                  "com.j0shua.s5lbox.guest-install") != NULL,
@@ -484,7 +494,7 @@ static void test_complete_synthetic_plan(void) {
         : NULL;
     const char *apt_cache_ready = script
         ? strstr((const char *)script->content,
-                 "Cydia APT caches built outside the application watchdog")
+                 "Cydia APT caches recovered outside the application watchdog")
         : NULL;
     const char *cydia_owner = script
         ? strstr((const char *)script->content,
@@ -549,10 +559,10 @@ static void test_complete_synthetic_plan(void) {
     CHECK(vm_guest_rootfs_plan_manifest_sha256(plan, digest),
           "plan manifest identity was not produced");
     static const uint8_t EXPECTED[VM_GUEST_PACKAGE_SHA256_SIZE] = {
-        0x44u, 0x0au, 0x33u, 0xc9u, 0x98u, 0x2bu, 0x71u, 0x2bu,
-        0xf9u, 0x32u, 0x9bu, 0x43u, 0x97u, 0xe9u, 0xbdu, 0x6eu,
-        0x6cu, 0xf8u, 0xe3u, 0xa4u, 0x51u, 0xc5u, 0x63u, 0xc2u,
-        0xc9u, 0xb9u, 0xcdu, 0x77u, 0x60u, 0x05u, 0xffu, 0xa4u
+        0xc1u, 0xc9u, 0xd8u, 0x92u, 0x06u, 0x03u, 0xe3u, 0x95u,
+        0xdeu, 0x38u, 0x86u, 0x91u, 0x49u, 0x10u, 0x3fu, 0x89u,
+        0x62u, 0xeeu, 0x5eu, 0xc1u, 0xd2u, 0x4cu, 0x3fu, 0xddu,
+        0x0au, 0x75u, 0x15u, 0x94u, 0xeeu, 0xb9u, 0xf3u, 0x14u
     };
     CHECK(memcmp(digest, EXPECTED, sizeof digest) == 0,
           "synthetic plan identity changed");

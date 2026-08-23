@@ -199,6 +199,11 @@ static void remove_fixture_artifacts(void) {
         VM_GUEST_CYDIA_CACHE_V3_MARKER_TMP,
         VM_GUEST_CYDIA_CACHE_V3_JOURNAL_FILE,
         VM_GUEST_CYDIA_CACHE_V3_JOURNAL_TMP,
+        VM_GUEST_CYDIA_CACHE_V4_BACKUP_FILE,
+        VM_GUEST_CYDIA_CACHE_V4_MARKER_FILE,
+        VM_GUEST_CYDIA_CACHE_V4_MARKER_TMP,
+        VM_GUEST_CYDIA_CACHE_V4_JOURNAL_FILE,
+        VM_GUEST_CYDIA_CACHE_V4_JOURNAL_TMP,
         VM_GUEST_CYDIA_CACHE_BACKUP_FILE,
         VM_GUEST_CYDIA_CACHE_MARKER_FILE,
         VM_GUEST_CYDIA_CACHE_MARKER_TMP,
@@ -249,6 +254,9 @@ static void remove_fixture_artifacts(void) {
         (void)remove_directory(path);
     if (path_for(path, sizeof path,
                  VM_GUEST_CYDIA_CACHE_V3_STAGE_DIRECTORY))
+        (void)remove_directory(path);
+    if (path_for(path, sizeof path,
+                 VM_GUEST_CYDIA_CACHE_V4_STAGE_DIRECTORY))
         (void)remove_directory(path);
     if (cydia_cache_stage_path_for(path, sizeof path,
                                    VM_GUEST_INSTALL_NEXT_FILE))
