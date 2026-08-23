@@ -45,6 +45,22 @@ extern "C" {
     "/private/etc/apt/sources.list.d/s5lbox-bigboss.list"
 #define VM_GUEST_ROOTFS_BIGBOSS_SOURCE_LINE \
     "deb http://apt.thebigboss.org/repofiles/cydia/ stable main\n"
+#define VM_GUEST_ROOTFS_IOS3_PARTY_SOURCE_PATH \
+    "/private/etc/apt/sources.list.d/s5lbox-ios3-party.list"
+#define VM_GUEST_ROOTFS_IOS3_PARTY_SOURCE_LINE \
+    "deb http://ios3.party/ ./\n"
+#define VM_GUEST_ROOTFS_APT_COMPAT_DIRECTORY \
+    "/private/etc/apt/apt.conf.d"
+#define VM_GUEST_ROOTFS_APT_COMPAT_PATH \
+    VM_GUEST_ROOTFS_APT_COMPAT_DIRECTORY "/99s5lbox-repository-compat"
+/* Period repositories and proxies can expose stale differential indexes or
+ * mishandle pipelined requests. Prefer complete, bounded transfers without
+ * weakening Release verification or marking any source as trusted. */
+#define VM_GUEST_ROOTFS_APT_COMPAT_CONTENT \
+    "Acquire::PDiffs \"false\";\n" \
+    "Acquire::http::Pipeline-Depth \"0\";\n" \
+    "Acquire::http::Timeout \"30\";\n" \
+    "Acquire::Retries \"2\";\n"
 #define VM_GUEST_ROOTFS_TRUSTED_KEYRING_PATH \
     "/private/etc/apt/trusted.gpg"
 

@@ -57,10 +57,14 @@ static const char VM_GUEST_APT_VERIFIER_MARKER_PREFIX[] =
     "s5lbox-guest-apt-verifier 1\ninstall-manifest-sha256 ";
 static const char VM_GUEST_APT_VERIFIER_JOURNAL_PREFIX[] =
     "s5lbox-guest-apt-verifier-transaction 1\ninstall-manifest-sha256 ";
-static const char VM_GUEST_CYDIA_CACHE_MARKER_PREFIX[] =
+static const char VM_GUEST_CYDIA_CACHE_V3_MARKER_PREFIX[] =
     "s5lbox-guest-cydia-cache 3\ninstall-manifest-sha256 ";
-static const char VM_GUEST_CYDIA_CACHE_JOURNAL_PREFIX[] =
+static const char VM_GUEST_CYDIA_CACHE_V3_JOURNAL_PREFIX[] =
     "s5lbox-guest-cydia-cache-transaction 3\ninstall-manifest-sha256 ";
+static const char VM_GUEST_CYDIA_CACHE_MARKER_PREFIX[] =
+    "s5lbox-guest-cydia-cache 4\ninstall-manifest-sha256 ";
+static const char VM_GUEST_CYDIA_CACHE_JOURNAL_PREFIX[] =
+    "s5lbox-guest-cydia-cache-transaction 4\ninstall-manifest-sha256 ";
 static const char VM_GUEST_RECOVERY_MARKER_PREFIX[] =
     "s5lbox-guest-recovery 1\nrecovery-id ";
 static const char VM_GUEST_RECOVERY_JOURNAL_PREFIX[] =
@@ -177,6 +181,19 @@ static const guest_transaction_spec_t VM_GUEST_APT_VERIFIER_SPEC = {
     false
 };
 
+static const guest_transaction_spec_t VM_GUEST_CYDIA_CACHE_V3_SPEC = {
+    VM_GUEST_CYDIA_CACHE_V3_BACKUP_FILE,
+    VM_GUEST_CYDIA_CACHE_V3_STAGE_DIRECTORY,
+    VM_GUEST_CYDIA_CACHE_V3_MARKER_FILE,
+    VM_GUEST_CYDIA_CACHE_V3_MARKER_TMP,
+    VM_GUEST_CYDIA_CACHE_V3_JOURNAL_FILE,
+    VM_GUEST_CYDIA_CACHE_V3_JOURNAL_TMP,
+    VM_GUEST_CYDIA_CACHE_V3_MARKER_PREFIX,
+    VM_GUEST_CYDIA_CACHE_V3_JOURNAL_PREFIX,
+    "guest-cydia-cache-v3",
+    false
+};
+
 static const guest_transaction_spec_t VM_GUEST_CYDIA_CACHE_SPEC = {
     VM_GUEST_CYDIA_CACHE_BACKUP_FILE,
     VM_GUEST_CYDIA_CACHE_STAGE_DIRECTORY,
@@ -186,7 +203,7 @@ static const guest_transaction_spec_t VM_GUEST_CYDIA_CACHE_SPEC = {
     VM_GUEST_CYDIA_CACHE_JOURNAL_TMP,
     VM_GUEST_CYDIA_CACHE_MARKER_PREFIX,
     VM_GUEST_CYDIA_CACHE_JOURNAL_PREFIX,
-    "guest-cydia-cache-v3",
+    "guest-cydia-cache-v4",
     false
 };
 
@@ -994,7 +1011,7 @@ vm_guest_maintenance_recover(const char *work_directory,
                              vm_guest_install_result_t *storage_result,
                              vm_guest_install_result_t *sources_result,
                              char *detail, size_t detail_capacity) {
-    enum { MAINTENANCE_COUNT = 8 };
+    enum { MAINTENANCE_COUNT = 9 };
     const guest_transaction_spec_t *specs[MAINTENANCE_COUNT] = {
         &VM_GUEST_RECOVERY_SPEC,
         &VM_GUEST_PRIVILEGE_SPEC,
@@ -1003,6 +1020,7 @@ vm_guest_maintenance_recover(const char *work_directory,
         &VM_GUEST_SOURCES_V2_SPEC,
         &VM_GUEST_APT_TRUST_SPEC,
         &VM_GUEST_APT_VERIFIER_SPEC,
+        &VM_GUEST_CYDIA_CACHE_V3_SPEC,
         &VM_GUEST_CYDIA_CACHE_SPEC
     };
     guest_paths_t paths[MAINTENANCE_COUNT];
@@ -1015,7 +1033,8 @@ vm_guest_maintenance_recover(const char *work_directory,
         &local[4],
         &local[5],
         &local[6],
-        &local[7]
+        &local[7],
+        &local[8]
     };
     bool journal[MAINTENANCE_COUNT] = {false};
     size_t owner = MAINTENANCE_COUNT;

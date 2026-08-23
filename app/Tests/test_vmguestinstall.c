@@ -194,6 +194,11 @@ static void remove_fixture_artifacts(void) {
         VM_GUEST_APT_VERIFIER_MARKER_TMP,
         VM_GUEST_APT_VERIFIER_JOURNAL_FILE,
         VM_GUEST_APT_VERIFIER_JOURNAL_TMP,
+        VM_GUEST_CYDIA_CACHE_V3_BACKUP_FILE,
+        VM_GUEST_CYDIA_CACHE_V3_MARKER_FILE,
+        VM_GUEST_CYDIA_CACHE_V3_MARKER_TMP,
+        VM_GUEST_CYDIA_CACHE_V3_JOURNAL_FILE,
+        VM_GUEST_CYDIA_CACHE_V3_JOURNAL_TMP,
         VM_GUEST_CYDIA_CACHE_BACKUP_FILE,
         VM_GUEST_CYDIA_CACHE_MARKER_FILE,
         VM_GUEST_CYDIA_CACHE_MARKER_TMP,
@@ -241,6 +246,9 @@ static void remove_fixture_artifacts(void) {
                                     VM_GUEST_INSTALL_NEXT_FILE))
         (void)remove(path);
     if (path_for(path, sizeof path, VM_GUEST_APT_VERIFIER_STAGE_DIRECTORY))
+        (void)remove_directory(path);
+    if (path_for(path, sizeof path,
+                 VM_GUEST_CYDIA_CACHE_V3_STAGE_DIRECTORY))
         (void)remove_directory(path);
     if (cydia_cache_stage_path_for(path, sizeof path,
                                    VM_GUEST_INSTALL_NEXT_FILE))
@@ -1369,6 +1377,27 @@ static void test_maintenance_recovery_refuses_competing_owners(void) {
           file_equals(sources_journal, "claimed\n") &&
           file_equals(sources_v2_journal, "claimed\n"),
           "source journal conflict changed the live disk or either owner record");
+
+    char cache_v3_journal[1400];
+    char cache_v4_journal[1400];
+    remove_fixture_artifacts();
+    CHECK(path_for(live, sizeof live, VM_GUEST_INSTALL_LIVE_FILE) &&
+          path_for(cache_v3_journal, sizeof cache_v3_journal,
+                   VM_GUEST_CYDIA_CACHE_V3_JOURNAL_FILE) &&
+          path_for(cache_v4_journal, sizeof cache_v4_journal,
+                   VM_GUEST_CYDIA_CACHE_JOURNAL_FILE) &&
+          write_bytes(live, "original-rootfs") &&
+          write_bytes(cache_v3_journal, "claimed\n") &&
+          write_bytes(cache_v4_journal, "claimed\n"),
+          "could not seed competing v3/v4 cache journals");
+    CHECK(vm_guest_maintenance_recover(FIXTURE_DIR, &privilege, &storage, NULL,
+                                       detail, sizeof detail) ==
+              VM_GUEST_INSTALL_ERR_STATE,
+          "v3 and v4 Cydia-cache journals were guessed through: %s", detail);
+    CHECK(file_equals(live, "original-rootfs") &&
+          file_equals(cache_v3_journal, "claimed\n") &&
+          file_equals(cache_v4_journal, "claimed\n"),
+          "cache journal conflict changed the live disk or either owner record");
 
     remove_fixture_artifacts();
     CHECK(path_for(privilege_backup, sizeof privilege_backup,

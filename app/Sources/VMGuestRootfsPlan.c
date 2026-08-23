@@ -12,13 +12,17 @@
 
 #define PLAN_NAME_ARENA_BYTES \
     ((size_t)ROOTFS_WORK_MAX_ENTRIES * (size_t)ROOTFS_WORK_MAX_PATH)
-#define PLAN_SCRIPT_CAPACITY 16384u
+#define PLAN_SCRIPT_CAPACITY 24576u
 #define PLAN_PATH_CAPACITY 1400u
 
 static const char CYDIA_SOURCE_LIST[] =
     VM_GUEST_ROOTFS_SAURIK_SOURCE_LINE;
 static const char BIGBOSS_SOURCE_LIST[] =
     VM_GUEST_ROOTFS_BIGBOSS_SOURCE_LINE;
+static const char IOS3_PARTY_SOURCE_LIST[] =
+    VM_GUEST_ROOTFS_IOS3_PARTY_SOURCE_LINE;
+static const char APT_COMPAT_CONFIGURATION[] =
+    VM_GUEST_ROOTFS_APT_COMPAT_CONTENT;
 
 /* Public signing key from the retained iPhone OS 3 bootstrap artifact. Its
  * OpenPGP fingerprint is A9C96A37115894A23B894107694D17D38764B4F4 and its
@@ -444,7 +448,37 @@ static bool plan_script_apt_cache_tool(
                "fi\n"
                "[ -x \"$apt_get\" ] && [ -x \"$apt_cache\" ] || exit 1\n"
                "/bin/rm -f /private/var/cache/apt/pkgcache.bin /private/var/cache/apt/srcpkgcache.bin || exit 1\n"
-               "\"$apt_get\" -o Acquire::http::Timeout=30 -o Acquire::Retries=3 update || echo 'APT refresh incomplete; rebuilding from authenticated retained lists'\n"
+               "run_apt_update() {\n"
+               "    update_token=\"$state/apt-update.$$.running\"\n"
+               "    /bin/rm -f \"$update_token\"\n"
+               "    (\n"
+               "        exec \"$apt_get\" -o Acquire::PDiffs=false -o Acquire::http::Timeout=30 -o Acquire::Retries=1 update\n"
+               "    ) &\n"
+               "    apt_pid=$!\n"
+               "    : >\"$update_token\" || { kill -TERM \"$apt_pid\" >/dev/null 2>&1; wait \"$apt_pid\" >/dev/null 2>&1; return 1; }\n"
+               "    (\n"
+               "        /bin/sleep 180\n"
+               "        [ -e \"$update_token\" ] || exit 0\n"
+               "        echo \"APT refresh attempt $1 exceeded 180 seconds; terminating it\"\n"
+               "        kill -TERM \"$apt_pid\" >/dev/null 2>&1 || exit 0\n"
+               "        /bin/sleep 5\n"
+               "        [ -e \"$update_token\" ] || exit 0\n"
+               "        kill -KILL \"$apt_pid\" >/dev/null 2>&1 || true\n"
+               "    ) &\n"
+               "    watchdog_pid=$!\n"
+               "    wait \"$apt_pid\"\n"
+               "    apt_status=$?\n"
+               "    /bin/rm -f \"$update_token\"\n"
+               "    kill -TERM \"$watchdog_pid\" >/dev/null 2>&1 || true\n"
+               "    return \"$apt_status\"\n"
+               "}\n"
+               "attempt=1\n"
+               "while [ \"$attempt\" -le 3 ]; do\n"
+               "    run_apt_update \"$attempt\" && break\n"
+               "    attempt=$((attempt + 1))\n"
+               "    [ \"$attempt\" -le 3 ] && /bin/sleep 10\n"
+               "done\n"
+               "[ \"$attempt\" -le 3 ] || echo 'APT refresh incomplete; rebuilding from retained lists'\n"
                "/bin/rm -f /private/var/cache/apt/pkgcache.bin /private/var/cache/apt/srcpkgcache.bin || exit 1\n"
                "\"$apt_cache\" gencaches || exit 1\n"
                "[ -s /private/var/cache/apt/pkgcache.bin ] || exit 1\n"
@@ -519,6 +553,7 @@ static bool plan_add_runtime_entries(
         "/private/var/log",
         "/private/etc/apt",
         "/private/etc/apt/sources.list.d",
+        VM_GUEST_ROOTFS_APT_COMPAT_DIRECTORY,
         "/usr/libexec",
         "/System/Library/LaunchDaemons"
     };
@@ -538,6 +573,14 @@ static bool plan_add_runtime_entries(
         !plan_add_file(plan, VM_GUEST_ROOTFS_BIGBOSS_SOURCE_PATH,
                        (const uint8_t *)BIGBOSS_SOURCE_LIST,
                        sizeof BIGBOSS_SOURCE_LIST - 1u, 0644u,
+                       detail, detail_capacity) ||
+        !plan_add_file(plan, VM_GUEST_ROOTFS_IOS3_PARTY_SOURCE_PATH,
+                       (const uint8_t *)IOS3_PARTY_SOURCE_LIST,
+                       sizeof IOS3_PARTY_SOURCE_LIST - 1u, 0644u,
+                       detail, detail_capacity) ||
+        !plan_add_file(plan, VM_GUEST_ROOTFS_APT_COMPAT_PATH,
+                       (const uint8_t *)APT_COMPAT_CONFIGURATION,
+                       sizeof APT_COMPAT_CONFIGURATION - 1u, 0644u,
                        detail, detail_capacity) ||
         !plan_add_file(plan, VM_GUEST_ROOTFS_TRUSTED_KEYRING_PATH,
                        BIGBOSS_TRUSTED_KEYRING,
@@ -574,7 +617,7 @@ static bool plan_compute_manifest(vm_guest_rootfs_plan_t *plan,
                                   size_t input_count) {
     ios3_sha256_context_t context;
     if (!ios3_sha256_init(&context) ||
-        !plan_hash_text(&context, "s5lbox-guest-rootfs-plan 7\n") ||
+        !plan_hash_text(&context, "s5lbox-guest-rootfs-plan 8\n") ||
         !plan_hash_text(&context,
                         "aliases /etc=/private/etc /var=/private/var\n") ||
         !plan_hash_text(
@@ -587,6 +630,16 @@ static bool plan_compute_manifest(vm_guest_rootfs_plan_t *plan,
             "source " VM_GUEST_ROOTFS_BIGBOSS_SOURCE_PATH "\n") ||
         !ios3_sha256_update(&context, BIGBOSS_SOURCE_LIST,
                             sizeof BIGBOSS_SOURCE_LIST - 1u) ||
+        !plan_hash_text(
+            &context,
+            "source " VM_GUEST_ROOTFS_IOS3_PARTY_SOURCE_PATH "\n") ||
+        !ios3_sha256_update(&context, IOS3_PARTY_SOURCE_LIST,
+                            sizeof IOS3_PARTY_SOURCE_LIST - 1u) ||
+        !plan_hash_text(
+            &context,
+            "apt-config " VM_GUEST_ROOTFS_APT_COMPAT_PATH "\n") ||
+        !ios3_sha256_update(&context, APT_COMPAT_CONFIGURATION,
+                            sizeof APT_COMPAT_CONFIGURATION - 1u) ||
         !plan_hash_text(
             &context,
             "keyring " VM_GUEST_ROOTFS_TRUSTED_KEYRING_PATH "\n") ||

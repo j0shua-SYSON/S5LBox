@@ -176,7 +176,10 @@ size_t vm_guest_install_build_test_apt_verifier_entries(
     const uint8_t *package, size_t package_size);
 size_t vm_guest_install_build_test_cydia_cache_entries(
     rootfs_work_entry_t *entries, size_t capacity,
-    const uint8_t *package, size_t package_size);
+    const uint8_t *package, size_t package_size,
+    bool create_ios3_source, bool create_apt_compat);
+void vm_guest_install_build_test_cydia_v3_rewrite(
+    rootfs_work_file_rewrite_t *rewrite);
 #endif
 
 const char *vm_guest_install_build_status_text(

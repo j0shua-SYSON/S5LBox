@@ -82,17 +82,23 @@ extern "C" {
 #define VM_GUEST_APT_VERIFIER_MARKER_TMP      "guest.apt-verifier-v1.partial"
 #define VM_GUEST_APT_VERIFIER_JOURNAL_FILE    "guest.apt-verifier-v1.transaction"
 #define VM_GUEST_APT_VERIFIER_JOURNAL_TMP     "guest.apt-verifier-v1.transaction.partial"
-/* Cache cleanup alone did not solve current repository growth: old Cydia can
- * be watchdog-killed while libapt builds its cache, leaving partial cache
- * files that later crash in libapt. This independent v3 namespace stages an
- * ABI-matched command-line cache builder for a boot daemon, without claiming
- * that the guest-side job has completed merely because the disk was published. */
-#define VM_GUEST_CYDIA_CACHE_BACKUP_FILE     "rootfs-work.pre-cydia-cache-v3"
-#define VM_GUEST_CYDIA_CACHE_STAGE_DIRECTORY "guest.cydia-cache-v3.stage"
-#define VM_GUEST_CYDIA_CACHE_MARKER_FILE     "guest.cydia-cache-v3"
-#define VM_GUEST_CYDIA_CACHE_MARKER_TMP      "guest.cydia-cache-v3.partial"
-#define VM_GUEST_CYDIA_CACHE_JOURNAL_FILE    "guest.cydia-cache-v3.transaction"
-#define VM_GUEST_CYDIA_CACHE_JOURNAL_TMP     "guest.cydia-cache-v3.transaction.partial"
+/* Retain the v3 transaction namespace solely so interrupted upgrades can be
+ * recovered before a newer owner touches the shared live disk. */
+#define VM_GUEST_CYDIA_CACHE_V3_BACKUP_FILE     "rootfs-work.pre-cydia-cache-v3"
+#define VM_GUEST_CYDIA_CACHE_V3_STAGE_DIRECTORY "guest.cydia-cache-v3.stage"
+#define VM_GUEST_CYDIA_CACHE_V3_MARKER_FILE     "guest.cydia-cache-v3"
+#define VM_GUEST_CYDIA_CACHE_V3_MARKER_TMP      "guest.cydia-cache-v3.partial"
+#define VM_GUEST_CYDIA_CACHE_V3_JOURNAL_FILE    "guest.cydia-cache-v3.transaction"
+#define VM_GUEST_CYDIA_CACHE_V3_JOURNAL_TMP     "guest.cydia-cache-v3.transaction.partial"
+/* v4 replaces the unbounded cache worker, disables broken repository PDiffs,
+ * and adds the dedicated iPhone OS 3 source. A committed host record still
+ * proves only atomic staging, never guest-side network or cache completion. */
+#define VM_GUEST_CYDIA_CACHE_BACKUP_FILE     "rootfs-work.pre-cydia-cache-v4"
+#define VM_GUEST_CYDIA_CACHE_STAGE_DIRECTORY "guest.cydia-cache-v4.stage"
+#define VM_GUEST_CYDIA_CACHE_MARKER_FILE     "guest.cydia-cache-v4"
+#define VM_GUEST_CYDIA_CACHE_MARKER_TMP      "guest.cydia-cache-v4.partial"
+#define VM_GUEST_CYDIA_CACHE_JOURNAL_FILE    "guest.cydia-cache-v4.transaction"
+#define VM_GUEST_CYDIA_CACHE_JOURNAL_TMP     "guest.cydia-cache-v4.transaction.partial"
 /* Powered-off filesystem repair is repeatable, so its commit record is only a
  * crash-recovery boundary. It is removed after the backup, journal, and stage
  * are durably cleaned instead of becoming permanent boot policy. */

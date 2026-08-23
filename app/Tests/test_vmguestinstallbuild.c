@@ -424,6 +424,12 @@ static void clear_fixture(void) {
         VM_GUEST_APT_VERIFIER_MARKER_TMP,
         VM_GUEST_APT_VERIFIER_JOURNAL_FILE,
         VM_GUEST_APT_VERIFIER_JOURNAL_TMP,
+        VM_GUEST_CYDIA_CACHE_V3_BACKUP_FILE,
+        VM_GUEST_CYDIA_CACHE_V3_STAGE_DIRECTORY,
+        VM_GUEST_CYDIA_CACHE_V3_MARKER_FILE,
+        VM_GUEST_CYDIA_CACHE_V3_MARKER_TMP,
+        VM_GUEST_CYDIA_CACHE_V3_JOURNAL_FILE,
+        VM_GUEST_CYDIA_CACHE_V3_JOURNAL_TMP,
         VM_GUEST_CYDIA_CACHE_BACKUP_FILE,
         VM_GUEST_CYDIA_CACHE_MARKER_FILE,
         VM_GUEST_CYDIA_CACHE_MARKER_TMP,
@@ -700,8 +706,8 @@ static void test_apt_trust_plan_is_exact_and_private(void) {
 
 static void test_apt_verifier_plan_uses_guest_dpkg(void) {
     static const uint8_t PACKAGE[] = {0x21u, 0x3cu, 0x61u, 0x72u};
-    rootfs_work_entry_t entries[9];
-    rootfs_work_entry_t sentinel[8];
+    rootfs_work_entry_t entries[12];
+    rootfs_work_entry_t sentinel[11];
     memset(entries, 0, sizeof entries);
     memset(sentinel, 0xa5, sizeof sentinel);
     CHECK(vm_guest_install_build_test_apt_verifier_entries(
@@ -770,37 +776,61 @@ static void test_apt_verifier_plan_uses_guest_dpkg(void) {
 
 static void test_cydia_cache_plan_builds_outside_watchdog(void) {
     static const uint8_t PACKAGE[] = {0x21u, 0x3cu, 0x61u, 0x72u};
-    rootfs_work_entry_t entries[9];
-    rootfs_work_entry_t sentinel[8];
+    rootfs_work_file_rewrite_t v3_rewrite;
+    vm_guest_install_build_test_cydia_v3_rewrite(&v3_rewrite);
+    CHECK(v3_rewrite.path &&
+              strcmp(v3_rewrite.path,
+                     "/private/var/lib/s5lbox/cydia-cache-v3-run") == 0 &&
+              v3_rewrite.expected_content &&
+              strstr((const char *)v3_rewrite.expected_content,
+                     "Acquire::Retries=3 update && break") != NULL &&
+              v3_rewrite.desired_content &&
+              strstr((const char *)v3_rewrite.desired_content,
+                     "Superseded by the bounded cydia-cache-v4 worker") != NULL &&
+              v3_rewrite.desired_content_size <
+                  v3_rewrite.expected_content_size &&
+              v3_rewrite.owner_id == 0u && v3_rewrite.group_id == 0u &&
+              v3_rewrite.permissions == 0755u,
+          "the exact unbounded v3 worker is not safely superseded");
+    rootfs_work_entry_t entries[12];
+    rootfs_work_entry_t sentinel[11];
     memset(entries, 0, sizeof entries);
     memset(sentinel, 0xa5, sizeof sentinel);
     CHECK(vm_guest_install_build_test_cydia_cache_entries(
-              sentinel, 8u, PACKAGE, sizeof PACKAGE) == 9u &&
+              sentinel, 11u, PACKAGE, sizeof PACKAGE, true, true) == 12u &&
           ((const unsigned char *)sentinel)[0] == 0xa5u,
           "a short Cydia-cache plan buffer was modified");
     size_t count = vm_guest_install_build_test_cydia_cache_entries(
-        entries, 9u, PACKAGE, sizeof PACKAGE);
-    CHECK(count == 9u,
-          "Cydia-cache plan has %zu entries, expected 9", count);
+        entries, 12u, PACKAGE, sizeof PACKAGE, true, true);
+    CHECK(count == 12u,
+          "Cydia-cache plan has %zu entries, expected 12", count);
 
     const rootfs_work_entry_t *package_entry = NULL;
     const rootfs_work_entry_t *helper_entry = NULL;
     const rootfs_work_entry_t *plist_entry = NULL;
+    const rootfs_work_entry_t *ios3_source_entry = NULL;
+    const rootfs_work_entry_t *apt_compat_entry = NULL;
     for (size_t i = 0u; i < count; i++) {
         CHECK(entries[i].path != NULL,
               "Cydia-cache plan entry %zu has no path", i);
         if (!entries[i].path) continue;
         if (strcmp(entries[i].path,
-                   "/private/var/lib/s5lbox/cydia-cache-v3/"
+                   "/private/var/lib/s5lbox/cydia-cache-v4/"
                    "apt7_0.7.20.2-1_iphoneos-arm.deb") == 0)
             package_entry = &entries[i];
         if (strcmp(entries[i].path,
-                   "/private/var/lib/s5lbox/cydia-cache-v3-run") == 0)
+                   "/private/var/lib/s5lbox/cydia-cache-v4-run") == 0)
             helper_entry = &entries[i];
         if (strcmp(entries[i].path,
                    "/System/Library/LaunchDaemons/"
-                   "com.j0shua.s5lbox.cydia-cache-v3.plist") == 0)
+                   "com.j0shua.s5lbox.cydia-cache-v4.plist") == 0)
             plist_entry = &entries[i];
+        if (strcmp(entries[i].path,
+                   VM_GUEST_ROOTFS_IOS3_PARTY_SOURCE_PATH) == 0)
+            ios3_source_entry = &entries[i];
+        if (strcmp(entries[i].path,
+                   VM_GUEST_ROOTFS_APT_COMPAT_PATH) == 0)
+            apt_compat_entry = &entries[i];
     }
     CHECK(package_entry &&
               package_entry->kind == ROOTFS_WORK_ENTRY_FILE &&
@@ -818,8 +848,10 @@ static void test_cydia_cache_plan_builds_outside_watchdog(void) {
         : NULL;
     const char *updated = script
         ? strstr(script,
-                 "\"$apt_get\" -o Acquire::http::Timeout=30 -o Acquire::Retries=3 update && break")
+                 "exec \"$apt_get\" -o Acquire::PDiffs=false -o Acquire::http::Timeout=30 -o Acquire::Retries=1 update")
         : NULL;
+    const char *watchdog = script
+        ? strstr(script, "exceeded 180 seconds; terminating it") : NULL;
     const char *generated = script
         ? strstr(script, "\"$apt_cache\" gencaches || exit 1") : NULL;
     const char *validated = script
@@ -834,23 +866,44 @@ static void test_cydia_cache_plan_builds_outside_watchdog(void) {
         ? strstr(script, "/bin/rm -f \"$package\" || exit 1") : NULL;
     CHECK(helper_entry && helper_entry->kind == ROOTFS_WORK_ENTRY_FILE &&
               helper_entry->permissions == 0755u && gated && extracted &&
-              updated && generated && validated && restored && published &&
-              removed && gated < extracted && extracted < updated &&
+              updated && watchdog && generated && validated && restored &&
+              published && removed && gated < extracted && extracted < updated &&
               updated < generated && generated < validated &&
               validated < restored && restored < published &&
               published < removed,
           "Cydia-cache helper does not gate, build, validate, restore, and publish in order");
     CHECK(script && strstr(script, "pkgcache.bin") != NULL &&
               strstr(script, "srcpkgcache.bin") != NULL &&
+              strstr(script, "Acquire::Retries=3 update && break") == NULL &&
               strstr(script, "allow-unauthenticated") == NULL &&
               strstr(script, "AllowInsecureRepositories") == NULL &&
               strstr(script, "trusted=yes") == NULL,
           "Cydia-cache helper omits cache validation or weakens authentication");
+    static const char EXPECTED_IOS3_SOURCE[] =
+        VM_GUEST_ROOTFS_IOS3_PARTY_SOURCE_LINE;
+    static const char EXPECTED_APT_COMPAT[] =
+        VM_GUEST_ROOTFS_APT_COMPAT_CONTENT;
+    CHECK(ios3_source_entry &&
+              ios3_source_entry->kind == ROOTFS_WORK_ENTRY_FILE &&
+              ios3_source_entry->permissions == 0644u &&
+              ios3_source_entry->content_size ==
+                  sizeof EXPECTED_IOS3_SOURCE - 1u &&
+              memcmp(ios3_source_entry->content, EXPECTED_IOS3_SOURCE,
+                     sizeof EXPECTED_IOS3_SOURCE - 1u) == 0,
+          "Cydia-cache plan omits the exact iOS 3 repository source");
+    CHECK(apt_compat_entry &&
+              apt_compat_entry->kind == ROOTFS_WORK_ENTRY_FILE &&
+              apt_compat_entry->permissions == 0644u &&
+              apt_compat_entry->content_size ==
+                  sizeof EXPECTED_APT_COMPAT - 1u &&
+              memcmp(apt_compat_entry->content, EXPECTED_APT_COMPAT,
+                     sizeof EXPECTED_APT_COMPAT - 1u) == 0,
+          "Cydia-cache plan omits the exact no-PDiff configuration");
     CHECK(plist_entry && plist_entry->kind == ROOTFS_WORK_ENTRY_FILE &&
               plist_entry->permissions == 0644u &&
               plist_entry->content_size != 0u &&
               strstr((const char *)plist_entry->content,
-                     "/private/var/lib/s5lbox/cydia-cache-v3-run") != NULL &&
+                     "/private/var/lib/s5lbox/cydia-cache-v4-run") != NULL &&
               strstr((const char *)plist_entry->content,
                      "<key>KeepAlive</key>") != NULL &&
               strstr((const char *)plist_entry->content,
@@ -1734,7 +1787,7 @@ static void test_real_privilege_repair_when_supplied(void) {
               17u &&
           result.rootfs.provision_entries +
                   result.rootfs.provision_reused_entries <=
-              19u &&
+              22u &&
           result.privilege_transaction.committed &&
           result.sources_v2_transaction.committed &&
           result.apt_trust_transaction.committed &&
@@ -1863,7 +1916,7 @@ static void test_real_cache_recovery_when_supplied(void) {
           result.rootfs.provision_entries +
                   result.rootfs.provision_reused_entries >= 9u &&
           result.rootfs.provision_entries +
-                  result.rootfs.provision_reused_entries <= 19u &&
+                  result.rootfs.provision_reused_entries <= 12u &&
           result.sources_transaction.committed &&
           result.sources_v2_transaction.committed &&
           result.apt_trust_transaction.committed &&
@@ -1880,7 +1933,7 @@ static void test_real_cache_recovery_when_supplied(void) {
     rootfs_work_file_repair_t cache_package_probe;
     memset(&cache_package_probe, 0, sizeof cache_package_probe);
     cache_package_probe.path =
-        "/private/var/lib/s5lbox/cydia-cache-v3/"
+        "/private/var/lib/s5lbox/cydia-cache-v4/"
         "apt7_0.7.20.2-1_iphoneos-arm.deb";
     cache_package_probe.expected_size = UINT64_C(664620);
     static const uint8_t CACHE_PACKAGE_SHA256[
@@ -1986,9 +2039,9 @@ static void test_real_apt_trust_when_supplied(void) {
         CHECK(result.rootfs.published &&
               result.rootfs.provision_entries >= 8u &&
               result.rootfs.provision_entries +
-                      result.rootfs.provision_reused_entries >= 15u &&
+                      result.rootfs.provision_reused_entries >= 16u &&
               result.rootfs.provision_entries +
-                      result.rootfs.provision_reused_entries <= 16u,
+                      result.rootfs.provision_reused_entries <= 19u,
               "real APT-trust migration omitted its bounded payload: %s",
               result.rootfs.detail);
     }
@@ -2088,7 +2141,9 @@ static void test_real_apt_verifier_when_supplied(void) {
           result.rootfs.published &&
           result.rootfs.provision_entries >= 3u &&
           result.rootfs.provision_entries +
-                  result.rootfs.provision_reused_entries == 13u &&
+                  result.rootfs.provision_reused_entries >= 14u &&
+          result.rootfs.provision_entries +
+                  result.rootfs.provision_reused_entries <= 16u &&
           file_size_or_zero(live) == before,
           "real APT-verifier migration refused or changed unrelated state: %s / %s",
           vm_guest_install_build_status_text(status), detail);

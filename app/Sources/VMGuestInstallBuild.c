@@ -80,6 +80,10 @@ static void build_cydia_privilege_repair(
 
 static const uint8_t VM_BIGBOSS_SOURCE[] =
     VM_GUEST_ROOTFS_BIGBOSS_SOURCE_LINE;
+static const uint8_t VM_IOS3_PARTY_SOURCE[] =
+    VM_GUEST_ROOTFS_IOS3_PARTY_SOURCE_LINE;
+static const uint8_t VM_APT_COMPAT_CONFIGURATION[] =
+    VM_GUEST_ROOTFS_APT_COMPAT_CONTENT;
 /* A short-lived compatibility build wrote this equivalent spelling before
  * packet-loss evidence disproved the URL rewrite as a remedy. It expands to
  * the same index URLs in old APT. Accept it on existing test/install media so
@@ -88,12 +92,12 @@ static const uint8_t VM_BIGBOSS_SOURCE_COMPAT[] =
     "deb http://apt.thebigboss.org/repofiles/cydia/ "
     "dists/stable/main/binary-iphoneos-arm/\n";
 
-static bool build_bigboss_source_probe_for(
-    rootfs_work_file_repair_t *probe, const uint8_t *content,
-    size_t content_size) {
-    if (!probe || !content || !content_size) return false;
+static bool build_managed_file_probe_for(
+    rootfs_work_file_repair_t *probe, const char *path,
+    const uint8_t *content, size_t content_size) {
+    if (!probe || !path || !*path || !content || !content_size) return false;
     memset(probe, 0, sizeof *probe);
-    probe->path = VM_GUEST_ROOTFS_BIGBOSS_SOURCE_PATH;
+    probe->path = path;
     probe->expected_size = content_size;
     if (!ios3_sha256(content, content_size, probe->expected_sha256))
         return false;
@@ -104,8 +108,24 @@ static bool build_bigboss_source_probe_for(
 
 static bool build_bigboss_source_probe(
     rootfs_work_file_repair_t *probe) {
-    return build_bigboss_source_probe_for(
-        probe, VM_BIGBOSS_SOURCE, sizeof VM_BIGBOSS_SOURCE - 1u);
+    return build_managed_file_probe_for(
+        probe, VM_GUEST_ROOTFS_BIGBOSS_SOURCE_PATH,
+        VM_BIGBOSS_SOURCE, sizeof VM_BIGBOSS_SOURCE - 1u);
+}
+
+static bool build_ios3_party_source_probe(
+    rootfs_work_file_repair_t *probe) {
+    return build_managed_file_probe_for(
+        probe, VM_GUEST_ROOTFS_IOS3_PARTY_SOURCE_PATH,
+        VM_IOS3_PARTY_SOURCE, sizeof VM_IOS3_PARTY_SOURCE - 1u);
+}
+
+static bool build_apt_compat_probe(
+    rootfs_work_file_repair_t *probe) {
+    return build_managed_file_probe_for(
+        probe, VM_GUEST_ROOTFS_APT_COMPAT_PATH,
+        VM_APT_COMPAT_CONFIGURATION,
+        sizeof VM_APT_COMPAT_CONFIGURATION - 1u);
 }
 
 /* This is the exact complete trusted.gpg carried by the retained historical
@@ -279,21 +299,23 @@ static const uint8_t VM_APT_VERIFIER_INSTALL_PLIST[] =
     "</dict>\n"
     "</plist>\n";
 
-#define VM_CYDIA_CACHE_STATE_DIRECTORY \
+#define VM_CYDIA_CACHE_V3_STATE_DIRECTORY \
     "/private/var/lib/s5lbox/cydia-cache-v3"
-#define VM_CYDIA_CACHE_PACKAGE_PATH \
-    VM_CYDIA_CACHE_STATE_DIRECTORY "/apt7_0.7.20.2-1_iphoneos-arm.deb"
-#define VM_CYDIA_CACHE_RUN_PATH \
+#define VM_CYDIA_CACHE_V3_PACKAGE_PATH \
+    VM_CYDIA_CACHE_V3_STATE_DIRECTORY "/apt7_0.7.20.2-1_iphoneos-arm.deb"
+#define VM_CYDIA_CACHE_V3_RUN_PATH \
     "/private/var/lib/s5lbox/cydia-cache-v3-run"
 
-static const uint8_t VM_CYDIA_CACHE_RUN[] =
+/* Exact v3 bytes are retained as the fail-closed identity for superseding an
+ * already-staged, unbounded worker. Unknown contents are never overwritten. */
+static const uint8_t VM_CYDIA_CACHE_V3_RUN[] =
     "#!/bin/sh\n"
     "PATH=/usr/bin:/bin:/usr/sbin:/sbin\n"
     "export PATH\n"
-    "state=" VM_CYDIA_CACHE_STATE_DIRECTORY "\n"
+    "state=" VM_CYDIA_CACHE_V3_STATE_DIRECTORY "\n"
     "marker=$state/complete\n"
     "[ -e \"$marker\" ] && exit 0\n"
-    "package=" VM_CYDIA_CACHE_PACKAGE_PATH "\n"
+    "package=" VM_CYDIA_CACHE_V3_PACKAGE_PATH "\n"
     "stage=$state/extract.partial\n"
     "apt_get=$state/apt-get\n"
     "apt_cache=$state/apt-cache\n"
@@ -343,13 +365,115 @@ static const uint8_t VM_CYDIA_CACHE_RUN[] =
     "echo 'Cydia cache build complete'\n"
     "exit 0\n";
 
+static const uint8_t VM_CYDIA_CACHE_V3_SUPERSEDED[] =
+    "#!/bin/sh\n"
+    "# Superseded by the bounded cydia-cache-v4 worker.\n"
+    "exit 0\n";
+
+#define VM_CYDIA_CACHE_STATE_DIRECTORY \
+    "/private/var/lib/s5lbox/cydia-cache-v4"
+#define VM_CYDIA_CACHE_PACKAGE_PATH \
+    VM_CYDIA_CACHE_STATE_DIRECTORY "/apt7_0.7.20.2-1_iphoneos-arm.deb"
+#define VM_CYDIA_CACHE_RUN_PATH \
+    "/private/var/lib/s5lbox/cydia-cache-v4-run"
+
+static const uint8_t VM_CYDIA_CACHE_RUN[] =
+    "#!/bin/sh\n"
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin\n"
+    "export PATH\n"
+    "state=" VM_CYDIA_CACHE_STATE_DIRECTORY "\n"
+    "marker=$state/complete\n"
+    "[ -e \"$marker\" ] && exit 0\n"
+    "package=" VM_CYDIA_CACHE_PACKAGE_PATH "\n"
+    "stage=$state/extract.partial\n"
+    "apt_get=$state/apt-get\n"
+    "apt_cache=$state/apt-cache\n"
+    "cydia=/Applications/Cydia.app/Cydia_\n"
+    "log=/private/var/log/s5lbox-cydia-cache-v4.log\n"
+    "exec >>\"$log\" 2>&1\n"
+    "echo 'building Cydia caches with a bounded legacy APT worker'\n"
+    "[ -f \"$cydia\" ] || exit 1\n"
+    "/bin/chown 0:0 \"$cydia\" || exit 1\n"
+    "/bin/chmod 0600 \"$cydia\" || exit 1\n"
+    "if [ -f \"$package\" ]; then\n"
+    "    /bin/rm -rf \"$stage\" || exit 1\n"
+    "    /bin/mkdir -p \"$stage\" || exit 1\n"
+    "    /usr/bin/dpkg-deb --extract \"$package\" \"$stage\" || exit 1\n"
+    "    [ -x \"$stage/usr/bin/apt-get\" ] || exit 1\n"
+    "    [ -x \"$stage/usr/bin/apt-cache\" ] || exit 1\n"
+    "    /bin/cp \"$stage/usr/bin/apt-get\" \"$apt_get.partial\" || exit 1\n"
+    "    /bin/cp \"$stage/usr/bin/apt-cache\" \"$apt_cache.partial\" || exit 1\n"
+    "    /bin/chown 0:0 \"$apt_get.partial\" \"$apt_cache.partial\" || exit 1\n"
+    "    /bin/chmod 0755 \"$apt_get.partial\" \"$apt_cache.partial\" || exit 1\n"
+    "    /bin/mv -f \"$apt_get.partial\" \"$apt_get\" || exit 1\n"
+    "    /bin/mv -f \"$apt_cache.partial\" \"$apt_cache\" || exit 1\n"
+    "    /bin/rm -rf \"$stage\" || exit 1\n"
+    "fi\n"
+    "[ -x \"$apt_get\" ] && [ -x \"$apt_cache\" ] || exit 1\n"
+    "for cache in /private/var/lib/apt/lists/partial/* /private/var/lib/apt/lists/apt.thebigboss.org_*Packages.diff_Index* /private/var/lib/apt/lists/*.FAILED; do\n"
+    "    [ -f \"$cache\" ] || continue\n"
+    "    /bin/rm -f \"$cache\" || exit 1\n"
+    "done\n"
+    "/bin/rm -f /private/var/cache/apt/pkgcache.bin /private/var/cache/apt/srcpkgcache.bin || exit 1\n"
+    "run_apt_update() {\n"
+    "    update_token=\"$state/apt-update.$$.running\"\n"
+    "    /bin/rm -f \"$update_token\"\n"
+    "    (\n"
+    "        exec \"$apt_get\" -o Acquire::PDiffs=false -o Acquire::http::Timeout=30 -o Acquire::Retries=1 update\n"
+    "    ) &\n"
+    "    apt_pid=$!\n"
+    "    : >\"$update_token\" || { kill -TERM \"$apt_pid\" >/dev/null 2>&1; wait \"$apt_pid\" >/dev/null 2>&1; return 1; }\n"
+    "    (\n"
+    "        /bin/sleep 180\n"
+    "        [ -e \"$update_token\" ] || exit 0\n"
+    "        echo \"APT refresh attempt $1 exceeded 180 seconds; terminating it\"\n"
+    "        kill -TERM \"$apt_pid\" >/dev/null 2>&1 || exit 0\n"
+    "        /bin/sleep 5\n"
+    "        [ -e \"$update_token\" ] || exit 0\n"
+    "        kill -KILL \"$apt_pid\" >/dev/null 2>&1 || true\n"
+    "    ) &\n"
+    "    watchdog_pid=$!\n"
+    "    wait \"$apt_pid\"\n"
+    "    apt_status=$?\n"
+    "    /bin/rm -f \"$update_token\"\n"
+    "    kill -TERM \"$watchdog_pid\" >/dev/null 2>&1 || true\n"
+    "    return \"$apt_status\"\n"
+    "}\n"
+    "attempt=1\n"
+    "while [ \"$attempt\" -le 3 ]; do\n"
+    "    run_apt_update \"$attempt\" && break\n"
+    "    attempt=$((attempt + 1))\n"
+    "    [ \"$attempt\" -le 3 ] && /bin/sleep 10\n"
+    "done\n"
+    "[ \"$attempt\" -le 3 ] || echo 'APT refresh incomplete; trying retained lists'\n"
+    "/bin/rm -f /private/var/cache/apt/pkgcache.bin /private/var/cache/apt/srcpkgcache.bin || exit 1\n"
+    "\"$apt_cache\" gencaches || exit 1\n"
+    "[ -s /private/var/cache/apt/pkgcache.bin ] || exit 1\n"
+    "[ -s /private/var/cache/apt/srcpkgcache.bin ] || exit 1\n"
+    "\"$apt_cache\" stats >/dev/null 2>&1 || exit 1\n"
+    "ios3_list=missing\n"
+    "for cache in /private/var/lib/apt/lists/ios3.party_*Packages; do\n"
+    "    [ -s \"$cache\" ] && ios3_list=present\n"
+    "done\n"
+    "echo \"ios3.party package list: $ios3_list\"\n"
+    "/bin/chown 0:0 \"$cydia\" || exit 1\n"
+    "/bin/chmod 6755 \"$cydia\" || exit 1\n"
+    "[ -u \"$cydia\" ] && [ -g \"$cydia\" ] || exit 1\n"
+    ": >\"$marker.partial\" || exit 1\n"
+    "/bin/sync\n"
+    "/bin/mv -f \"$marker.partial\" \"$marker\" || exit 1\n"
+    "/bin/sync\n"
+    "/bin/rm -f \"$package\" || exit 1\n"
+    "echo 'Cydia cache build complete'\n"
+    "exit 0\n";
+
 static const uint8_t VM_CYDIA_CACHE_RUN_PLIST[] =
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
     "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
     "<plist version=\"1.0\">\n"
     "<dict>\n"
     "  <key>Label</key>\n"
-    "  <string>com.j0shua.s5lbox.cydia-cache-v3</string>\n"
+    "  <string>com.j0shua.s5lbox.cydia-cache-v4</string>\n"
     "  <key>ProgramArguments</key>\n"
     "  <array>\n"
     "    <string>" VM_CYDIA_CACHE_RUN_PATH "</string>\n"
@@ -366,7 +490,21 @@ static const uint8_t VM_CYDIA_CACHE_RUN_PLIST[] =
     "</dict>\n"
     "</plist>\n";
 
-enum { VM_CYDIA_MAINTENANCE_MAX_ENTRIES = 19u };
+static void build_cydia_v3_supersede_rewrite(
+    rootfs_work_file_rewrite_t *rewrite) {
+    memset(rewrite, 0, sizeof *rewrite);
+    rewrite->path = VM_CYDIA_CACHE_V3_RUN_PATH;
+    rewrite->expected_content = VM_CYDIA_CACHE_V3_RUN;
+    rewrite->expected_content_size = sizeof VM_CYDIA_CACHE_V3_RUN - 1u;
+    rewrite->desired_content = VM_CYDIA_CACHE_V3_SUPERSEDED;
+    rewrite->desired_content_size =
+        sizeof VM_CYDIA_CACHE_V3_SUPERSEDED - 1u;
+    rewrite->owner_id = 0u;
+    rewrite->group_id = 0u;
+    rewrite->permissions = 0755u;
+}
+
+enum { VM_CYDIA_MAINTENANCE_MAX_ENTRIES = 22u };
 
 static size_t build_cydia_maintenance_entries(
     rootfs_work_entry_t *entries, size_t capacity,
@@ -375,7 +513,8 @@ static size_t build_cydia_maintenance_entries(
     bool include_verifier, const uint8_t *verifier_package,
     size_t verifier_package_size,
     bool include_cache, const uint8_t *cache_package,
-    size_t cache_package_size) {
+    size_t cache_package_size,
+    bool create_ios3_source, bool create_apt_compat) {
     static const char *directories[] = {
         "/private/etc/apt",
         "/private/etc/apt/sources.list.d",
@@ -389,7 +528,8 @@ static size_t build_cydia_maintenance_entries(
         (include_source ? 2u + (create_source ? 1u : 0u) : 0u) +
         (include_trust ? 2u + (create_keyring ? 1u : 0u) : 0u) +
         (include_verifier ? 4u : 0u) +
-        (include_cache ? 4u : 0u);
+        (include_cache ? 5u + (create_ios3_source ? 1u : 0u) +
+                             (create_apt_compat ? 1u : 0u) : 0u);
     if (include_verifier &&
         (!verifier_package || verifier_package_size == 0u))
         return required;
@@ -494,6 +634,29 @@ static size_t build_cydia_maintenance_entries(
     }
     if (include_cache) {
         entries[count].kind = ROOTFS_WORK_ENTRY_DIRECTORY;
+        entries[count].path = VM_GUEST_ROOTFS_APT_COMPAT_DIRECTORY;
+        entries[count].permissions = 0755u;
+        entries[count].existing_policy =
+            ROOTFS_WORK_EXISTING_REUSE_DIRECTORY;
+        count++;
+        if (create_ios3_source) {
+            entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
+            entries[count].path = VM_GUEST_ROOTFS_IOS3_PARTY_SOURCE_PATH;
+            entries[count].content = VM_IOS3_PARTY_SOURCE;
+            entries[count].content_size = sizeof VM_IOS3_PARTY_SOURCE - 1u;
+            entries[count].permissions = 0644u;
+            count++;
+        }
+        if (create_apt_compat) {
+            entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
+            entries[count].path = VM_GUEST_ROOTFS_APT_COMPAT_PATH;
+            entries[count].content = VM_APT_COMPAT_CONFIGURATION;
+            entries[count].content_size =
+                sizeof VM_APT_COMPAT_CONFIGURATION - 1u;
+            entries[count].permissions = 0644u;
+            count++;
+        }
+        entries[count].kind = ROOTFS_WORK_ENTRY_DIRECTORY;
         entries[count].path = VM_CYDIA_CACHE_STATE_DIRECTORY;
         entries[count].permissions = 0755u;
         entries[count].existing_policy =
@@ -514,7 +677,7 @@ static size_t build_cydia_maintenance_entries(
         entries[count].kind = ROOTFS_WORK_ENTRY_FILE;
         entries[count].path =
             "/System/Library/LaunchDaemons/"
-            "com.j0shua.s5lbox.cydia-cache-v3.plist";
+            "com.j0shua.s5lbox.cydia-cache-v4.plist";
         entries[count].content = VM_CYDIA_CACHE_RUN_PLIST;
         entries[count].content_size =
             sizeof VM_CYDIA_CACHE_RUN_PLIST - 1u;
@@ -528,14 +691,14 @@ static size_t build_bigboss_source_entries(
     rootfs_work_entry_t *entries, size_t capacity, bool create_source) {
     return build_cydia_maintenance_entries(
         entries, capacity, true, create_source, false, false,
-        false, NULL, 0u, false, NULL, 0u);
+        false, NULL, 0u, false, NULL, 0u, false, false);
 }
 
 static size_t build_apt_trust_entries(
     rootfs_work_entry_t *entries, size_t capacity, bool create_keyring) {
     return build_cydia_maintenance_entries(
         entries, capacity, false, false, true, create_keyring,
-        false, NULL, 0u, false, NULL, 0u);
+        false, NULL, 0u, false, NULL, 0u, false, false);
 }
 
 static size_t build_apt_verifier_entries(
@@ -543,15 +706,17 @@ static size_t build_apt_verifier_entries(
     const uint8_t *package, size_t package_size) {
     return build_cydia_maintenance_entries(
         entries, capacity, false, false, false, false,
-        true, package, package_size, false, NULL, 0u);
+        true, package, package_size, false, NULL, 0u, false, false);
 }
 
 static size_t build_cydia_cache_entries(
     rootfs_work_entry_t *entries, size_t capacity,
-    const uint8_t *package, size_t package_size) {
+    const uint8_t *package, size_t package_size,
+    bool create_ios3_source, bool create_apt_compat) {
     return build_cydia_maintenance_entries(
         entries, capacity, false, false, false, false,
-        false, NULL, 0u, true, package, package_size);
+        false, NULL, 0u, true, package, package_size,
+        create_ios3_source, create_apt_compat);
 }
 
 #if defined(S5LBOX_GUEST_INSTALL_TESTING)
@@ -574,9 +739,17 @@ size_t vm_guest_install_build_test_apt_verifier_entries(
 
 size_t vm_guest_install_build_test_cydia_cache_entries(
     rootfs_work_entry_t *entries, size_t capacity,
-    const uint8_t *package, size_t package_size) {
+    const uint8_t *package, size_t package_size,
+    bool create_ios3_source, bool create_apt_compat) {
     return build_cydia_cache_entries(
-        entries, capacity, package, package_size);
+        entries, capacity, package, package_size,
+        create_ios3_source, create_apt_compat);
+}
+
+void vm_guest_install_build_test_cydia_v3_rewrite(
+    rootfs_work_file_rewrite_t *rewrite) {
+    if (!rewrite) return;
+    build_cydia_v3_supersede_rewrite(rewrite);
 }
 #endif
 
@@ -1050,6 +1223,24 @@ static rootfs_work_status_t build_probe_file_repair(
         live, repair, true, true, state, probe);
 }
 
+static rootfs_work_status_t build_probe_file_rewrite(
+    const char *work_directory, const char *live, uint64_t live_size,
+    const rootfs_work_file_rewrite_t *rewrite,
+    rootfs_work_file_rewrite_state_t *state,
+    bool *allow_unclean_source,
+    vm_guest_install_build_result_t *result,
+    rootfs_work_result_t *probe) {
+    bool authorized = allow_unclean_source && *allow_unclean_source;
+    rootfs_work_status_t status = rootfs_work_probe_file_rewrite_policy(
+        live, rewrite, authorized, authorized, state, probe);
+    if (!build_rootfs_is_unclean(status, probe) ||
+        !build_authorize_unclean_source(
+            work_directory, live_size, allow_unclean_source, result))
+        return status;
+    return rootfs_work_probe_file_rewrite_policy(
+        live, rewrite, true, true, state, probe);
+}
+
 static rootfs_work_status_t build_validate_source(
     const char *work_directory, const char *live, uint64_t live_size,
     bool *allow_unclean_source,
@@ -1171,7 +1362,12 @@ static vm_guest_install_build_status_t build_maintain_install(
     bool trust_needed = false;
     bool verifier_needed = false;
     bool cache_needed = false;
+    bool cache_ios3_source_create = false;
+    bool cache_apt_compat_create = false;
+    bool cache_v3_rewrite_needed = false;
     bool trust_create = false;
+    rootfs_work_file_rewrite_t cache_v3_rewrite;
+    build_cydia_v3_supersede_rewrite(&cache_v3_rewrite);
     bool source_preflighted = false;
     char transaction_detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
 
@@ -1223,8 +1419,9 @@ static vm_guest_install_build_status_t build_maintain_install(
             work_directory, live, live_size, &source_probe, &source_state,
             &allow_unclean_source, result, &probe);
         if (probe_status == ROOTFS_WORK_FILE_REPAIR_MISMATCH &&
-            build_bigboss_source_probe_for(
-                &source_probe, VM_BIGBOSS_SOURCE_COMPAT,
+            build_managed_file_probe_for(
+                &source_probe, VM_GUEST_ROOTFS_BIGBOSS_SOURCE_PATH,
+                VM_BIGBOSS_SOURCE_COMPAT,
                 sizeof VM_BIGBOSS_SOURCE_COMPAT - 1u)) {
             source_state = ROOTFS_WORK_FILE_REPAIR_MISSING;
             probe_status = build_probe_file_repair(
@@ -1352,6 +1549,83 @@ static vm_guest_install_build_status_t build_maintain_install(
     if (cydia_cache->committed) {
         if (result) result->cydia_cache_staged = true;
     } else {
+        rootfs_work_file_repair_t ios3_source_probe;
+        rootfs_work_file_repair_state_t ios3_source_state =
+            ROOTFS_WORK_FILE_REPAIR_MISSING;
+        rootfs_work_result_t ios3_source_result;
+        if (!build_ios3_party_source_probe(&ios3_source_probe)) {
+            build_detail(detail, detail_capacity,
+                         "The iOS 3 repository source identity could not be computed.");
+            return VM_GUEST_INSTALL_BUILD_ERR_MANIFEST;
+        }
+        rootfs_work_status_t ios3_source_status = build_probe_file_repair(
+            work_directory, live, live_size, &ios3_source_probe,
+            &ios3_source_state, &allow_unclean_source, result,
+            &ios3_source_result);
+        if (result) result->rootfs = ios3_source_result;
+        if (ios3_source_status != ROOTFS_WORK_OK)
+            return build_rootfs_refusal(ios3_source_status,
+                                        &ios3_source_result,
+                                        detail, detail_capacity);
+        if (ios3_source_state != ROOTFS_WORK_FILE_REPAIR_MISSING &&
+            ios3_source_state != ROOTFS_WORK_FILE_REPAIR_SATISFIED) {
+            build_detail(detail, detail_capacity,
+                         "The managed iOS 3 repository source has unexpected metadata or contents.");
+            return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
+        }
+        cache_ios3_source_create =
+            ios3_source_state == ROOTFS_WORK_FILE_REPAIR_MISSING;
+
+        rootfs_work_file_repair_t apt_compat_probe;
+        rootfs_work_file_repair_state_t apt_compat_state =
+            ROOTFS_WORK_FILE_REPAIR_MISSING;
+        rootfs_work_result_t apt_compat_result;
+        if (!build_apt_compat_probe(&apt_compat_probe)) {
+            build_detail(detail, detail_capacity,
+                         "The legacy APT compatibility identity could not be computed.");
+            return VM_GUEST_INSTALL_BUILD_ERR_MANIFEST;
+        }
+        rootfs_work_status_t apt_compat_status = build_probe_file_repair(
+            work_directory, live, live_size, &apt_compat_probe,
+            &apt_compat_state, &allow_unclean_source, result,
+            &apt_compat_result);
+        if (result) result->rootfs = apt_compat_result;
+        if (apt_compat_status != ROOTFS_WORK_OK)
+            return build_rootfs_refusal(apt_compat_status,
+                                        &apt_compat_result,
+                                        detail, detail_capacity);
+        if (apt_compat_state != ROOTFS_WORK_FILE_REPAIR_MISSING &&
+            apt_compat_state != ROOTFS_WORK_FILE_REPAIR_SATISFIED) {
+            build_detail(detail, detail_capacity,
+                         "The managed legacy APT compatibility file has unexpected metadata or contents.");
+            return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
+        }
+        cache_apt_compat_create =
+            apt_compat_state == ROOTFS_WORK_FILE_REPAIR_MISSING;
+
+        rootfs_work_file_rewrite_state_t cache_v3_rewrite_state =
+            ROOTFS_WORK_FILE_REWRITE_MISSING;
+        rootfs_work_result_t cache_v3_rewrite_result;
+        rootfs_work_status_t cache_v3_rewrite_status =
+            build_probe_file_rewrite(
+                work_directory, live, live_size, &cache_v3_rewrite,
+                &cache_v3_rewrite_state, &allow_unclean_source,
+                result, &cache_v3_rewrite_result);
+        if (result) result->rootfs = cache_v3_rewrite_result;
+        if (cache_v3_rewrite_status != ROOTFS_WORK_OK)
+            return build_rootfs_refusal(cache_v3_rewrite_status,
+                                        &cache_v3_rewrite_result,
+                                        detail, detail_capacity);
+        cache_v3_rewrite_needed =
+            cache_v3_rewrite_state == ROOTFS_WORK_FILE_REWRITE_NEEDED;
+        if (!cache_v3_rewrite_needed &&
+            cache_v3_rewrite_state != ROOTFS_WORK_FILE_REWRITE_MISSING &&
+            cache_v3_rewrite_state != ROOTFS_WORK_FILE_REWRITE_SATISFIED) {
+            build_detail(detail, detail_capacity,
+                         "The legacy Cydia cache worker has unsupported contents or metadata.");
+            return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
+        }
+        source_preflighted = true;
         cache_needed = true;
     }
 
@@ -1503,6 +1777,10 @@ static vm_guest_install_build_status_t build_maintain_install(
         options.file_repairs = &repair;
         options.file_repair_count = 1u;
     }
+    if (cache_v3_rewrite_needed) {
+        options.file_rewrites = &cache_v3_rewrite;
+        options.file_rewrite_count = 1u;
+    }
     rootfs_work_entry_t
         maintenance_entries[VM_CYDIA_MAINTENANCE_MAX_ENTRIES];
     size_t maintenance_entry_count = 0u;
@@ -1511,7 +1789,8 @@ static vm_guest_install_build_status_t build_maintain_install(
             maintenance_entries, VM_CYDIA_MAINTENANCE_MAX_ENTRIES,
             source_needed, source_create, trust_needed, trust_create,
             verifier_needed, verifier_package, verifier_package_size,
-            cache_needed, cache_package, cache_package_size);
+            cache_needed, cache_package, cache_package_size,
+            cache_ios3_source_create, cache_apt_compat_create);
         options.entries = maintenance_entries;
         options.entry_count = maintenance_entry_count;
     }
@@ -1530,6 +1809,8 @@ static vm_guest_install_build_status_t build_maintain_install(
         (grow_storage &&
          rootfs.final_size < VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES) ||
         (repair_needed && rootfs.file_repairs_applied != 1u) ||
+        (cache_v3_rewrite_needed &&
+         rootfs.file_rewrites_applied != 1u) ||
         ((source_needed || trust_needed || verifier_needed || cache_needed) &&
          (rootfs.provision_entries <
               2u * ((source_needed ? 1u : 0u) +

@@ -316,24 +316,38 @@ static void test_complete_synthetic_plan(void) {
         find_entry(plan, "/private/etc/apt");
     const rootfs_work_entry_t *source_directory =
         find_entry(plan, "/private/etc/apt/sources.list.d");
+    const rootfs_work_entry_t *apt_compat_directory =
+        find_entry(plan, VM_GUEST_ROOTFS_APT_COMPAT_DIRECTORY);
     const rootfs_work_entry_t *cydia_source =
         find_entry(plan, VM_GUEST_ROOTFS_SAURIK_SOURCE_PATH);
     const rootfs_work_entry_t *bigboss_source =
         find_entry(plan, VM_GUEST_ROOTFS_BIGBOSS_SOURCE_PATH);
+    const rootfs_work_entry_t *ios3_party_source =
+        find_entry(plan, VM_GUEST_ROOTFS_IOS3_PARTY_SOURCE_PATH);
+    const rootfs_work_entry_t *apt_compat =
+        find_entry(plan, VM_GUEST_ROOTFS_APT_COMPAT_PATH);
     const rootfs_work_entry_t *trusted_keyring =
         find_entry(plan, VM_GUEST_ROOTFS_TRUSTED_KEYRING_PATH);
     static const char EXPECTED_CYDIA_SOURCE[] =
         VM_GUEST_ROOTFS_SAURIK_SOURCE_LINE;
     static const char EXPECTED_BIGBOSS_SOURCE[] =
         VM_GUEST_ROOTFS_BIGBOSS_SOURCE_LINE;
-    CHECK(apt_directory && source_directory &&
+    static const char EXPECTED_IOS3_PARTY_SOURCE[] =
+        VM_GUEST_ROOTFS_IOS3_PARTY_SOURCE_LINE;
+    static const char EXPECTED_APT_COMPAT[] =
+        VM_GUEST_ROOTFS_APT_COMPAT_CONTENT;
+    CHECK(apt_directory && source_directory && apt_compat_directory &&
           apt_directory->kind == ROOTFS_WORK_ENTRY_DIRECTORY &&
           source_directory->kind == ROOTFS_WORK_ENTRY_DIRECTORY &&
+          apt_compat_directory->kind == ROOTFS_WORK_ENTRY_DIRECTORY &&
           apt_directory->permissions == 0755u &&
           source_directory->permissions == 0755u &&
+          apt_compat_directory->permissions == 0755u &&
           apt_directory->existing_policy ==
               ROOTFS_WORK_EXISTING_REUSE_DIRECTORY &&
           source_directory->existing_policy ==
+              ROOTFS_WORK_EXISTING_REUSE_DIRECTORY &&
+          apt_compat_directory->existing_policy ==
               ROOTFS_WORK_EXISTING_REUSE_DIRECTORY,
           "the official source parent directories are absent or unsafe");
     CHECK(cydia_source && cydia_source->kind == ROOTFS_WORK_ENTRY_FILE &&
@@ -355,6 +369,25 @@ static void test_complete_synthetic_plan(void) {
           memcmp(bigboss_source->content, EXPECTED_BIGBOSS_SOURCE,
                  sizeof EXPECTED_BIGBOSS_SOURCE - 1u) == 0,
           "the BigBoss distribution source is not exact root:root 0644 data");
+    CHECK(ios3_party_source &&
+          ios3_party_source->kind == ROOTFS_WORK_ENTRY_FILE &&
+          ios3_party_source->permissions == 0644u &&
+          ios3_party_source->owner_id == 0u &&
+          ios3_party_source->group_id == 0u &&
+          ios3_party_source->existing_policy == ROOTFS_WORK_EXISTING_REFUSE &&
+          ios3_party_source->content_size ==
+              sizeof EXPECTED_IOS3_PARTY_SOURCE - 1u &&
+          memcmp(ios3_party_source->content, EXPECTED_IOS3_PARTY_SOURCE,
+                 sizeof EXPECTED_IOS3_PARTY_SOURCE - 1u) == 0,
+          "the iOS 3 repository source is not exact root:root 0644 data");
+    CHECK(apt_compat && apt_compat->kind == ROOTFS_WORK_ENTRY_FILE &&
+          apt_compat->permissions == 0644u &&
+          apt_compat->owner_id == 0u && apt_compat->group_id == 0u &&
+          apt_compat->existing_policy == ROOTFS_WORK_EXISTING_REFUSE &&
+          apt_compat->content_size == sizeof EXPECTED_APT_COMPAT - 1u &&
+          memcmp(apt_compat->content, EXPECTED_APT_COMPAT,
+                 sizeof EXPECTED_APT_COMPAT - 1u) == 0,
+          "the legacy APT no-PDiff configuration is not exact root:root 0644 data");
     size_t expected_keyring_size = 0u;
     const uint8_t *expected_keyring =
         vm_guest_rootfs_bigboss_keyring(&expected_keyring_size);
@@ -425,7 +458,9 @@ static void test_complete_synthetic_plan(void) {
           strstr((const char *)script->content,
                  "/usr/bin/dpkg-deb --extract \"$cache_archive\" \"$cache_stage\" || exit 1") != NULL &&
           strstr((const char *)script->content,
-                 "\"$apt_get\" -o Acquire::http::Timeout=30 -o Acquire::Retries=3 update") != NULL &&
+                 "exec \"$apt_get\" -o Acquire::PDiffs=false -o Acquire::http::Timeout=30 -o Acquire::Retries=1 update") != NULL &&
+          strstr((const char *)script->content,
+                 "exceeded 180 seconds; terminating it") != NULL &&
           strstr((const char *)script->content,
                  "\"$apt_cache\" gencaches || exit 1") != NULL &&
           strstr((const char *)script->content,
@@ -514,10 +549,10 @@ static void test_complete_synthetic_plan(void) {
     CHECK(vm_guest_rootfs_plan_manifest_sha256(plan, digest),
           "plan manifest identity was not produced");
     static const uint8_t EXPECTED[VM_GUEST_PACKAGE_SHA256_SIZE] = {
-        0x92u, 0x65u, 0x69u, 0x54u, 0x56u, 0x99u, 0x66u, 0x4cu,
-        0x09u, 0xccu, 0x8bu, 0x5fu, 0x80u, 0xe1u, 0x87u, 0x0cu,
-        0xeeu, 0xf7u, 0xebu, 0xf7u, 0x11u, 0x9eu, 0x29u, 0xb5u,
-        0x6eu, 0xb0u, 0x35u, 0x4cu, 0x3cu, 0x98u, 0x6du, 0x1eu
+        0x44u, 0x0au, 0x33u, 0xc9u, 0x98u, 0x2bu, 0x71u, 0x2bu,
+        0xf9u, 0x32u, 0x9bu, 0x43u, 0x97u, 0xe9u, 0xbdu, 0x6eu,
+        0x6cu, 0xf8u, 0xe3u, 0xa4u, 0x51u, 0xc5u, 0x63u, 0xc2u,
+        0xc9u, 0xb9u, 0xcdu, 0x77u, 0x60u, 0x05u, 0xffu, 0xa4u
     };
     CHECK(memcmp(digest, EXPECTED, sizeof digest) == 0,
           "synthetic plan identity changed");
