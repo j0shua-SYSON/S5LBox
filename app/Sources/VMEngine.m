@@ -242,6 +242,7 @@ static double vm_engine_now_seconds(void) {
     /* Live PPP/NAT payload counters, sampled on the emulator thread and
      * published under this lock. Rates are bytes per second. */
     BOOL             _networkStatusValid;
+    vm_network_status_t _networkStatus;
     uint64_t         _networkDownBaseline;
     uint64_t         _networkUpBaseline;
     double           _networkWindowStart;
@@ -785,6 +786,7 @@ static double vm_engine_now_seconds(void) {
     _retired = 0;
     _rate = 0.0;
     _networkStatusValid = NO;
+    memset(&_networkStatus, 0, sizeof _networkStatus);
     _networkDownBaseline = 0u;
     _networkUpBaseline = 0u;
     _networkWindowStart = 0.0;
@@ -1879,6 +1881,7 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     _machineReady = NO;
     _thread = nil;
     _networkStatusValid = NO;
+    memset(&_networkStatus, 0, sizeof _networkStatus);
     _networkDownBaseline = 0u;
     _networkUpBaseline = 0u;
     _networkWindowStart = 0.0;
@@ -2009,6 +2012,7 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     }
     _retired = retired;
     if (haveNetwork) {
+        _networkStatus = networkStatus;
         uint64_t down = networkStatus.tcp_bytes_to_guest;
         uint64_t up = networkStatus.tcp_bytes_to_host;
         BOOL counterReset = down < _networkDownBaseline ||
@@ -2035,6 +2039,7 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
         }
     } else {
         _networkStatusValid = NO;
+        memset(&_networkStatus, 0, sizeof _networkStatus);
         _networkDownBaseline = 0u;
         _networkUpBaseline = 0u;
         _networkWindowStart = 0.0;
@@ -2121,6 +2126,7 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     double fps = _fps;
     BOOL haveFps = _fbSignatureValid;
     BOOL haveNetwork = _networkStatusValid;
+    vm_network_status_t networkStatus = _networkStatus;
     double networkDownRate = _networkDownRate;
     double networkUpRate = _networkUpRate;
     pthread_mutex_unlock(&_lock);
@@ -2130,10 +2136,31 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     NSString *fpsText = haveFps ? [NSString stringWithFormat:@"%.0f fps", fps]
                                 : @"-- fps";
     double footprintMB = [VMEngine physFootprintBytes] / 1048576.0;
-    NSString *networkText = haveNetwork
-        ? [NSString stringWithFormat:@"  ·  net D %.2f U %.2f MB/s",
-             networkDownRate / 1.0e6, networkUpRate / 1.0e6]
-        : @"";
+    NSString *networkText = @"";
+    if (haveNetwork) {
+        NSString *phase = networkStatus.ipcp_open ? @"IP"
+                          : networkStatus.lcp_open ? @"LCP"
+                          : networkStatus.peer_opened ? @"NEG"
+                          : @"idle";
+        /* The rates alone can say only "slow". These cumulative boundary
+         * counters say WHERE a transfer stopped: guest UART/PPP, IP/TCP, or
+         * the ordinary host socket. Keeping the last errno next to the error
+         * count prevents a denied connect from looking like an idle link. */
+        networkText = [NSString stringWithFormat:
+            @"  ·  net %@ D %.2f U %.2f MB/s  ·  ppp g2h %llu h2g %llu B  ·  ip g2h %llu h2g %llu  ·  tcp %llu  ·  dns %llu/%llu  ·  host out %llu in %llu B err %llu:%d",
+            phase, networkDownRate / 1.0e6, networkUpRate / 1.0e6,
+            (unsigned long long)networkStatus.guest_tx_bytes,
+            (unsigned long long)networkStatus.guest_rx_bytes,
+            (unsigned long long)networkStatus.ip_in,
+            (unsigned long long)networkStatus.ip_out,
+            (unsigned long long)networkStatus.tcp_established,
+            (unsigned long long)networkStatus.dns_queries,
+            (unsigned long long)networkStatus.dns_answered,
+            (unsigned long long)networkStatus.host_bytes_out,
+            (unsigned long long)networkStatus.host_bytes_in,
+            (unsigned long long)networkStatus.host_errors,
+            networkStatus.host_last_error];
+    }
     /* The mode leads, because "3.2 M insn/s" means something different
      * depending on what is retiring them, and a user who cannot see which
      * guest is running has no way to tell. */
