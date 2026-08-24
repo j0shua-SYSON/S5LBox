@@ -416,13 +416,24 @@ void vm_boot_options_reconcile_network(vm_boot_options_report_t *report,
      * This is runtime policy derived from the WORK IMAGE, not from today's
      * PPP switch. The launchd job can outlive a later settings change.
      *
-     * Do not rewrite the kernel command line here. The former
-     * `uart4_dma_enable=0` escape forced AppleS5L8900XSerial to copy every PPP
-     * byte through CPU-driven PIO. The emulated PL080 now follows the device
-     * tree's crossed UART endpoints and routes UART4's logical DMA traffic to
-     * the host peer, so the stock DMA path is both visible and lossless.
+     * Keep the physically verified PIO transport until the stock UART4 DMA
+     * path completes a real LCP/IPCP handshake. A cold iPhone boot with DMA
+     * enabled on 2026-08-24 reached pppd, but every LCP Configure-Request timed
+     * out and the link terminated without a host-visible byte. Unit tests of
+     * crossed MMIO endpoints were therefore necessary but not sufficient.
+     * Shipping that path would turn working, slow networking into no
+     * networking at all.
+     *
+     * Preserve an unrelated caller-owned command line. The ordinary app
+     * supplies NULL here; the explicit equality branch documents the only
+     * other input this helper owns.
      */
-    (void)request;
+    if (request && ppp_provisioned &&
+        (!request->cmdline ||
+         strcmp(request->cmdline, S5L_BRINGUP_DEFAULT_CMDLINE) == 0)) {
+        request->cmdline = S5L_BRINGUP_DEFAULT_CMDLINE
+                           " uart4_dma_enable=0";
+    }
     if (!report) return;
     int ppp = vm_option_index("ppp");
     int nat = vm_option_index("nat");

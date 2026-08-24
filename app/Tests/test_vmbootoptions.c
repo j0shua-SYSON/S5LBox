@@ -473,8 +473,11 @@ static void test_network_state_is_reconciled_with_the_work_image(void) {
     vm_boot_options_reconcile_network(&report, &request, true);
     CHECK(report.row[ppp].effective && report.row[nat].effective,
           "a marked PPP/NAT image did not reconcile on");
-    CHECK(request.cmdline == NULL,
-          "a marked PPP image disabled the stock uart4 DMA path");
+    CHECK(request.cmdline &&
+          strstr(request.cmdline, S5L_BRINGUP_DEFAULT_CMDLINE) ==
+              request.cmdline &&
+          strstr(request.cmdline, "uart4_dma_enable=0") != NULL,
+          "a marked PPP image did not select the verified uart4 PIO path");
 
     defaults_into(values);                 /* PPP setting off, NAT setting on */
     vm_boot_options_apply(values, vm_option_count(), NULL, &report);
@@ -483,8 +486,9 @@ static void test_network_state_is_reconciled_with_the_work_image(void) {
     CHECK(report.row[ppp].effective && report.row[nat].effective,
           "an existing PPP image followed a later PPP switch instead of its "
           "recorded filesystem");
-    CHECK(request.cmdline == NULL,
-          "an existing PPP image disabled uart4 DMA after a later switch");
+    CHECK(request.cmdline &&
+          strstr(request.cmdline, "uart4_dma_enable=0") != NULL,
+          "an existing PPP image lost its verified uart4 PIO policy");
     CHECK(report.row[ppp].note && strstr(report.row[ppp].note, "contains"),
           "the recorded-on/settings-off mismatch has no explanation");
 
@@ -494,8 +498,9 @@ static void test_network_state_is_reconciled_with_the_work_image(void) {
     vm_boot_options_reconcile_network(&report, &request, true);
     CHECK(report.row[ppp].effective && !report.row[nat].effective,
           "the live NAT switch could not disable routing on a PPP image");
-    CHECK(request.cmdline == NULL,
-          "disabling NAT also disabled the stock uart4 DMA path");
+    CHECK(request.cmdline &&
+          strstr(request.cmdline, "uart4_dma_enable=0") != NULL,
+          "disabling NAT also disabled the PPP serial transport");
 
     memset(&request, 0, sizeof request);
     request.cmdline = "caller-owned=1";
