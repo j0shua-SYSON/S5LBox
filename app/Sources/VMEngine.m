@@ -2147,7 +2147,7 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
          * the ordinary host socket. Keeping the last errno next to the error
          * count prevents a denied connect from looking like an idle link. */
         networkText = [NSString stringWithFormat:
-            @"  ·  net %@ D %.2f U %.2f MB/s  ·  ppp g2h %llu h2g %llu B bad %llu ovf %llu  ·  ip g2h %llu h2g %llu  ·  tcp %llu rst in/out %llu/%llu rtx %llu ooo %llu drop/q %llu/%u  ·  abort syn/con/send/recv/rtx %llu/%llu/%llu/%llu/%llu last %u st %u wnd %u fly %u buf %u rtx %u  ·  peer-rst st %u wnd %u fly %u buf %u rtx %u  ·  dns %llu/%llu  ·  host out %llu in %llu B err %llu:%d",
+            @"  ·  net %@ D %.2f U %.2f MB/s  ·  ppp g2h %llu h2g %llu B bad %llu ovf %llu  ·  ip g2h %llu h2g %llu  ·  tcp %llu rst in/out %llu/%llu rtx %llu ooo %llu drop/q %llu/%u  ·  abort syn/con/send/recv/rtx %llu/%llu/%llu/%llu/%llu last %u st %u wnd %u fly %u buf %u rtx %u  ·  peer-rst st %u wnd %u fly %u buf %u rtx %u  ·  dns %llu/%llu  ·  host out %llu in %llu B err %llu:%d  ·  urx push/read/drop/under %llu/%llu/%llu/%llu  ·  dma0 r/w/b/i/c/bad %llu/%llu/%llu/%llu/%llu/%llu  ·  dma1 r/w/b/i/c/bad %llu/%llu/%llu/%llu/%llu/%llu  ·  dtx %@  ·  drx %@",
             phase, networkDownRate / 1.0e6, networkUpRate / 1.0e6,
             (unsigned long long)networkStatus.guest_tx_bytes,
             (unsigned long long)networkStatus.guest_rx_bytes,
@@ -2183,7 +2183,45 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
             (unsigned long long)networkStatus.host_bytes_out,
             (unsigned long long)networkStatus.host_bytes_in,
             (unsigned long long)networkStatus.host_errors,
-            networkStatus.host_last_error];
+            networkStatus.host_last_error,
+            (unsigned long long)networkStatus.uart4_rx_pushed,
+            (unsigned long long)networkStatus.uart4_rx_reads,
+            (unsigned long long)networkStatus.uart4_rx_dropped,
+            (unsigned long long)networkStatus.uart4_rx_underruns,
+            (unsigned long long)networkStatus.dmac_reads[0],
+            (unsigned long long)networkStatus.dmac_writes[0],
+            (unsigned long long)networkStatus.dmac_bytes[0],
+            (unsigned long long)networkStatus.dmac_items[0],
+            (unsigned long long)networkStatus.dmac_completions[0],
+            (unsigned long long)(networkStatus.dmac_refused_flow[0] +
+                networkStatus.dmac_refused_width[0] +
+                networkStatus.dmac_refused_chain[0]),
+            (unsigned long long)networkStatus.dmac_reads[1],
+            (unsigned long long)networkStatus.dmac_writes[1],
+            (unsigned long long)networkStatus.dmac_bytes[1],
+            (unsigned long long)networkStatus.dmac_items[1],
+            (unsigned long long)networkStatus.dmac_completions[1],
+            (unsigned long long)(networkStatus.dmac_refused_flow[1] +
+                networkStatus.dmac_refused_width[1] +
+                networkStatus.dmac_refused_chain[1]),
+            networkStatus.dma_guest_tx.found
+                ? [NSString stringWithFormat:@"%u:%u cfg%08x ctl%08x run%llu b%llu",
+                    networkStatus.dma_guest_tx.controller,
+                    networkStatus.dma_guest_tx.channel,
+                    networkStatus.dma_guest_tx.cfg,
+                    networkStatus.dma_guest_tx.ctrl,
+                    (unsigned long long)networkStatus.dma_guest_tx.runs,
+                    (unsigned long long)networkStatus.dma_guest_tx.bytes]
+                : @"none",
+            networkStatus.dma_guest_rx.found
+                ? [NSString stringWithFormat:@"%u:%u cfg%08x ctl%08x run%llu b%llu",
+                    networkStatus.dma_guest_rx.controller,
+                    networkStatus.dma_guest_rx.channel,
+                    networkStatus.dma_guest_rx.cfg,
+                    networkStatus.dma_guest_rx.ctrl,
+                    (unsigned long long)networkStatus.dma_guest_rx.runs,
+                    (unsigned long long)networkStatus.dma_guest_rx.bytes]
+                : @"none"];
     }
     /* The mode leads, because "3.2 M insn/s" means something different
      * depending on what is retiring them, and a user who cannot see which

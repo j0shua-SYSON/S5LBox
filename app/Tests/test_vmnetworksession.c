@@ -103,6 +103,49 @@ static void test_ppp_attachment_closes_the_uart_loop(void) {
           (unsigned long long)machine.dmac[0].bytes_moved,
           (machine.dmac[0].ch[0].cfg & PL080_CFG_EN) != 0u,
           (unsigned long long)machine.uart4.rx_underruns);
+    CHECK(status.dma_guest_rx.found &&
+          status.dma_guest_rx.controller == 0u &&
+          status.dma_guest_rx.channel == 0u &&
+          status.dma_guest_rx.bytes == 17u &&
+          status.dmac_bytes[0] == 17u &&
+          status.uart4_rx_reads == 17u,
+          "DMA receive witness is found/controller/channel/bytes/total/reads="
+          "%u/%u/%u/%llu/%llu/%llu, expected 1/0/0/17/17/17",
+          status.dma_guest_rx.found,
+          status.dma_guest_rx.controller,
+          status.dma_guest_rx.channel,
+          (unsigned long long)status.dma_guest_rx.bytes,
+          (unsigned long long)status.dmac_bytes[0],
+          (unsigned long long)status.uart4_rx_reads);
+
+    /* UART4's shipped transmit DMA record crosses to uart0 UTXH. The status
+     * witness must identify that physical endpoint while the host callback
+     * still receives it as logical UART4 traffic. */
+    machine.bus.write8(machine.bus.ctx, 0x500u, 0x7eu);
+    const uint32_t txdma = dma + PL080_CHAN_STRIDE;
+    machine.bus.write32(machine.bus.ctx, txdma + PL080_CH_SRC, 0x500u);
+    machine.bus.write32(machine.bus.ctx, txdma + PL080_CH_DST,
+                        S5L8900_UART0_BASE + UART_UTXH);
+    machine.bus.write32(machine.bus.ctx, txdma + PL080_CH_LLI, 0u);
+    machine.bus.write32(machine.bus.ctx, txdma + PL080_CH_CTRL,
+                        PL080_CTRL_SI | PL080_CTRL_I | 1u);
+    machine.bus.write32(machine.bus.ctx, txdma + PL080_CH_CFG,
+                        (1u << PL080_CFG_FLOW_SHIFT) | PL080_CFG_ITC |
+                        PL080_CFG_EN);
+    s5l8900_tick(&machine, 0u);
+    vm_network_session_status(session, &status);
+    CHECK(status.dma_guest_tx.found &&
+          status.dma_guest_tx.controller == 0u &&
+          status.dma_guest_tx.channel == 1u &&
+          status.dma_guest_tx.bytes == 1u &&
+          status.guest_tx_bytes > 7u,
+          "DMA transmit witness is found/controller/channel/bytes/guest="
+          "%u/%u/%u/%llu/%llu, expected 1/0/1/1/>7",
+          status.dma_guest_tx.found,
+          status.dma_guest_tx.controller,
+          status.dma_guest_tx.channel,
+          (unsigned long long)status.dma_guest_tx.bytes,
+          (unsigned long long)status.guest_tx_bytes);
 
     vm_network_session_destroy(&session);
     CHECK(session == NULL && machine.uart4_host_tx == NULL &&

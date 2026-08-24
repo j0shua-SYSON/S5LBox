@@ -476,8 +476,8 @@ static void test_network_state_is_reconciled_with_the_work_image(void) {
     CHECK(request.cmdline &&
           strstr(request.cmdline, S5L_BRINGUP_DEFAULT_CMDLINE) ==
               request.cmdline &&
-          strstr(request.cmdline, "uart4_dma_enable=0") != NULL,
-          "a marked PPP image did not select the verified uart4 PIO path");
+          strstr(request.cmdline, "uart4_dma_enable=1") != NULL,
+          "the DMA diagnostic did not explicitly enable uart4 DMA");
 
     defaults_into(values);                 /* PPP setting off, NAT setting on */
     vm_boot_options_apply(values, vm_option_count(), NULL, &report);
@@ -487,8 +487,8 @@ static void test_network_state_is_reconciled_with_the_work_image(void) {
           "an existing PPP image followed a later PPP switch instead of its "
           "recorded filesystem");
     CHECK(request.cmdline &&
-          strstr(request.cmdline, "uart4_dma_enable=0") != NULL,
-          "an existing PPP image lost its verified uart4 PIO policy");
+          strstr(request.cmdline, "uart4_dma_enable=1") != NULL,
+          "an existing PPP image lost the explicit DMA diagnostic policy");
     CHECK(report.row[ppp].note && strstr(report.row[ppp].note, "contains"),
           "the recorded-on/settings-off mismatch has no explanation");
 
@@ -499,7 +499,7 @@ static void test_network_state_is_reconciled_with_the_work_image(void) {
     CHECK(report.row[ppp].effective && !report.row[nat].effective,
           "the live NAT switch could not disable routing on a PPP image");
     CHECK(request.cmdline &&
-          strstr(request.cmdline, "uart4_dma_enable=0") != NULL,
+          strstr(request.cmdline, "uart4_dma_enable=1") != NULL,
           "disabling NAT also disabled the PPP serial transport");
 
     memset(&request, 0, sizeof request);

@@ -28,6 +28,19 @@ extern "C" {
 typedef struct vm_network_session vm_network_session_t;
 
 typedef struct {
+    bool     found;
+    unsigned controller;
+    unsigned channel;
+    uint32_t src;
+    uint32_t dst;
+    uint32_t lli;
+    uint32_t ctrl;
+    uint32_t cfg;
+    uint64_t runs;
+    uint64_t bytes;
+} vm_network_dma_endpoint_status_t;
+
+typedef struct {
     bool     attached;
     bool     nat_enabled;
     bool     peer_opened;
@@ -83,6 +96,24 @@ typedef struct {
     uint64_t host_resolve_nxdomain;
     uint64_t host_errors;
     int      host_last_error;
+    /* Existing PL080 state, copied at the same machine-thread boundary as the
+     * network counters.  These are diagnostic witnesses for the stock UART4
+     * DMA route: they distinguish an unarmed channel from bytes moved through
+     * the wrong endpoint without changing any guest-visible device behavior. */
+    uint64_t dmac_reads[S5L8900_DMAC_COUNT];
+    uint64_t dmac_writes[S5L8900_DMAC_COUNT];
+    uint64_t dmac_bytes[S5L8900_DMAC_COUNT];
+    uint64_t dmac_items[S5L8900_DMAC_COUNT];
+    uint64_t dmac_completions[S5L8900_DMAC_COUNT];
+    uint64_t dmac_refused_flow[S5L8900_DMAC_COUNT];
+    uint64_t dmac_refused_width[S5L8900_DMAC_COUNT];
+    uint64_t dmac_refused_chain[S5L8900_DMAC_COUNT];
+    uint64_t uart4_rx_pushed;
+    uint64_t uart4_rx_reads;
+    uint64_t uart4_rx_dropped;
+    uint64_t uart4_rx_underruns;
+    vm_network_dma_endpoint_status_t dma_guest_tx;
+    vm_network_dma_endpoint_status_t dma_guest_rx;
 } vm_network_status_t;
 
 /*

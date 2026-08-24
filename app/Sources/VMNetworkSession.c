@@ -264,6 +264,45 @@ void vm_network_session_status(const vm_network_session_t *session,
     out->guest_ip_dropped = session->guest_ip_dropped;
     out->net_to_guest = session->net_to_guest;
     out->net_to_guest_lost = session->net_to_guest_lost;
+    if (session->machine) {
+        const s5l8900_t *machine = session->machine;
+        out->uart4_rx_pushed = machine->uart4.rx_pushed;
+        out->uart4_rx_reads = machine->uart4.rx_reads;
+        out->uart4_rx_dropped = machine->uart4.rx_dropped;
+        out->uart4_rx_underruns = machine->uart4.rx_underruns;
+        for (unsigned d = 0u; d < S5L8900_DMAC_COUNT; d++) {
+            const s5l_pl080_t *controller = &machine->dmac[d];
+            out->dmac_reads[d] = controller->reads;
+            out->dmac_writes[d] = controller->writes;
+            out->dmac_bytes[d] = controller->bytes_moved;
+            out->dmac_items[d] = controller->items;
+            out->dmac_completions[d] = controller->completions;
+            out->dmac_refused_flow[d] = controller->refused_flow;
+            out->dmac_refused_width[d] = controller->refused_width;
+            out->dmac_refused_chain[d] = controller->refused_chain;
+            for (unsigned c = 0u; c < S5L_PL080_CHANNELS; c++) {
+                const s5l_pl080_chan_t *channel = &controller->ch[c];
+                vm_network_dma_endpoint_status_t *endpoint = NULL;
+                if (channel->dst == S5L8900_UART0_BASE + UART_UTXH)
+                    endpoint = &out->dma_guest_tx;
+                else if (channel->src == S5L8900_UART4_BASE + UART_URXH)
+                    endpoint = &out->dma_guest_rx;
+                if (!endpoint || (endpoint->found &&
+                    endpoint->bytes >= channel->bytes))
+                    continue;
+                endpoint->found = true;
+                endpoint->controller = d;
+                endpoint->channel = c;
+                endpoint->src = channel->src;
+                endpoint->dst = channel->dst;
+                endpoint->lli = channel->lli;
+                endpoint->ctrl = channel->ctrl;
+                endpoint->cfg = channel->cfg;
+                endpoint->runs = channel->runs;
+                endpoint->bytes = channel->bytes;
+            }
+        }
+    }
     if (session->peer) {
         out->lcp_open = ppp_lcp_open(session->peer);
         out->ipcp_open = ppp_ipcp_open(session->peer);
