@@ -990,11 +990,12 @@ static void test_the_line_is_gated_by_ucon(void) {
 
 static void test_the_causes_this_model_refuses_stay_clear(void) {
     /*
-     * 0x8, 0x40, 0x100 and 0x200 are never asserted, and each refusal has a
-     * consequence attached: 0x8's handler reports an overrun that did not
-     * happen, 0x100 runs an auto-baud calculation over +0x2c that this model
-     * answers 0 from, and 0x200 is newer than this kext. A model that started
-     * setting one would be caught here rather than by a boot that wandered.
+     * Ordinary pushes, reads, overruns and TX stores do not by themselves
+     * manufacture the DMA-only legacy timeout. Error, auto-baud and the newer
+     * timeout remain entirely unmodelled: 0x100 in particular would start an
+     * auto-baud calculation over +0x2c, which this model answers 0 from. A
+     * model that leaked one into this PIO traffic is caught here rather than by
+     * a boot that wandered.
      */
     s5l_uart_t u;
     s5l_uart_reset(&u);
@@ -1007,7 +1008,8 @@ static void test_the_causes_this_model_refuses_stay_clear(void) {
         if (i % 3u == 0u) (void)s5l_uart_read(&u, UART_URXH);
         if (i % 7u == 0u) s5l_uart_write(&u, UART_UTXH, (uint32_t)i);
     }
-    CHECK((seen & 0x8u) == 0u, "receive_time_out_interrupt_status was asserted");
+    CHECK((seen & UTRSTAT_RX_TIMEOUT) == 0u,
+          "PIO traffic manufactured receive_time_out_interrupt_status");
     CHECK((seen & 0x40u) == 0u, "error_interrupt_status was asserted");
     CHECK((seen & 0x100u) == 0u, "auto_baud_interrupt_status was asserted");
     CHECK((seen & 0x200u) == 0u,
@@ -1016,6 +1018,109 @@ static void test_the_causes_this_model_refuses_stay_clear(void) {
           "UTRSTAT reported a bit outside {0,1,2,4} (0x%08x)", seen);
     CHECK(u.rx_dropped != 0u,
           "the FIFO never overran, so the error bits were never tested");
+}
+
+static void test_receive_dma_uses_the_fifo_watermark_and_one_timeout(void) {
+    /* UFCON bits 5:4 are both the receive interrupt trigger and the receive
+     * DMA watermark. With FIFO mode off, the holding register itself is the
+     * one-byte threshold. */
+    static const unsigned watermark[] = { 4u, 8u, 12u, 16u };
+    s5l_uart_t u;
+    s5l_uart_reset(&u);
+    CHECK(s5l_uart_rx_push(&u, 0x41u), "non-FIFO seed failed");
+    CHECK(s5l_uart_rx_dma_ready(&u),
+          "non-FIFO DMA did not request on its one holding byte");
+
+    for (unsigned code = 0u; code < 4u; code++) {
+        s5l_uart_reset(&u);
+        s5l_uart_write(&u, UART_UFCON, 1u | (code << 4));
+        for (unsigned i = 0u; i + 1u < watermark[code]; i++)
+            CHECK(s5l_uart_rx_push(&u, (uint8_t)i),
+                  "could not fill watermark %u", watermark[code]);
+        CHECK(!s5l_uart_rx_dma_ready(&u),
+              "UFCON code %u requested at %u/%u bytes", code, u.rx_count,
+              watermark[code]);
+        CHECK(s5l_uart_rx_push(&u, 0xeeu),
+              "could not reach watermark %u", watermark[code]);
+        CHECK(s5l_uart_rx_dma_ready(&u),
+              "UFCON code %u did not request at %u bytes", code,
+              watermark[code]);
+    }
+
+    /* A tail below the watermark is not a DMA request. It becomes one timeout
+     * edge only when both parts of the legacy mechanism are present: an actual
+     * accepted byte armed the idle detector, and UCON bit 7 enabled it. UCON
+     * bit 11 independently gates the resulting UTRSTAT bit 3 onto the line. */
+    s5l_uart_reset(&u);
+    s5l_uart_write(&u, UART_UFCON, 0x31u); /* FIFO, 16-byte watermark */
+    for (unsigned i = 0u; i < 15u; i++)
+        CHECK(s5l_uart_rx_push(&u, (uint8_t)i), "tail seed failed at %u", i);
+    s5l_uart_write(&u, UART_UTRSTAT, UTRSTAT_RX_INT);
+    s5l_uart_write(&u, UART_UCON, 0x1800u); /* IRQ enables, timeout clock off */
+    CHECK(!s5l_uart_rx_dma_idle(&u),
+          "DMA idle latched while rx_time_out_enable was clear");
+    s5l_uart_write(&u, UART_UCON, 0x1880u);
+    CHECK(s5l_uart_rx_dma_idle(&u), "armed DMA tail did not latch timeout");
+    CHECK((s5l_uart_read(&u, UART_UTRSTAT) & UTRSTAT_RX_TIMEOUT) != 0u,
+          "timeout helper did not set UTRSTAT bit 3");
+    CHECK(s5l_uart_rx_irq(&u), "enabled timeout did not assert the UART line");
+    s5l_uart_write(&u, UART_UTRSTAT, UTRSTAT_RX_TIMEOUT);
+    CHECK(!s5l_uart_rx_dma_idle(&u),
+          "W1C immediately re-latched the same idle interval");
+    CHECK(!s5l_uart_rx_irq(&u), "one-shot timeout stayed asserted after W1C");
+
+    /* The machine-level join is the regression that failed physically. A
+     * 32-byte PL080 command starts with a full 16-byte FIFO. The watermark
+     * permits one byte into memory, leaves the 15-byte tail in the UART, and
+     * latches timeout instead of consuming all 16 and waiting forever for the
+     * other 16 command bytes. */
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0u, 1u << 20), "machine init failed");
+    m.bus.write32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_INTENABLE, 1u << 28);
+    m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UCON, 0x1880u);
+    m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UFCON, 0x31u);
+    for (unsigned i = 0u; i < UART_RX_FIFO; i++)
+        CHECK(s5l_uart_rx_push(&m.uart4, (uint8_t)(0x80u + i)),
+              "machine FIFO seed failed at %u", i);
+
+    const uint32_t ch = S5L8900_DMAC0_BASE + PL080_CHAN_BASE;
+    m.bus.write32(m.bus.ctx, ch + PL080_CH_SRC,
+                  S5L8900_UART4_BASE + UART_URXH);
+    m.bus.write32(m.bus.ctx, ch + PL080_CH_DST, 0x200u);
+    m.bus.write32(m.bus.ctx, ch + PL080_CH_LLI, 0u);
+    m.bus.write32(m.bus.ctx, ch + PL080_CH_CTRL,
+                  PL080_CTRL_DI | PL080_CTRL_I | 32u);
+    m.bus.write32(m.bus.ctx, ch + PL080_CH_CFG,
+                  (2u << PL080_CFG_FLOW_SHIFT) | PL080_CFG_ITC |
+                  PL080_CFG_EN);
+    m.bus.write32(m.bus.ctx, S5L8900_DMAC0_BASE + PL080_CONFIG,
+                  PL080_CONFIG_EN);
+
+    s5l8900_tick(&m, 0u);
+    CHECK(m.bus.read8(m.bus.ctx, 0x200u) == 0x80u,
+          "the first watermark-qualified byte did not reach memory");
+    CHECK(m.uart4.rx_count == 15u &&
+          (m.dmac[0].ch[0].ctrl & PL080_CTRL_SIZE_MASK) == 31u &&
+          (m.dmac[0].ch[0].cfg & PL080_CFG_EN) != 0u,
+          "partial DMA did not preserve the tail/count (%u/%u/%08x)",
+          m.uart4.rx_count,
+          m.dmac[0].ch[0].ctrl & PL080_CTRL_SIZE_MASK,
+          m.dmac[0].ch[0].cfg);
+    CHECK((s5l_uart_read(&m.uart4, UART_UTRSTAT) &
+           UTRSTAT_RX_TIMEOUT) != 0u,
+          "partial machine DMA did not latch the legacy timeout");
+    uint32_t raw = m.bus.read32(m.bus.ctx,
+                                S5L8900_VIC0_BASE + VIC_RAWINTR);
+    CHECK((raw & (1u << 28)) != 0u,
+          "partial DMA timeout did not reach VIC line 28 (0x%08x)", raw);
+
+    m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTRSTAT,
+                  FILTER_RX_MASK);
+    s5l8900_tick(&m, 0u);
+    raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
+    CHECK((raw & (1u << 28)) == 0u,
+          "the same idle interval re-latched after W1C (0x%08x)", raw);
+    s5l8900_free(&m);
 }
 
 static void test_suppression_withholds_the_line_and_nothing_else(void) {
@@ -1133,6 +1238,8 @@ static void test_suppression_defaults_off_and_reset_clears_it(void) {
     CHECK(u.utrstat_pending == 0u,
           "reset left a latched interrupt cause (0x%08x) -- a port that has "
           "just been reset owes nobody an edge", u.utrstat_pending);
+    CHECK(!u.rx_timeout_armed,
+          "reset left the receive-timeout one-shot armed");
     s5l_uart_write(&u, UART_UCON, UCON_RX_INT_ENABLE);
     CHECK(s5l_uart_rx_push(&u, 0x42u), "push failed after reset");
     CHECK(s5l_uart_rx_irq(&u), "reset did not restore the default");
@@ -1443,9 +1550,13 @@ static void test_snapshot_carries_the_receive_fifo(void) {
     CHECK(r.uart4.utrstat_pending == UTRSTAT_RX_INT,
           "a restored non-empty FIFO came back with no latched cause (0x%08x)",
           r.uart4.utrstat_pending);
+    CHECK(r.uart4.rx_timeout_armed,
+          "a restored non-empty FIFO did not re-arm the DMA timeout");
     CHECK(r.uart0.utrstat_pending == 0u,
           "a restored EMPTY FIFO invented a latched cause (0x%08x)",
           r.uart0.utrstat_pending);
+    CHECK(!r.uart0.rx_timeout_armed,
+          "a restored empty FIFO invented a DMA timeout arm");
 
     /* And the restored port really delivers the same next byte. */
     CHECK(s5l_uart_read(&r.uart4, UART_URXH) ==
@@ -1517,6 +1628,7 @@ int main(void) {
     test_the_receive_interrupt_is_an_edge_not_a_level();
     test_the_line_is_gated_by_ucon();
     test_the_causes_this_model_refuses_stay_clear();
+    test_receive_dma_uses_the_fifo_watermark_and_one_timeout();
     test_suppression_withholds_the_line_and_nothing_else();
     test_suppression_defaults_off_and_reset_clears_it();
     test_uart0_receive_is_deliberately_not_wired();

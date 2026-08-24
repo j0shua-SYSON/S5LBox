@@ -303,11 +303,18 @@
  * (--no-uart4-rx-irq) restored run80's behaviour with byte delivery unchanged,
  * which is what turned the explanation into a demonstrated cause.
  *
- * SO: 0x10 IS LATCHED, AND NOTHING ELSE IS.
+ * SO: RECEIVE CAUSES ARE LATCHED, NOT LIVE FIFO LEVELS.
  *
  *   - A byte arriving in the receive FIFO sets pending bit 0x10. Every arrival,
  *     not just the empty->non-empty one: a driver that acknowledges, drains
  *     part of the FIFO and stops would otherwise never be told about the rest.
+ *   - A receive DMA request is gated by UFCON's 4/8/12/16-byte watermark. When
+ *     an armed request becomes idle below that watermark, pending bit 0x8 is
+ *     latched once. The filter's sole true return is this branch; it passes a
+ *     timeout flag to AppleOnboardSerial, whose DMA state closes the partial
+ *     command using the PL080 remaining count. This is the missing path that a
+ *     non-empty-is-ready request model erased: it consumed the tail, never
+ *     asserted 0x8, and left a 2,048-byte receive command waiting forever.
  *   - Bits 0, 1 and 2 stay LEVELS and are never latched. They are status, the
  *     polled console path depends on them, and bit 0 is what a drain loop tests
  *     to know when to stop.
@@ -317,11 +324,10 @@
  *     enabled the receive interrupt never sees it. The gate this model once
  *     declined to guess is legible now: 0xc065f0e4 sets the enable and the mask
  *     in the same straight-line instruction stream.
- *   - 0x8, 0x40, 0x100 and 0x200 are NEVER asserted. 0x8's handler reports an
- *     overrun that did not happen; 0x100 runs an auto-baud calculation over
- *     +0x2c, which this model answers 0 from and which is only safe while that
- *     branch is never taken; 0x200 is newer than this kext, which neither tests
- *     it nor enables it.
+ *   - 0x40, 0x100 and 0x200 are NEVER asserted. 0x100 runs an auto-baud
+ *     calculation over +0x2c, which this model answers 0 from and which is only
+ *     safe while that branch is never taken; 0x200 is newer than this kext,
+ *     which neither tests nor enables it.
  *
  * THE ACKNOWLEDGE CLEARS 0x10 EVEN WITH THE FIFO STILL FULL, and that is the
  * load-bearing half of the repair rather than a corner case. The filter's
@@ -361,14 +367,14 @@
 #define UART_UBRDIV  0x28u
 
 /*
- * UTRSTAT's latched receive cause, Apple's own receive_interrupt_status. It is
- * named in the header rather than kept private to core/src/soc/uart.c for one
- * reason: core/src/snapshot.c re-derives it on restore, and a bare 0x10 there
- * would be a magic number in the one file where a wrong bit is silent. Every
- * other bit of the register stays private, because uart.c is the only place
- * entitled to decide that one of them is set.
+ * UTRSTAT's two latched receive causes: Apple's legacy receive timeout and
+ * receive_interrupt_status. They are named in the header rather than kept
+ * private to uart.c because snapshot restore re-derives the ordinary edge and
+ * machine-level DMA pacing requests the timeout; bare 0x8/0x10 values at those
+ * joins would make a wrong bit silent.
  */
-#define UTRSTAT_RX_INT 0x010u
+#define UTRSTAT_RX_TIMEOUT 0x008u
+#define UTRSTAT_RX_INT     0x010u
 
 #define UART_TX_BUFFER 8192
 
@@ -408,19 +414,36 @@ typedef struct {
      * did, and this is what the operator asked for, so it is re-applied from the
      * restoring run's command line instead of travelling in the stream. It fits
      * in the tail padding this struct already had, so SNAP_SIZE_GUARD's 8280
-     * still holds and no SNAPSHOT_VERSION bump is owed — which is the only
-     * reason a new field here is not a snapshot change. Check that again before
-     * adding a second one.
+     * still holds and no SNAPSHOT_VERSION bump is owed. The timeout arm below
+     * consumes the last byte of that old alignment hole; there is no remaining
+     * slack for another field. Check the size guard and snapshot format before
+     * changing this layout again.
      */
     bool     rx_irq_suppressed;
 
     /*
-     * UTRSTAT's LATCHED half — today only 0x10, receive_interrupt_status. Set
-     * by an arriving byte, cleared by the driver's write-one-to-clear store,
-     * and ANDed with the UCON enables to produce the VIC line. The levels (bits
-     * 0, 1, 2) are deliberately not here: they are derived from the FIFO on
-     * every read, which is what makes "a W1C store cannot clear a level" a
-     * property of the layout rather than a rule someone has to remember.
+     * One-shot arm for the legacy receive-timeout cause. A successful wire
+     * arrival arms it; s5l_uart_rx_dma_idle() consumes the arm when a DMA
+     * request stalls below UFCON's receive watermark. Without this bit, the
+     * driver's W1C acknowledge would immediately re-latch the same idle
+     * condition on the next device refresh and turn one timeout into an IRQ
+     * storm.
+     *
+     * This byte occupies the old alignment hole before utrstat_pending, so
+     * sizeof(s5l_uart_t) and the snapshot byte format do not move. Like the
+     * pending receive edge, it is derived conservatively from a restored
+     * non-empty FIFO in snap_uart(): one repeat timeout is safe, while losing
+     * the only event that closes a partial DMA buffer leaves the guest stuck.
+     */
+    bool     rx_timeout_armed;
+
+    /*
+     * UTRSTAT's LATCHED half: 0x10 receive_interrupt_status and 0x8 the legacy
+     * receive timeout. Set by an arriving byte or one DMA-idle transition,
+     * cleared by the driver's write-one-to-clear store, and ANDed with UCON's
+     * enables to produce the VIC line. The levels (bits 0, 1, 2) are
+     * deliberately not here: they are derived from the FIFO on every read,
+     * which makes "a W1C store cannot clear a level" a property of the layout.
      *
      * Placed last on purpose. It lands in the tail padding this struct already
      * had, so sizeof stays 8280 and core/src/snapshot.c's guard — and the
@@ -449,6 +472,20 @@ void     s5l_uart_write(s5l_uart_t *u, uint32_t off, uint32_t val);
 bool     s5l_uart_rx_push(s5l_uart_t *u, uint8_t byte);
 /* How many more bytes s5l_uart_rx_push() would accept right now. */
 unsigned s5l_uart_rx_space(const s5l_uart_t *u);
+/*
+ * The PL080 request line for URXH. In FIFO mode it asserts only at UFCON's
+ * receive trigger/watermark (4, 8, 12 or 16 bytes); without FIFO mode one byte
+ * is sufficient. Treating every non-empty FIFO as a DMA request consumes the
+ * short tail that real hardware leaves for its receive-timeout path, so the
+ * stock driver never learns how many bytes completed a partial command.
+ */
+bool     s5l_uart_rx_dma_ready(const s5l_uart_t *u);
+/*
+ * Announce that an armed receive DMA request is idle below its watermark.
+ * Returns true only when a fresh UTRSTAT_RX_TIMEOUT cause was latched. The
+ * machine calls this only while a PL080 channel is enabled on this URXH.
+ */
+bool     s5l_uart_rx_dma_idle(s5l_uart_t *u);
 /*
  * The port's interrupt line: (UTRSTAT's latched half & the UCON enables) != 0.
  *

@@ -28,12 +28,11 @@
 #define UTRSTAT_TX_EMPTY     (1u << 2)
 
 /*
- * UTRSTAT's LATCHED half. Only UTRSTAT_RX_INT (soc.h) is ever set — see the UART
- * block there for why the other four are not, and for what asserting 0x100 in
- * particular would set running. UTRSTAT_LATCHED is the whole of the set the
- * driver's enable mask at this->0x9c can hold, and so the whole of what an
- * enable may arm; it is written out rather than derived so that adding a bit is
- * a decision somebody makes here.
+ * UTRSTAT's LATCHED half. This model can produce the ordinary receive edge and
+ * the legacy receive timeout; the UART block in soc.h records the shipped
+ * driver's handling of both. UTRSTAT_LATCHED is the whole set its enable mask
+ * can hold, not just the subset we assert, so adding any other cause remains an
+ * explicit decision.
  */
 #define UTRSTAT_LATCHED      0x178u      /* 0x8|0x10|0x20|0x40|0x100  */
 
@@ -44,10 +43,21 @@
  */
 #define UCON_ENABLE_SHIFT    8u
 
+/* UCON bit 7 starts the legacy receive timeout counter. Bit 11, eight bits
+ * above UTRSTAT_RX_TIMEOUT, separately gates that latched cause onto the IRQ
+ * line through utrstat_enables(). */
+#define UCON_RX_TIMEOUT_ENABLE (1u << 7)
+
 /* UFSTAT: bits[3:0] receive count, bit 8 receive full, bits[7:4] transmit
  * count, bit 9 transmit full. The transmitter drains instantly, so its two
  * fields are permanently zero. */
 #define UFSTAT_RX_FULL       (1u << 8)
+
+/* UFCON's receive trigger field is also the DMA watermark on this Apple UART.
+ * Samsung's four encodings are 4, 8, 12 and 16 bytes. */
+#define UFCON_FIFO_ENABLE       (1u << 0)
+#define UFCON_RX_TRIGGER_SHIFT  4u
+#define UFCON_RX_TRIGGER_MASK   3u
 
 void s5l_uart_reset(s5l_uart_t *u) {
     /* Still every byte, including rx_irq_suppressed. Preserving the flag here
@@ -67,6 +77,27 @@ void s5l_uart_set_rx_irq(s5l_uart_t *u, bool enabled) {
 unsigned s5l_uart_rx_space(const s5l_uart_t *u) {
     if (!u || u->rx_count >= UART_RX_FIFO) return 0u;
     return UART_RX_FIFO - u->rx_count;
+}
+
+static unsigned rx_dma_watermark(const s5l_uart_t *u) {
+    if (!u || !(u->ufcon & UFCON_FIFO_ENABLE)) return 1u;
+    return 4u * (((u->ufcon >> UFCON_RX_TRIGGER_SHIFT) &
+                  UFCON_RX_TRIGGER_MASK) + 1u);
+}
+
+bool s5l_uart_rx_dma_ready(const s5l_uart_t *u) {
+    return u && u->rx_count >= rx_dma_watermark(u);
+}
+
+bool s5l_uart_rx_dma_idle(s5l_uart_t *u) {
+    if (!u || !u->rx_timeout_armed || u->rx_count == 0u ||
+        s5l_uart_rx_dma_ready(u) ||
+        !(u->ucon & UCON_RX_TIMEOUT_ENABLE))
+        return false;
+
+    u->rx_timeout_armed = false;
+    u->utrstat_pending |= UTRSTAT_RX_TIMEOUT;
+    return true;
 }
 
 /* Which latched causes UCON has armed. Nothing in this model ever latches a bit
@@ -105,6 +136,10 @@ bool s5l_uart_rx_push(s5l_uart_t *u, uint8_t byte) {
     u->rx[(unsigned)(u->rx_head + u->rx_count) % UART_RX_FIFO] = byte;
     u->rx_count++;
     u->rx_pushed++;
+    /* A real arriving character restarts the receive-idle timer. A refused
+     * push above does not reach this line and therefore cannot manufacture a
+     * timeout for a byte the UART never accepted. */
+    u->rx_timeout_armed = true;
     /*
      * THE EDGE. Every arrival latches, not just the empty->non-empty one: after
      * an acknowledge the driver may have drained only part of the FIFO, and a
@@ -180,14 +215,13 @@ void s5l_uart_write(s5l_uart_t *u, uint32_t off, uint32_t val) {
              * the filter cannot even produce, since 0x1 can never enter its mask
              * — is structurally incapable of stranding a queued byte.
              *
-             * And it clears 0x10 whether or not the FIFO still holds data. That
-             * is the whole repair: this line is lowered by the acknowledge and
-             * by nothing else, because the filter returns 0 for a receive cause
-             * and IOFilterInterruptEventSource::disableInterruptOccurred then
-             * returns without masking. A latch re-armed from a non-empty FIFO
-             * would re-raise a level nobody masks, which is exactly the storm
-             * run94 measured. The remaining bytes are announced by UTRSTAT bit
-             * 0, which is live and which the driver's drain loop reads.
+             * And it clears the ordinary 0x10 edge whether or not the FIFO
+             * still holds data. The filter returns 0 for that cause, so a latch
+             * re-armed merely from a non-empty FIFO would re-raise a level
+             * nobody masks — exactly the storm run94 measured. Timeout 0x8 is
+             * different: its filter return is true, but rx_timeout_armed still
+             * makes one idle interval one edge rather than re-latching after
+             * every W1C. The next accepted byte re-arms it.
              */
             u->utrstat_pending &= ~val;
             break;

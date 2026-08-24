@@ -360,13 +360,13 @@ static uint32_t bus_read(void *ctx, uint32_t addr, unsigned bytes) {
         uint32_t off = addr - S5L8900_UART4_BASE;
         unsigned rx_before = m->uart4.rx_count;
         v = s5l_uart_read(&m->uart4, off);
-        /* A PIO receive handler must eventually observe an empty hardware
-         * FIFO and return to the tty layer.  Refilling after every PIO byte
-         * made the sixteen-entry FIFO an unbounded synchronous stream: the
-         * stock driver never left its drain loop and eventually printed
-         * "Software Overflow" while dropping PPP bytes.  A PL080 command is
-         * different: its programmed transfer count is the burst boundary, so
-         * demand refill is both bounded and required to let one DMA command
+        /* A PIO receive handler snapshots a finite FIFO count, then hands that
+         * batch to the tty layer. Refilling synchronously after each PIO read
+         * kept the RX cause continuously active across handler entries, faster
+         * than the tty software queue could absorb it; the physical guest then
+         * printed "Software Overflow" and lost PPP bytes. A PL080 command is
+         * different: its programmed transfer count is a hard batch boundary,
+         * so demand refill is both bounded and required to let one command
          * consume beyond the initially visible FIFO. */
         if (off == UART_URXH && m->uart4.rx_count < rx_before &&
             m->dma_access_active && m->uart4_host_refill)
@@ -689,9 +689,9 @@ static bool dma_request_ready(void *ctx, uint32_t address, unsigned width,
     (void)width;
     if (source) {
         if (address == S5L8900_UART0_BASE + UART_URXH)
-            return m->uart0.rx_count != 0u;
+            return s5l_uart_rx_dma_ready(&m->uart0);
         if (address == S5L8900_UART4_BASE + UART_URXH)
-            return m->uart4.rx_count != 0u;
+            return s5l_uart_rx_dma_ready(&m->uart4);
         for (unsigned i = 0; i < S5L8900_SPI_COUNT; i++) {
             static const uint32_t base[] = {
                 S5L8900_SPI0_BASE, S5L8900_SPI1_BASE, S5L8900_SPI2_BASE
@@ -711,6 +711,29 @@ static bool dma_request_ready(void *ctx, uint32_t address, unsigned width,
             return m->spi[i].tx_level < S5L_SPI_FIFO_DEPTH;
     }
     return true;
+}
+
+/* Whether an enabled PL080 channel is currently asking uart4 for receive
+ * bytes. The endpoint address is fixed while SI is clear, as it is in the
+ * shipped device-tree template, so the live SrcAddr is an exact identifier.
+ * This is deliberately a machine-level join: the UART knows its FIFO and the
+ * PL080 knows its command, but neither device reaches into the other. */
+static bool uart4_rx_dma_pending(const s5l8900_t *m) {
+    if (!m) return false;
+    for (unsigned d = 0u; d < S5L8900_DMAC_COUNT; d++) {
+        const s5l_pl080_t *controller = &m->dmac[d];
+        if (!(controller->config & PL080_CONFIG_EN)) continue;
+        for (unsigned c = 0u; c < S5L_PL080_CHANNELS; c++) {
+            const s5l_pl080_chan_t *channel = &controller->ch[c];
+            if ((channel->cfg & (PL080_CFG_EN | PL080_CFG_HALT)) !=
+                    PL080_CFG_EN ||
+                !(channel->ctrl & PL080_CTRL_SIZE_MASK))
+                continue;
+            if (channel->src == S5L8900_UART4_BASE + UART_URXH)
+                return true;
+        }
+    }
+    return false;
 }
 
 static void w32(void *c, uint32_t a, uint32_t v) { bus_write(c, a, v, 4); }
@@ -2045,7 +2068,9 @@ static void s5l8900_refresh(s5l8900_t *m, uint32_t tb) {
      * forever: s5l_uart_rx_push() is the only producer and core/ never calls
      * it. core/tests/test_uart4.c pins that.
      */
-    s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_UART4, s5l_uart_rx_irq(&m->uart4));
+    /* Finalized after the PL080s below. A receive DMA can consume down through
+     * its watermark and expose the legacy idle-timeout cause in this same
+     * refresh; no guest instruction runs between these two points. */
 
     /*
      * The two DMA controllers, and the ONLY device in this machine that reaches
@@ -2071,6 +2096,21 @@ static void s5l8900_refresh(s5l8900_t *m, uint32_t tb) {
                          i == 0u ? S5L8900_IRQ_DMAC0 : S5L8900_IRQ_DMAC1,
                          dmac_irq);
     }
+
+    /* A real FIFO asserts its DMA request only at UFCON's watermark. Bytes
+     * below it remain in the UART; after the receive line has been idle for
+     * three character times, hardware latches UTRSTAT bit 3 and Apple's driver
+     * closes the partial DMA command using the PL080's remaining count. Device
+     * refreshes do not model sub-character serial time, so the idle interval is
+     * collapsed here, but the ordering and one-shot acknowledge contract are
+     * retained: after at least one accepted byte, below watermark, while the
+     * receive command is still enabled. The UART arm prevents W1C from turning
+     * that one event into a continuously re-latched level.
+     */
+    if (uart4_rx_dma_pending(m))
+        (void)s5l_uart_rx_dma_idle(&m->uart4);
+    s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_UART4,
+                     s5l_uart_rx_irq(&m->uart4));
 
     /*
      * The GPIO interrupt cascade. Seven group outputs, seven VIC lines, and

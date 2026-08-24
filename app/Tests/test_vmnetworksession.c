@@ -87,6 +87,10 @@ static void test_ppp_attachment_closes_the_uart_loop(void) {
                         (2u << PL080_CFG_FLOW_SHIFT) | PL080_CFG_ITC |
                         PL080_CFG_EN);
     machine.bus.write32(machine.bus.ctx,
+                        S5L8900_UART4_BASE + UART_UCON, 0x1880u);
+    machine.bus.write32(machine.bus.ctx,
+                        S5L8900_UART4_BASE + UART_UFCON, 0x31u);
+    machine.bus.write32(machine.bus.ctx,
                         S5L8900_DMAC0_BASE + PL080_CONFIG,
                         PL080_CONFIG_EN);
     s5l8900_tick(&machine, 0u);
@@ -117,6 +121,12 @@ static void test_ppp_attachment_closes_the_uart_loop(void) {
           (unsigned long long)status.dma_guest_rx.bytes,
           (unsigned long long)status.dmac_bytes[0],
           (unsigned long long)status.uart4_rx_reads);
+    CHECK(status.uart4_ucon == 0x1880u &&
+          status.uart4_ufcon == 0x31u &&
+          status.uart4_rx_count <= UART_RX_FIFO,
+          "UART receive registers/count are %08x/%08x/%u",
+          status.uart4_ucon, status.uart4_ufcon,
+          (unsigned)status.uart4_rx_count);
 
     /* UART4's shipped transmit DMA record crosses to uart0 UTXH. The status
      * witness must identify that physical endpoint while the host callback

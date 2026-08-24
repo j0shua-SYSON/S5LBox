@@ -112,6 +112,11 @@ typedef struct {
     uint64_t uart4_rx_reads;
     uint64_t uart4_rx_dropped;
     uint64_t uart4_rx_underruns;
+    uint32_t uart4_ucon;
+    uint32_t uart4_ufcon;
+    uint32_t uart4_utrstat_pending;
+    uint8_t  uart4_rx_count;
+    bool     uart4_rx_timeout_armed;
     vm_network_dma_endpoint_status_t dma_guest_tx;
     vm_network_dma_endpoint_status_t dma_guest_rx;
 } vm_network_status_t;

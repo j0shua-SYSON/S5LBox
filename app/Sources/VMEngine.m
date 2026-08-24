@@ -2147,7 +2147,7 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
          * the ordinary host socket. Keeping the last errno next to the error
          * count prevents a denied connect from looking like an idle link. */
         networkText = [NSString stringWithFormat:
-            @"  ·  net %@ D %.2f U %.2f MB/s  ·  ppp g2h %llu h2g %llu B bad %llu ovf %llu  ·  ip g2h %llu h2g %llu  ·  tcp %llu rst in/out %llu/%llu rtx %llu ooo %llu drop/q %llu/%u  ·  abort syn/con/send/recv/rtx %llu/%llu/%llu/%llu/%llu last %u st %u wnd %u fly %u buf %u rtx %u  ·  peer-rst st %u wnd %u fly %u buf %u rtx %u  ·  dns %llu/%llu  ·  host out %llu in %llu B err %llu:%d  ·  urx push/read/drop/under %llu/%llu/%llu/%llu  ·  dma0 r/w/b/i/c/bad %llu/%llu/%llu/%llu/%llu/%llu  ·  dma1 r/w/b/i/c/bad %llu/%llu/%llu/%llu/%llu/%llu  ·  dtx %@  ·  drx %@",
+            @"  ·  net %@ D %.2f U %.2f MB/s  ·  ppp g2h %llu h2g %llu B bad %llu ovf %llu  ·  ip g2h %llu h2g %llu  ·  tcp %llu rst in/out %llu/%llu rtx %llu ooo %llu drop/q %llu/%u  ·  abort syn/con/send/recv/rtx %llu/%llu/%llu/%llu/%llu last %u st %u wnd %u fly %u buf %u rtx %u  ·  peer-rst st %u wnd %u fly %u buf %u rtx %u  ·  dns %llu/%llu  ·  host out %llu in %llu B err %llu:%d  ·  urx push/read/drop/under %llu/%llu/%llu/%llu  ·  ureg u/f/q/p/a %08x/%08x/%u/%08x/%u  ·  dma0 r/w/b/i/c/bad %llu/%llu/%llu/%llu/%llu/%llu  ·  dma1 r/w/b/i/c/bad %llu/%llu/%llu/%llu/%llu/%llu  ·  dtx %@  ·  drx %@",
             phase, networkDownRate / 1.0e6, networkUpRate / 1.0e6,
             (unsigned long long)networkStatus.guest_tx_bytes,
             (unsigned long long)networkStatus.guest_rx_bytes,
@@ -2188,6 +2188,11 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
             (unsigned long long)networkStatus.uart4_rx_reads,
             (unsigned long long)networkStatus.uart4_rx_dropped,
             (unsigned long long)networkStatus.uart4_rx_underruns,
+            networkStatus.uart4_ucon,
+            networkStatus.uart4_ufcon,
+            (unsigned)networkStatus.uart4_rx_count,
+            networkStatus.uart4_utrstat_pending,
+            (unsigned)networkStatus.uart4_rx_timeout_armed,
             (unsigned long long)networkStatus.dmac_reads[0],
             (unsigned long long)networkStatus.dmac_writes[0],
             (unsigned long long)networkStatus.dmac_bytes[0],
