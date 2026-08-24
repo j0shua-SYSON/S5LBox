@@ -267,6 +267,8 @@ void vm_network_session_status(const vm_network_session_t *session,
     if (session->peer) {
         out->lcp_open = ppp_lcp_open(session->peer);
         out->ipcp_open = ppp_ipcp_open(session->peer);
+        out->ppp_fcs_errors = session->peer->stats.fcs_errors;
+        out->ppp_tx_overflows = session->peer->stats.tx_overflows;
     }
     if (session->net) {
         out->ip_in = session->net->stats.ip_in;
@@ -279,6 +281,38 @@ void vm_network_session_status(const vm_network_session_t *session,
         out->tcp_established = session->net->stats.tcp_established;
         out->tcp_bytes_to_host = session->net->stats.tcp_bytes_to_host;
         out->tcp_bytes_to_guest = session->net->stats.tcp_bytes_to_guest;
+        out->tcp_resets_out = session->net->stats.tcp_resets_out;
+        out->tcp_resets_in = session->net->stats.tcp_resets_in;
+        out->tcp_retransmits = session->net->stats.tcp_retransmits;
+        out->tcp_out_of_order = session->net->stats.tcp_out_of_order;
+        out->tcp_output_dropped = session->net->stats.out_dropped;
+        out->tcp_aborts_unexpected_syn =
+            session->net->stats.tcp_aborts_unexpected_syn;
+        out->tcp_aborts_connect = session->net->stats.tcp_aborts_connect;
+        out->tcp_aborts_host_send = session->net->stats.tcp_aborts_host_send;
+        out->tcp_aborts_host_recv = session->net->stats.tcp_aborts_host_recv;
+        out->tcp_aborts_retransmit =
+            session->net->stats.tcp_aborts_retransmit;
+        out->tcp_last_abort_reason = session->net->stats.tcp_last_abort_reason;
+        out->tcp_last_abort_state = session->net->stats.tcp_last_abort_state;
+        out->tcp_last_abort_window = session->net->stats.tcp_last_abort_window;
+        out->tcp_last_abort_inflight =
+            session->net->stats.tcp_last_abort_inflight;
+        out->tcp_last_abort_buffered =
+            session->net->stats.tcp_last_abort_buffered;
+        out->tcp_last_abort_retries =
+            session->net->stats.tcp_last_abort_retries;
+        out->tcp_last_peer_reset_state =
+            session->net->stats.tcp_last_peer_reset_state;
+        out->tcp_last_peer_reset_window =
+            session->net->stats.tcp_last_peer_reset_window;
+        out->tcp_last_peer_reset_inflight =
+            session->net->stats.tcp_last_peer_reset_inflight;
+        out->tcp_last_peer_reset_buffered =
+            session->net->stats.tcp_last_peer_reset_buffered;
+        out->tcp_last_peer_reset_retries =
+            session->net->stats.tcp_last_peer_reset_retries;
+        out->tcp_output_pending = (uint32_t)net_output_pending(session->net);
     }
     const net_host_stats_t *host = net_host_stats(session->host);
     if (host) {

@@ -1291,6 +1291,14 @@ static void test_a_reset_from_the_guest_frees_the_flow(void) {
     CHECK(net_flows_open(&g_ns) == 0u, "the flow survived a RST");
     CHECK(g_mock.h[0].closed, "the socket was not closed");
     CHECK(g_ns.stats.tcp_resets_in == 1u, "the reset was not counted");
+    CHECK(g_ns.stats.tcp_last_peer_reset_state == NET_TCP_ESTABLISHED,
+          "the reset snapshot lost the live state: %u",
+          g_ns.stats.tcp_last_peer_reset_state);
+    CHECK(g_ns.stats.tcp_last_peer_reset_window == 8192u &&
+          g_ns.stats.tcp_last_peer_reset_inflight == 0u,
+          "the reset snapshot has window/inflight %u/%u",
+          g_ns.stats.tcp_last_peer_reset_window,
+          g_ns.stats.tcp_last_peer_reset_inflight);
     CHECK(net_output_pending(&g_ns) == 0u, "we answered a RST with a segment");
 }
 
@@ -1455,6 +1463,16 @@ static void test_a_lost_segment_is_retransmitted_and_then_given_up_on(void) {
     bool saw_rst = false;
     while (take(&r)) if (r.flags & TCP_RST) saw_rst = true;
     CHECK(saw_rst, "a flow that was never acknowledged was not reset");
+    CHECK(g_ns.stats.tcp_aborts_retransmit == 1u &&
+          g_ns.stats.tcp_last_abort_reason == NET_TCP_ABORT_RETRANSMIT,
+          "the R2 abort was not attributed to retransmission exhaustion");
+    CHECK(g_ns.stats.tcp_last_abort_state == NET_TCP_ESTABLISHED &&
+          g_ns.stats.tcp_last_abort_inflight == sizeof d &&
+          g_ns.stats.tcp_last_abort_buffered == sizeof d,
+          "the R2 snapshot has state/fly/buf %u/%u/%u",
+          g_ns.stats.tcp_last_abort_state,
+          g_ns.stats.tcp_last_abort_inflight,
+          g_ns.stats.tcp_last_abort_buffered);
     CHECK(net_flows_open(&g_ns) == 0u, "the dead flow was left allocated");
 }
 

@@ -111,6 +111,17 @@
 #define NET_DNS_TTL         60u      /* what we put in the answers we synth    */
 #define NET_DNS_TIMEOUT_MS  30000u   /* pending host lookup -> SERVFAIL        */
 
+/* Why an established or connecting TCP flow was actively reset by us. The
+ * values are stable diagnostics: frontends may publish them without importing
+ * tcp.c's private implementation details. A reset received FROM the guest is
+ * counted separately by stats.tcp_resets_in and is never an abort reason. */
+#define NET_TCP_ABORT_NONE             0u
+#define NET_TCP_ABORT_UNEXPECTED_SYN   1u
+#define NET_TCP_ABORT_CONNECT          2u
+#define NET_TCP_ABORT_HOST_SEND        3u
+#define NET_TCP_ABORT_HOST_RECV        4u
+#define NET_TCP_ABORT_RETRANSMIT       5u
+
 /*
  * Host resolution is allowed to finish after the packet that requested it.
  * Four outstanding questions cover the parallel A lookups a browser normally
@@ -297,6 +308,31 @@ typedef struct {
     uint64_t tcp_retransmits;
     uint64_t tcp_out_of_order;  /* dropped and re-ACKed, never reassembled   */
     uint64_t tcp_bytes_to_host, tcp_bytes_to_guest;
+
+    /* tcp_resets_out alone cannot tell a rejected stray segment from a live
+     * flow that we destroyed. Keep every local abort cause separate and retain
+     * one bounded snapshot of the last such flow. This is diagnostic state,
+     * not protocol state, and survives net_flow_free(). */
+    uint64_t tcp_aborts_unexpected_syn;
+    uint64_t tcp_aborts_connect;
+    uint64_t tcp_aborts_host_send;
+    uint64_t tcp_aborts_host_recv;
+    uint64_t tcp_aborts_retransmit;
+    uint32_t tcp_last_abort_reason;
+    uint32_t tcp_last_abort_state;
+    uint32_t tcp_last_abort_window;
+    uint32_t tcp_last_abort_inflight;
+    uint32_t tcp_last_abort_buffered;
+    uint32_t tcp_last_abort_retries;
+
+    /* A peer RST frees the flow immediately. Preserve the state it killed so a
+     * browser cancellation and an internal R2 abort cannot look identical in
+     * a physical-device report. */
+    uint32_t tcp_last_peer_reset_state;
+    uint32_t tcp_last_peer_reset_window;
+    uint32_t tcp_last_peer_reset_inflight;
+    uint32_t tcp_last_peer_reset_buffered;
+    uint32_t tcp_last_peer_reset_retries;
 
     uint64_t flows_open, flows_peak, flow_table_full;
     uint64_t out_dropped;       /* the queue toward the guest was full       */

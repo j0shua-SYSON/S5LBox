@@ -138,8 +138,36 @@ static void tcp_reject(net_stack_t *ns, uint32_t dst_ip,
     (void)n;
 }
 
-/* Reset an established flow and drop it. */
-static void tcp_abort(net_stack_t *ns, net_flow_t *f) {
+/* Reset an established flow and drop it. Record WHY before net_flow_free()
+ * erases the only state that can distinguish a transport defect from an
+ * unreachable host. */
+static void tcp_abort(net_stack_t *ns, net_flow_t *f, uint32_t reason) {
+    switch (reason) {
+        case NET_TCP_ABORT_UNEXPECTED_SYN:
+            ns->stats.tcp_aborts_unexpected_syn++;
+            break;
+        case NET_TCP_ABORT_CONNECT:
+            ns->stats.tcp_aborts_connect++;
+            break;
+        case NET_TCP_ABORT_HOST_SEND:
+            ns->stats.tcp_aborts_host_send++;
+            break;
+        case NET_TCP_ABORT_HOST_RECV:
+            ns->stats.tcp_aborts_host_recv++;
+            break;
+        case NET_TCP_ABORT_RETRANSMIT:
+            ns->stats.tcp_aborts_retransmit++;
+            break;
+        default:
+            reason = NET_TCP_ABORT_NONE;
+            break;
+    }
+    ns->stats.tcp_last_abort_reason   = reason;
+    ns->stats.tcp_last_abort_state    = (uint32_t)f->state;
+    ns->stats.tcp_last_abort_window   = f->snd_wnd;
+    ns->stats.tcp_last_abort_inflight = f->snd_nxt - f->snd_una;
+    ns->stats.tcp_last_abort_buffered = f->txlen;
+    ns->stats.tcp_last_abort_retries  = f->rtx;
     tcp_out(ns, f, TCP_RST | TCP_ACK, f->snd_nxt, NULL, 0);
     ns->stats.tcp_resets_out++;
     net_flow_free(ns, f);
@@ -390,6 +418,11 @@ void net_tcp_input(net_stack_t *ns, uint32_t src, uint32_t dst,
 
     if (flags & TCP_RST) {
         ns->stats.tcp_resets_in++;
+        ns->stats.tcp_last_peer_reset_state    = (uint32_t)f->state;
+        ns->stats.tcp_last_peer_reset_window   = f->snd_wnd;
+        ns->stats.tcp_last_peer_reset_inflight = f->snd_nxt - f->snd_una;
+        ns->stats.tcp_last_peer_reset_buffered = f->txlen;
+        ns->stats.tcp_last_peer_reset_retries  = f->rtx;
         net_flow_free(ns, f);
         return;
     }
@@ -405,7 +438,7 @@ void net_tcp_input(net_stack_t *ns, uint32_t src, uint32_t dst,
         }
         /* A SYN inside an open connection is either a peer that lost its mind
          * or a stale duplicate. RFC 793 §3.9 says reset. */
-        tcp_abort(ns, f);
+        tcp_abort(ns, f, NET_TCP_ABORT_UNEXPECTED_SYN);
         return;
     }
 
@@ -510,13 +543,13 @@ void net_tcp_tick(net_stack_t *ns, net_flow_t *f) {
         if (st == NET_ST_PENDING) {
             if ((int32_t)(ns->now_ms - f->close_at) >= 0) {
                 ns->stats.tcp_refused++;
-                tcp_abort(ns, f);
+                tcp_abort(ns, f, NET_TCP_ABORT_CONNECT);
             }
             return;
         }
         if (st == NET_ST_FAILED) {
             ns->stats.tcp_refused++;
-            tcp_abort(ns, f);
+            tcp_abort(ns, f, NET_TCP_ABORT_CONNECT);
             return;
         }
         if (!tcp_out(ns, f, TCP_SYN | TCP_ACK, f->snd_nxt, NULL, 0))
@@ -531,7 +564,10 @@ void net_tcp_tick(net_stack_t *ns, net_flow_t *f) {
      * §8.3 asks for: a full queue never blocks and never silently drops. */
     if (f->rxlen && ns->eg.send) {
         int w = ns->eg.send(ns->eg.ctx, f->handle, f->rxbuf, f->rxlen);
-        if (w < 0) { tcp_abort(ns, f); return; }
+        if (w < 0) {
+            tcp_abort(ns, f, NET_TCP_ABORT_HOST_SEND);
+            return;
+        }
         if (w > 0) {
             memmove(f->rxbuf, f->rxbuf + w, f->rxlen - (uint32_t)w);
             f->rxlen -= (uint32_t)w;
@@ -551,7 +587,10 @@ void net_tcp_tick(net_stack_t *ns, net_flow_t *f) {
                                 NET_TCP_TXBUF - f->txlen);
             if (r == NET_EG_WOULDBLOCK) break;
             if (r == NET_EG_EOF) { f->host_eof = true; break; }
-            if (r < 0) { tcp_abort(ns, f); return; }
+            if (r < 0) {
+                tcp_abort(ns, f, NET_TCP_ABORT_HOST_RECV);
+                return;
+            }
             f->txlen += (uint32_t)r;
         }
     }
@@ -561,7 +600,7 @@ void net_tcp_tick(net_stack_t *ns, net_flow_t *f) {
         if (++f->rtx > NET_TCP_RTX_MAX) {
             /* RFC 1122 §4.2.3.5's R2: give up and tell the guest, rather than
              * leaving a flow that will never move and never be reported. */
-            tcp_abort(ns, f);
+            tcp_abort(ns, f, NET_TCP_ABORT_RETRANSMIT);
             return;
         }
         ns->stats.tcp_retransmits++;
