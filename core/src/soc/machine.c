@@ -360,8 +360,16 @@ static uint32_t bus_read(void *ctx, uint32_t addr, unsigned bytes) {
         uint32_t off = addr - S5L8900_UART4_BASE;
         unsigned rx_before = m->uart4.rx_count;
         v = s5l_uart_read(&m->uart4, off);
+        /* A PIO receive handler must eventually observe an empty hardware
+         * FIFO and return to the tty layer.  Refilling after every PIO byte
+         * made the sixteen-entry FIFO an unbounded synchronous stream: the
+         * stock driver never left its drain loop and eventually printed
+         * "Software Overflow" while dropping PPP bytes.  A PL080 command is
+         * different: its programmed transfer count is the burst boundary, so
+         * demand refill is both bounded and required to let one DMA command
+         * consume beyond the initially visible FIFO. */
         if (off == UART_URXH && m->uart4.rx_count < rx_before &&
-            m->uart4_host_refill)
+            m->dma_access_active && m->uart4_host_refill)
             m->uart4_host_refill(m->uart4_host_ctx);
     } else if (mmio_word(addr, bytes, S5L8900_VIC0_BASE, S5L8900_DEV_SIZE)) {
         uint32_t off = addr - S5L8900_VIC0_BASE;

@@ -3923,13 +3923,17 @@ typedef bool (*s5l_active_host_now_fn)(void *ctx, uint64_t *nanoseconds);
  * FIFO through s5l_uart_rx_push() and then call s5l8900_tick(machine, 0) to
  * refresh the interrupt line. It must not call s5l8900_run() recursively.
  *
- * `refill` runs after a successful guest read from uart4's URXH has freed one
- * receive-FIFO slot. It may only move already-queued host bytes into uart4
- * through s5l_uart_rx_push(); socket polling and protocol work remain at the
- * between-slices `service` boundary. This demand edge is what prevents a
- * 16-byte hardware FIFO from accidentally becoming a 16-byte-per-run-slice
- * throughput limit. bus_read() has already marked interrupt levels dirty, so
- * refill must not tick or run the machine recursively.
+ * `refill` runs after a successful PL080-owned read from uart4's URXH has
+ * freed one receive-FIFO slot. It does NOT run for PIO reads: the stock PIO
+ * handler must observe an empty FIFO and return to the tty layer, or an eager
+ * refill turns its finite drain loop into an unbounded stream and overruns the
+ * tty software queue. A DMA command already supplies a finite transfer-count
+ * boundary, and demand refill is what lets that one bounded command consume
+ * beyond the sixteen bytes initially visible. The callback may only move
+ * already-queued host bytes into uart4 through s5l_uart_rx_push(); socket
+ * polling and protocol work remain at the between-slices `service` boundary.
+ * bus_read() has already marked interrupt levels dirty, so refill must not
+ * tick or run the machine recursively.
  *
  * Both callbacks run synchronously on the machine-owning thread. Generic
  * frontends leave them NULL, preserving the historical machine exactly.

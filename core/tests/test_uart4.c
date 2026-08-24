@@ -457,11 +457,39 @@ static void test_host_peer_sees_the_live_stream_and_run_boundary(void) {
           (unsigned long long)probe.retired);
 
     CHECK(s5l_uart_rx_push(&m.uart4, 0x5au),
-          "could not seed uart4 RX for the refill edge");
+          "could not seed uart4 RX for the PIO receive");
     CHECK(m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_URXH) == 0x5au &&
-          probe.refill_calls == 1u,
-          "successful URXH read produced %llu refill callbacks, expected 1",
+          probe.refill_calls == 0u,
+          "PIO URXH read produced %llu refill callbacks, expected 0",
           (unsigned long long)probe.refill_calls);
+
+    /* PIO has no finite transfer-count boundary.  Refilling synchronously
+     * here would keep Apple's receive loop non-empty forever and bypass the
+     * tty layer's opportunity to consume its software queue.  DMA does have a
+     * programmed boundary, so the same physical read must request one refill
+     * when its access originates inside the PL080. */
+    CHECK(s5l_uart_rx_push(&m.uart4, 0xa5u),
+          "could not seed uart4 RX for the DMA refill edge");
+    const uint32_t dma = S5L8900_DMAC0_BASE + PL080_CHAN_BASE;
+    m.bus.write32(m.bus.ctx, dma + PL080_CH_SRC,
+                  S5L8900_UART4_BASE + UART_URXH);
+    m.bus.write32(m.bus.ctx, dma + PL080_CH_DST, 0x200u);
+    m.bus.write32(m.bus.ctx, dma + PL080_CH_LLI, 0u);
+    m.bus.write32(m.bus.ctx, dma + PL080_CH_CTRL,
+                  PL080_CTRL_DI | PL080_CTRL_I | 1u);
+    m.bus.write32(m.bus.ctx, dma + PL080_CH_CFG,
+                  (2u << PL080_CFG_FLOW_SHIFT) | PL080_CFG_ITC |
+                  PL080_CFG_EN);
+    m.bus.write32(m.bus.ctx, S5L8900_DMAC0_BASE + PL080_CONFIG,
+                  PL080_CONFIG_EN);
+    s5l8900_tick(&m, 0u);
+    CHECK(m.bus.read8(m.bus.ctx, 0x200u) == 0xa5u &&
+          probe.refill_calls == 1u,
+          "DMA URXH read stored %02x and produced %llu refill callbacks, "
+          "expected a5/1",
+          m.bus.read8(m.bus.ctx, 0x200u),
+          (unsigned long long)probe.refill_calls);
+
     (void)m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_URXH);
     (void)m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_UFSTAT);
     CHECK(probe.refill_calls == 1u,
