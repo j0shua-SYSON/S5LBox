@@ -1,6 +1,7 @@
 /* Host-side tests for the iOS PPP/NAT attachment. */
 #include "VMNetworkSession.h"
 
+#include "net.h"
 #include "ppp.h"
 
 #include <stdio.h>
@@ -12,6 +13,80 @@ static int g_pass, g_fail;
     else { g_fail++; printf("  FAIL %s:%d: ", __func__, __LINE__); \
            printf(__VA_ARGS__); printf("\n"); } \
 } while (0)
+
+static void write_be16(uint8_t *out, uint16_t value) {
+    out[0] = (uint8_t)(value >> 8);
+    out[1] = (uint8_t)value;
+}
+
+static void send_guest_ppp_bytes(s5l8900_t *machine, ppp_peer_t *guest) {
+    int byte;
+    while ((byte = ppp_output_byte(guest)) >= 0)
+        machine->bus.write32(machine->bus.ctx,
+                             S5L8900_UART4_BASE + UART_UTXH,
+                             (uint32_t)(uint8_t)byte);
+}
+
+static void receive_host_ppp_bytes(s5l8900_t *machine, ppp_peer_t *guest) {
+    while (machine->uart4.rx_count != 0u) {
+        uint8_t byte = (uint8_t)machine->bus.read32(
+            machine->bus.ctx, S5L8900_UART4_BASE + UART_URXH);
+        ppp_input_byte(guest, byte);
+    }
+}
+
+static bool run_service_boundary(s5l8900_t *machine) {
+    arm_status_t status = ARM_OK;
+    return s5l8900_run(machine, 0u, &status) == 0u && status == ARM_OK;
+}
+
+static bool open_test_ppp_link(s5l8900_t *machine,
+                               vm_network_session_t *session,
+                               ppp_peer_t *guest) {
+    ppp_config_t config;
+    ppp_config_default(&config);
+    uint32_t address = config.local_ip;
+    config.local_ip = config.remote_ip;
+    config.remote_ip = address;
+    config.magic ^= UINT32_C(0x01010101);
+    ppp_init(guest, &config);
+    ppp_open(guest);
+
+    for (unsigned turn = 0u; turn < 32u; turn++) {
+        send_guest_ppp_bytes(machine, guest);
+        if (!run_service_boundary(machine)) return false;
+        receive_host_ppp_bytes(machine, guest);
+
+        vm_network_status_t status;
+        vm_network_session_status(session, &status);
+        if (status.ipcp_open && ppp_ipcp_open(guest)) {
+            send_guest_ppp_bytes(machine, guest);
+            if (!run_service_boundary(machine)) return false;
+            receive_host_ppp_bytes(machine, guest);
+            return true;
+        }
+    }
+    return false;
+}
+
+static size_t build_echo_request(uint8_t *packet, size_t capacity,
+                                 uint16_t sequence) {
+    uint8_t icmp[12] = {0};
+    icmp[0] = 8u;
+    write_be16(icmp + 4u, UINT16_C(0x5355));
+    write_be16(icmp + 6u, sequence);
+    for (unsigned i = 8u; i < sizeof icmp; i++)
+        icmp[i] = (uint8_t)(sequence + i);
+    write_be16(icmp + 2u, net_checksum(icmp, sizeof icmp));
+
+    size_t header = net_build_ipv4(packet, capacity,
+                                   UINT32_C(0x0a00020f),
+                                   UINT32_C(0x0a000202),
+                                   NET_PROTO_ICMP, sequence, sizeof icmp);
+    if (!header || header + sizeof icmp > capacity) return 0u;
+    memcpy(packet + header, icmp, sizeof icmp);
+    return header + sizeof icmp;
+}
 
 static void send_initial_guest_request(s5l8900_t *machine) {
     ppp_config_t config;
@@ -187,6 +262,70 @@ static void test_nat_socket_owner_starts_without_a_flow(void) {
     s5l8900_free(&machine);
 }
 
+static void test_host_datagrams_cross_one_per_run_boundary(void) {
+    s5l8900_t machine;
+    char detail[192];
+    CHECK(s5l8900_init(&machine, 0u, 1u << 20), "machine init failed");
+    vm_network_session_t *session = vm_network_session_create(
+        &machine, true, detail, sizeof detail);
+    CHECK(session != NULL, "PPP/NAT attachment failed: %s", detail);
+    if (!session) {
+        s5l8900_free(&machine);
+        return;
+    }
+
+    ppp_peer_t guest;
+    CHECK(open_test_ppp_link(&machine, session, &guest),
+          "the two in-process PPP peers did not reach IPCP Opened");
+
+    vm_network_status_t before;
+    vm_network_session_status(session, &before);
+    CHECK(before.ipcp_open && before.tcp_output_pending == 0u,
+          "the test link opened with IPCP/pending=%u/%u",
+          before.ipcp_open, before.tcp_output_pending);
+
+    for (uint16_t sequence = 1u; sequence <= 3u; sequence++) {
+        uint8_t packet[64];
+        size_t length = build_echo_request(packet, sizeof packet, sequence);
+        CHECK(length != 0u && ppp_send_ip(&guest, packet, length),
+              "echo request %u could not be framed", sequence);
+    }
+    send_guest_ppp_bytes(&machine, &guest);
+
+    vm_network_status_t status;
+    CHECK(run_service_boundary(&machine), "the first service boundary failed");
+    vm_network_session_status(session, &status);
+    CHECK(status.net_to_guest == before.net_to_guest + 1u &&
+          status.tcp_output_pending == 2u,
+          "first boundary sent/pending=%llu/%u, expected %llu/2",
+          (unsigned long long)status.net_to_guest,
+          status.tcp_output_pending,
+          (unsigned long long)(before.net_to_guest + 1u));
+
+    CHECK(run_service_boundary(&machine), "the second service boundary failed");
+    vm_network_session_status(session, &status);
+    CHECK(status.net_to_guest == before.net_to_guest + 2u &&
+          status.tcp_output_pending == 1u,
+          "second boundary sent/pending=%llu/%u, expected %llu/1",
+          (unsigned long long)status.net_to_guest,
+          status.tcp_output_pending,
+          (unsigned long long)(before.net_to_guest + 2u));
+
+    CHECK(run_service_boundary(&machine), "the third service boundary failed");
+    vm_network_session_status(session, &status);
+    CHECK(status.net_to_guest == before.net_to_guest + 3u &&
+          status.tcp_output_pending == 0u &&
+          status.net_to_guest_lost == 0u && status.guest_ip_dropped == 0u,
+          "third boundary sent/pending/lost/dropped=%llu/%u/%llu/%llu",
+          (unsigned long long)status.net_to_guest,
+          status.tcp_output_pending,
+          (unsigned long long)status.net_to_guest_lost,
+          (unsigned long long)status.guest_ip_dropped);
+
+    vm_network_session_destroy(&session);
+    s5l8900_free(&machine);
+}
+
 static void test_invalid_create_fails_closed(void) {
     char detail[96];
     vm_network_session_t *session = vm_network_session_create(
@@ -205,6 +344,7 @@ int main(void) {
     printf("S5LBox iOS PPP/NAT attachment tests\n");
     test_ppp_attachment_closes_the_uart_loop();
     test_nat_socket_owner_starts_without_a_flow();
+    test_host_datagrams_cross_one_per_run_boundary();
     test_invalid_create_fails_closed();
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
