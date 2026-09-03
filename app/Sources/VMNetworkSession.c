@@ -31,6 +31,12 @@ struct vm_network_session {
     bool          peer_opened;
     bool          lcp_reported;
     bool          ipcp_reported;
+    s5l_active_host_now_fn host_now;
+    void          *host_now_ctx;
+    uint64_t       host_clock_anchor_ns;
+    uint64_t       host_clock_failures;
+    uint32_t       network_now_ms;
+    bool           host_clock_anchored;
     uint64_t      service_calls;
     uint64_t      refill_calls;
     uint64_t      retired_since_open;
@@ -44,6 +50,21 @@ struct vm_network_session {
     unsigned      inbound_head;
     unsigned      inbound_tail;
 };
+
+static void anchor_host_clock(vm_network_session_t *session) {
+    if (!session) return;
+    session->host_clock_anchor_ns = 0u;
+    session->host_clock_anchored = false;
+    if (!session->host_now) return;
+
+    uint64_t now_ns = 0u;
+    if (!session->host_now(session->host_now_ctx, &now_ns)) {
+        session->host_clock_failures++;
+        return;
+    }
+    session->host_clock_anchor_ns = now_ns;
+    session->host_clock_anchored = true;
+}
 
 static void set_detail(char *out, size_t capacity, const char *text) {
     if (!out || !capacity) return;
@@ -78,6 +99,8 @@ static bool open_peer(vm_network_session_t *session, const char *trigger) {
     if (session->peer_opened) return true;
     session->peer_opened = true;
     session->retired_since_open = 0u;
+    session->network_now_ms = 0u;
+    anchor_host_clock(session);
     ppp_open(session->peer);
     (void)fprintf(stderr, "[network] %s; PPP negotiation started\n",
                   trigger);
@@ -99,6 +122,41 @@ static uint32_t guest_milliseconds(uint64_t retired) {
     uint64_t ms = whole * UINT64_C(1000) +
                   (rem * UINT64_C(1000)) / (uint64_t)S5L8900_CPU_HZ;
     return ms > UINT32_MAX ? UINT32_MAX : (uint32_t)ms;
+}
+
+static uint32_t network_milliseconds(vm_network_session_t *session) {
+    if (!session) return 0u;
+
+    uint32_t fallback = guest_milliseconds(session->retired_since_open);
+    if (!session->host_now) {
+        session->network_now_ms = fallback;
+        return fallback;
+    }
+
+    uint64_t now_ns = 0u;
+    if (!session->host_now(session->host_now_ctx, &now_ns)) {
+        session->host_clock_failures++;
+    } else if (!session->host_clock_anchored) {
+        session->host_clock_anchor_ns = now_ns;
+        session->host_clock_anchored = true;
+    } else if (now_ns >= session->host_clock_anchor_ns) {
+        uint64_t elapsed_ms =
+            (now_ns - session->host_clock_anchor_ns) / UINT64_C(1000000);
+        uint32_t measured = elapsed_ms > UINT32_MAX
+                          ? UINT32_MAX : (uint32_t)elapsed_ms;
+        if (measured > session->network_now_ms)
+            session->network_now_ms = measured;
+        return session->network_now_ms;
+    } else {
+        /* A monotonic source moving backward is a failed sample, not a new
+         * epoch. Keep the last protocol instant and allow a later good sample
+         * from the original anchor to recover without moving time backward. */
+        session->host_clock_failures++;
+    }
+
+    if (fallback > session->network_now_ms)
+        session->network_now_ms = fallback;
+    return session->network_now_ms;
 }
 
 static void drain_guest_ip(vm_network_session_t *session) {
@@ -147,7 +205,7 @@ static void uart4_host_service(void *ctx, unsigned retired) {
         session->retired_since_open = UINT64_MAX;
     else
         session->retired_since_open += (uint64_t)retired;
-    uint32_t now_ms = guest_milliseconds(session->retired_since_open);
+    uint32_t now_ms = network_milliseconds(session);
     ppp_tick(session->peer, now_ms);
 
     if (session->net) {
@@ -261,6 +319,16 @@ vm_network_session_t *vm_network_session_create(
     return session;
 }
 
+bool vm_network_session_set_host_clock(vm_network_session_t *session,
+                                       s5l_active_host_now_fn now,
+                                       void *ctx) {
+    if (!session) return false;
+    session->host_now = now;
+    session->host_now_ctx = now ? ctx : NULL;
+    anchor_host_clock(session);
+    return true;
+}
+
 bool vm_network_session_reopen_after_restore(vm_network_session_t *session) {
     if (!session || !session->machine || !session->peer ||
         session->machine->uart4_host_tx != uart4_guest_tx ||
@@ -280,6 +348,10 @@ void vm_network_session_status(const vm_network_session_t *session,
                     session->machine->uart4_host_ctx == session;
     out->nat_enabled = session->nat_enabled;
     out->peer_opened = session->peer_opened;
+    out->host_clock_enabled = session->host_now != NULL;
+    out->host_clock_anchored = session->host_clock_anchored;
+    out->network_now_ms = session->network_now_ms;
+    out->host_clock_failures = session->host_clock_failures;
     out->service_calls = session->service_calls;
     out->refill_calls = session->refill_calls;
     out->retired_since_open = session->retired_since_open;

@@ -1652,6 +1652,18 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                        "guest networking unavailable");
             return false;
         }
+#if defined(S5LBOX_IOS_ACTIVE_REALTIME_CLOCK)
+        if (!vm_network_session_set_host_clock(
+                boot->network, vm_firmware_active_now, NULL)) {
+            (void)file_block_close(boot->media);
+            set_detail(report->detail, sizeof report->detail,
+                       "Guest networking could not install its monotonic "
+                       "protocol clock.");
+            set_detail(report->summary, sizeof report->summary,
+                       "guest network clock unavailable");
+            return false;
+        }
+#endif
         if (restored &&
             !vm_network_session_reopen_after_restore(boot->network)) {
             (void)file_block_close(boot->media);

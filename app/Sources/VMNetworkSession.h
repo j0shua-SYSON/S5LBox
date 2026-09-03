@@ -46,6 +46,10 @@ typedef struct {
     bool     peer_opened;
     bool     lcp_open;
     bool     ipcp_open;
+    bool     host_clock_enabled;
+    bool     host_clock_anchored;
+    uint32_t network_now_ms;
+    uint64_t host_clock_failures;
     uint64_t service_calls;
     uint64_t refill_calls;
     uint64_t retired_since_open;
@@ -143,6 +147,21 @@ typedef struct {
 vm_network_session_t *vm_network_session_create(
     s5l8900_t *machine, bool nat_enabled,
     char *detail, size_t detail_capacity);
+
+/*
+ * Give protocol restart, DNS, and TCP timers a monotonic host clock. Network
+ * deadlines describe real sockets and a real serial peer; tying three seconds
+ * to 1.236 billion interpreted instructions can turn one PPP retry into many
+ * wall-clock minutes. The callback uses the same nanosecond contract as the
+ * machine's optional active clock, but remains independent guest-network
+ * policy. Pass NULL to retain deterministic retired-instruction time.
+ *
+ * Set this before the machine starts running. Replacing it on an open session
+ * safely re-anchors at the current protocol instant.
+ */
+bool vm_network_session_set_host_clock(vm_network_session_t *session,
+                                       s5l_active_host_now_fn now,
+                                       void *ctx);
 
 /*
  * A machine checkpoint preserves the guest's UART and PPP state, but host

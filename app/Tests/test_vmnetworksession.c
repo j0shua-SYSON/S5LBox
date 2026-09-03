@@ -40,6 +40,33 @@ static bool run_service_boundary(s5l8900_t *machine) {
     return s5l8900_run(machine, 0u, &status) == 0u && status == ARM_OK;
 }
 
+typedef struct {
+    uint64_t now_ns;
+    bool available;
+} fake_host_clock_t;
+
+static bool fake_host_now(void *ctx, uint64_t *nanoseconds) {
+    fake_host_clock_t *clock = (fake_host_clock_t *)ctx;
+    if (!clock || !nanoseconds || !clock->available) return false;
+    *nanoseconds = clock->now_ns;
+    return true;
+}
+
+static size_t drain_uart4_bytes(s5l8900_t *machine, size_t limit) {
+    size_t count = 0u;
+    while (count < limit) {
+        if (machine->uart4.rx_count == 0u) {
+            if (!run_service_boundary(machine) ||
+                machine->uart4.rx_count == 0u)
+                break;
+        }
+        (void)machine->bus.read32(machine->bus.ctx,
+                                  S5L8900_UART4_BASE + UART_URXH);
+        count++;
+    }
+    return count;
+}
+
 static bool settle_test_ppp_link(s5l8900_t *machine,
                                  vm_network_session_t *session,
                                  ppp_peer_t *guest) {
@@ -425,6 +452,69 @@ static void test_restored_guest_reopens_replaced_host_peer(void) {
     s5l8900_free(&machine);
 }
 
+static void test_restore_retry_uses_monotonic_host_time(void) {
+    s5l8900_t machine;
+    char detail[192];
+    CHECK(s5l8900_init(&machine, 0u, 1u << 20), "machine init failed");
+    vm_network_session_t *session = vm_network_session_create(
+        &machine, false, detail, sizeof detail);
+    CHECK(session != NULL, "PPP attachment failed: %s", detail);
+    if (!session) {
+        s5l8900_free(&machine);
+        return;
+    }
+
+    fake_host_clock_t clock = {
+        UINT64_C(900000000000),
+        true
+    };
+    CHECK(vm_network_session_set_host_clock(session, fake_host_now, &clock),
+          "host protocol clock was refused");
+    CHECK(vm_network_session_reopen_after_restore(session),
+          "restore-specific peer reopen was refused");
+    CHECK(run_service_boundary(&machine), "initial service boundary failed");
+    CHECK(drain_uart4_bytes(&machine, 37u) == 37u,
+          "initial LCP request did not contain 37 wire bytes");
+
+    vm_network_status_t status;
+    vm_network_session_status(session, &status);
+    CHECK(status.host_clock_enabled && status.host_clock_anchored &&
+          status.network_now_ms == 0u && status.retired_since_open == 0u &&
+          status.guest_rx_bytes == 37u,
+          "initial host clock/open status was %u/%u/%u/%llu/%llu",
+          status.host_clock_enabled, status.host_clock_anchored,
+          status.network_now_ms,
+          (unsigned long long)status.retired_since_open,
+          (unsigned long long)status.guest_rx_bytes);
+
+    clock.now_ns += UINT64_C(2999000000);
+    CHECK(run_service_boundary(&machine), "pre-deadline boundary failed");
+    vm_network_session_status(session, &status);
+    CHECK(status.network_now_ms == 2999u && status.guest_rx_bytes == 37u &&
+          drain_uart4_bytes(&machine, 1u) == 0u,
+          "LCP retried before 3 seconds (now/rx=%u/%llu)",
+          status.network_now_ms,
+          (unsigned long long)status.guest_rx_bytes);
+
+    clock.now_ns += UINT64_C(1000000);
+    CHECK(run_service_boundary(&machine), "deadline boundary failed");
+    CHECK(drain_uart4_bytes(&machine, 37u) == 37u,
+          "three-second LCP retry did not contain 37 wire bytes");
+    vm_network_session_status(session, &status);
+    CHECK(status.network_now_ms == 3000u &&
+          status.retired_since_open == 0u &&
+          status.guest_rx_bytes == 74u &&
+          status.host_clock_failures == 0u,
+          "wall-clock retry status now/retired/rx/fail=%u/%llu/%llu/%llu",
+          status.network_now_ms,
+          (unsigned long long)status.retired_since_open,
+          (unsigned long long)status.guest_rx_bytes,
+          (unsigned long long)status.host_clock_failures);
+
+    vm_network_session_destroy(&session);
+    s5l8900_free(&machine);
+}
+
 static void test_invalid_create_fails_closed(void) {
     char detail[96];
     vm_network_session_t *session = vm_network_session_create(
@@ -445,6 +535,7 @@ int main(void) {
     test_nat_socket_owner_starts_without_a_flow();
     test_host_datagrams_cross_one_per_run_boundary();
     test_restored_guest_reopens_replaced_host_peer();
+    test_restore_retry_uses_monotonic_host_time();
     test_invalid_create_fails_closed();
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
