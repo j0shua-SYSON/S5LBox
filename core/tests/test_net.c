@@ -1122,6 +1122,17 @@ static void test_bulk_data_starts_with_a_bounded_ack_clocked_flight(void) {
     CHECK(queued == 4u && second == 4u * NET_TCP_MSS_MAX,
           "the ACK-clocked second flight is datagrams/octet=%zu/%zu",
           queued, second);
+
+    send_tcp(PEER_IP, 50017u, 80u, gseq,
+             ours + (uint32_t)payload + (uint32_t)second,
+             TCP_ACK, 65535u, NULL, 0u, NULL, 0u);
+    queued = net_output_pending(&g_ns);
+    size_t third = 0u;
+    while (take(&r)) third += r.paylen;
+    CHECK(queued == NET_TCP_CWND_MAX_SEGMENTS &&
+          third == NET_TCP_CWND_MAX_SEGMENTS * NET_TCP_MSS_MAX,
+          "the bounded steady flight is datagrams/octet=%zu/%zu",
+          queued, third);
     CHECK(g_ns.stats.out_dropped == 0u,
           "paced bulk output still overfilled its bounded queue");
 }
