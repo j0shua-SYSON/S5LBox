@@ -86,16 +86,18 @@ static unsigned rx_dma_watermark(const s5l_uart_t *u) {
 }
 
 bool s5l_uart_rx_dma_ready(const s5l_uart_t *u) {
-    return u && u->rx_count >= rx_dma_watermark(u);
+    return u && u->rx_count != 0u &&
+           (u->rx_count >= rx_dma_watermark(u) ||
+            u->rx_timeout_state == S5L_UART_RX_TIMEOUT_RELEASED);
 }
 
 bool s5l_uart_rx_dma_idle(s5l_uart_t *u) {
-    if (!u || !u->rx_timeout_armed || u->rx_count == 0u ||
-        s5l_uart_rx_dma_ready(u) ||
+    if (!u || u->rx_timeout_state != S5L_UART_RX_TIMEOUT_ARMED ||
+        u->rx_count == 0u || u->rx_count >= rx_dma_watermark(u) ||
         !(u->ucon & UCON_RX_TIMEOUT_ENABLE))
         return false;
 
-    u->rx_timeout_armed = false;
+    u->rx_timeout_state = S5L_UART_RX_TIMEOUT_RELEASED;
     u->utrstat_pending |= UTRSTAT_RX_TIMEOUT;
     return true;
 }
@@ -139,7 +141,8 @@ bool s5l_uart_rx_push(s5l_uart_t *u, uint8_t byte) {
     /* A real arriving character restarts the receive-idle timer. A refused
      * push above does not reach this line and therefore cannot manufacture a
      * timeout for a byte the UART never accepted. */
-    u->rx_timeout_armed = true;
+    if (u->rx_timeout_state != S5L_UART_RX_TIMEOUT_RELEASED)
+        u->rx_timeout_state = S5L_UART_RX_TIMEOUT_ARMED;
     /*
      * THE EDGE. Every arrival latches, not just the empty->non-empty one: after
      * an acknowledge the driver may have drained only part of the FIFO, and a
@@ -187,6 +190,10 @@ uint32_t s5l_uart_read(s5l_uart_t *u, uint32_t off) {
             u->rx_head = (uint8_t)((u->rx_head + 1u) % UART_RX_FIFO);
             u->rx_count--;
             u->rx_reads++;
+            /* The timeout request is a FIFO-drain level, not the interrupt
+             * latch. End it at empty even if UTRSTAT bit 3 still awaits W1C. */
+            if (u->rx_count == 0u)
+                u->rx_timeout_state = S5L_UART_RX_TIMEOUT_DISARMED;
             return b;
         }
         default:           return 0;
@@ -219,9 +226,9 @@ void s5l_uart_write(s5l_uart_t *u, uint32_t off, uint32_t val) {
              * still holds data. The filter returns 0 for that cause, so a latch
              * re-armed merely from a non-empty FIFO would re-raise a level
              * nobody masks — exactly the storm run94 measured. Timeout 0x8 is
-             * different: its filter return is true, but rx_timeout_armed still
-             * makes one idle interval one edge rather than re-latching after
-             * every W1C. The next accepted byte re-arms it.
+             * also rejected when the FIFO is below full; its separate RELEASED
+             * request state lets PL080 drain that tail before this acknowledge,
+             * while the next accepted byte arms a genuinely new idle interval.
              */
             u->utrstat_pending &= ~val;
             break;

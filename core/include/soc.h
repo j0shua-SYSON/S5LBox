@@ -310,11 +310,14 @@
  *     part of the FIFO and stops would otherwise never be told about the rest.
  *   - A receive DMA request is gated by UFCON's 4/8/12/16-byte watermark. When
  *     an armed request becomes idle below that watermark, pending bit 0x8 is
- *     latched once. The filter's sole true return is this branch; it passes a
- *     timeout flag to AppleOnboardSerial, whose DMA state closes the partial
- *     command using the PL080 remaining count. This is the missing path that a
- *     non-empty-is-ready request model erased: it consumed the tail, never
- *     asserted 0x8, and left a 2,048-byte receive command waiting forever.
+ *     latched once and the UART releases the remaining FIFO bytes to DMA. That
+ *     release is distinct from the W1C status latch and ends only when the FIFO
+ *     is empty. This distinction is required by the shipped filter: below a
+ *     completely full FIFO its 0x8 branch neither stops nor queries the active
+ *     PL080 command and returns false. Only the full-FIFO recovery path calls
+ *     AppleOnboardSerial's receive handler with its timeout flag and returns
+ *     true. Latching the interrupt without releasing the request left the
+ *     measured 11-byte tail below UFCON=0x67's 12-byte watermark forever.
  *   - Bits 0, 1 and 2 stay LEVELS and are never latched. They are status, the
  *     polled console path depends on them, and bit 0 is what a drain loop tests
  *     to know when to stop.
@@ -422,20 +425,20 @@ typedef struct {
     bool     rx_irq_suppressed;
 
     /*
-     * One-shot arm for the legacy receive-timeout cause. A successful wire
-     * arrival arms it; s5l_uart_rx_dma_idle() consumes the arm when a DMA
-     * request stalls below UFCON's receive watermark. Without this bit, the
-     * driver's W1C acknowledge would immediately re-latch the same idle
-     * condition on the next device refresh and turn one timeout into an IRQ
-     * storm.
+     * State for the legacy receive-timeout DMA request. A successful wire
+     * arrival arms it; s5l_uart_rx_dma_idle() changes ARMED to RELEASED when a
+     * DMA request stalls below UFCON's receive watermark. RELEASED keeps the
+     * request asserted until the real FIFO becomes empty, independently of the
+     * W1C interrupt-status bit. Keeping those states separate prevents a later
+     * arrival from inheriting an acknowledged timeout merely because its
+     * status bit was still pending.
      *
      * This byte occupies the old alignment hole before utrstat_pending, so
      * sizeof(s5l_uart_t) and the snapshot byte format do not move. Like the
      * pending receive edge, it is derived conservatively from a restored
-     * non-empty FIFO in snap_uart(): one repeat timeout is safe, while losing
-     * the only event that closes a partial DMA buffer leaves the guest stuck.
+     * non-empty FIFO in snap_uart().
      */
-    bool     rx_timeout_armed;
+    uint8_t  rx_timeout_state;
 
     /*
      * UTRSTAT's LATCHED half: 0x10 receive_interrupt_status and 0x8 the legacy
@@ -473,17 +476,21 @@ bool     s5l_uart_rx_push(s5l_uart_t *u, uint8_t byte);
 /* How many more bytes s5l_uart_rx_push() would accept right now. */
 unsigned s5l_uart_rx_space(const s5l_uart_t *u);
 /*
- * The PL080 request line for URXH. In FIFO mode it asserts only at UFCON's
+ * The PL080 request line for URXH. In FIFO mode it normally asserts at UFCON's
  * receive trigger/watermark (4, 8, 12 or 16 bytes); without FIFO mode one byte
- * is sufficient. Treating every non-empty FIFO as a DMA request consumes the
- * short tail that real hardware leaves for its receive-timeout path, so the
- * stock driver never learns how many bytes completed a partial command.
+ * is sufficient. A fired legacy timeout also holds it asserted while a real
+ * FIFO tail remains. The three values are public so focused tests and telemetry
+ * can distinguish an idle timer from a tail that DMA is entitled to consume.
  */
+#define S5L_UART_RX_TIMEOUT_DISARMED 0u
+#define S5L_UART_RX_TIMEOUT_ARMED    1u
+#define S5L_UART_RX_TIMEOUT_RELEASED 2u
 bool     s5l_uart_rx_dma_ready(const s5l_uart_t *u);
 /*
  * Announce that an armed receive DMA request is idle below its watermark.
- * Returns true only when a fresh UTRSTAT_RX_TIMEOUT cause was latched. The
- * machine calls this only while a PL080 channel is enabled on this URXH.
+ * Returns true only when it changed ARMED to RELEASED and latched a fresh
+ * UTRSTAT_RX_TIMEOUT cause. The machine calls this from the request predicate,
+ * so the same PL080 run can consume the finite tail before guest code executes.
  */
 bool     s5l_uart_rx_dma_idle(s5l_uart_t *u);
 /*

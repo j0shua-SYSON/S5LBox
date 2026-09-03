@@ -526,19 +526,22 @@ static void snap_uart(sn_io_t *io, s5l_uart_t *u) {
      * that the load path sets rather than reads, with the byte format unchanged.
      * The legacy receive timeout remains derivable because it is meaningful
      * only for an enabled receive DMA command with a non-empty FIFO below its
-     * watermark; snap_uart() re-arms that one-shot and machine refresh checks
-     * the serialized PL080 command. A transmit, error, or auto-baud edge would
-     * not be reconstructible and would require a real format field/version.
+     * watermark; snap_uart() re-arms the idle state and the serialized PL080
+     * command releases and drains the tail on refresh. A transmit, error, or
+     * auto-baud edge would not be reconstructible and would require a real
+     * format field/version.
      */
     if (sn_reading(io) && io->err == SNAP_OK) {
         u->utrstat_pending = u->rx_count ? UTRSTAT_RX_INT : 0u;
-        /* This one-shot occupies an old struct padding byte and does not travel
-         * in the stream. Conservatively re-arm a restored non-empty FIFO: if a
+        /* This state occupies an old struct padding byte and does not travel in
+         * the stream. Conservatively re-arm a restored non-empty FIFO: if a
          * partial receive DMA is waiting below its watermark, the next refresh
          * regenerates the timeout event instead of leaving that command stuck.
          * A PIO port never calls the DMA-idle helper, so this cannot invent a
          * timeout merely because ordinary console input was queued. */
-        u->rx_timeout_armed = u->rx_count != 0u;
+        u->rx_timeout_state = u->rx_count
+            ? S5L_UART_RX_TIMEOUT_ARMED
+            : S5L_UART_RX_TIMEOUT_DISARMED;
     }
 }
 

@@ -116,7 +116,7 @@ typedef struct {
     uint32_t uart4_ufcon;
     uint32_t uart4_utrstat_pending;
     uint8_t  uart4_rx_count;
-    bool     uart4_rx_timeout_armed;
+    uint8_t  uart4_rx_timeout_state;
     vm_network_dma_endpoint_status_t dma_guest_tx;
     vm_network_dma_endpoint_status_t dma_guest_rx;
 } vm_network_status_t;

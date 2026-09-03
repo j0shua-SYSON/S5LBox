@@ -116,6 +116,11 @@ typedef struct {
     uint64_t refill_calls;
     uint64_t retired;
     uint8_t  last_tx;
+    s5l8900_t *refill_machine;
+    const uint8_t *refill_bytes;
+    size_t refill_len;
+    size_t refill_pos;
+    uint64_t refill_push_failures;
 } uart4_host_probe_t;
 
 static void uart4_host_tx_probe(void *ctx, uint8_t byte) {
@@ -134,7 +139,18 @@ static void uart4_host_service_probe(void *ctx, unsigned retired) {
 
 static void uart4_host_refill_probe(void *ctx) {
     uart4_host_probe_t *probe = (uart4_host_probe_t *)ctx;
-    if (probe) probe->refill_calls++;
+    if (!probe) return;
+    probe->refill_calls++;
+    if (!probe->refill_machine || !probe->refill_bytes) return;
+    unsigned room = s5l_uart_rx_space(&probe->refill_machine->uart4);
+    while (room-- && probe->refill_pos < probe->refill_len) {
+        if (!s5l_uart_rx_push(&probe->refill_machine->uart4,
+                              probe->refill_bytes[probe->refill_pos])) {
+            probe->refill_push_failures++;
+            break;
+        }
+        probe->refill_pos++;
+    }
 }
 
 /*
@@ -1047,10 +1063,10 @@ static void test_receive_dma_uses_the_fifo_watermark_and_one_timeout(void) {
               watermark[code]);
     }
 
-    /* A tail below the watermark is not a DMA request. It becomes one timeout
-     * edge only when both parts of the legacy mechanism are present: an actual
-     * accepted byte armed the idle detector, and UCON bit 7 enabled it. UCON
-     * bit 11 independently gates the resulting UTRSTAT bit 3 onto the line. */
+    /* A tail below the watermark is not a normal DMA request. An idle timeout
+     * releases it only when both parts of the legacy mechanism are present: an
+     * accepted byte armed the detector, and UCON bit 7 enabled it. UCON bit 11
+     * independently gates the resulting UTRSTAT bit 3 onto the line. */
     s5l_uart_reset(&u);
     s5l_uart_write(&u, UART_UFCON, 0x31u); /* FIFO, 16-byte watermark */
     for (unsigned i = 0u; i < 15u; i++)
@@ -1063,25 +1079,51 @@ static void test_receive_dma_uses_the_fifo_watermark_and_one_timeout(void) {
     CHECK(s5l_uart_rx_dma_idle(&u), "armed DMA tail did not latch timeout");
     CHECK((s5l_uart_read(&u, UART_UTRSTAT) & UTRSTAT_RX_TIMEOUT) != 0u,
           "timeout helper did not set UTRSTAT bit 3");
+    CHECK(u.rx_timeout_state == S5L_UART_RX_TIMEOUT_RELEASED &&
+          s5l_uart_rx_dma_ready(&u),
+          "timeout did not release the sub-watermark DMA tail (state %u)",
+          (unsigned)u.rx_timeout_state);
     CHECK(s5l_uart_rx_irq(&u), "enabled timeout did not assert the UART line");
     s5l_uart_write(&u, UART_UTRSTAT, UTRSTAT_RX_TIMEOUT);
+    CHECK(!s5l_uart_rx_irq(&u) && s5l_uart_rx_dma_ready(&u) &&
+          u.rx_timeout_state == S5L_UART_RX_TIMEOUT_RELEASED,
+          "W1C incorrectly revoked the independent DMA-tail request");
+    while (u.rx_count != 0u) (void)s5l_uart_read(&u, UART_URXH);
+    CHECK(u.rx_timeout_state == S5L_UART_RX_TIMEOUT_DISARMED &&
+          !s5l_uart_rx_dma_ready(&u),
+          "empty FIFO retained its timeout request (state %u)",
+          (unsigned)u.rx_timeout_state);
     CHECK(!s5l_uart_rx_dma_idle(&u),
           "W1C immediately re-latched the same idle interval");
     CHECK(!s5l_uart_rx_irq(&u), "one-shot timeout stayed asserted after W1C");
 
-    /* The machine-level join is the regression that failed physically. A
-     * 32-byte PL080 command starts with a full 16-byte FIFO. The watermark
-     * permits one byte into memory, leaves the 15-byte tail in the UART, and
-     * latches timeout instead of consuming all 16 and waiting forever for the
-     * other 16 command bytes. */
+    /* The machine-level join reproduces the physical failure exactly:
+     * UFCON=0x67 selects the 12-byte watermark, the host has produced 389
+     * genuine octets, and Apple's receive command still has 2,048 entries.
+     * Watermark-only DMA consumes 378 and strands 11. The timeout request must
+     * consume those 11 too, without completing the 1,659 entries not sent. */
+    enum { DMA_COMMAND_BYTES = 2048, FIRST_HOST_BYTES = 389 };
+    uint8_t stream[DMA_COMMAND_BYTES];
+    for (unsigned i = 0u; i < DMA_COMMAND_BYTES; i++)
+        stream[i] = (uint8_t)(0x5bu + 37u * i);
+
     s5l8900_t m;
+    uart4_host_probe_t probe = {0};
     CHECK(s5l8900_init(&m, 0u, 1u << 20), "machine init failed");
+    probe.refill_machine = &m;
+    probe.refill_bytes = stream;
+    probe.refill_len = FIRST_HOST_BYTES;
+    CHECK(s5l8900_set_uart4_host(&m, uart4_host_tx_probe,
+                                 uart4_host_service_probe,
+                                 uart4_host_refill_probe, &probe),
+          "could not attach the finite UART4 source");
     m.bus.write32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_INTENABLE, 1u << 28);
-    m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UCON, 0x1880u);
-    m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UFCON, 0x31u);
-    for (unsigned i = 0u; i < UART_RX_FIFO; i++)
-        CHECK(s5l_uart_rx_push(&m.uart4, (uint8_t)(0x80u + i)),
-              "machine FIFO seed failed at %u", i);
+    m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UCON, 0x00015c87u);
+    m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UFCON, 0x67u);
+    uart4_host_refill_probe(&probe);
+    CHECK(probe.refill_pos == UART_RX_FIFO && m.uart4.rx_count == UART_RX_FIFO,
+          "initial refill exposed %zu/%u bytes, expected 16/16",
+          probe.refill_pos, m.uart4.rx_count);
 
     const uint32_t ch = S5L8900_DMAC0_BASE + PL080_CHAN_BASE;
     m.bus.write32(m.bus.ctx, ch + PL080_CH_SRC,
@@ -1089,26 +1131,46 @@ static void test_receive_dma_uses_the_fifo_watermark_and_one_timeout(void) {
     m.bus.write32(m.bus.ctx, ch + PL080_CH_DST, 0x200u);
     m.bus.write32(m.bus.ctx, ch + PL080_CH_LLI, 0u);
     m.bus.write32(m.bus.ctx, ch + PL080_CH_CTRL,
-                  PL080_CTRL_DI | PL080_CTRL_I | 32u);
+                  PL080_CTRL_DI | PL080_CTRL_I | DMA_COMMAND_BYTES);
     m.bus.write32(m.bus.ctx, ch + PL080_CH_CFG,
                   (2u << PL080_CFG_FLOW_SHIFT) | PL080_CFG_ITC |
                   PL080_CFG_EN);
     m.bus.write32(m.bus.ctx, S5L8900_DMAC0_BASE + PL080_CONFIG,
                   PL080_CONFIG_EN);
+    m.bus.write8(m.bus.ctx, 0x200u + DMA_COMMAND_BYTES, 0xa5u);
 
     s5l8900_tick(&m, 0u);
-    CHECK(m.bus.read8(m.bus.ctx, 0x200u) == 0x80u,
-          "the first watermark-qualified byte did not reach memory");
-    CHECK(m.uart4.rx_count == 15u &&
-          (m.dmac[0].ch[0].ctrl & PL080_CTRL_SIZE_MASK) == 31u &&
-          (m.dmac[0].ch[0].cfg & PL080_CFG_EN) != 0u,
-          "partial DMA did not preserve the tail/count (%u/%u/%08x)",
-          m.uart4.rx_count,
+    CHECK(probe.refill_pos == FIRST_HOST_BYTES &&
+          m.uart4.rx_pushed == FIRST_HOST_BYTES &&
+          m.uart4.rx_reads == FIRST_HOST_BYTES,
+          "finite source crossed UART as %zu/%llu/%llu, expected 389 each",
+          probe.refill_pos, (unsigned long long)m.uart4.rx_pushed,
+          (unsigned long long)m.uart4.rx_reads);
+    CHECK(m.uart4.rx_count == 0u &&
+          m.uart4.rx_timeout_state == S5L_UART_RX_TIMEOUT_DISARMED,
+          "the physical 11-byte tail remained (%u bytes, state %u)",
+          m.uart4.rx_count, (unsigned)m.uart4.rx_timeout_state);
+    CHECK((m.dmac[0].ch[0].ctrl & PL080_CTRL_SIZE_MASK) ==
+              DMA_COMMAND_BYTES - FIRST_HOST_BYTES &&
+          (m.dmac[0].ch[0].cfg & PL080_CFG_EN) != 0u &&
+          (m.dmac[0].raw_tc & 1u) == 0u,
+          "partial DMA remaining/enabled/tc = %u/%u/%u, expected 1659/1/0",
           m.dmac[0].ch[0].ctrl & PL080_CTRL_SIZE_MASK,
-          m.dmac[0].ch[0].cfg);
+          (unsigned)((m.dmac[0].ch[0].cfg & PL080_CFG_EN) != 0u),
+          (unsigned)(m.dmac[0].raw_tc & 1u));
+    CHECK(memcmp(&m.ram[0x200u - m.ram_base], stream, FIRST_HOST_BYTES) == 0,
+          "the first 389 DMA bytes differ from the host stream");
+    CHECK(m.bus.read8(m.bus.ctx, 0x200u + DMA_COMMAND_BYTES) == 0xa5u,
+          "partial DMA crossed its 2,048-byte destination boundary");
+    CHECK(m.uart4.rx_dropped == 0u && m.uart4.rx_underruns == 0u &&
+          probe.refill_push_failures == 0u,
+          "tail drain dropped/underflowed/refused %llu/%llu/%llu bytes",
+          (unsigned long long)m.uart4.rx_dropped,
+          (unsigned long long)m.uart4.rx_underruns,
+          (unsigned long long)probe.refill_push_failures);
     CHECK((s5l_uart_read(&m.uart4, UART_UTRSTAT) &
            UTRSTAT_RX_TIMEOUT) != 0u,
-          "partial machine DMA did not latch the legacy timeout");
+          "tail drain did not retain the legacy timeout status for W1C");
     uint32_t raw = m.bus.read32(m.bus.ctx,
                                 S5L8900_VIC0_BASE + VIC_RAWINTR);
     CHECK((raw & (1u << 28)) != 0u,
@@ -1120,6 +1182,32 @@ static void test_receive_dma_uses_the_fifo_watermark_and_one_timeout(void) {
     raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
     CHECK((raw & (1u << 28)) == 0u,
           "the same idle interval re-latched after W1C (0x%08x)", raw);
+
+    /* Let the same real command receive the rest. It must complete on exactly
+     * byte 2,048, preserve order across the timeout boundary, and leave the
+     * sentinel immediately after its destination untouched. */
+    probe.refill_len = DMA_COMMAND_BYTES;
+    uart4_host_refill_probe(&probe);
+    s5l8900_tick(&m, 0u);
+    CHECK(probe.refill_pos == DMA_COMMAND_BYTES &&
+          m.uart4.rx_pushed == DMA_COMMAND_BYTES &&
+          m.uart4.rx_reads == DMA_COMMAND_BYTES && m.uart4.rx_count == 0u,
+          "completed stream crossed UART as %zu/%llu/%llu/%u",
+          probe.refill_pos, (unsigned long long)m.uart4.rx_pushed,
+          (unsigned long long)m.uart4.rx_reads, m.uart4.rx_count);
+    CHECK((m.dmac[0].ch[0].ctrl & PL080_CTRL_SIZE_MASK) == 0u &&
+          (m.dmac[0].ch[0].cfg & PL080_CFG_EN) == 0u &&
+          (m.dmac[0].raw_tc & 1u) != 0u,
+          "2,048-byte command did not complete at its real boundary");
+    CHECK(memcmp(&m.ram[0x200u - m.ram_base], stream,
+                 DMA_COMMAND_BYTES) == 0,
+          "completed DMA payload differs from the exact host stream");
+    CHECK(m.bus.read8(m.bus.ctx, 0x200u + DMA_COMMAND_BYTES) == 0xa5u &&
+          m.uart4.rx_dropped == 0u && m.uart4.rx_underruns == 0u &&
+          probe.refill_push_failures == 0u,
+          "completed DMA crossed its boundary or fabricated/lost a byte");
+    CHECK(s5l8900_set_uart4_host(&m, NULL, NULL, NULL, NULL),
+          "could not detach the finite UART4 source");
     s5l8900_free(&m);
 }
 
@@ -1238,8 +1326,9 @@ static void test_suppression_defaults_off_and_reset_clears_it(void) {
     CHECK(u.utrstat_pending == 0u,
           "reset left a latched interrupt cause (0x%08x) -- a port that has "
           "just been reset owes nobody an edge", u.utrstat_pending);
-    CHECK(!u.rx_timeout_armed,
-          "reset left the receive-timeout one-shot armed");
+    CHECK(u.rx_timeout_state == S5L_UART_RX_TIMEOUT_DISARMED,
+          "reset left receive-timeout state %u",
+          (unsigned)u.rx_timeout_state);
     s5l_uart_write(&u, UART_UCON, UCON_RX_INT_ENABLE);
     CHECK(s5l_uart_rx_push(&u, 0x42u), "push failed after reset");
     CHECK(s5l_uart_rx_irq(&u), "reset did not restore the default");
@@ -1550,13 +1639,15 @@ static void test_snapshot_carries_the_receive_fifo(void) {
     CHECK(r.uart4.utrstat_pending == UTRSTAT_RX_INT,
           "a restored non-empty FIFO came back with no latched cause (0x%08x)",
           r.uart4.utrstat_pending);
-    CHECK(r.uart4.rx_timeout_armed,
-          "a restored non-empty FIFO did not re-arm the DMA timeout");
+    CHECK(r.uart4.rx_timeout_state == S5L_UART_RX_TIMEOUT_ARMED,
+          "a restored non-empty FIFO has timeout state %u, expected armed",
+          (unsigned)r.uart4.rx_timeout_state);
     CHECK(r.uart0.utrstat_pending == 0u,
           "a restored EMPTY FIFO invented a latched cause (0x%08x)",
           r.uart0.utrstat_pending);
-    CHECK(!r.uart0.rx_timeout_armed,
-          "a restored empty FIFO invented a DMA timeout arm");
+    CHECK(r.uart0.rx_timeout_state == S5L_UART_RX_TIMEOUT_DISARMED,
+          "a restored empty FIFO invented timeout state %u",
+          (unsigned)r.uart0.rx_timeout_state);
 
     /* And the restored port really delivers the same next byte. */
     CHECK(s5l_uart_read(&r.uart4, UART_URXH) ==
@@ -1569,6 +1660,93 @@ static void test_snapshot_carries_the_receive_fifo(void) {
     free(img);
     s5l8900_free(&r);
     s5l8900_free(&m);
+}
+
+static void test_snapshot_releases_a_restored_dma_tail(void) {
+    /* A checkpoint may land after the host accepted a short UART batch but
+     * before the next device refresh. The timeout state itself is derived, so
+     * this pins the complete join: restored FIFO plus restored PL080 command
+     * must make forward progress without a second host byte. */
+    static const uint8_t tail[11] = {
+        0x7eu, 0xffu, 0x7du, 0x23u, 0xc0u, 0x21u,
+        0x01u, 0x09u, 0x00u, 0x0bu, 0x42u
+    };
+    s5l8900_t source, restored;
+    CHECK(s5l8900_init(&source, 0u, 1u << 20), "source init failed");
+    CHECK(s5l8900_init(&restored, 0u, 1u << 20), "restore init failed");
+    source.bus.write32(source.bus.ctx,
+                       S5L8900_VIC0_BASE + VIC_INTENABLE, 1u << 28);
+    source.bus.write32(source.bus.ctx,
+                       S5L8900_UART4_BASE + UART_UCON, 0x00015c87u);
+    source.bus.write32(source.bus.ctx,
+                       S5L8900_UART4_BASE + UART_UFCON, 0x67u);
+    for (size_t i = 0u; i < sizeof tail; i++)
+        CHECK(s5l_uart_rx_push(&source.uart4, tail[i]),
+              "could not seed restored tail byte %zu", i);
+
+    const uint32_t ch = S5L8900_DMAC0_BASE + PL080_CHAN_BASE;
+    source.bus.write32(source.bus.ctx, ch + PL080_CH_SRC,
+                       S5L8900_UART4_BASE + UART_URXH);
+    source.bus.write32(source.bus.ctx, ch + PL080_CH_DST, 0x400u);
+    source.bus.write32(source.bus.ctx, ch + PL080_CH_LLI, 0u);
+    source.bus.write32(source.bus.ctx, ch + PL080_CH_CTRL,
+                       PL080_CTRL_DI | PL080_CTRL_I | 32u);
+    source.bus.write32(source.bus.ctx, ch + PL080_CH_CFG,
+                       (2u << PL080_CFG_FLOW_SHIFT) | PL080_CFG_ITC |
+                       PL080_CFG_EN);
+    source.bus.write32(source.bus.ctx,
+                       S5L8900_DMAC0_BASE + PL080_CONFIG, PL080_CONFIG_EN);
+    source.bus.write8(source.bus.ctx, 0x400u + (uint32_t)sizeof tail, 0xa5u);
+
+    uint8_t *image = NULL;
+    size_t image_len = 0u;
+    CHECK(snapshot_save_mem(&source, &image, &image_len) == SNAP_OK,
+          "could not save active receive DMA tail");
+    CHECK(snapshot_load_mem(&restored, image, image_len) == SNAP_OK,
+          "could not restore active receive DMA tail");
+    CHECK(restored.uart4.rx_count == (uint8_t)sizeof tail &&
+          restored.uart4.rx_timeout_state == S5L_UART_RX_TIMEOUT_ARMED,
+          "restored tail/count state is %u/%u, expected 11/armed",
+          restored.uart4.rx_count,
+          (unsigned)restored.uart4.rx_timeout_state);
+
+    s5l8900_tick(&restored, 0u);
+    CHECK(restored.uart4.rx_count == 0u &&
+          restored.uart4.rx_reads == (uint64_t)sizeof tail &&
+          restored.uart4.rx_timeout_state == S5L_UART_RX_TIMEOUT_DISARMED,
+          "restored tail did not drain exactly once (%u/%llu/%u)",
+          restored.uart4.rx_count,
+          (unsigned long long)restored.uart4.rx_reads,
+          (unsigned)restored.uart4.rx_timeout_state);
+    CHECK((restored.dmac[0].ch[0].ctrl & PL080_CTRL_SIZE_MASK) ==
+              32u - (uint32_t)sizeof tail &&
+          (restored.dmac[0].ch[0].cfg & PL080_CFG_EN) != 0u &&
+          (restored.dmac[0].raw_tc & 1u) == 0u,
+          "restored partial command did not remain open at 21 bytes");
+    CHECK(memcmp(&restored.ram[0x400u - restored.ram_base],
+                 tail, sizeof tail) == 0 &&
+          restored.bus.read8(restored.bus.ctx,
+                             0x400u + (uint32_t)sizeof tail) == 0xa5u,
+          "restored DMA tail changed bytes or crossed its boundary");
+    CHECK((s5l_uart_read(&restored.uart4, UART_UTRSTAT) &
+           UTRSTAT_RX_TIMEOUT) != 0u,
+          "restored DMA tail did not produce timeout status");
+    uint32_t raw = restored.bus.read32(
+        restored.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
+    CHECK((raw & (1u << 28)) != 0u,
+          "restored timeout did not reach VIC line 28 (0x%08x)", raw);
+    restored.bus.write32(restored.bus.ctx,
+                         S5L8900_UART4_BASE + UART_UTRSTAT,
+                         FILTER_RX_MASK);
+    s5l8900_tick(&restored, 0u);
+    raw = restored.bus.read32(restored.bus.ctx,
+                              S5L8900_VIC0_BASE + VIC_RAWINTR);
+    CHECK((raw & (1u << 28)) == 0u,
+          "restored timeout re-latched after W1C (0x%08x)", raw);
+
+    free(image);
+    s5l8900_free(&restored);
+    s5l8900_free(&source);
 }
 
 static void test_snapshot_rejects_an_impossible_receive_fifo(void) {
@@ -1637,6 +1815,7 @@ int main(void) {
     test_snapshot_carries_both_captures_separately();
     test_snapshot_rejects_an_impossible_uart4_length();
     test_snapshot_carries_the_receive_fifo();
+    test_snapshot_releases_a_restored_dma_tail();
     test_snapshot_rejects_an_impossible_receive_fifo();
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

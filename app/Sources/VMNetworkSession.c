@@ -274,7 +274,7 @@ void vm_network_session_status(const vm_network_session_t *session,
         out->uart4_ufcon = machine->uart4.ufcon;
         out->uart4_utrstat_pending = machine->uart4.utrstat_pending;
         out->uart4_rx_count = machine->uart4.rx_count;
-        out->uart4_rx_timeout_armed = machine->uart4.rx_timeout_armed;
+        out->uart4_rx_timeout_state = machine->uart4.rx_timeout_state;
         for (unsigned d = 0u; d < S5L8900_DMAC_COUNT; d++) {
             const s5l_pl080_t *controller = &machine->dmac[d];
             out->dmac_reads[d] = controller->reads;
