@@ -671,3 +671,52 @@ const char *net_tcp_state_name(net_tcp_state_t s) {
     }
     return "?";
 }
+
+bool net_get_tcp_live_status(const net_stack_t *ns,
+                             net_tcp_live_status_t *out) {
+    if (!out) return false;
+    memset(out, 0, sizeof *out);
+    if (!ns) return false;
+
+    const net_flow_t *selected = NULL;
+    for (unsigned i = 0u; i < NET_MAX_FLOWS; i++) {
+        const net_flow_t *flow = &ns->flow[i];
+        if (!flow->used || flow->proto != NET_PROTO_TCP) continue;
+        out->flows++;
+        /* A bulk flow with buffered response data is the useful bottleneck
+         * witness.  The tie-breakers keep selection deterministic and retain
+         * an in-flight flow over an otherwise idle keep-alive connection. */
+        if (!selected || flow->txlen > selected->txlen ||
+            (flow->txlen == selected->txlen &&
+             flow->snd_nxt - flow->snd_una >
+             selected->snd_nxt - selected->snd_una) ||
+            (flow->txlen == selected->txlen &&
+             flow->snd_nxt - flow->snd_una ==
+             selected->snd_nxt - selected->snd_una &&
+             flow->rxlen > selected->rxlen))
+            selected = flow;
+    }
+    if (!selected) return false;
+
+    uint32_t inflight = selected->snd_nxt - selected->snd_una;
+    if (selected->fin_sent && inflight > selected->txlen)
+        inflight = selected->txlen;
+    out->state = selected->state;
+    out->guest_port = selected->guest_port;
+    out->dst_port = selected->dst_port;
+    out->window = selected->snd_wnd;
+    out->inflight = inflight;
+    out->tx_buffered = selected->txlen;
+    out->rx_buffered = selected->rxlen;
+    out->retries = selected->rtx;
+    if (selected->rto_on) {
+        int32_t remaining = (int32_t)(selected->rto_at - ns->now_ms);
+        out->rto_remaining_ms = remaining > 0 ? (uint32_t)remaining : 0u;
+    }
+    if (selected->fin_sent) out->flags |= NET_TCP_LIVE_FIN_SENT;
+    if (selected->host_eof) out->flags |= NET_TCP_LIVE_HOST_EOF;
+    if (selected->tx_shutdown) out->flags |= NET_TCP_LIVE_TX_SHUTDOWN;
+    if (selected->need_ack) out->flags |= NET_TCP_LIVE_NEED_ACK;
+    if (selected->rto_on) out->flags |= NET_TCP_LIVE_RTO_ON;
+    return true;
+}

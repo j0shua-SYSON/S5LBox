@@ -87,6 +87,17 @@ typedef struct {
     uint32_t tcp_last_peer_reset_buffered;
     uint32_t tcp_last_peer_reset_retries;
     uint32_t tcp_output_pending;
+    unsigned tcp_live_flows;
+    uint32_t tcp_live_state;
+    uint16_t tcp_live_guest_port;
+    uint16_t tcp_live_dst_port;
+    uint32_t tcp_live_window;
+    uint32_t tcp_live_inflight;
+    uint32_t tcp_live_tx_buffered;
+    uint32_t tcp_live_rx_buffered;
+    uint32_t tcp_live_retries;
+    uint32_t tcp_live_rto_remaining_ms;
+    uint32_t tcp_live_flags;
     uint64_t ppp_fcs_errors;
     uint64_t ppp_tx_overflows;
     uint64_t host_bytes_out;

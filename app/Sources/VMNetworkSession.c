@@ -357,6 +357,20 @@ void vm_network_session_status(const vm_network_session_t *session,
         out->tcp_last_peer_reset_retries =
             session->net->stats.tcp_last_peer_reset_retries;
         out->tcp_output_pending = (uint32_t)net_output_pending(session->net);
+        net_tcp_live_status_t live;
+        if (net_get_tcp_live_status(session->net, &live)) {
+            out->tcp_live_flows = live.flows;
+            out->tcp_live_state = (uint32_t)live.state;
+            out->tcp_live_guest_port = live.guest_port;
+            out->tcp_live_dst_port = live.dst_port;
+            out->tcp_live_window = live.window;
+            out->tcp_live_inflight = live.inflight;
+            out->tcp_live_tx_buffered = live.tx_buffered;
+            out->tcp_live_rx_buffered = live.rx_buffered;
+            out->tcp_live_retries = live.retries;
+            out->tcp_live_rto_remaining_ms = live.rto_remaining_ms;
+            out->tcp_live_flags = live.flags;
+        }
     }
     const net_host_stats_t *host = net_host_stats(session->host);
     if (host) {

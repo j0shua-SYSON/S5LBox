@@ -177,10 +177,11 @@ static void test_nat_socket_owner_starts_without_a_flow(void) {
         vm_network_status_t status;
         vm_network_session_status(session, &status);
         CHECK(status.attached && status.nat_enabled &&
-              status.host_errors == 0u,
-              "fresh NAT status attached/nat/errors=%u/%u/%llu",
+              status.host_errors == 0u && status.tcp_live_flows == 0u,
+              "fresh NAT status attached/nat/errors/live=%u/%u/%llu/%u",
               status.attached, status.nat_enabled,
-              (unsigned long long)status.host_errors);
+              (unsigned long long)status.host_errors,
+              status.tcp_live_flows);
     }
     vm_network_session_destroy(&session);
     s5l8900_free(&machine);

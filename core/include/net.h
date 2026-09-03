@@ -364,6 +364,30 @@ typedef struct {
     uint32_t     out_head, out_tail;
 } net_stack_t;
 
+/* One bounded, read-only view of the live TCP flow currently carrying the
+ * most host-to-guest data.  A frontend needs this to distinguish a closed
+ * guest window from an output-queue stall without exposing the whole flow
+ * table or changing protocol behaviour. */
+typedef struct {
+    unsigned        flows;
+    net_tcp_state_t state;
+    uint16_t        guest_port;
+    uint16_t        dst_port;
+    uint32_t        window;
+    uint32_t        inflight;
+    uint32_t        tx_buffered;
+    uint32_t        rx_buffered;
+    uint32_t        retries;
+    uint32_t        rto_remaining_ms;
+    uint32_t        flags;
+} net_tcp_live_status_t;
+
+#define NET_TCP_LIVE_FIN_SENT    (1u << 0)
+#define NET_TCP_LIVE_HOST_EOF    (1u << 1)
+#define NET_TCP_LIVE_TX_SHUTDOWN (1u << 2)
+#define NET_TCP_LIVE_NEED_ACK    (1u << 3)
+#define NET_TCP_LIVE_RTO_ON      (1u << 4)
+
 /* ------------------------------------------------------------------ API --- */
 
 /*
@@ -420,6 +444,8 @@ void net_tick(net_stack_t *ns, uint32_t now_ms);
 
 const char *net_tcp_state_name(net_tcp_state_t s);
 size_t      net_flows_open(const net_stack_t *ns);
+bool        net_get_tcp_live_status(const net_stack_t *ns,
+                                    net_tcp_live_status_t *out);
 
 /* -------------------------------------------------- exposed for testing --- */
 

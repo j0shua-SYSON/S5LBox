@@ -1185,6 +1185,49 @@ static void test_the_guests_window_bounds_what_we_send(void) {
           "a %u-octet segment exceeded the MSS", (unsigned)biggest);
 }
 
+static void test_live_tcp_status_names_the_buffered_flow(void) {
+    pkt_t packet;
+    uint32_t guest_seq;
+    start(true, false);
+
+    net_tcp_live_status_t live;
+    memset(&live, 0xa5, sizeof live);
+    CHECK(!net_get_tcp_live_status(NULL, &live) && live.flows == 0u,
+          "NULL stack produced a live TCP flow");
+    CHECK(!net_get_tcp_live_status(&g_ns, &live) && live.flows == 0u,
+          "an empty stack produced a live TCP flow");
+    CHECK(!net_get_tcp_live_status(&g_ns, NULL),
+          "a NULL live-status destination succeeded");
+
+    uint32_t ours = handshake(50021u, &guest_seq);
+    CHECK(ours != 0u, "the live-status handshake did not complete");
+    drain();
+
+    send_tcp(PEER_IP, 50021u, 80u, guest_seq, ours, TCP_ACK, 100u,
+             NULL, 0u, NULL, 0u);
+    drain();
+    g_mock.h[0].stream_left = 3000u;
+    g_mock.h[0].recv_err = NET_EG_WOULDBLOCK;
+    net_tick(&g_ns, 10u);
+
+    CHECK(net_get_tcp_live_status(&g_ns, &live),
+          "the established flow was not reported");
+    CHECK(live.flows == 1u && live.state == NET_TCP_ESTABLISHED &&
+          live.guest_port == 50021u && live.dst_port == 80u,
+          "live identity is flows/state/ports=%u/%u/%u/%u",
+          live.flows, (unsigned)live.state, (unsigned)live.guest_port,
+          (unsigned)live.dst_port);
+    CHECK(live.window == 100u && live.inflight == 100u &&
+          live.tx_buffered == 3000u && live.rx_buffered == 0u,
+          "live bottleneck is wnd/fly/tx/rx=%u/%u/%u/%u",
+          live.window, live.inflight, live.tx_buffered, live.rx_buffered);
+    CHECK(live.retries == 0u && live.rto_remaining_ms == NET_TCP_RTO_MS &&
+          live.flags == NET_TCP_LIVE_RTO_ON,
+          "live timer is retries/remaining/flags=%u/%u/%x",
+          live.retries, live.rto_remaining_ms, live.flags);
+    while (take(&packet)) { }
+}
+
 static void test_a_small_mss_from_the_guest_is_honoured(void) {
     static const uint8_t mss_opt[4] = { 2u, 4u, 0x00, 0x80 };   /* 128        */
     pkt_t r;
@@ -1707,6 +1750,7 @@ int main(void) {
     RUN(test_one_tick_can_fill_a_bulk_guest_window);
     RUN(test_a_full_output_queue_does_not_strand_tcp_data);
     RUN(test_the_guests_window_bounds_what_we_send);
+    RUN(test_live_tcp_status_names_the_buffered_flow);
     RUN(test_a_small_mss_from_the_guest_is_honoured);
     RUN(test_out_of_order_is_reacked_and_never_reassembled);
     RUN(test_backpressure_shrinks_the_window_and_never_drops);
