@@ -40,18 +40,9 @@ static bool run_service_boundary(s5l8900_t *machine) {
     return s5l8900_run(machine, 0u, &status) == 0u && status == ARM_OK;
 }
 
-static bool open_test_ppp_link(s5l8900_t *machine,
-                               vm_network_session_t *session,
-                               ppp_peer_t *guest) {
-    ppp_config_t config;
-    ppp_config_default(&config);
-    uint32_t address = config.local_ip;
-    config.local_ip = config.remote_ip;
-    config.remote_ip = address;
-    config.magic ^= UINT32_C(0x01010101);
-    ppp_init(guest, &config);
-    ppp_open(guest);
-
+static bool settle_test_ppp_link(s5l8900_t *machine,
+                                 vm_network_session_t *session,
+                                 ppp_peer_t *guest) {
     for (unsigned turn = 0u; turn < 32u; turn++) {
         send_guest_ppp_bytes(machine, guest);
         if (!run_service_boundary(machine)) return false;
@@ -67,6 +58,20 @@ static bool open_test_ppp_link(s5l8900_t *machine,
         }
     }
     return false;
+}
+
+static bool open_test_ppp_link(s5l8900_t *machine,
+                               vm_network_session_t *session,
+                               ppp_peer_t *guest) {
+    ppp_config_t config;
+    ppp_config_default(&config);
+    uint32_t address = config.local_ip;
+    config.local_ip = config.remote_ip;
+    config.remote_ip = address;
+    config.magic ^= UINT32_C(0x01010101);
+    ppp_init(guest, &config);
+    ppp_open(guest);
+    return settle_test_ppp_link(machine, session, guest);
 }
 
 static size_t build_echo_request(uint8_t *packet, size_t capacity,
@@ -86,6 +91,20 @@ static size_t build_echo_request(uint8_t *packet, size_t capacity,
     if (!header || header + sizeof icmp > capacity) return 0u;
     memcpy(packet + header, icmp, sizeof icmp);
     return header + sizeof icmp;
+}
+
+typedef struct {
+    unsigned packets;
+    size_t length;
+    uint8_t last[64];
+} guest_ip_sink_t;
+
+static void capture_guest_ip(void *ctx, const uint8_t *packet, size_t length) {
+    guest_ip_sink_t *sink = (guest_ip_sink_t *)ctx;
+    if (!sink || !packet) return;
+    sink->packets++;
+    sink->length = length;
+    if (length <= sizeof sink->last) memcpy(sink->last, packet, length);
 }
 
 static void send_initial_guest_request(s5l8900_t *machine) {
@@ -326,6 +345,86 @@ static void test_host_datagrams_cross_one_per_run_boundary(void) {
     s5l8900_free(&machine);
 }
 
+static void test_restored_guest_reopens_replaced_host_peer(void) {
+    s5l8900_t machine;
+    char detail[192];
+    CHECK(s5l8900_init(&machine, 0u, 1u << 20), "machine init failed");
+    vm_network_session_t *session = vm_network_session_create(
+        &machine, true, detail, sizeof detail);
+    CHECK(session != NULL, "initial PPP/NAT attachment failed: %s", detail);
+    if (!session) {
+        s5l8900_free(&machine);
+        return;
+    }
+
+    ppp_peer_t guest;
+    CHECK(open_test_ppp_link(&machine, session, &guest),
+          "the initial link did not reach IPCP Opened");
+    vm_network_session_destroy(&session);
+
+    /* A checkpoint can contain bytes already committed to the UART FIFO while
+     * the rest of that old host frame lived in the unsaved peer output ring.
+     * Preserve such a fragment: the replacement peer's leading Flag must end
+     * it and let the already-open guest re-synchronize. */
+    static const uint8_t STALE_FRAME[] = {0xffu, 0x21u, 0x45u, 0xaau, 0xbbu};
+    for (size_t i = 0u; i < sizeof STALE_FRAME; i++)
+        CHECK(s5l_uart_rx_push(&machine.uart4, STALE_FRAME[i]),
+              "could not stage stale UART byte %zu", i);
+    uint64_t fcs_before = guest.stats.fcs_errors;
+
+    session = vm_network_session_create(&machine, true, detail, sizeof detail);
+    CHECK(session != NULL, "replacement PPP/NAT attachment failed: %s", detail);
+    if (!session) {
+        s5l8900_free(&machine);
+        return;
+    }
+    vm_network_status_t status;
+    vm_network_session_status(session, &status);
+    CHECK(!status.peer_opened && machine.uart4.rx_count == sizeof STALE_FRAME,
+          "replacement peer opened early or discarded saved UART bytes");
+    CHECK(vm_network_session_reopen_after_restore(session),
+          "restore-specific peer reopen was refused");
+    vm_network_session_status(session, &status);
+    CHECK(status.peer_opened && !status.lcp_open && !status.ipcp_open,
+          "fresh host peer reported an inherited open state");
+    CHECK(settle_test_ppp_link(&machine, session, &guest),
+          "the already-open guest did not renegotiate with its new host peer");
+    CHECK(guest.stats.fcs_errors == fcs_before + 1u,
+          "fresh Flag did not isolate the stale frame (%llu -> %llu errors)",
+          (unsigned long long)fcs_before,
+          (unsigned long long)guest.stats.fcs_errors);
+
+    guest_ip_sink_t sink;
+    memset(&sink, 0, sizeof sink);
+    ppp_set_ip_sink(&guest, capture_guest_ip, &sink);
+    uint8_t packet[64];
+    size_t length = build_echo_request(packet, sizeof packet, 0x33u);
+    CHECK(length != 0u && ppp_send_ip(&guest, packet, length),
+          "post-restore echo request could not be framed");
+    send_guest_ppp_bytes(&machine, &guest);
+    bool serviced = true;
+    for (unsigned turn = 0u; turn < 8u && sink.packets == 0u; turn++) {
+        if (!run_service_boundary(&machine)) {
+            serviced = false;
+            break;
+        }
+        receive_host_ppp_bytes(&machine, &guest);
+        send_guest_ppp_bytes(&machine, &guest);
+    }
+    CHECK(serviced, "post-restore echo service boundary failed");
+    vm_network_session_status(session, &status);
+    CHECK(sink.packets == 1u && sink.length >= 28u &&
+          sink.last[9] == NET_PROTO_ICMP && sink.last[20] == 0u,
+          "post-restore gateway echo reply packets/length/out/pending="
+          "%u/%zu/%llu/%u",
+          sink.packets, sink.length,
+          (unsigned long long)status.net_to_guest,
+          status.tcp_output_pending);
+
+    vm_network_session_destroy(&session);
+    s5l8900_free(&machine);
+}
+
 static void test_invalid_create_fails_closed(void) {
     char detail[96];
     vm_network_session_t *session = vm_network_session_create(
@@ -345,6 +444,7 @@ int main(void) {
     test_ppp_attachment_closes_the_uart_loop();
     test_nat_socket_owner_starts_without_a_flow();
     test_host_datagrams_cross_one_per_run_boundary();
+    test_restored_guest_reopens_replaced_host_peer();
     test_invalid_create_fails_closed();
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

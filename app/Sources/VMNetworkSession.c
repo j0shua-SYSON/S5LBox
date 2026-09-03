@@ -73,18 +73,23 @@ static void queue_guest_ip(void *ctx, const uint8_t *packet, size_t length) {
     session->guest_ip_queued++;
 }
 
+static bool open_peer(vm_network_session_t *session, const char *trigger) {
+    if (!session || !session->peer) return false;
+    if (session->peer_opened) return true;
+    session->peer_opened = true;
+    session->retired_since_open = 0u;
+    ppp_open(session->peer);
+    (void)fprintf(stderr, "[network] %s; PPP negotiation started\n",
+                  trigger);
+    return true;
+}
+
 static void uart4_guest_tx(void *ctx, uint8_t byte) {
     vm_network_session_t *session = (vm_network_session_t *)ctx;
     if (!session || !session->peer) return;
 
     session->guest_tx_bytes++;
-    if (!session->peer_opened) {
-        session->peer_opened = true;
-        session->retired_since_open = 0u;
-        ppp_open(session->peer);
-        (void)fprintf(stderr,
-                      "[network] guest opened uart4; PPP negotiation started\n");
-    }
+    if (!open_peer(session, "guest opened uart4")) return;
     ppp_input_byte(session->peer, byte);
 }
 
@@ -254,6 +259,16 @@ vm_network_session_t *vm_network_session_create(
     (void)fprintf(stderr, "[network] uart4 PPP peer armed%s\n",
                   nat_enabled ? " with IPv4 NAT" : " without NAT");
     return session;
+}
+
+bool vm_network_session_reopen_after_restore(vm_network_session_t *session) {
+    if (!session || !session->machine || !session->peer ||
+        session->machine->uart4_host_tx != uart4_guest_tx ||
+        session->machine->uart4_host_service != uart4_host_service ||
+        session->machine->uart4_host_refill != uart4_host_refill ||
+        session->machine->uart4_host_ctx != session)
+        return false;
+    return open_peer(session, "checkpoint restore replaced the host peer");
 }
 
 void vm_network_session_status(const vm_network_session_t *session,

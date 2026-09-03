@@ -1652,6 +1652,16 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                        "guest networking unavailable");
             return false;
         }
+        if (restored &&
+            !vm_network_session_reopen_after_restore(boot->network)) {
+            (void)file_block_close(boot->media);
+            set_detail(report->detail, sizeof report->detail,
+                       "The restored guest could not restart its replaced "
+                       "host network peer.");
+            set_detail(report->summary, sizeof report->summary,
+                       "restored guest networking unavailable");
+            return false;
+        }
     }
 
 #if defined(S5LBOX_IOS3_HLE_EXPERIMENT)

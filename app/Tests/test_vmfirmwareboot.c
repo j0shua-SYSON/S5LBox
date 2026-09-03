@@ -415,6 +415,12 @@ static void test_saved_state_restore_fixture(void) {
               (machine.uart4_host_refill != NULL) == expect_ppp &&
               (machine.uart4_host_ctx != NULL) == expect_ppp,
               "the live uart4 host peer disagrees with the PPP record");
+        vm_network_status_t network;
+        bool network_attached =
+            vm_firmware_boot_network_status(boot, &network);
+        CHECK(network_attached == expect_ppp &&
+              network.peer_opened == expect_ppp,
+              "restored PPP did not proactively open its replacement peer");
         CHECK(mentions(report.summary, ", PPP/NAT") == expect_ppp,
               "the restore summary hides or invents PPP/NAT: %s",
               report.summary);

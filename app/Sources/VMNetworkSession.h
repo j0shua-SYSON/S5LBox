@@ -144,6 +144,16 @@ vm_network_session_t *vm_network_session_create(
     s5l8900_t *machine, bool nat_enabled,
     char *detail, size_t detail_capacity);
 
+/*
+ * A machine checkpoint preserves the guest's UART and PPP state, but host
+ * sockets and this peer are process-local and cannot cross the restore. Start
+ * a fresh LCP exchange immediately so an already-open guest observes that
+ * replacement instead of waiting indefinitely for an old inbound flow.
+ * Existing UART bytes remain intact and PPP's next flag safely resynchronizes
+ * any frame whose unsent host tail could not be checkpointed.
+ */
+bool vm_network_session_reopen_after_restore(vm_network_session_t *session);
+
 /* A lock-free copy: call only on the same owner thread as the machine. */
 void vm_network_session_status(const vm_network_session_t *session,
                                vm_network_status_t *out);
