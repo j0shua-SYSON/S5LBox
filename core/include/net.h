@@ -82,6 +82,17 @@
 #define NET_TCP_RXBUF    4096u
 
 /*
+ * The guest's advertised window is a capacity limit, not permission to skip
+ * TCP congestion control.  In particular, old CFNetwork peers can advertise
+ * 64 KiB while their PPP input path is serviced far more slowly than a host
+ * loopback socket.  Start with RFC 3390's initial window and never expose more
+ * than this many MSS-sized packets without an acknowledgement clock.  Sixteen
+ * leaves useful bulk throughput while keeping a single flow below the bounded
+ * PPP/output rings.
+ */
+#define NET_TCP_CWND_MAX_SEGMENTS 16u
+
+/*
  * How many guest flows may exist at once. A browser opens four to six per page
  * and iPhone OS 3's CFNetwork is not more parallel than that; 24 leaves room
  * for DNS and a stray connection without making the struct enormous.
@@ -253,6 +264,8 @@ typedef struct {
     uint32_t snd_nxt;           /* highest sequence we have sent, plus one   */
     uint32_t snd_wnd;           /* what the guest last advertised            */
     uint16_t mss;               /* clamped to NET_TCP_MSS_MAX                */
+    uint32_t cwnd;              /* congestion window toward the guest       */
+    uint32_t ssthresh;          /* slow-start threshold after a timeout      */
     bool     fin_sent;          /* our FIN occupies snd_una + txlen          */
     bool     host_eof;          /* the egress reported an orderly close      */
     bool     tx_shutdown;       /* we already half-closed the host socket    */
@@ -374,6 +387,9 @@ typedef struct {
     uint16_t        guest_port;
     uint16_t        dst_port;
     uint32_t        window;
+    uint16_t        mss;
+    uint32_t        congestion_window;
+    uint32_t        slow_start_threshold;
     uint32_t        inflight;
     uint32_t        tx_buffered;
     uint32_t        rx_buffered;

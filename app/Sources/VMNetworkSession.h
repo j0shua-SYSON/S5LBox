@@ -92,6 +92,9 @@ typedef struct {
     uint16_t tcp_live_guest_port;
     uint16_t tcp_live_dst_port;
     uint32_t tcp_live_window;
+    uint16_t tcp_live_mss;
+    uint32_t tcp_live_congestion_window;
+    uint32_t tcp_live_slow_start_threshold;
     uint32_t tcp_live_inflight;
     uint32_t tcp_live_tx_buffered;
     uint32_t tcp_live_rx_buffered;

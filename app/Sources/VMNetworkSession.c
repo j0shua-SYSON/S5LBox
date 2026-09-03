@@ -364,6 +364,9 @@ void vm_network_session_status(const vm_network_session_t *session,
             out->tcp_live_guest_port = live.guest_port;
             out->tcp_live_dst_port = live.dst_port;
             out->tcp_live_window = live.window;
+            out->tcp_live_mss = live.mss;
+            out->tcp_live_congestion_window = live.congestion_window;
+            out->tcp_live_slow_start_threshold = live.slow_start_threshold;
             out->tcp_live_inflight = live.inflight;
             out->tcp_live_tx_buffered = live.tx_buffered;
             out->tcp_live_rx_buffered = live.rx_buffered;

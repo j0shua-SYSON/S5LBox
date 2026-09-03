@@ -213,12 +213,52 @@ static uint32_t tcp_inflight(const net_flow_t *f) {
     return n;
 }
 
+/* RFC 3390: min(4*SMSS, max(2*SMSS, 4380)).  The peer's MSS is already
+ * clamped, so every intermediate fits comfortably in uint32_t. */
+static uint32_t tcp_initial_cwnd(uint16_t mss) {
+    uint32_t four = 4u * (uint32_t)mss;
+    uint32_t floor = 2u * (uint32_t)mss;
+    if (floor < 4380u) floor = 4380u;
+    return four < floor ? four : floor;
+}
+
+static uint32_t tcp_cwnd_ceiling(const net_flow_t *f) {
+    uint32_t ceiling = NET_TCP_CWND_MAX_SEGMENTS * (uint32_t)f->mss;
+    return ceiling < NET_TCP_TXBUF ? ceiling : NET_TCP_TXBUF;
+}
+
+static void tcp_cwnd_ack(net_flow_t *f, uint32_t acknowledged) {
+    if (!acknowledged) return;
+    uint32_t increase;
+    if (f->cwnd < f->ssthresh) {
+        /* Slow start grows by at most one SMSS for each cumulative ACK. */
+        increase = acknowledged < f->mss ? acknowledged : f->mss;
+    } else {
+        /* Congestion avoidance: approximately one SMSS per window. */
+        increase = ((uint32_t)f->mss * (uint32_t)f->mss) / f->cwnd;
+        if (!increase) increase = 1u;
+    }
+    uint32_t ceiling = tcp_cwnd_ceiling(f);
+    if (f->cwnd >= ceiling || increase > ceiling - f->cwnd) f->cwnd = ceiling;
+    else f->cwnd += increase;
+}
+
+static void tcp_cwnd_timeout(net_flow_t *f) {
+    uint32_t floor = 2u * (uint32_t)f->mss;
+    uint32_t threshold = tcp_inflight(f) / 2u;
+    if (threshold < floor) threshold = floor;
+    uint32_t ceiling = tcp_cwnd_ceiling(f);
+    f->ssthresh = threshold < ceiling ? threshold : ceiling;
+    f->cwnd = f->mss;
+}
+
 static void tcp_pump(net_stack_t *ns, net_flow_t *f) {
     if (f->state == NET_TCP_SYN_RCVD || f->state == NET_TCP_TIME_WAIT) return;
 
     uint32_t sent = tcp_inflight(f);
     while (f->txlen > sent) {
-        uint32_t win = f->snd_wnd > sent ? f->snd_wnd - sent : 0u;
+        uint32_t limit = f->snd_wnd < f->cwnd ? f->snd_wnd : f->cwnd;
+        uint32_t win = limit > sent ? limit - sent : 0u;
         uint32_t seg = f->txlen - sent;
         if (win == 0u) break;
         if (seg > win) seg = win;
@@ -304,6 +344,7 @@ static void tcp_consume_ack(net_stack_t *ns, net_flow_t *f, uint32_t ack) {
     bool fin_acked = f->fin_sent && dat > f->txlen;
     if (dat > f->txlen) dat = f->txlen;
     if (dat) {
+        tcp_cwnd_ack(f, dat);
         memmove(f->txbuf, f->txbuf + dat, f->txlen - dat);
         f->txlen -= dat;
     }
@@ -358,6 +399,8 @@ static void tcp_syn(net_stack_t *ns, uint32_t dst_ip,
     }
     if (f->mss > NET_TCP_MSS_MAX) f->mss = NET_TCP_MSS_MAX;
     if (f->mss < 64u) f->mss = 64u;                /* a hostile tiny MSS     */
+    f->cwnd = tcp_initial_cwnd(f->mss);
+    f->ssthresh = tcp_cwnd_ceiling(f);
 
     /*
      * RFC 793 §3.3 wants the initial send sequence to advance between
@@ -616,6 +659,7 @@ void net_tcp_tick(net_stack_t *ns, net_flow_t *f) {
         /* Go back N. tcp_pump() rebuilds the whole window from snd_una, and
          * the FIN follows the data again because it lives at snd_una + txlen
          * rather than in a flag that could be re-sent out of order. */
+        tcp_cwnd_timeout(f);
         f->snd_nxt = f->snd_una;
     }
 

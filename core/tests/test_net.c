@@ -1083,15 +1083,10 @@ static void test_a_bigboss_sized_stream_arrives_byte_exact(void) {
           (unsigned long long)g_ns.stats.out_dropped);
 }
 
-/*
- * A frontend services host sockets once per bounded CPU slice. Before the bulk
- * buffers existed, one service could expose only 4 KiB to the guest, imposing
- * a hard ceiling of about 0.8 MB/s on a 20 M-insn/s phone with 100k slices no
- * matter how fast its Wi-Fi or host socket was. This is not a wall-clock
- * benchmark; it pins the architectural prerequisite that one service can fill
- * a substantial advertised TCP window without loss or an unbounded queue.
- */
-static void test_one_tick_can_fill_a_bulk_guest_window(void) {
+/* A 64 KiB advertised window is capacity, not a safe initial burst.  Pace a
+ * new bulk flow with an acknowledgement clock, then grow it only after the
+ * guest proves that it drained the first flight. */
+static void test_bulk_data_starts_with_a_bounded_ack_clocked_flight(void) {
     pkt_t r;
     uint32_t gseq;
     start(true, false);
@@ -1111,16 +1106,24 @@ static void test_one_tick_can_fill_a_bulk_guest_window(void) {
     size_t queued = net_output_pending(&g_ns);
     size_t payload = 0u;
     while (take(&r)) payload += r.paylen;
-    CHECK(queued == NET_OUT_SLOTS,
-          "the bulk service queued %zu of %u bounded datagrams", queued,
-          (unsigned)NET_OUT_SLOTS);
-    CHECK(payload >= 32u * 1024u,
-          "one host service exposed only %zu bulk octets", payload);
+    const size_t initial = 3u * NET_TCP_MSS_MAX; /* RFC 3390 at MSS 1460 */
+    CHECK(queued == 3u && payload == initial,
+          "the initial bulk flight is datagrams/octet=%zu/%zu, expected 3/%zu",
+          queued, payload, initial);
     CHECK(g_ns.stats.tcp_bytes_to_guest == payload,
-          "the bulk byte counter/report disagree: %llu/%zu",
+          "the initial byte counter/report disagree: %llu/%zu",
           (unsigned long long)g_ns.stats.tcp_bytes_to_guest, payload);
-    CHECK(g_ns.stats.out_dropped >= 1u,
-          "the full bounded queue did not report TCP backpressure");
+
+    send_tcp(PEER_IP, 50017u, 80u, gseq, ours + (uint32_t)payload,
+             TCP_ACK, 65535u, NULL, 0u, NULL, 0u);
+    queued = net_output_pending(&g_ns);
+    size_t second = 0u;
+    while (take(&r)) second += r.paylen;
+    CHECK(queued == 4u && second == 4u * NET_TCP_MSS_MAX,
+          "the ACK-clocked second flight is datagrams/octet=%zu/%zu",
+          queued, second);
+    CHECK(g_ns.stats.out_dropped == 0u,
+          "paced bulk output still overfilled its bounded queue");
 }
 
 /* A full bounded queue is backpressure, not evidence that bytes reached the
@@ -1217,10 +1220,17 @@ static void test_live_tcp_status_names_the_buffered_flow(void) {
           "live identity is flows/state/ports=%u/%u/%u/%u",
           live.flows, (unsigned)live.state, (unsigned)live.guest_port,
           (unsigned)live.dst_port);
-    CHECK(live.window == 100u && live.inflight == 100u &&
+    CHECK(live.window == 100u && live.mss == NET_TCP_MSS_MAX &&
+          live.congestion_window == 3u * NET_TCP_MSS_MAX &&
+          live.slow_start_threshold ==
+              NET_TCP_CWND_MAX_SEGMENTS * NET_TCP_MSS_MAX &&
+          live.inflight == 100u &&
           live.tx_buffered == 3000u && live.rx_buffered == 0u,
-          "live bottleneck is wnd/fly/tx/rx=%u/%u/%u/%u",
-          live.window, live.inflight, live.tx_buffered, live.rx_buffered);
+          "live bottleneck is wnd/mss/cwnd/ss/fly/tx/rx="
+          "%u/%u/%u/%u/%u/%u/%u",
+          live.window, (unsigned)live.mss, live.congestion_window,
+          live.slow_start_threshold, live.inflight, live.tx_buffered,
+          live.rx_buffered);
     CHECK(live.retries == 0u && live.rto_remaining_ms == NET_TCP_RTO_MS &&
           live.flags == NET_TCP_LIVE_RTO_ON,
           "live timer is retries/remaining/flags=%u/%u/%x",
@@ -1247,6 +1257,32 @@ static void test_a_small_mss_from_the_guest_is_honoured(void) {
     CHECK(biggest == 128u,
           "the guest asked for a 128-octet MSS and we sent %u",
           (unsigned)biggest);
+}
+
+static void test_a_peer_without_an_mss_option_gets_a_bounded_initial_flight(void) {
+    pkt_t r;
+    net_tcp_live_status_t live;
+    start(true, false);
+    send_tcp(PEER_IP, 50031u, 80u, 4000u, 0u, TCP_SYN, 65535u,
+             NULL, 0u, NULL, 0u);
+    CHECK(take(&r), "no SYN-ACK for a peer without an MSS option");
+    uint32_t ours = r.seq + 1u;
+    send_tcp(PEER_IP, 50031u, 80u, 4001u, ours, TCP_ACK, 65535u,
+             NULL, 0u, NULL, 0u);
+    drain();
+
+    g_mock.h[0].stream_left = 6000u;
+    net_tick(&g_ns, 10u);
+    size_t queued = net_output_pending(&g_ns);
+    size_t payload = 0u;
+    while (take(&r)) payload += r.paylen;
+    CHECK(queued == 4u && payload == 4u * 536u,
+          "default-MSS initial flight is datagrams/octet=%zu/%zu",
+          queued, payload);
+    CHECK(net_get_tcp_live_status(&g_ns, &live) && live.mss == 536u &&
+          live.congestion_window == 4u * 536u,
+          "default-MSS telemetry is mss/cwnd=%u/%u",
+          (unsigned)live.mss, live.congestion_window);
 }
 
 static void test_out_of_order_is_reacked_and_never_reassembled(void) {
@@ -1477,6 +1513,7 @@ static void test_the_guest_closing_first_half_closes_the_socket(void) {
 
 static void test_a_lost_segment_is_retransmitted_and_then_given_up_on(void) {
     pkt_t r;
+    net_tcp_live_status_t live;
     uint32_t gseq;
     start(true, false);
     uint32_t ours = handshake(50100u, &gseq);
@@ -1495,6 +1532,11 @@ static void test_a_lost_segment_is_retransmitted_and_then_given_up_on(void) {
     CHECK(take(&r) && r.paylen == 8u && r.seq == ours,
           "the retransmission did not repeat the segment from snd_una");
     CHECK(g_ns.stats.tcp_retransmits == 1u, "the retransmission was not counted");
+    CHECK(net_get_tcp_live_status(&g_ns, &live) &&
+          live.congestion_window == NET_TCP_MSS_MAX &&
+          live.slow_start_threshold == 2u * NET_TCP_MSS_MAX,
+          "timeout congestion state is cwnd/ss=%u/%u",
+          live.congestion_window, live.slow_start_threshold);
 
     /* Keep not acknowledging. After R2 the flow is reset rather than left to
      * sit forever. */
@@ -1747,11 +1789,12 @@ int main(void) {
     RUN(test_a_refused_connect_resets_rather_than_hanging);
     RUN(test_data_crosses_in_both_directions);
     RUN(test_a_bigboss_sized_stream_arrives_byte_exact);
-    RUN(test_one_tick_can_fill_a_bulk_guest_window);
+    RUN(test_bulk_data_starts_with_a_bounded_ack_clocked_flight);
     RUN(test_a_full_output_queue_does_not_strand_tcp_data);
     RUN(test_the_guests_window_bounds_what_we_send);
     RUN(test_live_tcp_status_names_the_buffered_flow);
     RUN(test_a_small_mss_from_the_guest_is_honoured);
+    RUN(test_a_peer_without_an_mss_option_gets_a_bounded_initial_flight);
     RUN(test_out_of_order_is_reacked_and_never_reassembled);
     RUN(test_backpressure_shrinks_the_window_and_never_drops);
     RUN(test_a_reset_from_the_guest_frees_the_flow);

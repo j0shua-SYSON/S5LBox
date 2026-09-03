@@ -705,6 +705,9 @@ bool net_get_tcp_live_status(const net_stack_t *ns,
     out->guest_port = selected->guest_port;
     out->dst_port = selected->dst_port;
     out->window = selected->snd_wnd;
+    out->mss = selected->mss;
+    out->congestion_window = selected->cwnd;
+    out->slow_start_threshold = selected->ssthresh;
     out->inflight = inflight;
     out->tx_buffered = selected->txlen;
     out->rx_buffered = selected->rxlen;
