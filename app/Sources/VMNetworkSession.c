@@ -9,6 +9,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* A public machine run is the scheduling boundary between the host network
+ * and the guest UART driver.  Queueing more than one IP datagram here lets
+ * demand-refilled DMA turn a whole TCP flight into one uninterrupted serial
+ * burst before the guest has run again.  Leave the rest in net_stack's FIFO;
+ * the following run slice gives the guest time to consume this frame before
+ * another is framed by PPP. */
+#define VM_NETWORK_IP_DATAGRAMS_PER_SERVICE 1u
+
 typedef struct {
     uint16_t len;
     uint8_t  bytes[NET_MTU];
@@ -141,7 +149,9 @@ static void uart4_host_service(void *ctx, unsigned retired) {
         /* Socket work is confined to this between-slices boundary. */
         drain_guest_ip(session);
         net_tick(session->net, now_ms);
-        for (unsigned guard = 0u; guard < NET_OUT_SLOTS; guard++) {
+        for (unsigned sent = 0u;
+             sent < VM_NETWORK_IP_DATAGRAMS_PER_SERVICE;
+             sent++) {
             /* net_output() consumes a datagram. Reserve enough encoded space
              * before consuming it so a full PPP ring is ordinary
              * backpressure, never a packet silently removed between TCP and
