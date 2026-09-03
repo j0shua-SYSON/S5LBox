@@ -86,11 +86,11 @@
  * TCP congestion control.  In particular, old CFNetwork peers can advertise
  * 64 KiB while their PPP input path is serviced far more slowly than a host
  * loopback socket.  Start with RFC 3390's initial window and never expose more
- * than this many MSS-sized packets without an acknowledgement clock.  Four is
+ * than this many MSS-sized packets without an acknowledgement clock.  Three is
  * the physical guest's last known continuously drained flight size; larger
  * bursts can leave its old PPP/TCP receive path silent for tens of seconds.
  */
-#define NET_TCP_CWND_MAX_SEGMENTS 4u
+#define NET_TCP_CWND_MAX_SEGMENTS 3u
 
 /*
  * How many guest flows may exist at once. A browser opens four to six per page

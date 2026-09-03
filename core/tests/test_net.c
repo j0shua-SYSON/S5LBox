@@ -1119,7 +1119,8 @@ static void test_bulk_data_starts_with_a_bounded_ack_clocked_flight(void) {
     queued = net_output_pending(&g_ns);
     size_t second = 0u;
     while (take(&r)) second += r.paylen;
-    CHECK(queued == 4u && second == 4u * NET_TCP_MSS_MAX,
+    CHECK(queued == NET_TCP_CWND_MAX_SEGMENTS &&
+          second == NET_TCP_CWND_MAX_SEGMENTS * NET_TCP_MSS_MAX,
           "the ACK-clocked second flight is datagrams/octet=%zu/%zu",
           queued, second);
 
