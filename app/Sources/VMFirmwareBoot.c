@@ -1885,11 +1885,11 @@ bool vm_firmware_boot_provision(const vm_firmware_boot_paths_t *paths,
     memset(provision, 0, sizeof provision);
     /*
      * The phone used to set only ppp_launchd_job. That made pppd appear and
-     * negotiate a link, but silently omitted /etc/ppp/options, resolv.conf and
-     * the matching SystemConfiguration service that bootkernel already
-     * provisions. A green core test therefore described a desktop image, not
-     * the image users created in the app. Merge the same authoritative table
-     * here, after activation, exactly as bootkernel does.
+     * negotiate a link, but silently omitted /etc/ppp/options, resolv.conf,
+     * the matching SystemConfiguration service and its startup-race publisher
+     * that bootkernel provisions. A green core test therefore described a
+     * desktop image, not the image users created in the app. Merge the same
+     * authoritative table here, after activation, exactly as bootkernel does.
      */
     if (provision_count > sizeof provision / sizeof provision[0] ||
         rootfs_work_standard_entries(wanted.activate, wanted.ppp, provision,

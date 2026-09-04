@@ -8741,9 +8741,11 @@ static const char RESOLV_CONF_FILE[] = "nameserver 10.0.2.3\n";
  * service ID above.  The static 10.0.2.3 is intentional: it leaves configd a
  * valid resolver even if this old pppd build omits its dynamic DNS dictionary.
  *
- * NOT YET A RUNTIME CLAIM: the schema comes from configd-293.6 and ppp-412,
- * but a MobileSafari page still has to load on the physical guest before this
- * can be called working Internet.
+ * A physical cold-boot diagnostic confirmed that this schema is accepted by
+ * configd and that MobileSafari can carry an HTTP request over the resulting
+ * PPP route.  It also exposed an old-configd startup race: PreferencesMonitor
+ * can miss its initial publication even though this on-disk plist is valid.
+ * The setup publisher below makes that publication independent of timing.
  */
 static const char PPP_SYSTEM_CONFIGURATION[] =
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
@@ -8822,11 +8824,83 @@ static const char PPP_SYSTEM_CONFIGURATION[] =
     "</dict>\n"
     "</plist>\n";
 
+/*
+ * configd owns two different namespaces.  PreferencesMonitor translates the
+ * persistent plist above into Setup:, while pppd and IPMonitor publish the
+ * negotiated address, route and DNS under State:.  On this guest the former
+ * can race configd startup and never publish, leaving a healthy PPP link that
+ * CFNetwork treats as unusable.
+ *
+ * `scutil -p` exposes the matching-era private lock/unlock commands.  Publish
+ * only the static Setup graph in one transaction, then wait on a key nobody
+ * changes so the dynamic-store session remains its owner.  Never synthesize
+ * State: here: live state remains pppd/IPMonitor's responsibility.  If configd
+ * restarts, n.wait returns, scutil exits, and launchd's KeepAlive starts a new
+ * session which republishes the graph.
+ *
+ * Keep this byte-for-byte command shape aligned with the physical cold-boot
+ * test.  In particular, subscribe only after unlock so our own Setup changes
+ * cannot wake the waiter immediately.
+ */
+static const char PPP_SETUP_COMMAND_FILE[] =
+    "lock\n"
+    "d.init\n"
+    "d.add CurrentSet /Sets/53354C42-4F58-4053-9000-000000000001\n"
+    "set Setup:\n"
+    "d.init\n"
+    "d.add ServiceOrder * " PPP_SERVICE_ID "\n"
+    "set Setup:/Network/Global/IPv4\n"
+    "d.init\n"
+    "d.add DeviceName tty.debug\n"
+    "d.add Hardware Modem\n"
+    "d.add SubType PPPSerial\n"
+    "d.add Type PPP\n"
+    "d.add UserDefinedName S5LBox-Serial\n"
+    "set Setup:/Network/Service/" PPP_SERVICE_ID "/Interface\n"
+    "d.init\n"
+    "d.add ConfigMethod PPP\n"
+    "set Setup:/Network/Service/" PPP_SERVICE_ID "/IPv4\n"
+    "d.init\n"
+    "d.add DialOnDemand # 0\n"
+    "d.add LCPEchoEnabled # 0\n"
+    "d.add VerboseLogging # 0\n"
+    "set Setup:/Network/Service/" PPP_SERVICE_ID "/PPP\n"
+    "d.init\n"
+    "d.add ServerAddresses * 10.0.2.3\n"
+    "set Setup:/Network/Service/" PPP_SERVICE_ID "/DNS\n"
+    "d.init\n"
+    "d.add FTPPassive # 1\n"
+    "set Setup:/Network/Service/" PPP_SERVICE_ID "/Proxies\n"
+    "unlock\n"
+    "n.add State:/S5LBox/NetworkSetupKeepAlive\n"
+    "n.wait\n";
+
+static const char PPP_SETUP_LAUNCHD_JOB[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+        "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\">\n"
+    "<dict>\n"
+    "\t<key>KeepAlive</key><true/>\n"
+    "\t<key>Label</key><string>com.s5lbox.network-setup</string>\n"
+    "\t<key>ProgramArguments</key>\n"
+    "\t<array>\n"
+    "\t\t<string>/usr/sbin/scutil</string>\n"
+    "\t\t<string>-p</string>\n"
+    "\t</array>\n"
+    "\t<key>RunAtLoad</key><true/>\n"
+    "\t<key>StandardErrorPath</key><string>/dev/null</string>\n"
+    "\t<key>StandardInPath</key>\n"
+    "\t<string>/etc/ppp/s5lbox-network-setup</string>\n"
+    "\t<key>StandardOutPath</key><string>/dev/null</string>\n"
+    "</dict>\n"
+    "</plist>\n";
+
 size_t rootfs_work_ppp_entries(rootfs_work_entry_t *entries, size_t capacity) {
-    /* All four catalog entries describe one service. Never publish a partial
-     * table. The directory must precede the plist which depends on it. */
-    if (entries && capacity >= 4u) {
-        memset(entries, 0, 4u * sizeof(*entries));
+    /* All six catalog entries describe one service. Never publish a partial
+     * table. The directory and input file precede their dependants. */
+    if (entries && capacity >= 6u) {
+        memset(entries, 0, 6u * sizeof(*entries));
         /*
          * The DIRECTORY entry this used to carry was wrong and the provisioner
          * said so: "an object already exists under CNID 1410 with that name".
@@ -8856,8 +8930,19 @@ size_t rootfs_work_ppp_entries(rootfs_work_entry_t *entries, size_t capacity) {
             (const uint8_t *)PPP_SYSTEM_CONFIGURATION;
         entries[3].content_size = sizeof(PPP_SYSTEM_CONFIGURATION) - 1u;
         entries[3].permissions = 0644u;
+        entries[4].kind = ROOTFS_WORK_ENTRY_FILE;
+        entries[4].path = "/private/etc/ppp/s5lbox-network-setup";
+        entries[4].content = (const uint8_t *)PPP_SETUP_COMMAND_FILE;
+        entries[4].content_size = sizeof(PPP_SETUP_COMMAND_FILE) - 1u;
+        entries[4].permissions = 0644u;
+        entries[5].kind = ROOTFS_WORK_ENTRY_FILE;
+        entries[5].path =
+            "/System/Library/LaunchDaemons/com.s5lbox.network-setup.plist";
+        entries[5].content = (const uint8_t *)PPP_SETUP_LAUNCHD_JOB;
+        entries[5].content_size = sizeof(PPP_SETUP_LAUNCHD_JOB) - 1u;
+        entries[5].permissions = 0644u;
     }
-    return 4u;
+    return 6u;
 }
 
 size_t rootfs_work_standard_entries(bool activate, bool ppp,

@@ -4578,23 +4578,61 @@ static void test_ppp_entries(void) {
         "defaultroute\n"
         "usepeerdns\n"
         "serviceid 53354C42-4F58-4050-9000-000000000001\n";
+    static const char expected_setup_commands[] =
+        "lock\n"
+        "d.init\n"
+        "d.add CurrentSet /Sets/53354C42-4F58-4053-9000-000000000001\n"
+        "set Setup:\n"
+        "d.init\n"
+        "d.add ServiceOrder * 53354C42-4F58-4050-9000-000000000001\n"
+        "set Setup:/Network/Global/IPv4\n"
+        "d.init\n"
+        "d.add DeviceName tty.debug\n"
+        "d.add Hardware Modem\n"
+        "d.add SubType PPPSerial\n"
+        "d.add Type PPP\n"
+        "d.add UserDefinedName S5LBox-Serial\n"
+        "set Setup:/Network/Service/"
+            "53354C42-4F58-4050-9000-000000000001/Interface\n"
+        "d.init\n"
+        "d.add ConfigMethod PPP\n"
+        "set Setup:/Network/Service/"
+            "53354C42-4F58-4050-9000-000000000001/IPv4\n"
+        "d.init\n"
+        "d.add DialOnDemand # 0\n"
+        "d.add LCPEchoEnabled # 0\n"
+        "d.add VerboseLogging # 0\n"
+        "set Setup:/Network/Service/"
+            "53354C42-4F58-4050-9000-000000000001/PPP\n"
+        "d.init\n"
+        "d.add ServerAddresses * 10.0.2.3\n"
+        "set Setup:/Network/Service/"
+            "53354C42-4F58-4050-9000-000000000001/DNS\n"
+        "d.init\n"
+        "d.add FTPPassive # 1\n"
+        "set Setup:/Network/Service/"
+            "53354C42-4F58-4050-9000-000000000001/Proxies\n"
+        "unlock\n"
+        "n.add State:/S5LBox/NetworkSetupKeepAlive\n"
+        "n.wait\n";
     static const char service_id[] =
         "53354C42-4F58-4050-9000-000000000001";
-    rootfs_work_entry_t entries[4];
-    rootfs_work_entry_t short_table[4];
+    rootfs_work_entry_t entries[6];
+    rootfs_work_entry_t short_table[6];
     size_t needed = rootfs_work_ppp_entries(NULL, 0u);
 
-    CHECK(needed == 4u, "PPP needs %zu entries, expected 4", needed);
+    CHECK(needed == 6u, "PPP needs %zu entries, expected 6", needed);
     memset(short_table, 0, sizeof short_table);
-    CHECK(rootfs_work_ppp_entries(short_table, 3u) == 4u &&
+    CHECK(rootfs_work_ppp_entries(short_table, 5u) == 6u &&
           short_table[0].path == NULL && short_table[1].path == NULL &&
-          short_table[2].path == NULL && short_table[3].path == NULL,
+          short_table[2].path == NULL && short_table[3].path == NULL &&
+          short_table[4].path == NULL && short_table[5].path == NULL,
           "a short PPP table was partially filled");
     memset(entries, 0, sizeof entries);
-    CHECK(rootfs_work_ppp_entries(entries, 4u) == 4u,
+    CHECK(rootfs_work_ppp_entries(entries, 6u) == 6u,
           "PPP entries were not produced");
 
-    static const size_t file_indices[] = {0u, 1u, 3u};
+    static const size_t file_indices[] = {0u, 1u, 3u, 4u, 5u};
     for (size_t n = 0; n < sizeof file_indices / sizeof file_indices[0]; n++) {
         size_t i = file_indices[n];
         CHECK(entries[i].kind == ROOTFS_WORK_ENTRY_FILE,
@@ -4666,16 +4704,49 @@ static void test_ppp_entries(void) {
           memcmp(plist + entries[3].content_size - 9u, "</plist>\n", 9u) == 0,
           "SystemConfiguration payload is not a complete plist document");
 
-    rootfs_work_entry_t combined[6];
-    rootfs_work_entry_t combined_short[6];
+    CHECK(entries[4].path &&
+          strcmp(entries[4].path,
+                 "/private/etc/ppp/s5lbox-network-setup") == 0,
+          "Setup publisher input path is %s",
+          entries[4].path ? entries[4].path : "(null)");
+    CHECK(entries[4].content_size == sizeof expected_setup_commands - 1u &&
+          memcmp(entries[4].content, expected_setup_commands,
+                 sizeof expected_setup_commands - 1u) == 0,
+          "Setup publisher commands differ from the cold-boot payload");
+    CHECK(strstr((const char *)entries[4].content, "set State:") == NULL,
+          "Setup publisher must not synthesize live State dictionaries");
+
+    CHECK(entries[5].path &&
+          strcmp(entries[5].path,
+                 "/System/Library/LaunchDaemons/"
+                 "com.s5lbox.network-setup.plist") == 0,
+          "Setup publisher launchd path is %s",
+          entries[5].path ? entries[5].path : "(null)");
+    const char *job = (const char *)entries[5].content;
+    CHECK(entries[5].content_size > 400u && entries[5].content_size < 1024u,
+          "Setup publisher launchd plist is %zu bytes",
+          entries[5].content_size);
+    CHECK(job && strstr(job, "<key>KeepAlive</key><true/>") &&
+          strstr(job, "<key>RunAtLoad</key><true/>") &&
+          strstr(job, "<string>/usr/sbin/scutil</string>") &&
+          strstr(job, "<string>-p</string>") &&
+          strstr(job, "<key>StandardInPath</key>") &&
+          strstr(job, "<string>/etc/ppp/s5lbox-network-setup</string>"),
+          "Setup publisher launchd plist lacks its restart/input contract");
+    CHECK(job && entries[5].content_size >= 9u &&
+          memcmp(job + entries[5].content_size - 9u, "</plist>\n", 9u) == 0,
+          "Setup publisher payload is not a complete plist document");
+
+    rootfs_work_entry_t combined[8];
+    rootfs_work_entry_t combined_short[8];
     memset(combined_short, 0, sizeof combined_short);
-    CHECK(rootfs_work_standard_entries(true, true, NULL, 0u) == 6u,
-          "the activation+PPP plan is not six entries");
-    CHECK(rootfs_work_standard_entries(true, true, combined_short, 5u) == 6u &&
-          combined_short[0].path == NULL && combined_short[5].path == NULL,
+    CHECK(rootfs_work_standard_entries(true, true, NULL, 0u) == 8u,
+          "the activation+PPP plan is not eight entries");
+    CHECK(rootfs_work_standard_entries(true, true, combined_short, 7u) == 8u &&
+          combined_short[0].path == NULL && combined_short[7].path == NULL,
           "a short activation+PPP plan was partially filled");
     memset(combined, 0, sizeof combined);
-    CHECK(rootfs_work_standard_entries(true, true, combined, 6u) == 6u &&
+    CHECK(rootfs_work_standard_entries(true, true, combined, 8u) == 8u &&
           combined[0].path &&
           strcmp(combined[0].path,
                  "/private/var/root/Library/Lockdown") == 0 &&
@@ -4687,13 +4758,20 @@ static void test_ppp_entries(void) {
           combined[5].path &&
           strcmp(combined[5].path,
                  "/private/var/preferences/SystemConfiguration/"
-                 "preferences.plist") == 0,
+                 "preferences.plist") == 0 &&
+          combined[6].path &&
+          strcmp(combined[6].path,
+                 "/private/etc/ppp/s5lbox-network-setup") == 0 &&
+          combined[7].path &&
+          strcmp(combined[7].path,
+                 "/System/Library/LaunchDaemons/"
+                 "com.s5lbox.network-setup.plist") == 0,
           "the shared activation+PPP plan is missing or misordered");
-    CHECK(rootfs_work_standard_entries(false, true, combined, 6u) == 4u &&
+    CHECK(rootfs_work_standard_entries(false, true, combined, 8u) == 6u &&
           combined[0].path &&
           strcmp(combined[0].path, "/private/etc/ppp/options") == 0,
           "the PPP-only standard plan is wrong");
-    CHECK(rootfs_work_standard_entries(true, false, combined, 6u) == 2u &&
+    CHECK(rootfs_work_standard_entries(true, false, combined, 8u) == 2u &&
           combined[1].path &&
           strcmp(combined[1].path,
                  "/private/var/root/Library/Lockdown/data_ark.plist") == 0,
@@ -4708,7 +4786,7 @@ static void test_ppp_entries(void) {
         CHECK(0, "PPP fixture allocation failed");
         return;
     }
-    rootfs_work_entry_t image_plan[10];
+    rootfs_work_entry_t image_plan[15];
     memset(image_plan, 0, sizeof image_plan);
     entry_directory(&image_plan[0], "/private", 0755u);
     entry_directory(&image_plan[1], "/private/etc", 0755u);
@@ -4716,10 +4794,17 @@ static void test_ppp_entries(void) {
     entry_directory(&image_plan[3], "/private/var", 0755u);
     entry_directory(&image_plan[4], "/private/var/run", 0755u);
     entry_directory(&image_plan[5], "/private/var/preferences", 0755u);
-    memcpy(&image_plan[6], entries, sizeof entries);
+    entry_directory(&image_plan[6], "/System", 0755u);
+    entry_directory(&image_plan[7], "/System/Library", 0755u);
+    entry_directory(&image_plan[8], "/System/Library/LaunchDaemons", 0755u);
+    memcpy(&image_plan[9], entries, sizeof entries);
 
     run_t run;
-    if (run_provision(&run, fx, "ppp-layout", image_plan, 10u, 0u)) {
+    /* Five payload files need five allocation blocks while this stock-shaped
+     * fixture has four free. Production always grows the zero-free-blocks
+     * source volume before provisioning, so exercise the same contract. */
+    if (run_provision(&run, fx, "ppp-layout", image_plan, 15u,
+                      (uint64_t)8u * FX_BLOCK_SIZE)) {
         tr_volume_t vol;
         tr_record_t record;
         expect_success(&run, "PPP stock-layout payload");
@@ -4736,6 +4821,33 @@ static void test_ppp_entries(void) {
             CHECK(tr_find(&vol, cnid, "preferences.plist", &record) &&
                   record.type == 2u,
                   "SystemConfiguration/preferences.plist is missing");
+
+            cnid = FX_ROOT;
+            static const char *ppp_parents[] = {"private", "etc", "ppp"};
+            for (size_t i = 0;
+                 i < sizeof ppp_parents / sizeof ppp_parents[0]; i++) {
+                CHECK(tr_find(&vol, cnid, ppp_parents[i], &record) &&
+                      record.type == 1u, "%s is missing", ppp_parents[i]);
+                cnid = get_be32(record.data + 8);
+            }
+            CHECK(tr_find(&vol, cnid, "s5lbox-network-setup", &record) &&
+                  record.type == 2u,
+                  "the Setup publisher input file is missing");
+
+            cnid = FX_ROOT;
+            static const char *job_parents[] = {
+                "System", "Library", "LaunchDaemons"
+            };
+            for (size_t i = 0;
+                 i < sizeof job_parents / sizeof job_parents[0]; i++) {
+                CHECK(tr_find(&vol, cnid, job_parents[i], &record) &&
+                      record.type == 1u, "%s is missing", job_parents[i]);
+                cnid = get_be32(record.data + 8);
+            }
+            CHECK(tr_find(&vol, cnid,
+                          "com.s5lbox.network-setup.plist", &record) &&
+                  record.type == 2u,
+                  "the Setup publisher launchd job is missing");
             tr_close(&vol);
         }
         run_release(&run);

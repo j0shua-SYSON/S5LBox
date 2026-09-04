@@ -830,12 +830,14 @@ size_t rootfs_work_activation_entries(rootfs_work_entry_t *entries,
  *
  * The options file carries the fixed pppd service ID, resolv.conf remains a
  * libc fallback, and the SystemConfiguration directory plus preferences.plist
- * give configd the matching persistent PPPSerial service. These are one
- * transaction: a short buffer is left untouched rather than producing a
+ * give configd the matching persistent PPPSerial service. A launchd job and
+ * scutil input file keep the corresponding Setup: graph published across the
+ * guest's configd startup race; pppd/IPMonitor still own live State:. These are
+ * one transaction: a short buffer is left untouched rather than producing a
  * half-described network. The stock image has /private/var/preferences but not
  * its SystemConfiguration child, so the directory entry is required.
  *
- * Returns the number of entries required (4). Fills `entries` only when
+ * Returns the number of entries required (6). Fills `entries` only when
  * `capacity` is at least that. The filled entries point at static storage.
  */
 size_t rootfs_work_ppp_entries(rootfs_work_entry_t *entries, size_t capacity);

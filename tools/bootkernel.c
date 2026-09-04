@@ -35624,7 +35624,7 @@ int main(int argc, char **argv) {
          * See rootfs_work_ppp_entries() for why the option goes in
          * /etc/ppp/options rather than into the launchd job's argument list.
          */
-        static rootfs_work_entry_t provision_entries[6];
+        static rootfs_work_entry_t provision_entries[8];
         size_t standard_count = rootfs_work_standard_entries(
             cfg.v.activate, cfg.v.ppp, NULL, 0u);
         if (standard_count > sizeof provision_entries /
