@@ -599,6 +599,13 @@ void net_input(net_stack_t *ns, const uint8_t *pkt, size_t n) {
 
 /* ================================================================ tick === */
 
+void net_input_at(net_stack_t *ns, const uint8_t *pkt, size_t n,
+                  uint32_t now_ms) {
+    if (!ns || !pkt) return;
+    if ((int32_t)(now_ms - ns->now_ms) >= 0) ns->now_ms = now_ms;
+    net_input(ns, pkt, n);
+}
+
 void net_tick(net_stack_t *ns, uint32_t now_ms) {
     if (!ns) return;
     if ((int32_t)(now_ms - ns->now_ms) < 0) return;   /* monotonic only      */

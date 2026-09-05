@@ -1573,6 +1573,125 @@ static void test_a_lost_segment_is_retransmitted_and_then_given_up_on(void) {
     CHECK(net_flows_open(&g_ns) == 0u, "the dead flow was left allocated");
 }
 
+static void send_tcp_control_at(uint16_t sport, uint32_t seq, uint32_t ack,
+                                uint8_t flags, uint32_t now_ms) {
+    uint8_t packet[40];
+    size_t header = net_build_ipv4(packet, sizeof packet, GUEST_IP, PEER_IP,
+                                   NET_PROTO_TCP, 0x1234u, 20u);
+    CHECK(header == 20u, "control packet header did not fit");
+    if (header != 20u) return;
+    uint8_t *seg = packet + header;
+    memset(seg, 0, 20u);
+    w16(seg, sport);
+    w16(seg + 2u, 80u);
+    w32(seg + 4u, seq);
+    w32(seg + 8u, ack);
+    seg[12] = 5u << 4u;
+    seg[13] = flags;
+    w16(seg + 14u, 8192u);
+    w16(seg + 16u, net_l4_checksum(GUEST_IP, PEER_IP, NET_PROTO_TCP,
+                                    seg, 20u));
+    net_input_at(&g_ns, packet, sizeof packet, now_ms);
+}
+
+static void test_queued_ack_restarts_rto_at_its_service_time(void) {
+    pkt_t packet;
+    net_tcp_live_status_t live;
+    uint32_t guest_seq;
+    start(true, false);
+    uint32_t ours = handshake(50101u, &guest_seq);
+    drain();
+    g_mock.h[0].stream_left = 8u;
+    net_tick(&g_ns, 10u);
+    CHECK(take(&packet) && packet.seq == ours && packet.paylen == 8u,
+          "initial response did not reach the guest");
+    drain();
+
+    /* The app drains queued guest input BEFORE ticking timers. After a long
+     * run/pause gap, that ACK must use this boundary's time, not the previous
+     * net_tick's 10 ms. Otherwise new data is queued with an already-expired
+     * RTO and the following tick retransmits it immediately. */
+    const uint32_t serviced_at = 10u + 2u * NET_TCP_RTO_MS;
+    g_mock.h[0].stream_left = 8u;
+    send_tcp_control_at(50101u, guest_seq, ours + 8u, TCP_ACK, serviced_at);
+    net_tick(&g_ns, serviced_at);
+    CHECK(take(&packet) && packet.seq == ours + 8u && packet.paylen == 8u,
+          "the ACK did not release the next response bytes");
+    CHECK(!take(&packet) && g_ns.stats.tcp_retransmits == 0u,
+          "fresh response was retransmitted at its own service boundary");
+    CHECK(net_get_tcp_live_status(&g_ns, &live) &&
+          live.rto_remaining_ms == NET_TCP_RTO_MS && live.retries == 0u,
+          "fresh response has remaining/retries %u/%u, expected %u/0",
+          live.rto_remaining_ms, live.retries, NET_TCP_RTO_MS);
+    net_tick(&g_ns, serviced_at + NET_TCP_RTO_MS - 1u);
+    CHECK(!take(&packet), "fresh response did not receive one full RTO");
+    net_tick(&g_ns, serviced_at + NET_TCP_RTO_MS);
+    CHECK(take(&packet) && packet.seq == ours + 8u && packet.paylen == 8u &&
+          g_ns.stats.tcp_retransmits == 1u,
+          "a genuinely unacknowledged response did not retry at the deadline");
+}
+
+static void test_new_syn_does_not_inherit_an_expired_clock(void) {
+    pkt_t packet;
+    net_tcp_live_status_t live;
+    start(true, false);
+    const uint32_t serviced_at = 5u * NET_TCP_RTO_MS;
+    send_tcp_control_at(50102u, 123u, 0u, TCP_SYN, serviced_at);
+    net_tick(&g_ns, serviced_at);
+    CHECK(take(&packet) && packet.flags == (TCP_SYN | TCP_ACK),
+          "new SYN did not receive a SYN-ACK");
+    CHECK(!take(&packet) && g_ns.stats.tcp_retransmits == 0u,
+          "new SYN-ACK was retransmitted immediately after a service gap");
+    CHECK(net_get_tcp_live_status(&g_ns, &live) &&
+          live.rto_remaining_ms == NET_TCP_RTO_MS && live.retries == 0u,
+          "new SYN inherited remaining/retries %u/%u",
+          live.rto_remaining_ms, live.retries);
+}
+
+static void test_timestamped_input_does_not_tick_other_flows_first(void) {
+    pkt_t packet;
+    uint32_t seq_a, seq_b;
+    start(true, false);
+    uint32_t ours_a = handshake(50103u, &seq_a);
+    uint32_t ours_b = handshake(50104u, &seq_b);
+    drain();
+    g_mock.h[0].stream_left = 8u;
+    g_mock.h[1].stream_left = 8u;
+    net_tick(&g_ns, 10u);
+    CHECK(drain() == 2u, "two flows did not emit their initial responses");
+
+    const uint32_t serviced_at = 10u + 2u * NET_TCP_RTO_MS;
+    send_tcp_control_at(50103u, seq_a, ours_a + 8u, TCP_ACK, serviced_at);
+    CHECK(g_ns.stats.tcp_retransmits == 0u && net_output_pending(&g_ns) == 0u,
+          "input evaluated expiration before the queued ACK or on another flow");
+    net_tick(&g_ns, serviced_at);
+    CHECK(take(&packet) && packet.dport == 50104u && packet.seq == ours_b &&
+          packet.paylen == 8u && !take(&packet) &&
+          g_ns.stats.tcp_retransmits == 1u,
+          "the following tick did not retry only the still-unacknowledged flow");
+}
+
+static void test_timestamped_input_clamps_stale_time_and_handles_wrap(void) {
+    static const uint8_t malformed = 0u;
+    start(true, false);
+    net_tick(&g_ns, 1000u);
+    net_input_at(NULL, &malformed, 1u, 2000u);
+    net_input_at(&g_ns, NULL, 0u, 2000u);
+    CHECK(g_ns.now_ms == 1000u && g_ns.stats.ip_in == 0u,
+          "NULL input changed the clock or packet count");
+    net_input_at(&g_ns, &malformed, 1u, 500u);
+    CHECK(g_ns.now_ms == 1000u && g_ns.stats.ip_bad_header == 1u,
+          "stale time moved backward or discarded the packet before admission");
+    net_input_at(&g_ns, &malformed, 1u, INT32_MAX);
+    net_input_at(&g_ns, &malformed, 1u, UINT32_MAX - 10u);
+    net_input_at(&g_ns, &malformed, 1u, 20u);
+    CHECK(g_ns.now_ms == 20u && g_ns.stats.ip_bad_header == 4u,
+          "monotonic timestamp did not advance across 32-bit wrap");
+    net_input_at(&g_ns, &malformed, 1u, UINT32_MAX - 5u);
+    CHECK(g_ns.now_ms == 20u && g_ns.stats.ip_bad_header == 5u,
+          "pre-wrap stale timestamp was treated as a future instant");
+}
+
 static void test_a_zero_window_is_probed_and_not_left_to_stall(void) {
     pkt_t r;
     uint32_t gseq;
@@ -1814,6 +1933,10 @@ int main(void) {
     RUN(test_the_host_closing_first_ends_the_connection_cleanly);
     RUN(test_the_guest_closing_first_half_closes_the_socket);
     RUN(test_a_lost_segment_is_retransmitted_and_then_given_up_on);
+    RUN(test_queued_ack_restarts_rto_at_its_service_time);
+    RUN(test_new_syn_does_not_inherit_an_expired_clock);
+    RUN(test_timestamped_input_does_not_tick_other_flows_first);
+    RUN(test_timestamped_input_clamps_stale_time_and_handles_wrap);
     RUN(test_a_zero_window_is_probed_and_not_left_to_stall);
     RUN(test_the_flow_table_fills_and_says_so);
     RUN(test_the_output_queue_backs_up_rather_than_overwriting);

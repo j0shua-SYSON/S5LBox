@@ -434,6 +434,18 @@ void net_reset(net_stack_t *ns);
 void net_input(net_stack_t *ns, const uint8_t *pkt, size_t n);
 
 /*
+ * Input queued between service boundaries must be processed at the current
+ * protocol time, not the preceding tick's time. Advance the clock without
+ * polling other flows or firing their timers first, then dispatch this packet.
+ * A stale timestamp is clamped to the last accepted time; input is not lost.
+ * Call this for queued input before net_tick(ns, now_ms), so an ACK already
+ * waiting at the boundary can restart its RTO before expiration is evaluated.
+ * Like net_tick, ordering uses a signed 32-bit delta and permits clock wrap.
+ */
+void net_input_at(net_stack_t *ns, const uint8_t *pkt, size_t n,
+                  uint32_t now_ms);
+
+/*
  * Take the next datagram queued for the guest. Returns its length, or 0 when
  * there is none or `cap` is too small — check net_output_peek() first if the
  * difference matters, which for a caller with a bounded PPP ring it does.
@@ -451,8 +463,8 @@ size_t net_output_pending(const net_stack_t *ns);
  * data at it, send whatever the guest's window allows, retransmit what the
  * timer owes and expire what is idle. Monotonic; going backwards is ignored.
  *
- * This is the ONLY place the egress is polled, so a caller that never ticks
- * gets a stack that answers pings and nothing else.
+ * Input may service its addressed flow, but this is what services all flows
+ * when the guest is silent. Call it even when no input arrives.
  */
 void net_tick(net_stack_t *ns, uint32_t now_ms);
 

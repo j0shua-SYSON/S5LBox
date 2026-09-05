@@ -159,7 +159,7 @@ static uint32_t network_milliseconds(vm_network_session_t *session) {
     return session->network_now_ms;
 }
 
-static void drain_guest_ip(vm_network_session_t *session) {
+static void drain_guest_ip(vm_network_session_t *session, uint32_t now_ms) {
     if (!session || !session->net) return;
     for (unsigned guard = 0u;
          guard < NET_OUT_SLOTS &&
@@ -167,7 +167,7 @@ static void drain_guest_ip(vm_network_session_t *session) {
          guard++) {
         vm_network_dgram_t *slot =
             &session->inbound[session->inbound_head];
-        net_input(session->net, slot->bytes, slot->len);
+        net_input_at(session->net, slot->bytes, slot->len, now_ms);
         slot->len = 0u;
         session->inbound_head = inbound_next(session->inbound_head);
     }
@@ -209,8 +209,10 @@ static void uart4_host_service(void *ctx, unsigned retired) {
     ppp_tick(session->peer, now_ms);
 
     if (session->net) {
-        /* Socket work is confined to this between-slices boundary. */
-        drain_guest_ip(session);
+        /* Input gets this boundary's time before it can restart a TCP timer.
+         * Drain queued ACKs before evaluating expirations, without backdating
+         * any new response to the previous boundary. Socket work remains here. */
+        drain_guest_ip(session, now_ms);
         net_tick(session->net, now_ms);
         for (unsigned sent = 0u;
              sent < VM_NETWORK_IP_DATAGRAMS_PER_SERVICE;
