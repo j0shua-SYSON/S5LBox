@@ -529,7 +529,7 @@ static void test_invalid_create_fails_closed(void) {
     vm_network_session_destroy(NULL);
 }
 
-static void test_bulk_packets_use_tokens_and_recover_lost_notifications(void) {
+static void test_bulk_packets_use_tokens_and_recover_lost_notifications(bool batch) {
     s5l8900_t machine;
     char detail[192];
     CHECK(s5l8900_init(&machine, 0u, 1u << 20), "machine init failed");
@@ -540,7 +540,8 @@ static void test_bulk_packets_use_tokens_and_recover_lost_notifications(void) {
     CHECK(vm_network_session_set_host_clock(session, fake_host_now, &clock),
           "clock attach failed");
     guest_packet_bridge_t bridge = {
-        .sites = {0xc0000800u, 0xc0000804u, 0xc0000900u, 0xc0000a00u, 0xc0000b00u},
+        .sites = {0xc0000800u, 0xc0000804u, 0xc0000900u, 0xc0000a00u, 0xc0000b00u,
+                  0xc0000808u, 0xc0000d00u, 0xc0000e00u},
         .ram = machine.ram, .ram_base = 0u, .ram_size = machine.ram_size
     };
     CHECK(!vm_network_session_attach_packet_bridge(session, &bridge),
@@ -549,7 +550,9 @@ static void test_bulk_packets_use_tokens_and_recover_lost_notifications(void) {
     CHECK(!vm_network_session_attach_packet_bridge(session, &bridge),
           "a partially patched checkpoint enabled bulk tokens");
     machine.bus.write32(machine.bus.ctx, 0x804u, GUEST_PACKET_TX_SVC);
+    if (batch) machine.bus.write32(machine.bus.ctx, 0x808u, GUEST_PACKET_BATCH_SVC);
     CHECK(vm_network_session_attach_packet_bridge(session, &bridge), "bulk attach failed");
+    CHECK((bridge.finish != NULL) == batch, "old checkpoint enabled batch delivery");
     CHECK(!vm_network_session_attach_packet_bridge(session, &bridge), "double attach accepted");
     ppp_peer_t guest;
     CHECK(open_test_ppp_link(&machine, session, &guest), "bulk setup lost stock IPCP");
@@ -569,11 +572,11 @@ static void test_bulk_packets_use_tokens_and_recover_lost_notifications(void) {
           "bulk transport retained one-packet scheduling");
     /* This fixture uses PIO, not the real driver's demand-refilled DMA. Its
      * 16-byte FIFO needs further service boundaries to carry the tokens. */
-    for (unsigned turn = 0u; turn < 16u && sink.packets < 3u; turn++) {
+    for (unsigned turn = 0u; turn < 16u; turn++) {
         CHECK(run_service_boundary(&machine), "token refill failed");
         receive_host_ppp_bytes(&machine, &guest);
     }
-    CHECK(sink.packets == 3u && sink.length == GUEST_PACKET_TOKEN_SIZE,
+    CHECK(sink.packets == (batch ? 1u : 3u) && sink.length == GUEST_PACKET_TOKEN_SIZE,
           "UART notification packets/length=%u/%zu ip=%llu bad=%llu pending=%u",
           sink.packets, sink.length, (unsigned long long)guest.stats.ip_frames_in,
           (unsigned long long)guest.stats.fcs_errors, machine.uart4.rx_count);
@@ -581,9 +584,26 @@ static void test_bulk_packets_use_tokens_and_recover_lost_notifications(void) {
     size_t n = bridge.peek(bridge.ctx, sink.last, &reply);
     CHECK(n == 32u && reply && reply[20] == 0u && net_checksum(reply, 20u) == 0u,
           "guest packet queue did not retain the actual ICMP reply");
-    bridge.consume(bridge.ctx); /* the first two notifications were lost */
+    bridge.consume(bridge.ctx);
+    if (batch) {
+        CHECK(bridge.peek(bridge.ctx, NULL, &reply) == 32u,
+              "batch next packet missing after token consumption");
+        bridge.consume(bridge.ctx);
+        /* End early as if native allocation failed: the third packet is
+         * retained and must get a fresh notification at the next boundary. */
+        bridge.finish(bridge.ctx);
+        for (unsigned turn = 0u; turn < 16u; turn++) {
+            CHECK(run_service_boundary(&machine), "partial batch rearm failed");
+            receive_host_ppp_bytes(&machine, &guest);
+        }
+        CHECK(sink.packets == 2u && bridge.peek(bridge.ctx, sink.last, &reply) == 32u,
+              "early batch finish lost or duplicated the remaining packet");
+        bridge.consume(bridge.ctx);
+        CHECK(bridge.peek(bridge.ctx, NULL, &reply) == 0u, "batch left a packet queued");
+        bridge.finish(bridge.ctx);
+    } /* Without batching the first two notifications were deliberately lost. */
     vm_network_session_status(session, &status);
-    CHECK(status.net_to_guest_lost == 2u,
+    CHECK(status.net_to_guest_lost == (batch ? 0u : 2u),
           "lost earlier notifications wedged or silently disappeared");
     CHECK(bridge.peek(bridge.ctx, sink.last, &reply) == 0u,
           "duplicate notification reused a consumed packet");
@@ -591,19 +611,29 @@ static void test_bulk_packets_use_tokens_and_recover_lost_notifications(void) {
     CHECK(bridge.send(bridge.ctx, packet, n), "send after notification loss failed");
     CHECK(run_service_boundary(&machine), "second bulk service failed");
     receive_host_ppp_bytes(&machine, &guest);
-    for (unsigned turn = 0u; turn < 16u && sink.packets < 4u; turn++) {
+    for (unsigned turn = 0u; turn < 16u; turn++) {
         CHECK(run_service_boundary(&machine), "second token refill failed");
         receive_host_ppp_bytes(&machine, &guest);
     }
-    CHECK(sink.packets == 4u, "notification after lost tokens did not arrive");
+    CHECK(sink.packets == (batch ? 3u : 4u), "notification after lost tokens did not arrive");
     clock.now_ns += UINT64_C(5000000000);
     CHECK(run_service_boundary(&machine), "expiration service failed");
     CHECK(bridge.peek(bridge.ctx, sink.last, &reply) == 0u,
           "fully lost notifications retained their slots forever");
     vm_network_session_status(session, &status);
-    CHECK(status.net_to_guest_lost == 3u, "expired notification loss unreported");
+    CHECK(status.net_to_guest_lost == (batch ? 1u : 3u), "expired notification loss unreported");
+    if (batch) {
+        n = build_echo_request(packet, sizeof packet, 5u);
+        CHECK(bridge.send(bridge.ctx, packet, n), "send after lost batch failed");
+        for (unsigned turn = 0u; turn < 16u; turn++) {
+            CHECK(run_service_boundary(&machine), "lost batch rearm failed");
+            receive_host_ppp_bytes(&machine, &guest);
+        }
+        CHECK(sink.packets == 4u && bridge.peek(bridge.ctx, sink.last, &reply) == 32u,
+              "lost whole-batch notification wedged the link");
+    }
     vm_network_session_destroy(&session);
-    CHECK(!bridge.ctx && !bridge.send && !bridge.peek && !bridge.consume,
+    CHECK(!bridge.ctx && !bridge.send && !bridge.peek && !bridge.consume && !bridge.finish,
           "destroy left dangling host packet callbacks");
     s5l8900_free(&machine);
 }
@@ -616,7 +646,8 @@ int main(void) {
     test_restored_guest_reopens_replaced_host_peer();
     test_restore_retry_uses_monotonic_host_time();
     test_invalid_create_fails_closed();
-    test_bulk_packets_use_tokens_and_recover_lost_notifications();
+    test_bulk_packets_use_tokens_and_recover_lost_notifications(false);
+    test_bulk_packets_use_tokens_and_recover_lost_notifications(true);
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

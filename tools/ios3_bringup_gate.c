@@ -67,6 +67,9 @@ void ios3_bringup_gate_configure(s5l_bringup_request_t *request,
         .tx_pc = IOS3_KERNEL_PATCH_PACKET_TX_VA,
         .free_thumb_pc = IOS3_KERNEL_MBUF_FREE_VA,
         .tx_done_pc = IOS3_KERNEL_PACKET_TX_DONE_VA,
-        .rx_drop_pc = IOS3_KERNEL_PACKET_RX_DROP_VA
+        .rx_drop_pc = IOS3_KERNEL_PACKET_RX_DROP_VA,
+        .batch_pc = IOS3_KERNEL_PATCH_PACKET_BATCH_VA,
+        .rx_enqueue_pc = IOS3_KERNEL_PACKET_RX_ENQUEUE_VA,
+        .rx_unlock_pc = IOS3_KERNEL_PACKET_RX_UNLOCK_VA
     };
 }

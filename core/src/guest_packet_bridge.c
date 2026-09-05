@@ -166,7 +166,76 @@ static arm_svc_result_t receive(guest_packet_bridge_t *b, arm_cpu_t *c) {
     b->consume(b->ctx);
     b->rx_packets++;
     b->rx_bytes += n;
+    if (b->finish && b->sites.batch_pc) {
+        b->batch_link = c->r[5];
+        b->batch_frame = c->r[7];
+        b->batch_left = GUEST_PACKET_BATCH_MAX - 1u;
+        b->rx_batches++;
+    }
     return ARM_SVC_HANDLED;
+}
+
+static arm_svc_result_t finish_batch(guest_packet_bridge_t *b, arm_cpu_t *c) {
+    b->batch_link = b->batch_frame = b->batch_left = 0u;
+    if (b->finish) b->finish(b->ctx);
+    c->r[15] = b->sites.rx_unlock_pc;
+    return ARM_SVC_REDIRECTED;
+}
+
+static arm_svc_result_t receive_batch(guest_packet_bridge_t *b, arm_cpu_t *c) {
+    /* This site is reached with the native PPP mutex still held, after the
+     * previous packet has been enqueued and getm has replenished ld->inm.
+     * A restored checkpoint has no host batch owner: just unlock normally. */
+    if (!b->batch_link || b->batch_link != c->r[5] ||
+        b->batch_frame != c->r[7]) {
+        c->r[15] = b->sites.rx_unlock_pc;
+        return ARM_SVC_REDIRECTED;
+    }
+    if (!b->batch_left || !b->peek || !b->consume || !b->finish)
+        return finish_batch(b, c);
+    const uint8_t *packet = NULL;
+    size_t n = b->peek(b->ctx, NULL, &packet);
+    if (!n) return finish_batch(b, c);
+
+    map_t link, meta, data, length;
+    uint8_t word[4], header[MBUF_HEADER];
+    if (!map(b, c, b->batch_link + 0xf8u, 4u, true, &link)) return fail(b);
+    copy_from(&link, word);
+    uint32_t m = ld32(word);
+    /* MBUF_DONTWAIT allocation failure is normal backpressure. Leave the
+     * queued packet owned by the host and request a later notification. */
+    if (!m) return finish_batch(b, c);
+    if ((m & 3u) || !map(b, c, m, MBUF_HEADER, false, &meta)) return fail(b);
+    copy_from(&meta, header);
+    uint32_t data_va = ld32(header + 12u), base = ld32(header + 68u);
+    if (!packet || n < 20u || n > GUEST_PACKET_MTU) return fail(b);
+    if (ld32(header) || (header[18] & 3u) != 3u ||
+        ld32(header + 76u) != 2048u || data_va < base ||
+        (uint64_t)data_va - base + n + 4u > 2048u)
+        return finish_batch(b, c); /* unsupported native layout: single RX */
+    if (!map(b, c, data_va, (uint32_t)n + 4u, true, &data) ||
+        !map(b, c, m + 8u, 4u, true, &length) ||
+        overlap(&data, &meta) || overlap(&data, &link) || overlap(&meta, &link))
+        return fail(b);
+    uint8_t framed[GUEST_PACKET_MTU + 4u];
+    memcpy(framed, "\xff\x03\x00\x21", 4u);
+    memcpy(framed + 4u, packet, n);
+    /* All destinations are preflighted. Detach exactly this native buffer;
+     * native pkthdr_setlen/enqueue/schedule/getm do all ownership transitions. */
+    copy_to(&data, framed);
+    st32(word, (uint32_t)n + 4u);
+    copy_to(&length, word);
+    st32(word, 0u);
+    copy_to(&link, word);
+    b->consume(b->ctx);
+    b->batch_left--;
+    b->rx_packets++;
+    b->rx_bytes += n;
+    b->rx_batched++;
+    c->r[4] = m;
+    c->r[6] = (uint32_t)n + 6u; /* native length includes removed FCS */
+    c->r[15] = b->sites.rx_enqueue_pc;
+    return ARM_SVC_REDIRECTED;
 }
 
 arm_svc_result_t guest_packet_bridge_svc(guest_packet_bridge_t *b,
@@ -175,8 +244,9 @@ arm_svc_result_t guest_packet_bridge_svc(guest_packet_bridge_t *b,
     if (!b || !c) return ARM_SVC_UNHANDLED;
     bool rx = pc == b->sites.rx_pc && encoding == GUEST_PACKET_RX_SVC;
     bool tx = pc == b->sites.tx_pc && encoding == GUEST_PACKET_TX_SVC;
-    if (!rx && !tx) return ARM_SVC_UNHANDLED;
+    bool batch = pc == b->sites.batch_pc && encoding == GUEST_PACKET_BATCH_SVC;
+    if (!rx && !tx && !batch) return ARM_SVC_UNHANDLED;
     if ((c->cpsr & (ARM_CPSR_T | 0x1fu)) != ARM_MODE_SVC || !c->bus)
         return fail(b);
-    return rx ? receive(b, c) : transmit(b, c, pc);
+    return rx ? receive(b, c) : batch ? receive_batch(b, c) : transmit(b, c, pc);
 }

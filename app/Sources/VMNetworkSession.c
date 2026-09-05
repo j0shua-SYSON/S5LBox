@@ -56,6 +56,8 @@ struct vm_network_session {
     unsigned bulk_head, bulk_tail;
     unsigned bulk_peek;
     uint64_t bulk_id;
+    bool bulk_batch_enabled, bulk_notified;
+    unsigned bulk_notified_slot;
 };
 
 static void anchor_host_clock(vm_network_session_t *session) {
@@ -115,7 +117,7 @@ static size_t bulk_guest_peek(void *ctx, const uint8_t token[16],
     vm_network_session_t *s = (vm_network_session_t *)ctx;
     if (!ppp_ipcp_open(s->peer)) return 0u;
     for (unsigned i = s->bulk_head; i != s->bulk_tail; i = inbound_next(i)) {
-        if (memcmp(token, s->bulk_token[i], 16u)) continue;
+        if (token && memcmp(token, s->bulk_token[i], 16u)) continue;
         s->bulk_peek = i;
         *packet = s->bulk_rx[i].bytes;
         return s->bulk_rx[i].len;
@@ -134,6 +136,11 @@ static void bulk_guest_consume(void *ctx) {
     }
     s->bulk_rx[s->bulk_head].len = 0u;
     s->bulk_head = inbound_next(s->bulk_head);
+}
+
+static void bulk_guest_finish(void *ctx) {
+    vm_network_session_t *s = (vm_network_session_t *)ctx;
+    s->bulk_notified = false;
 }
 
 bool vm_network_session_attach_packet_bridge(vm_network_session_t *s,
@@ -162,6 +169,16 @@ bool vm_network_session_attach_packet_bridge(vm_network_session_t *s,
     b->peek = bulk_guest_peek;
     b->consume = bulk_guest_consume;
     s->packet_bridge = b;
+    if (b->sites.batch_pc >= UINT32_C(0xc0000000)) {
+        uint64_t offset = b->sites.batch_pc - UINT32_C(0xc0000000);
+        uint32_t word = 0u;
+        if (offset <= b->ram_size && b->ram_size - offset >= 4u)
+            memcpy(&word, b->ram + offset, sizeof word);
+        if (word == GUEST_PACKET_BATCH_SVC) {
+            s->bulk_batch_enabled = true;
+            b->finish = bulk_guest_finish;
+        }
+    }
     s->net->cfg.tcp_cwnd_segments = NET_OUT_SLOTS;
     (void)fprintf(stderr, "[network] bulk packet transport attached; "
                          "serial carries setup and delivery notifications only\n");
@@ -286,6 +303,9 @@ static void uart4_host_service(void *ctx, unsigned retired) {
     while (session->bulk_head != session->bulk_tail &&
            (!ppp_ipcp_open(session->peer) ||
             (uint32_t)(now_ms - session->bulk_queued_ms[session->bulk_head]) >= 4000u)) {
+        if (session->bulk_notified &&
+            session->bulk_notified_slot == session->bulk_head)
+            session->bulk_notified = false;
         session->bulk_rx[session->bulk_head].len = 0u;
         session->bulk_head = inbound_next(session->bulk_head);
         session->net_to_guest_lost++;
@@ -319,7 +339,8 @@ static void uart4_host_service(void *ctx, unsigned retired) {
                 d->len = (uint16_t)n;
                 session->bulk_queued_ms[slot] = now_ms;
                 guest_packet_token(session->bulk_token[slot], ++session->bulk_id);
-                if (!ppp_send_ip(session->peer, session->bulk_token[slot],
+                if (!session->bulk_batch_enabled &&
+                    !ppp_send_ip(session->peer, session->bulk_token[slot],
                                  GUEST_PACKET_TOKEN_SIZE)) {
                     session->net_to_guest_lost++;
                     break;
@@ -343,6 +364,16 @@ static void uart4_host_service(void *ctx, unsigned retired) {
                               "after PPP capacity reservation\n");
                 break;
             }
+        }
+        /* One notification starts a bounded native allocation/enqueue batch.
+         * finish re-arms it even when allocation fails or the budget expires;
+         * untouched packets remain queued, never silently consumed. */
+        if (session->bulk_batch_enabled && !session->bulk_notified &&
+            session->bulk_head != session->bulk_tail &&
+            ppp_send_ip(session->peer, session->bulk_token[session->bulk_head],
+                        GUEST_PACKET_TOKEN_SIZE)) {
+            session->bulk_notified = true;
+            session->bulk_notified_slot = session->bulk_head;
         }
     }
 
@@ -460,6 +491,8 @@ void vm_network_session_status(const vm_network_session_t *session,
         out->bulk_rx_bytes = b->rx_bytes;
         out->bulk_stale_tokens = b->stale_tokens;
         out->bulk_failures = b->failures;
+        out->bulk_batches = b->rx_batches;
+        out->bulk_batched_packets = b->rx_batched;
     }
     out->peer_opened = session->peer_opened;
     out->host_clock_enabled = session->host_now != NULL;
@@ -605,6 +638,7 @@ void vm_network_session_destroy(vm_network_session_t **slot) {
         session->packet_bridge->send = NULL;
         session->packet_bridge->peek = NULL;
         session->packet_bridge->consume = NULL;
+        session->packet_bridge->finish = NULL;
         session->packet_bridge->ctx = NULL;
     }
     if (session->machine &&

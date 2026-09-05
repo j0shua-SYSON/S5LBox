@@ -97,6 +97,11 @@ static const expected_site_t expected_sites[] = {
         IOS3_KERNEL_PATCH_PACKET_TX_VA, 4u,
         {0x36u, 0xffu, 0x2fu, 0xe1u}, {0xf1u, 0x00u, 0x00u, 0xefu},
         IOS3_KERNEL_PATCH_SITE_PACKET_TX
+    },
+    {
+        IOS3_KERNEL_PATCH_PACKET_BATCH_VA, 4u,
+        {0x5eu, 0x01u, 0x00u, 0xeau}, {0xf2u, 0x00u, 0x00u, 0xefu},
+        IOS3_KERNEL_PATCH_SITE_PACKET_BATCH
     }
 };
 

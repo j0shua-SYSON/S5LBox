@@ -7,13 +7,14 @@
 static s5l8900_t machine;
 static guest_packet_bridge_t bridge;
 static uint8_t payload[1500], captured[1500], expected_token[16];
-static unsigned sent, consumed, passed, failed;
+static unsigned sent, consumed, finished, passed, failed;
 static bool accept_send, have_rx;
 #define CHECK(x) do { if (x) passed++; else { failed++; \
     printf("FAIL line %u: %s\n", (unsigned)__LINE__, #x); } } while (0)
 #define VA UINT32_C(0xc0000000)
 #define RX (VA + 0x800u)
 #define TX (VA + 0x804u)
+#define BATCH (VA + 0x808u)
 static void put(uint32_t off, uint32_t v) {
     for (unsigned i = 0; i < 4u; i++) machine.ram[off + i] = (uint8_t)(v >> (8u*i));
 }
@@ -31,11 +32,12 @@ static bool send_packet(void *ctx, const uint8_t *p, size_t n) {
 }
 static size_t peek_packet(void *ctx, const uint8_t *token, const uint8_t **p) {
     (void)ctx;
-    if (!have_rx || memcmp(token, expected_token, 16u)) return 0;
+    if (!have_rx || (token && memcmp(token, expected_token, 16u))) return 0;
     *p = payload;
     return sizeof payload;
 }
 static void consume_packet(void *ctx) { (void)ctx; consumed++; have_rx = false; }
+static void finish_packets(void *ctx) { (void)ctx; finished++; }
 static arm_svc_result_t handler(void *ctx, arm_cpu_t *c, uint32_t pc, uint32_t op) {
     return guest_packet_bridge_svc(ctx, c, pc, op);
 }
@@ -49,8 +51,10 @@ static void reset(void) {
     put(0x4000u + 0xc00u*4u, 0xc02u);
     put(0x800u, GUEST_PACKET_RX_SVC);
     put(0x804u, GUEST_PACKET_TX_SVC);
+    put(0x808u, GUEST_PACKET_BATCH_SVC);
     bridge = (guest_packet_bridge_t){
-        .sites = {RX, TX, VA+0x900u, VA+0xa00u, VA+0xb00u},
+        .sites = {RX, TX, VA+0x900u, VA+0xa00u, VA+0xb00u,
+                  BATCH, VA+0xd00u, VA+0xe00u},
         .ram = machine.ram, .ram_base = 0u, .ram_size = machine.ram_size,
         .send = send_packet, .peek = peek_packet, .consume = consume_packet
     };
@@ -58,7 +62,7 @@ static void reset(void) {
     for (unsigned i = 0; i < sizeof payload; i++) payload[i] = (uint8_t)(i*17u);
     payload[0] = 0x45u;
     guest_packet_token(expected_token, UINT64_C(0x1122334455667788));
-    sent = consumed = 0;
+    sent = consumed = finished = 0;
     accept_send = have_rx = true;
 }
 static void mbuf(uint32_t off, uint32_t data, uint32_t n) {
@@ -140,6 +144,57 @@ static void test_transmit(void) {
     reset(); setup_tx(); put(0x100cu, VA+0xfff00u);
     CHECK(arm_step(&machine.cpu) == ARM_HALT && sent == 0u);
 }
+static void setup_batch(void) {
+    reset(); setup_rx();
+    bridge.finish = finish_packets;
+    CHECK(arm_step(&machine.cpu) == ARM_OK && consumed == 1u);
+    CHECK(bridge.batch_link == VA+0x2000u && bridge.rx_batches == 1u);
+    /* Simulate the unmodified native enqueue/getm supplying its next mbuf. */
+    mbuf(0x1100u, 0x3700u, 0u);
+    put(0x20f8u, VA+0x1100u);
+    machine.cpu.r[15] = BATCH;
+    have_rx = true;
+}
+static void test_batch(void) {
+    setup_batch();
+    CHECK(arm_step(&machine.cpu) == ARM_OK);
+    CHECK(consumed == 2u && bridge.rx_batched == 1u && bridge.rx_bytes == 3000u);
+    CHECK(machine.cpu.r[15] == VA+0xd00u && machine.cpu.r[4] == VA+0x1100u &&
+          machine.cpu.r[6] == 1506u && get(0x20f8u) == 0u);
+    CHECK(get(0x1108u) == 1504u && get(0x1114u) == 0u);
+    CHECK(!memcmp(machine.ram+0x3700u, "\xff\x03\x00\x21", 4u) &&
+          !memcmp(machine.ram+0x3704u, payload, sizeof payload));
+    machine.cpu.r[15] = BATCH;
+    CHECK(arm_step(&machine.cpu) == ARM_OK && finished == 1u);
+    CHECK(machine.cpu.r[15] == VA+0xe00u && bridge.batch_link == 0u);
+
+    setup_batch(); put(0x20f8u, 0u); /* native allocation failure */
+    CHECK(arm_step(&machine.cpu) == ARM_OK && consumed == 1u && have_rx);
+    CHECK(finished == 1u && bridge.failures == 0u);
+    setup_batch(); put(0x114cu, 4096u); /* valid but unsupported allocation */
+    CHECK(arm_step(&machine.cpu) == ARM_OK && consumed == 1u && finished == 1u);
+    CHECK(get(0x20f8u) == VA+0x1100u && get(0x1108u) == 0u);
+    setup_batch(); put(0x110cu, VA+0xffff0u); put(0x1144u, VA+0xffff0u);
+    CHECK(arm_step(&machine.cpu) == ARM_HALT && consumed == 1u);
+    CHECK(get(0x20f8u) == VA+0x1100u && get(0x1108u) == 0u);
+    setup_batch(); put(0x110cu, VA+0x1100u); put(0x1144u, VA+0x1100u);
+    CHECK(arm_step(&machine.cpu) == ARM_HALT && consumed == 1u); /* metadata alias */
+    setup_batch(); machine.cpu.r[7] = 4u; /* unrelated native invocation */
+    CHECK(arm_step(&machine.cpu) == ARM_OK && consumed == 1u && finished == 0u);
+    CHECK(machine.cpu.r[15] == VA+0xe00u && bridge.batch_link != 0u);
+    setup_batch(); bridge.batch_link = 0u; /* unsaved owner after restore */
+    CHECK(arm_step(&machine.cpu) == ARM_OK && consumed == 1u && finished == 0u);
+    setup_batch();
+    bool bounded = true;
+    for (unsigned i = 1u; i < GUEST_PACKET_BATCH_MAX; i++) {
+        put(0x20f8u, VA+0x1100u); have_rx = true; machine.cpu.r[15] = BATCH;
+        if (arm_step(&machine.cpu) != ARM_OK) bounded = false;
+    }
+    CHECK(bounded && consumed == GUEST_PACKET_BATCH_MAX && bridge.batch_left == 0u);
+    put(0x20f8u, VA+0x1100u); have_rx = true; machine.cpu.r[15] = BATCH;
+    CHECK(arm_step(&machine.cpu) == ARM_OK && finished == 1u && have_rx);
+    CHECK(consumed == GUEST_PACKET_BATCH_MAX && get(0x20f8u) == VA+0x1100u);
+}
 static void test_user_svc_stays_in_guest(void) {
     reset(); setup_tx(); machine.cpu.cpsr = ARM_MODE_USR;
     CHECK(arm_step(&machine.cpu) == ARM_OK);
@@ -149,7 +204,7 @@ static void test_user_svc_stays_in_guest(void) {
 }
 int main(void) {
     if (!s5l8900_init(&machine, 0u, 1u<<20)) return 1;
-    test_receive(); test_transmit(); test_user_svc_stays_in_guest();
+    test_receive(); test_transmit(); test_batch(); test_user_svc_stays_in_guest();
     s5l8900_free(&machine);
     printf("guest packet bridge: %u passed, %u failed\n", passed, failed);
     return failed ? 1 : 0;

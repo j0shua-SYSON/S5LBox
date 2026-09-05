@@ -13,6 +13,8 @@
 #define GUEST_PACKET_TOKEN_SIZE 16u
 #define GUEST_PACKET_RX_SVC UINT32_C(0xef0000f0)
 #define GUEST_PACKET_TX_SVC UINT32_C(0xef0000f1)
+#define GUEST_PACKET_BATCH_SVC UINT32_C(0xef0000f2)
+#define GUEST_PACKET_BATCH_MAX 16u
 
 typedef struct {
     uint32_t rx_pc;             /* A32 sub r1,r6,#2, after native FCS removal */
@@ -20,6 +22,9 @@ typedef struct {
     uint32_t free_thumb_pc;     /* native mbuf_freem, even fetch address */
     uint32_t tx_done_pc;        /* native return-success epilogue, A32 */
     uint32_t rx_drop_pc;        /* native receive-buffer replenishment, A32 */
+    uint32_t batch_pc;          /* A32 branch after native buffer replenishment */
+    uint32_t rx_enqueue_pc;     /* native receive accounting/enqueue, A32 */
+    uint32_t rx_unlock_pc;      /* original batch_pc branch target, A32 */
 } guest_packet_sites_t;
 
 typedef struct {
@@ -32,9 +37,15 @@ typedef struct {
     size_t (*peek)(void *ctx, const uint8_t token[GUEST_PACKET_TOKEN_SIZE],
                    const uint8_t **packet);
     void (*consume)(void *ctx);
+    /* Optional batch owner: peek(NULL) returns the next queued packet. The
+     * native allocator/enqueue loop runs at most BATCH_MAX packets under the
+     * original lock; finish releases its one outstanding notification. */
+    void (*finish)(void *ctx);
     void *ctx;
     uint64_t tx_packets, tx_bytes, rx_packets, rx_bytes;
     uint64_t tx_fallback, stale_tokens, failures;
+    uint32_t batch_link, batch_frame, batch_left;
+    uint64_t rx_batches, rx_batched;
 } guest_packet_bridge_t;
 
 void guest_packet_token(uint8_t token[GUEST_PACKET_TOKEN_SIZE], uint64_t id);

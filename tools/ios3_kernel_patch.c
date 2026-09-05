@@ -76,6 +76,14 @@ static const guest_patch_entry_t kernel_patches[] = {
         .length = 4u,
         .expected = {0x36u, 0xffu, 0x2fu, 0xe1u},
         .replacement = {0xf1u, 0x00u, 0x00u, 0xefu}
+    },
+    {
+        /* Native mbuf_getpacket has replenished the receive buffer. Bounded
+         * batches reuse native allocation and enqueue without serial bytes. */
+        .virtual_address = IOS3_KERNEL_PATCH_PACKET_BATCH_VA,
+        .length = 4u,
+        .expected = {0x5eu, 0x01u, 0x00u, 0xeau},
+        .replacement = {0xf2u, 0x00u, 0x00u, 0xefu}
     }
 };
 
@@ -717,6 +725,7 @@ const char *ios3_kernel_patch_site_string(uint32_t site) {
     case IOS3_KERNEL_PATCH_SITE_RAW_WATCHER: return "mdevrw raw watcher";
     case IOS3_KERNEL_PATCH_SITE_PACKET_RX: return "packet receive handoff";
     case IOS3_KERNEL_PATCH_SITE_PACKET_TX: return "packet transmit handoff";
+    case IOS3_KERNEL_PATCH_SITE_PACKET_BATCH: return "packet receive batch";
     case IOS3_KERNEL_PATCH_NO_SITE: return "none";
     default: return "unknown kernel patch site";
     }
