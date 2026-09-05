@@ -164,6 +164,11 @@ bool ios3_kernel_patch_sha256(
     size_t length,
     uint8_t digest[IOS3_KERNEL_PATCH_SHA256_LENGTH]);
 
+/* Exact whole-file digests of the historical and complete 7E18 extractions.
+ * The apply gate also checks build identity, topology and loaded bytes. */
+bool ios3_kernel_patch_digest_supported(
+    const uint8_t digest[IOS3_KERNEL_PATCH_SHA256_LENGTH]);
+
 const char *ios3_kernel_patch_status_string(ios3_kernel_patch_status_t status);
 const char *ios3_kernel_patch_site_string(uint32_t site);
 

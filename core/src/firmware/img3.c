@@ -50,17 +50,32 @@ bool img3_decrypt_data_iv(const img3_t *img, const uint8_t *key, unsigned key_bi
         !key || !out || !iv || key_bits != img->kbag.key_bits ||
         out_cap < img->data_len) return false;
 
+    /* DATA's logical length need not be block-aligned. The ciphertext still
+     * occupies whole AES blocks, including bytes counted as tag padding.
+     * Never borrow bytes from the next tag or wrap a hostile logical length. */
+    uint64_t encrypted_len = ((uint64_t)img->data_len + AES_BLOCK_SIZE - 1u)
+                           & ~(uint64_t)(AES_BLOCK_SIZE - 1u);
+    if (encrypted_len > img->data_storage_len) return false;
+
     aes_ctx_t ctx;
     if (!aes_init(&ctx, key, key_bits)) return false;
 
-    /* Real payloads are not always a whole number of blocks; CBC covers the
-     * aligned prefix and the remainder is passed through unchanged. */
     uint32_t whole = img->data_len & ~(AES_BLOCK_SIZE - 1u);
     uint32_t tail  = img->data_len - whole;
 
+    /* Decrypt the partial final block before overwriting its preceding
+     * ciphertext: the importer decrypts in place, and CBC needs that previous
+     * block as the IV. A small temporary also keeps padding out of the caller's
+     * logical-sized output buffer. */
+    uint8_t final[AES_BLOCK_SIZE];
+    if (tail && !aes_cbc_decrypt(&ctx,
+                                 whole ? img->data + whole - AES_BLOCK_SIZE : iv,
+                                 img->data + whole, final, sizeof final))
+        return false;
+
     if (whole && !aes_cbc_decrypt(&ctx, iv, img->data, out, whole))
         return false;
-    if (tail) memcpy(out + whole, img->data + whole, tail);
+    if (tail) memcpy(out + whole, final, tail);
 
     if (out_len) *out_len = img->data_len;
     return true;
@@ -137,6 +152,7 @@ img3_status_t img3_parse(const uint8_t *buf, size_t len, img3_t *out) {
             case IMG3_TAG_DATA:
                 out->data     = d;
                 out->data_len = data_len;
+                out->data_storage_len = total_len - IMG3_TAG_HEADER;
                 break;
             case IMG3_TAG_KBAG:
                 if (!out->kbag.present) parse_kbag(d, data_len, &out->kbag);

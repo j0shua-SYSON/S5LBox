@@ -94,17 +94,15 @@ static void test_encrypted_image_boots(void) {
     uint8_t iv[16];
     for (unsigned i = 0; i < 16; i++) iv[i] = (uint8_t)(0x20 + i);
 
-    /* Real payloads are not always block-aligned, and img3_decrypt_data covers
-     * the aligned prefix while passing any tail through. Mirror that here so
-     * the test exercises the unaligned path rather than avoiding it. */
-    uint8_t cipher[sizeof PAYLOAD];
-    const uint32_t whole = (uint32_t)(sizeof PAYLOAD) & ~15u;
-    const uint32_t tail  = (uint32_t)(sizeof PAYLOAD) - whole;
+    /* Encrypt complete blocks while keeping the DATA tag's logical size.
+     * The UART-address literal reaches into the final padded block. */
+    uint8_t padded[(sizeof PAYLOAD + 15u) & ~15u] = {0};
+    uint8_t cipher[sizeof padded];
+    memcpy(padded, PAYLOAD, sizeof PAYLOAD);
     aes_ctx_t ctx;
     aes_init(&ctx, key, 128);
-    CHECK(aes_cbc_encrypt(&ctx, iv, (const uint8_t *)PAYLOAD, cipher, whole),
-          "cbc encrypt of the aligned prefix failed");
-    if (tail) memcpy(cipher + whole, (const uint8_t *)PAYLOAD + whole, tail);
+    CHECK(aes_cbc_encrypt(&ctx, iv, padded, cipher, sizeof cipher),
+          "cbc encrypt of the padded payload failed");
 
     uint8_t kbag[24 + 16];
     memset(kbag, 0, sizeof kbag);
@@ -113,7 +111,9 @@ static void test_encrypted_image_boots(void) {
 
     img_begin(0x69626f74u);
     img_tag(0x4b424147u, kbag, sizeof kbag);                   /* KBAG */
+    uint32_t data_tag = g_len;
     img_tag(0x44415441u, cipher, (uint32_t)sizeof cipher);     /* DATA */
+    put32(data_tag + 8u, (uint32_t)sizeof PAYLOAD);
     img_tag(0x53485348u, "sig", 3);                            /* SHSH */
     img_finish();
 

@@ -238,7 +238,18 @@ typedef struct {
     const char *build;
     uint64_t    size[VM_FW_ARTEFACT_COUNT];
     uint8_t     sha256[VM_FW_ARTEFACT_COUNT][VM_FW_SHA256_LEN];
+    const uint8_t *complete_kernel_sha256;
 } vm_fw_reference_t;
+
+/* Full padded-block decryption of iPhone1,2/7E18 produces 7,942,144 bytes
+ * with the header's Adler-32 2671cd74. Only 18 bytes near the end differ from
+ * the historical extraction below. Retain that old reference for existing
+ * guest files; freshly imported firmware can match the complete extraction. */
+static const uint8_t k_7e18_complete_kernel_sha256[VM_FW_SHA256_LEN] = {
+    0xf3,0x6a,0x88,0xd6,0x11,0xd3,0xb9,0x06,0xae,0x85,0x8f,0x37,
+    0x7e,0x21,0x85,0x3b,0x40,0xb2,0x14,0xb2,0xbe,0xa9,0x9c,0xb2,
+    0xf9,0x88,0xe3,0x80,0x69,0x8e,0x6c,0xe9
+};
 
 static const vm_fw_reference_t k_references[] = {
     {
@@ -257,7 +268,8 @@ static const vm_fw_reference_t k_references[] = {
             { 0xc3,0x25,0x1e,0x7f,0x09,0x2c,0x93,0x9d,0x58,0x18,0xe9,0x20,
               0x86,0xcb,0x47,0x68,0x09,0x81,0xcf,0xb0,0x37,0x31,0xde,0x7b,
               0x55,0xd2,0x38,0xc9,0x42,0xeb,0x5e,0x82 }
-        }
+        },
+        k_7e18_complete_kernel_sha256
     }
 };
 
@@ -578,6 +590,20 @@ bool vm_fw_reference_matches(uint64_t produced_size,
     return memcmp(produced_sha256, reference_sha256, VM_FW_SHA256_LEN) == 0;
 }
 
+bool vm_fw_build_reference_matches(const char *product_type, const char *build,
+                                   vm_fw_artefact_t which, uint64_t size,
+                                   const uint8_t sha256[VM_FW_SHA256_LEN]) {
+    if (!product_type || !build || !sha256 ||
+        (unsigned)which >= VM_FW_ARTEFACT_COUNT) return false;
+    const vm_fw_reference_t *ref = find_reference(product_type, build);
+    if (!ref) return false;
+    if (vm_fw_reference_matches(size, sha256, ref->size[which], ref->sha256[which]))
+        return true;
+    return which == VM_FW_KERNEL && ref->complete_kernel_sha256 &&
+           vm_fw_reference_matches(size, sha256, ref->size[VM_FW_KERNEL],
+                                   ref->complete_kernel_sha256);
+}
+
 static void finish_hash(const run_t *r, vm_fw_artefact_report_t *ar,
                         out_sink_t *o, vm_fw_artefact_t which) {
     if (!ios3_sha256_final(&o->sha, ar->sha256)) return;
@@ -590,8 +616,8 @@ static void finish_hash(const run_t *r, vm_fw_artefact_report_t *ar,
     }
     ar->reference_known = true;
     ar->matches_reference =
-        vm_fw_reference_matches(o->total, ar->sha256,
-                                r->ref->size[which], r->ref->sha256[which]);
+        vm_fw_build_reference_matches(r->ref->product_type, r->ref->build,
+                                      which, o->total, ar->sha256);
     ar->state = ar->matches_reference ? VM_FW_STATE_VERIFIED
                                       : VM_FW_STATE_MISMATCH;
 }
@@ -704,8 +730,6 @@ static void import_img3_artefact(run_t *r, vm_fw_artefact_t which,
     const uint8_t *payload = img.data;
     size_t payload_len = img.data_len;
     uint8_t *expanded = NULL;
-    bool short_stream = false;
-    uint32_t shortfall = 0;
 
     if (which == VM_FW_KERNEL) {
         lzss_header_t lh;
@@ -743,48 +767,30 @@ static void import_img3_artefact(run_t *r, vm_fw_artefact_t which,
         size_t got = lzss_decompress(expanded, lh.uncompressed_size,
                                      payload + LZSS_HEADER_SIZE,
                                      lh.compressed_size);
-        /*
-         * lzss_decompress is bounded and cannot exceed the capacity it is
-         * given, so this can only fire if that guarantee is ever broken. It is
-         * checked anyway because the alternative to noticing here is not
-         * noticing at all: the overrun would land in a heap buffer, the file
-         * written would still be exactly uncompressed_size bytes, and the only
-         * symptom would be corruption somewhere else entirely.
-         */
-        if (got > lh.uncompressed_size) {
+        /* A partial final AES block used to be copied as plaintext, causing
+         * short LZSS output that was then zero-filled. With complete ciphertext
+         * decryption, both known kernels match their declared size and Adler.
+         * Refuse damaged input before opening an output, even for a build
+         * without a reference SHA-256. */
+        if (got != lh.uncompressed_size) {
             ar->state = VM_FW_STATE_FAILED;
             ar->reason = VM_FW_ERR_DECOMPRESS_FAILED;
             set_detail(ar->detail, sizeof ar->detail,
-                       "The kernel's compressed stream produced more bytes "
-                       "than it declared.");
+                       "The kernel's expanded size does not match its header.");
             free(expanded);
             free(raw);
             return;
         }
-        if (got == 0) {
+        if (lzss_adler32(expanded, got) != lh.adler32) {
             ar->state = VM_FW_STATE_FAILED;
             ar->reason = VM_FW_ERR_DECOMPRESS_FAILED;
             set_detail(ar->detail, sizeof ar->detail,
-                       vm_fw_strerror(VM_FW_ERR_DECOMPRESS_FAILED));
+                       "The kernel's expanded checksum does not match its header.");
             free(expanded);
             free(raw);
             return;
         }
 
-        /*
-         * KNOWN AND DOCUMENTED, not papered over. On the 7E18 kernelcache the
-         * stream encodes 42 bytes fewer than the header declares and stops with
-         * one source byte left. tools/unlzss.c has carried this note since the
-         * canonical kernel.macho was produced, an independent implementation
-         * agrees byte for byte, and the shortfall lands in __PRELINK_INFO. The
-         * zero fill is what makes every Mach-O segment addressable, and it is
-         * baked into the hash this file checks against.
-         */
-        if (got < lh.uncompressed_size) {
-            shortfall = lh.uncompressed_size - (uint32_t)got;
-            short_stream = true;
-            memset(expanded + got, 0, shortfall);
-        }
         payload = expanded;
         payload_len = lh.uncompressed_size;
     }
@@ -839,13 +845,9 @@ static void import_img3_artefact(run_t *r, vm_fw_artefact_t which,
     if (ar->state == VM_FW_STATE_VERIFIED) {
         snprintf(ar->detail, sizeof ar->detail,
                  "Extracted and verified: %llu bytes, SHA-256 matches the "
-                 "known-good %s for this build.%s",
+                 "known-good %s for this build.",
                  (unsigned long long)ar->produced,
-                 vm_fw_artefact_filename(which),
-                 short_stream ? " The compressed stream ended 42 bytes short of"
-                                " its declared size, which is the documented"
-                                " known discrepancy and is part of that hash."
-                              : "");
+                 vm_fw_artefact_filename(which));
     } else if (ar->state == VM_FW_STATE_MISMATCH) {
         snprintf(ar->detail, sizeof ar->detail,
                  "Extracted %llu bytes, but they are not the known-good %s "

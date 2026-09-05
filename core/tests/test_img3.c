@@ -196,15 +196,16 @@ static void test_decrypt_data_roundtrip(void) {
     uint8_t iv[16];
     for (unsigned i = 0; i < 16; i++) iv[i] = (uint8_t)(0x10 + i);
 
-    /* 32 bytes of "firmware" + a 5-byte unaligned tail. */
-    uint8_t plain[37];
+    /* DATA declares 37 logical bytes, with the final encrypted block
+     * completed by eleven bytes of tag padding. */
+    const uint32_t logical = 37u;
+    uint8_t plain[48];
     for (unsigned i = 0; i < sizeof plain; i++) plain[i] = (uint8_t)(i * 3 + 1);
 
     uint8_t cipher[sizeof plain];
     aes_ctx_t ctx;
     aes_init(&ctx, key, 128);
-    aes_cbc_encrypt(&ctx, iv, plain, cipher, 32);
-    memcpy(cipher + 32, plain + 32, 5);            /* tail passes through */
+    CHECK(aes_cbc_encrypt(&ctx, iv, plain, cipher, sizeof cipher), "encrypt");
 
     uint8_t kbag[24 + 16];
     memset(kbag, 0, sizeof kbag);
@@ -213,18 +214,78 @@ static void test_decrypt_data_roundtrip(void) {
 
     img_begin(0x69626f74u);
     img_tag(IMG3_TAG_KBAG, kbag, sizeof kbag);
-    img_tag(IMG3_TAG_DATA, cipher, (uint32_t)sizeof cipher);
+    uint32_t tag = img_tag(IMG3_TAG_DATA, cipher, (uint32_t)sizeof cipher);
+    put32(tag + 8u, logical);
     img_finish();
 
     img3_t img;
     CHECK(img3_parse(g_buf, g_len, &img) == IMG3_OK, "parse failed");
 
-    uint8_t out[sizeof plain];
+    uint8_t out[37];
     uint32_t out_len = 0;
     CHECK(img3_decrypt_data_iv(&img, key, 128, iv, out, sizeof out, &out_len),
           "decrypt failed");
-    CHECK(out_len == sizeof plain, "out_len=%u expect %u", out_len, (unsigned)sizeof plain);
-    CHECK(memcmp(out, plain, sizeof plain) == 0, "decrypted payload mismatch");
+    CHECK(out_len == logical, "out_len=%u expect %u", out_len, logical);
+    CHECK(memcmp(out, plain, logical) == 0, "decrypted payload mismatch");
+}
+
+static void test_padded_decrypt_in_place_and_bounds(void) {
+    uint8_t key[32], iv[16], plain[48], cipher[48], kbag[56] = {0};
+    for (unsigned i = 0; i < sizeof key; i++) key[i] = (uint8_t)(i * 7u + 3u);
+    for (unsigned i = 0; i < sizeof iv; i++) iv[i] = (uint8_t)(0x80u + i);
+    for (unsigned i = 0; i < sizeof plain; i++) plain[i] = (uint8_t)(i * 3u + 1u);
+    aes_ctx_t ctx;
+    CHECK(aes_init(&ctx, key, 256) &&
+          aes_cbc_encrypt(&ctx, iv, plain, cipher, sizeof cipher), "encrypt");
+    kbag[0] = 1u; kbag[5] = 1u; /* production AES-256 */
+
+    for (uint32_t logical = 1u; logical <= sizeof plain; logical++) {
+        uint32_t storage = (logical + 15u) & ~15u;
+        img_begin(0x6b726e6cu);
+        uint32_t tag = img_tag(IMG3_TAG_DATA, cipher, storage);
+        put32(tag + 8u, logical);
+        img_tag(IMG3_TAG_KBAG, kbag, sizeof kbag);
+        img_finish();
+        img3_t img;
+        CHECK(img3_parse(g_buf, g_len, &img) == IMG3_OK, "parse");
+        uint8_t out[49], original[sizeof g_buf];
+        memset(out, 0xa5, sizeof out);
+        memcpy(original, g_buf, sizeof original);
+        uint32_t got = 0u;
+        CHECK(img3_decrypt_data_iv(&img, key, 256, iv, out, logical, &got) &&
+              got == logical && memcmp(out, plain, logical) == 0,
+              "%u-byte padded payload did not decrypt", logical);
+        CHECK(out[logical] == 0xa5 && memcmp(g_buf, original, sizeof g_buf) == 0,
+              "decrypt changed the source or wrote padding to the destination");
+        CHECK(img3_decrypt_data_iv(&img, key, 256, iv,
+                                  (uint8_t *)img.data, logical, &got) &&
+              got == logical && memcmp(img.data, plain, logical) == 0,
+              "%u-byte in-place decrypt lost CBC chaining", logical);
+        CHECK(memcmp(g_buf + tag + 12u + logical,
+                     original + tag + 12u + logical,
+                     g_len - tag - 12u - logical) == 0,
+              "in-place decrypt overwrote padding or the next tag");
+
+        if (logical % 16u) {
+            /* A following tag must never be borrowed to complete a missing
+             * ciphertext block. Reject before even decrypting the prefix. */
+            img_begin(0x6b726e6cu);
+            img_tag(IMG3_TAG_DATA, cipher, logical);
+            img_tag(IMG3_TAG_KBAG, kbag, sizeof kbag);
+            img_finish();
+            CHECK(img3_parse(g_buf, g_len, &img) == IMG3_OK, "short tag parse");
+            memset(out, 0xa5, sizeof out);
+            got = 0x12345678u;
+            CHECK(!img3_decrypt_data_iv(&img, key, 256, iv,
+                                       out, logical, &got),
+                  "incomplete encrypted DATA accepted");
+            bool untouched = true;
+            for (unsigned i = 0; i < sizeof out; i++)
+                if (out[i] != 0xa5) untouched = false;
+            CHECK(untouched && got == 0x12345678u,
+                  "rejected decryption changed output");
+        }
+    }
 }
 
 static void test_decrypt_requires_kbag(void) {
@@ -389,6 +450,7 @@ int main(void) {
     test_reject_partial_trailing_tag();
     test_truncated_kbag_ignored();
     test_decrypt_data_roundtrip();
+    test_padded_decrypt_in_place_and_bounds();
     test_decrypt_requires_kbag();
     test_decrypt_checks_output_capacity();
     test_null_output_struct_is_refused();

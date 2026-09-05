@@ -18,6 +18,24 @@ const uint8_t ios3_kernel_patch_expected_sha256[
         0x6eu, 0xfau, 0x16u, 0x18u, 0x72u, 0x5du, 0xf7u, 0x0cu
     };
 
+/* Decrypting the complete final IMG3 AES block repairs 18 bytes at the end
+ * of __PRELINK_INFO. Build identity, topology and all patch sites are the
+ * same; retain the historical digest and accept only this exact alternative. */
+static const uint8_t complete_kernel_sha256[IOS3_KERNEL_PATCH_SHA256_LENGTH] = {
+    0xf3,0x6a,0x88,0xd6,0x11,0xd3,0xb9,0x06,0xae,0x85,0x8f,0x37,
+    0x7e,0x21,0x85,0x3b,0x40,0xb2,0x14,0xb2,0xbe,0xa9,0x9c,0xb2,
+    0xf9,0x88,0xe3,0x80,0x69,0x8e,0x6c,0xe9
+};
+
+bool ios3_kernel_patch_digest_supported(
+        const uint8_t digest[IOS3_KERNEL_PATCH_SHA256_LENGTH]) {
+    return digest &&
+        (memcmp(digest, ios3_kernel_patch_expected_sha256,
+                IOS3_KERNEL_PATCH_SHA256_LENGTH) == 0 ||
+         memcmp(digest, complete_kernel_sha256,
+                IOS3_KERNEL_PATCH_SHA256_LENGTH) == 0);
+}
+
 const uint8_t ios3_kernel_patch_expected_uuid[
     IOS3_KERNEL_PATCH_UUID_LENGTH] = {
         0x7fu, 0x87u, 0xddu, 0x4bu, 0xdcu, 0x3du, 0xf5u, 0x22u,
@@ -578,17 +596,19 @@ ios3_kernel_patch_status_t ios3_kernel_patch_apply(
                               IOS3_KERNEL_PATCH_STATUS_INVALID_ARGUMENT,
                               0u, 0u);
     }
-    for (byte_index = 0u; byte_index < IOS3_KERNEL_PATCH_SHA256_LENGTH;
-         byte_index++) {
-        if (digest[byte_index] !=
-            ios3_kernel_patch_expected_sha256[byte_index]) {
-            return report_failure(
-                report, IOS3_KERNEL_PATCH_STATUS_KERNEL_DIGEST_MISMATCH,
-                IOS3_KERNEL_PATCH_NO_SITE, IOS3_KERNEL_PATCH_NO_SEGMENT,
-                (uint32_t)byte_index, IOS3_KERNEL_PATCH_NO_ADDRESS,
-                IOS3_KERNEL_PATCH_NO_ADDRESS,
-                ios3_kernel_patch_expected_sha256[byte_index],
-                digest[byte_index], MACHO_OK, GUEST_PATCH_STATUS_OK);
+    if (!ios3_kernel_patch_digest_supported(digest)) {
+        for (byte_index = 0u; byte_index < IOS3_KERNEL_PATCH_SHA256_LENGTH;
+             byte_index++) {
+            if (digest[byte_index] !=
+                ios3_kernel_patch_expected_sha256[byte_index]) {
+                return report_failure(
+                    report, IOS3_KERNEL_PATCH_STATUS_KERNEL_DIGEST_MISMATCH,
+                    IOS3_KERNEL_PATCH_NO_SITE, IOS3_KERNEL_PATCH_NO_SEGMENT,
+                    (uint32_t)byte_index, IOS3_KERNEL_PATCH_NO_ADDRESS,
+                    IOS3_KERNEL_PATCH_NO_ADDRESS,
+                    ios3_kernel_patch_expected_sha256[byte_index],
+                    digest[byte_index], MACHO_OK, GUEST_PATCH_STATUS_OK);
+            }
         }
     }
 

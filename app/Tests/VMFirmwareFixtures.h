@@ -303,24 +303,26 @@ static inline size_t fx_img3_build(uint8_t *dst, size_t cap,
     out += n;
 
     /* DATA */
-    if (out + 12 + spec->payload_len > cap) return 0;
+    size_t storage = spec->payload_len;
+    if (spec->encrypt) {
+        if (storage > SIZE_MAX - (AES_BLOCK_SIZE - 1u)) return 0;
+        storage = (storage + AES_BLOCK_SIZE - 1u) & ~(size_t)(AES_BLOCK_SIZE - 1u);
+    }
+    if (storage > cap - out || cap - out - storage < 12u) return 0;
     fx_w32le(dst + out, IMG3_TAG_DATA);
-    fx_w32le(dst + out + 4, (uint32_t)(12 + spec->payload_len));
+    fx_w32le(dst + out + 4, (uint32_t)(12 + storage));
     fx_w32le(dst + out + 8, (uint32_t)spec->payload_len);
+    memcpy(dst + out + 12, spec->payload, spec->payload_len);
+    if (storage > spec->payload_len)
+        memset(dst + out + 12 + spec->payload_len, 0, storage - spec->payload_len);
     if (spec->encrypt) {
         aes_ctx_t ctx;
         if (!aes_init(&ctx, spec->key, 128u)) return 0;
-        size_t whole = spec->payload_len & ~(size_t)(AES_BLOCK_SIZE - 1u);
-        if (whole &&
-            !aes_cbc_encrypt(&ctx, spec->iv, spec->payload, dst + out + 12, whole))
+        if (!aes_cbc_encrypt(&ctx, spec->iv, dst + out + 12,
+                             dst + out + 12, storage))
             return 0;
-        if (spec->payload_len > whole)
-            memcpy(dst + out + 12 + whole, spec->payload + whole,
-                   spec->payload_len - whole);
-    } else {
-        memcpy(dst + out + 12, spec->payload, spec->payload_len);
     }
-    out += 12 + spec->payload_len;
+    out += 12 + storage;
 
     if (spec->malformed_kbag) {
         /* Present, and too short for the fields it promises: keyBits says 256

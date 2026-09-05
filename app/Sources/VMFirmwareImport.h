@@ -369,4 +369,11 @@ bool vm_fw_reference_matches(uint64_t produced_size,
                              uint64_t reference_size,
                              const uint8_t reference_sha256[VM_FW_SHA256_LEN]);
 
+/* Match an artefact against its exact product/build references. This accepts
+ * the historical and complete 7E18 kernel extractions without broadening the
+ * device, build, size or digest check. Unknown identities return false. */
+bool vm_fw_build_reference_matches(const char *product_type, const char *build,
+                                   vm_fw_artefact_t which, uint64_t size,
+                                   const uint8_t sha256[VM_FW_SHA256_LEN]);
+
 #endif /* S5LBOX_VM_FIRMWARE_IMPORT_H */

@@ -71,6 +71,7 @@ typedef struct {
 
     const uint8_t *data;    /* DATA tag payload (points into the input) */
     uint32_t       data_len;
+    uint32_t       data_storage_len; /* bounded DATA bytes including padding */
 
     img3_kbag_t kbag;
     bool        has_shsh;
@@ -91,9 +92,10 @@ img3_status_t img3_parse(const uint8_t *buf, size_t len, img3_t *out);
  * uses img.kbag.iv.
  *
  * `key_bits` must match the parsed KBAG and `out_cap` must cover img.data_len
- * bytes. Only whole 16-byte blocks are decrypted; an unaligned tail is copied
- * through verbatim, matching Apple's container convention. `out_len` receives
- * the number of bytes written.
+ * bytes. The last ciphertext block may extend into DATA-tag padding, which
+ * must be present inside data_storage_len. Only the logical data_len bytes
+ * are written, including when out == img.data. Missing ciphertext padding
+ * fails before modifying out or out_len. `out_len` receives bytes written.
  */
 bool img3_decrypt_data_iv(const img3_t *img, const uint8_t *key, unsigned key_bits,
                           const uint8_t iv[16], uint8_t *out, size_t out_cap,

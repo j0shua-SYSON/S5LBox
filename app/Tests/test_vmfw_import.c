@@ -220,6 +220,8 @@ typedef enum {
     KERNEL_NOT_IMG3,        /* a valid container with its magic flipped     */
     KERNEL_LZSS_OVERLONG,   /* complzss declaring more input than it has    */
     KERNEL_LZSS_OVERPRODUCE,/* a stream encoding more than it declares      */
+    KERNEL_LZSS_SHORT,      /* complete input with too little output        */
+    KERNEL_LZSS_BAD_ADLER,  /* exact output length but corrupted checksum   */
     KERNEL_MALFORMED_KBAG   /* a key bag that is present but unparseable    */
 } kernel_mode_t;
 
@@ -280,6 +282,10 @@ static bool build_ipsw(ipsw_t *ip, const ipsw_spec_t *spec) {
          * decompressor that trusted the stream rather than its own capacity
          * would run off the end of the buffer it was given. */
         fx_w32be(comp + 12, 64u);
+    } else if (spec->kernel_mode == KERNEL_LZSS_SHORT) {
+        fx_w32be(comp + 12, (uint32_t)sizeof ip->kernel_plain + 42u);
+    } else if (spec->kernel_mode == KERNEL_LZSS_BAD_ADLER) {
+        comp[8] ^= 1u;
     }
 
     static uint8_t kc_img3[16384];
@@ -681,8 +687,15 @@ void vmfw_test_import(vmfw_test_t *t) {
             { KERNEL_LZSS_OVERLONG, VM_FW_STATE_FAILED,
               VM_FW_ERR_NOT_COMPRESSED,
               "a complzss header claiming more input than the member holds" },
-            { KERNEL_LZSS_OVERPRODUCE, VM_FW_STATE_MISMATCH, VM_FW_OK,
-              "a stream encoding more than it declares is bounded, not trusted" },
+            { KERNEL_LZSS_OVERPRODUCE, VM_FW_STATE_FAILED,
+              VM_FW_ERR_DECOMPRESS_FAILED,
+              "a bounded prefix with the wrong checksum is refused" },
+            { KERNEL_LZSS_SHORT, VM_FW_STATE_FAILED,
+              VM_FW_ERR_DECOMPRESS_FAILED,
+              "a short stream is refused without zero-filling" },
+            { KERNEL_LZSS_BAD_ADLER, VM_FW_STATE_FAILED,
+              VM_FW_ERR_DECOMPRESS_FAILED,
+              "the checksum is checked even when output length matches" },
         };
 
         for (size_t ci = 0; ci < sizeof cases / sizeof cases[0]; ci++) {
@@ -724,6 +737,9 @@ void vmfw_test_import(vmfw_test_t *t) {
              */
             VMFW_T_CHECK(t, !rep.artefacts[VM_FW_KERNEL].matches_reference,
                          "and never claimed to be the known-good kernel");
+            for (unsigned fi = 0; fi < fs.count; fi++)
+                VMFW_T_CHECK(t, strcmp(fs.f[fi].name, "kernel.macho") != 0,
+                             "invalid kernel never opens an output file");
         }
     }
 
@@ -861,6 +877,47 @@ void vmfw_test_import(vmfw_test_t *t) {
                      "a missing reference is not a match");
         VMFW_T_CHECK(t, !vm_fw_reference_matches(100u, NULL, 100u, b),
                      "a missing digest is not a match");
+    }
+
+    VMFW_T_SECTION(t, "import/complete kernel reference");
+    {
+        static const char *hashes[] = {
+            "f36a88d611d3b906ae858f377e21853b40b214b2bea99cb2f988e380698e6ce9",
+            "0d8cdb339d37cf37a1db2638fff79272ecd63a17764bf7666efa1618725df70c"
+        };
+        for (size_t h = 0; h < sizeof hashes / sizeof hashes[0]; h++) {
+            uint8_t digest[VM_FW_SHA256_LEN];
+            VMFW_T_EQ_U(t, vm_fw_parse_hex(hashes[h], digest, sizeof digest),
+                        VM_FW_OK, "reference digest");
+            VMFW_T_CHECK(t, vm_fw_build_reference_matches("iPhone1,2", "7E18",
+                              VM_FW_KERNEL, 7942144u, digest),
+                         "complete and historical kernel references accepted");
+            for (size_t i = 0; i < sizeof digest; i++) {
+                digest[i] ^= 1u;
+                VMFW_T_CHECK(t, !vm_fw_build_reference_matches("iPhone1,2", "7E18",
+                                  VM_FW_KERNEL, 7942144u, digest),
+                             "every digest byte is checked");
+                digest[i] ^= 1u;
+            }
+            VMFW_T_CHECK(t, !vm_fw_build_reference_matches("iPhone2,1", "7E18",
+                              VM_FW_KERNEL, 7942144u, digest) &&
+                           !vm_fw_build_reference_matches("iPhone1,2", "10B500",
+                              VM_FW_KERNEL, 7942144u, digest) &&
+                           !vm_fw_build_reference_matches("iPhone1,2", "7E18",
+                              VM_FW_DEVICE_TREE, 7942144u, digest) &&
+                           !vm_fw_build_reference_matches("iPhone1,2", "7E18",
+                              VM_FW_KERNEL, 7942143u, digest),
+                         "reference remains device/build/artefact/size specific");
+            VMFW_T_CHECK(t, !vm_fw_build_reference_matches(NULL, "7E18",
+                              VM_FW_KERNEL, 7942144u, digest) &&
+                           !vm_fw_build_reference_matches("iPhone1,2", NULL,
+                              VM_FW_KERNEL, 7942144u, digest) &&
+                           !vm_fw_build_reference_matches("iPhone1,2", "7E18",
+                              (vm_fw_artefact_t)-1, 7942144u, digest) &&
+                           !vm_fw_build_reference_matches("iPhone1,2", "7E18",
+                              VM_FW_KERNEL, 7942144u, NULL),
+                         "invalid reference requests refused");
+        }
     }
 
     /* ---------------- an unknown build --------------------------------- */

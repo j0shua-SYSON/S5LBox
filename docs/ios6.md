@@ -73,13 +73,32 @@ establish that result.
 - Boot arguments, device-tree relocation, importer/storage selection, and
   any compatibility patches need explicit target/version guards. Existing
   iPhone OS 3 patches are not evidence of iOS 6 compatibility.
-- The current IMG3 helper copies a partial final AES block as plaintext. It
-  produces a 36-byte decompression shortfall and an Adler-32 mismatch on this
-  kernelcache. A separate host probe decrypting the entire final block,
-  including its one byte of DATA-tag padding, produces all 11,821,056 bytes
-  with matching Adler-32 `c4bee74e`. The resulting kernel SHA-256 is
-  `ec4787ac012567f9c10ba2d5ab611058545bce7e17cd95ef310eba94bfca9b78`.
-  The production extraction helper still needs that fix and regression tests.
+- The verified kernel entry at virtual `0x80086084` contains A32 ISB
+  (`f57ff06f`) at `0x8008609c` and DSB (`f57ff04f`) at `0x800860ac`.
+  These ARMv7 encodings are currently unsupported. This is disassembly
+  evidence; a machine boot has not been executed.
+
+## Complete kernel extraction
+
+IMG3 decryption now reads the entire final AES block within the DATA tag,
+including bytes counted as padding, and returns only the logical payload.
+It validates that extent before changing the destination and supports the
+importer's in-place operation. Previously the partial block was copied as
+plaintext, causing a 36-byte decompression shortfall in the N88 kernel.
+The production helpers now produce all 11,821,056 bytes with matching
+Adler-32 `c4bee74e` and SHA-256
+`ec4787ac012567f9c10ba2d5ab611058545bce7e17cd95ef310eba94bfca9b78`.
+An independent padded-block probe produces the same bytes.
+
+The same correction produces the complete iPhone1,2/7E18 kernel: 7,942,144
+bytes, Adler-32 `2671cd74`, SHA-256
+`f36a88d611d3b906ae858f377e21853b40b214b2bea99cb2f988e380698e6ce9`.
+Its last metadata bytes differ from the historical zero-filled extraction.
+The importer and iOS 3 patch gate accept both exact reference hashes. The
+patch gate retains its build, segment, loaded-byte and instruction checks;
+both real files pass the host patch test. Existing guest files are not
+replaced. New imports and `unlzss` reject a
+size or checksum mismatch before opening their output file.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim

@@ -1250,6 +1250,9 @@ target_link_libraries(runfw PRIVATE emucore)
 
 add_executable(unlzss ../tools/unlzss.c)
 target_link_libraries(unlzss PRIVATE emucore)
+add_executable(test_unlzss tests/test_unlzss.c)
+target_link_libraries(test_unlzss PRIVATE emucore)
+add_test(NAME unlzss_output_validation COMMAND test_unlzss)
 
 add_executable(machoinfo ../tools/machoinfo.c)
 target_link_libraries(machoinfo PRIVATE emucore)

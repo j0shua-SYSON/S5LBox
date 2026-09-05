@@ -377,6 +377,28 @@ static void test_manifest_constants(void) {
           "kernel SHA-256 constant drifted");
 }
 
+static void test_supported_digests(void) {
+    uint8_t digests[2][32] = {
+        {0xf3,0x6a,0x88,0xd6,0x11,0xd3,0xb9,0x06,0xae,0x85,0x8f,0x37,
+         0x7e,0x21,0x85,0x3b,0x40,0xb2,0x14,0xb2,0xbe,0xa9,0x9c,0xb2,
+         0xf9,0x88,0xe3,0x80,0x69,0x8e,0x6c,0xe9},
+        {0x0d,0x8c,0xdb,0x33,0x9d,0x37,0xcf,0x37,0xa1,0xdb,0x26,0x38,
+         0xff,0xf7,0x92,0x72,0xec,0xd6,0x3a,0x17,0x76,0x4b,0xf7,0x66,
+         0x6e,0xfa,0x16,0x18,0x72,0x5d,0xf7,0x0c}
+    };
+    CHECK(!ios3_kernel_patch_digest_supported(NULL), "NULL digest accepted");
+    for (unsigned variant = 0; variant < 2; variant++) {
+        CHECK(ios3_kernel_patch_digest_supported(digests[variant]),
+              "exact extraction %u refused", variant);
+        for (unsigned byte = 0; byte < 32; byte++) {
+            digests[variant][byte] ^= 1u;
+            CHECK(!ios3_kernel_patch_digest_supported(digests[variant]),
+                  "extraction %u digest byte %u not checked", variant, byte);
+            digests[variant][byte] ^= 1u;
+        }
+    }
+}
+
 static void test_sha256_known_answers(void) {
     static const uint8_t empty_digest[32] = {
         0xe3u, 0xb0u, 0xc4u, 0x42u, 0x98u, 0xfcu, 0x1cu, 0x14u,
@@ -937,11 +959,17 @@ static void test_private_kernel_positive(fixture_t *fixture,
         return;
     bind_fixture(fixture);
 
+    static const uint8_t complete_digest[32] = {
+        0xf3,0x6a,0x88,0xd6,0x11,0xd3,0xb9,0x06,0xae,0x85,0x8f,0x37,
+        0x7e,0x21,0x85,0x3b,0x40,0xb2,0x14,0xb2,0xbe,0xa9,0x9c,0xb2,
+        0xf9,0x88,0xe3,0x80,0x69,0x8e,0x6c,0xe9
+    };
     CHECK(ios3_kernel_patch_sha256(
               g_kernel_storage.bytes,
               (size_t)IOS3_KERNEL_PATCH_FILE_SIZE, digest_before) &&
-          memcmp(digest_before, ios3_kernel_patch_expected_sha256,
-                 sizeof digest_before) == 0,
+          (memcmp(digest_before, ios3_kernel_patch_expected_sha256,
+                  sizeof digest_before) == 0 ||
+           memcmp(digest_before, complete_digest, sizeof digest_before) == 0),
           "private kernel did not match the pinned SHA-256");
     CHECK(memcmp(g_kernel_storage.bytes + text_file_offset_for_va(
                      IOS3_KERNEL_PATCH_RAW_WATCHER_VA),
@@ -1051,6 +1079,7 @@ int main(int argc, char **argv) {
     fixture_t fixture;
 
     test_manifest_constants();
+    test_supported_digests();
     test_sha256_known_answers();
     test_identity_and_topology_fail_closed(&fixture);
     test_synthetic_metadata_cannot_assert_digest(&fixture);
