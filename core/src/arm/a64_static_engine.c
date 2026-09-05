@@ -92,6 +92,9 @@ typedef struct {
     bool compact_raw_privileged_window_refill_enabled;
     bool compact_raw_window_cache_enabled;
     bool compact_bulk_enabled;
+    bool compact_tlb_refill_enabled;
+    arm_ram_window_t compact_ram_window;
+    a64_compact_tlb_stats_t compact_tlb_stats;
     bool compact_raw_pc_profile_enabled;
     bool compact_fallback_profile_enabled;
     bool indirect_enabled;
@@ -796,6 +799,12 @@ void s5l8900_static_a64_invalidate_derived(s5l8900_t *m) {
     memset(state->cache, 0, sizeof state->cache);
     memset(&state->compact_pending, 0, sizeof state->compact_pending);
     memset(state->graph_nodes, 0, sizeof state->graph_nodes);
+    if (state->compact_tlb_refill_enabled) {
+        /* Reacquire pointer lifetime after a host reset/invalidation. Failure
+         * leaves no grant; execution simply uses the existing fallback. */
+        (void)arm_ram_window_capture(&state->compact_ram_window, &m->cpu,
+                                     m->ram_base, m->ram_size);
+    }
 #else
     (void)m;
 #endif
@@ -959,6 +968,56 @@ bool s5l8900_static_a64_set_compact_raw_window_cache(s5l8900_t *m,
 #else
     (void)enabled;
     return false;
+#endif
+}
+
+bool s5l8900_static_a64_set_compact_tlb_refill(s5l8900_t *m, bool enabled) {
+    if (!m) return false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (!state || !state->enabled || !state->compact_raw_enabled ||
+        !a64_static_host_available()) return false;
+    state->compact_tlb_refill_enabled = false;
+    memset(&state->compact_ram_window, 0, sizeof state->compact_ram_window);
+    if (enabled &&
+        (!arm_ram_window_capture(&state->compact_ram_window, &m->cpu,
+                                  m->ram_base, m->ram_size) ||
+         state->compact_ram_window.read_host != m->ram)) return false;
+    state->compact_tlb_refill_enabled = enabled;
+    return true;
+#else
+    (void)enabled;
+    return false;
+#endif
+}
+
+uint64_t s5l8900_static_a64_compact_tlb_fetch(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_tlb_stats.fetch : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
+uint64_t s5l8900_static_a64_compact_tlb_read(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_tlb_stats.read : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
+uint64_t s5l8900_static_a64_compact_tlb_write(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_tlb_stats.write : 0u;
+#else
+    (void)m;
+    return 0u;
 #endif
 }
 
@@ -1847,6 +1906,7 @@ static unsigned try_compact_raw(
     unsigned fallback_completed = 0u;
     uint64_t window_cache_hits = 0u;
     a64_compact_bulk_stats_t bulk_stats = {0};
+    a64_compact_tlb_stats_t tlb_stats = {0};
 
     if (known_negative) *known_negative = false;
     if (boundary_retired) *boundary_retired = 0u;
@@ -1890,11 +1950,20 @@ static unsigned try_compact_raw(
         return 0u;
     }
     fallback_context.fetch_block = fetch_block;
-    if (!a64_compact_raw_run_code_window_resident_bulk(
+    const arm_ram_window_t *ram_window = &state->compact_ram_window;
+    const a64_compact_raw_options_t options = {
+        .window_cache_enabled = state->compact_raw_window_cache_enabled,
+        .bulk_enabled = state->compact_bulk_enabled,
+        .ram_window = state->compact_tlb_refill_enabled && !priv &&
+            ram_window->read_host == m->ram &&
+            ram_window->base == m->ram_base && ram_window->bytes == m->ram_size
+                ? ram_window : NULL,
+        .owner_fetch_block = &fallback_context.fetch_block,
+    };
+    if (!a64_compact_raw_run_code_window_resident_options(
             cpu, cpu->fetch_host, fetch_block, UINT32_C(0x400), budget,
             compact_raw_fallback, &fallback_context,
-            state->compact_raw_window_cache_enabled, &window_cache_hits,
-            state->compact_bulk_enabled, &bulk_stats,
+            &options, &window_cache_hits, &bulk_stats, &tlb_stats,
             &completed,
             &native_completed, &fallback_completed)) {
         state->compact_raw_refusals.runner++;
@@ -1906,8 +1975,11 @@ static unsigned try_compact_raw(
     state->compact_raw_window_cache_hits += window_cache_hits;
     state->compact_bulk_calls += bulk_stats.calls;
     state->compact_bulk_retired += bulk_stats.retired;
-    state->compact_raw_window_crossings += window_cache_hits;
-    state->compact_raw_window_reloads += window_cache_hits;
+    state->compact_tlb_stats.fetch += tlb_stats.fetch;
+    state->compact_tlb_stats.read += tlb_stats.read;
+    state->compact_tlb_stats.write += tlb_stats.write;
+    state->compact_raw_window_crossings += window_cache_hits + tlb_stats.fetch;
+    state->compact_raw_window_reloads += window_cache_hits + tlb_stats.fetch;
     if (completed) {
         state->compact_raw_calls++;
         state->compact_raw_retired += native_completed;

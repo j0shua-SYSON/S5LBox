@@ -4688,6 +4688,12 @@ bool s5l8900_static_a64_set_compact_raw_window_cache(s5l8900_t *m,
  * Complete live instruction and RAM witnesses are mandatory; original
  * instruction counts still bound device/interrupt service intervals. */
 bool s5l8900_static_a64_set_compact_bulk(s5l8900_t *m, bool enabled);
+/* User-mode native refill from the existing TLB and a full-RAM bus grant.
+ * Host policy, default off; never serialized. */
+bool s5l8900_static_a64_set_compact_tlb_refill(s5l8900_t *m, bool enabled);
+uint64_t s5l8900_static_a64_compact_tlb_fetch(const s5l8900_t *m);
+uint64_t s5l8900_static_a64_compact_tlb_read(const s5l8900_t *m);
+uint64_t s5l8900_static_a64_compact_tlb_write(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_bulk_calls(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_bulk_retired(const s5l8900_t *m);
 /* Explicit diagnostic-only sampling for the compact runner. On a supported

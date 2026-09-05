@@ -206,6 +206,11 @@ target_include_directories(test_arm_bulk PRIVATE ../tools)
 target_link_libraries(test_arm_bulk PRIVATE emucore)
 add_test(NAME arm_bulk COMMAND test_arm_bulk)
 
+add_executable(test_arm_ram_window tests/test_arm_ram_window.c)
+target_include_directories(test_arm_ram_window PRIVATE ../tools)
+target_link_libraries(test_arm_ram_window PRIVATE emucore)
+add_test(NAME arm_ram_window COMMAND test_arm_ram_window)
+
 add_executable(test_native_pc_histogram tests/test_native_pc_histogram.c)
 target_include_directories(test_native_pc_histogram PRIVATE ../tools)
 add_test(NAME native_pc_histogram COMMAND test_native_pc_histogram)

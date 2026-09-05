@@ -583,6 +583,32 @@ typedef enum {
     ARM_ACCESS_FETCH = 2
 } arm_access_t;
 
+/* Host-owned, derived permission for one contiguous plain-RAM range. Capture
+ * calls the bus's full-range read grant and, separately, its optional write
+ * grant. The bus promises both pointers remain valid until reset/restore;
+ * neither this object nor anything derived from it may be serialized. The
+ * owner must discard it on RAM replacement and must not mutate it while a
+ * CPU execution interval is using it. Bus identity and observer callbacks are
+ * revalidated without calling through the bus. This is not MMU permission. */
+typedef struct {
+    arm_bus_t bus;
+    const arm_bus_t *identity;
+    uint8_t *read_host;
+    uint8_t *write_host;
+    uint32_t base, bytes;
+} arm_ram_window_t;
+
+bool arm_ram_window_capture(arm_ram_window_t *window, const arm_cpu_t *cpu,
+                            uint32_t base, uint32_t bytes);
+bool arm_ram_window_current(const arm_ram_window_t *window,
+                            const arm_cpu_t *cpu);
+/* Nonmutating reference for native second-level refill. Only an exact,
+ * current, successful MMU-on TLB entry can return a full 1 KiB host block.
+ * No walk, bus access, counter change, fault, or cache publication occurs. */
+uint8_t *arm_ram_window_tlb_lookup(const arm_ram_window_t *window,
+                                  const arm_cpu_t *cpu, uint32_t va,
+                                  arm_access_t access, bool priv);
+
 /*
  * Translate a virtual address. Returns 0 on success (writing the physical
  * address to *pa) or a non-zero ARMv6 fault status register value.

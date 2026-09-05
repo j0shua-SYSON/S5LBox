@@ -118,6 +118,7 @@ extern "C" {
  * routine/loop and each RAM access must be witnessed by the compact engine.
  * Guest files and snapshot semantics are unchanged. Disabled by default. */
 #define VM_FW_BOOT_COMPACT_BULK_FILE "engine.compact-bulk-on"
+#define VM_FW_BOOT_COMPACT_TLB_REFILL_FILE "engine.compact-tlb-refill-on"
 /* Opt-in rollout control for privileged window continuation. The code remains
  * available because it substantially reduces engine work, but it is not the
  * stock product default after a three-pair physical-A9 Settings replay showed

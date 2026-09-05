@@ -311,6 +311,32 @@ bool a64_compact_raw_run_code_window_resident_bulk(
     unsigned *completed, unsigned *native_completed,
     unsigned *fallback_completed);
 
+typedef struct {
+    uint64_t fetch, read, write;
+} a64_compact_tlb_stats_t;
+
+/* Optional, User-only second-level refill from the existing exact TLB. This
+ * never walks page tables. A full-range bus capability supplies host pointers;
+ * access-specific TLB tags still supply guest permission. Any interpreter
+ * callback that changes the translation context, bus contract, mode or pending
+ * interrupt/abort state ends the native interval. owner_fetch_block, when
+ * supplied, is the caller's derived current-window bookkeeping, not guest RAM.
+ * The capability must remain immutable until this call returns. */
+typedef struct {
+    bool window_cache_enabled, bulk_enabled;
+    const arm_ram_window_t *ram_window;
+    uint32_t *owner_fetch_block;
+} a64_compact_raw_options_t;
+bool a64_compact_raw_run_code_window_resident_options(
+    arm_cpu_t *cpu, const uint8_t *code, uint32_t code_base,
+    uint32_t code_bytes, unsigned max_insns,
+    a64_compact_raw_fallback_fn fallback, void *fallback_opaque,
+    const a64_compact_raw_options_t *options,
+    uint64_t *window_cache_hits, a64_compact_bulk_stats_t *bulk_stats,
+    a64_compact_tlb_stats_t *tlb_stats,
+    unsigned *completed, unsigned *native_completed,
+    unsigned *fallback_completed);
+
 /* Opt-in statistical attribution for the build-time-linked compact runner. A
  * marker-created sampler polls only the pthread executing the public SoC run
  * slice, rejects observations while that thread is not running, and assigns

@@ -2748,6 +2748,8 @@ def compact_vfp_memory_body() -> list[str]:
         "    mov w2, #1",
         "    ret",
         ".La64cr_memory_lookup_fail:",
+        *compact_tlb_refill_body(False),
+        ".La64cr_memory_publish_miss:",
         # Publish the exact pre-mutation miss only after every field is ready.
         # w15 bit 0 is load/read; bit 1 forces unprivileged translation for
         # LDRT/STRT. The callback may consume this witness but may not walk.
@@ -2768,6 +2770,132 @@ def compact_vfp_memory_body() -> list[str]:
         "    mov w2, wzr",
         "    ret",
     ]
+
+
+def compact_tlb_refill_body(fetch: bool) -> list[str]:
+    """Exact User TLB hit -> full-range RAM capability, x0-x5 scratch only.
+
+    The C entry and guarded callback prove the invariant translation/bus
+    context. No admitted native User instruction can change that context.
+    Entry kind, generation, fault status and physical bounds remain live tests.
+    """
+    fail = ".La64cr_fallback" if fetch else ".La64cr_memory_publish_miss"
+    va = "w26" if fetch else "w10"
+    out = [
+        "    ldr x5, [x27, #368]",
+        f"    cbz x5, {fail}",
+    ]
+    if fetch:
+        out += [
+            "    ldr w1, [x20]",
+            "    tst w1, #0x20",
+            "    mov w2, #1",
+            "    mov w3, #3",
+            "    csel w2, w2, w3, ne",
+            "    tst w26, w2",
+            f"    b.ne {fail}",
+            "    mov w4, #2",
+        ]
+    else:
+        out += ["    eor w4, w15, #1", "    and w4, w4, #1"]
+    out += [
+        f"    lsr w3, {va}, #10",
+        "    add w2, w3, w4, lsl #10",
+        "    and w2, w2, #4095",
+        "    ldr x0, [x27, #376]",
+        "    add x0, x0, w2, uxtw #4",
+        "    ldr w1, [x0]",
+        "    ldr w2, [x27, #80]",
+        "    cmp w1, w2",
+        f"    b.ne {fail}",
+        "    lsl w3, w3, #3",
+        "    orr w3, w3, w4, lsl #1",
+        "    ldr w1, [x0, #4]",
+        "    cmp w1, w3",
+        f"    b.ne {fail}",
+        "    ldr w1, [x0, #12]",
+        f"    cbnz w1, {fail}",
+        "    ldr w0, [x0, #8]",
+        "    tst w0, #0x3ff",
+        f"    b.ne {fail}",
+        "    ldr w1, [x5, #120]",
+        "    cmp w0, w1",
+        f"    b.lo {fail}",
+        "    sub w0, w0, w1",
+        "    ldr w1, [x5, #124]",
+        "    sub w1, w1, #1024",
+        "    cmp w0, w1",
+        f"    b.hi {fail}",
+    ]
+    if fetch:
+        out += ["    ldr x1, [x5, #104]"]
+    else:
+        out += [
+            "    ldr x1, [x5, #104]",
+            "    ldr x2, [x5, #112]",
+            "    cmp w4, #1",
+            "    csel x1, x2, x1, eq",
+            f"    cbz x1, {fail}",
+        ]
+    out += [
+        "    add x0, x1, w0, uxtw",
+        "    ldr x1, [x27, #384]",
+        "    ldr x2, [x1]",
+        "    add x2, x2, #1",
+        "    str x2, [x1]",
+    ]
+    if fetch:
+        out += [
+            "    mov x22, x0",
+            "    and w23, w26, #0xfffffc00",
+            "    mov w24, #1024",
+            "    str x22, [x27, #176]",
+            "    str w23, [x27, #184]",
+            "    str w24, [x27, #188]",
+            "    ldr x1, [x27, #392]",
+            "    str x22, [x1]",
+            "    str w23, [x1, #8]",
+            "    ldr w2, [x27, #80]",
+            "    str w2, [x1, #12]",
+            "    strb wzr, [x1, #16]",
+            "    ldr x1, [x27, #400]",
+            "    cbz x1, .La64cr_tlb_fetch_published",
+            "    str w23, [x1]",
+            ".La64cr_tlb_fetch_published:",
+            "    ldr x1, [x27, #408]",
+            "    add x1, x1, #1",
+            "    str x1, [x27, #408]",
+            "    b .La64cr_loop",
+        ]
+    else:
+        out += [
+            "    ldr x1, [x27, #16]",
+            "    ldr x2, [x27, #24]",
+            "    cmp w4, #1",
+            "    csel x1, x2, x1, eq",
+            "    lsr w3, w10, #10",
+            "    and w3, w3, #63",
+            "    add x1, x1, w3, uxtw #4",
+            "    str x0, [x1]",
+            "    and w3, w10, #0xfffffc00",
+            "    str w3, [x1, #8]",
+            "    ldr w2, [x27, #80]",
+            "    str w2, [x1, #12]",
+            "    add x1, x27, #416",
+            "    add x1, x1, w4, uxtw #3",
+            "    ldr x2, [x1]",
+            "    add x2, x2, #1",
+            "    str x2, [x1]",
+            "    ldr x1, [x27, #32]",
+            "    ldr x2, [x27, #40]",
+            "    cmp w4, #1",
+            "    csel x1, x2, x1, eq",
+            "    and w3, w10, #0x3ff",
+            "    add x0, x0, w3, uxtw",
+            "    mov w2, #1",
+            "    ret",
+        ]
+    return out
 
 
 def compact_vfp_nonarith_body() -> list[str]:
@@ -5067,7 +5195,7 @@ def compact_raw_function() -> list[str]:
         # partial or unaligned windows still take the literal callback.
         ".La64cr_window_miss:",
         "    ldr w10, [x27, #172]",
-        "    cbz w10, .La64cr_fallback",
+        "    cbz w10, .La64cr_tlb_fetch",
         "    ldr w10, [x27, #84]",
         "    cbnz w10, .La64cr_fallback",
         "    lsr w9, w26, #10",
@@ -5084,7 +5212,7 @@ def compact_raw_function() -> list[str]:
         "    add x10, x10, #16",
         "    subs w11, w11, #1",
         "    b.ne .La64cr_window_cache_probe",
-        "    b .La64cr_fallback",
+        "    b .La64cr_tlb_fetch",
         ".La64cr_window_cache_hit:",
         "    mov x22, x12",
         "    mov w23, w13",
@@ -5096,6 +5224,8 @@ def compact_raw_function() -> list[str]:
         "    add x12, x12, #1",
         "    str x12, [x27, #160]",
         "    b .La64cr_loop",
+        ".La64cr_tlb_fetch:",
+        *compact_tlb_refill_body(True),
         "",
         # Commit native cycles before a fallback because arm_step owns the
         # next instruction's cycle accounting and may inspect the counter.

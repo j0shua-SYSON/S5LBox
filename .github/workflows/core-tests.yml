@@ -179,6 +179,18 @@ jobs:
           fi
           grep -Eq 'arm_bulk: [1-9][0-9]* checks, 0 failures' <<<"$output"
 
+      - name: Verify native TLB-refill execution coverage
+        run: |
+          set -euo pipefail
+          output="$(./build-jit/core/test_arm_ram_window)"
+          printf '%s\n' "$output"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            grep -Fq 'NATIVE-TLB-REFILL real execution and mutation-boundary checks complete' <<<"$output"
+          else
+            grep -Fq 'NATIVE-TLB-REFILL execution unavailable on this host' <<<"$output"
+          fi
+          grep -Eq 'RAM-window/TLB: [1-9][0-9]* checks, 0 failures' <<<"$output"
+
       - name: Verify JIT and signed-static execution verdicts
         run: |
           set -euo pipefail

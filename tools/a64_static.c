@@ -2005,6 +2005,16 @@ typedef struct {
     a64_compact_raw_data_miss_t data_miss;
     arm_cpu_t *bulk_cpu;
     a64_compact_bulk_stats_t bulk_stats;
+    const arm_ram_window_t *ram_window;
+    const void *tlb;
+    uint64_t *tlb_hits;
+    void *fetch_cache;
+    uint32_t *owner_fetch_block;
+    a64_compact_tlb_stats_t tlb_stats;
+    arm_cpu_t *tlb_cpu;
+    arm_cp15_t tlb_cp15;
+    a64_compact_raw_fallback_fn guarded_fallback;
+    void *guarded_opaque;
 } a64_compact_raw_context_t;
 
 _Static_assert(sizeof(void *) == 8u,
@@ -2049,8 +2059,36 @@ _Static_assert(offsetof(a64_compact_raw_context_t, flat_ram) == 0u &&
                             data_miss) == 320u &&
                    offsetof(a64_compact_raw_context_t, bulk_cpu) == 344u &&
                    offsetof(a64_compact_raw_context_t, bulk_stats) == 352u &&
-                   sizeof(a64_compact_raw_context_t) == 368u,
+                   offsetof(a64_compact_raw_context_t, ram_window) == 368u &&
+                   offsetof(a64_compact_raw_context_t, tlb) == 376u &&
+                   offsetof(a64_compact_raw_context_t, tlb_hits) == 384u &&
+                   offsetof(a64_compact_raw_context_t, fetch_cache) == 392u &&
+                   offsetof(a64_compact_raw_context_t,
+                            owner_fetch_block) == 400u &&
+                   offsetof(a64_compact_raw_context_t, tlb_stats) == 408u &&
+                   sizeof(a64_compact_raw_context_t) == 520u,
                "compact raw native context layout drifted");
+_Static_assert(offsetof(arm_ram_window_t, read_host) == 104u &&
+                   offsetof(arm_ram_window_t, write_host) == 112u &&
+                   offsetof(arm_ram_window_t, base) == 120u &&
+                   offsetof(arm_ram_window_t, bytes) == 124u &&
+                   sizeof(arm_ram_window_t) == 128u,
+               "compact raw RAM capability layout drifted");
+_Static_assert(ARM_TLB_ENTRIES == 4096u && ARM_DREAD_ENTRIES == 64u &&
+                   sizeof(((arm_cpu_t *)0)->tlb[0]) == 16u &&
+                   offsetof(arm_cpu_t, tlb[0].tag) -
+                       offsetof(arm_cpu_t, tlb[0]) == 4u &&
+                   offsetof(arm_cpu_t, tlb[0].pa) -
+                       offsetof(arm_cpu_t, tlb[0]) == 8u &&
+                   offsetof(arm_cpu_t, tlb[0].fsr) -
+                       offsetof(arm_cpu_t, tlb[0]) == 12u &&
+                   offsetof(arm_cpu_t, fetch_blk) -
+                       offsetof(arm_cpu_t, fetch_host) == 8u &&
+                   offsetof(arm_cpu_t, fetch_gen) -
+                       offsetof(arm_cpu_t, fetch_host) == 12u &&
+                   offsetof(arm_cpu_t, fetch_priv) -
+                       offsetof(arm_cpu_t, fetch_host) == 16u,
+               "compact raw TLB/FETCH layout drifted");
 _Static_assert(offsetof(arm_cp15_t, tpidrurw) == 52u &&
                    offsetof(arm_cp15_t, tpidruro) == 56u &&
                    offsetof(arm_cp15_t, tpidrprw) == 60u &&
@@ -2092,6 +2130,45 @@ unsigned a64_compact_raw_bulk_try(a64_compact_raw_context_t *context,
         context->bulk_stats.retired += n;
     }
     return n;
+}
+
+/* Native User instructions cannot change translation control or install bus
+ * observers. An interpreter callback can. Check once at that mutation
+ * boundary, not on every native load: a rejected continuation retains its
+ * exact retirement result and returns to the machine-owned device boundary. */
+static a64_compact_raw_fallback_result_t compact_tlb_guarded_fallback(
+        void *opaque, a64_compact_raw_code_window_t *next_window,
+        const a64_compact_raw_data_miss_t *data_miss) {
+    a64_compact_raw_context_t *context = opaque;
+    a64_compact_raw_fallback_result_t result = context->guarded_fallback(
+        context->guarded_opaque, next_window, data_miss);
+    if (result != A64_COMPACT_RAW_FALLBACK_RETIRE_CONTINUE &&
+        result != A64_COMPACT_RAW_FALLBACK_NO_RETIRE_CONTINUE) return result;
+    const arm_cpu_t *cpu = context->tlb_cpu;
+    const arm_cp15_t *saved = &context->tlb_cp15;
+    if (arm_ram_window_current(context->ram_window, cpu) &&
+        cpu->tlb_gen == context->tlb_gen &&
+        cpu->cp15.sctlr == saved->sctlr &&
+        cpu->cp15.ttbr0 == saved->ttbr0 &&
+        cpu->cp15.ttbr1 == saved->ttbr1 &&
+        cpu->cp15.ttbcr == saved->ttbcr &&
+        cpu->cp15.dacr == saved->dacr &&
+        cpu->cp15.context_id == saved->context_id &&
+        cpu->cp15.cpacr == saved->cpacr &&
+        cpu->tlb_stamp.sctlr == saved->sctlr &&
+        cpu->tlb_stamp.ttbr0 == saved->ttbr0 &&
+        cpu->tlb_stamp.ttbr1 == saved->ttbr1 &&
+        cpu->tlb_stamp.ttbcr == saved->ttbcr &&
+        cpu->tlb_stamp.dacr == saved->dacr &&
+        cpu->tlb_stamp.context_id == saved->context_id &&
+        (cpu->cpsr & (ARM_CPSR_MODE_MASK | ARM_CPSR_E)) == ARM_MODE_USR &&
+        !cpu->abort_pending &&
+        !(cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) &&
+        !(cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I))) return result;
+    memset(next_window, 0, sizeof *next_window);
+    return result == A64_COMPACT_RAW_FALLBACK_RETIRE_CONTINUE
+        ? A64_COMPACT_RAW_FALLBACK_RETIRE_STOP
+        : A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
 }
 #endif
 
@@ -2542,6 +2619,25 @@ bool a64_compact_raw_run_code_window_resident_bulk(
         bool bulk_enabled, a64_compact_bulk_stats_t *bulk_stats,
         unsigned *completed, unsigned *native_completed,
         unsigned *fallback_completed) {
+    const a64_compact_raw_options_t options = {
+        .window_cache_enabled = window_cache_enabled,
+        .bulk_enabled = bulk_enabled,
+    };
+    return a64_compact_raw_run_code_window_resident_options(
+        cpu, code, code_base, code_bytes, max_insns, fallback, fallback_opaque,
+        &options, window_cache_hits, bulk_stats, NULL, completed,
+        native_completed, fallback_completed);
+}
+
+bool a64_compact_raw_run_code_window_resident_options(
+        arm_cpu_t *cpu, const uint8_t *code, uint32_t code_base,
+        uint32_t code_bytes, unsigned max_insns,
+        a64_compact_raw_fallback_fn fallback, void *fallback_opaque,
+        const a64_compact_raw_options_t *options,
+        uint64_t *window_cache_hits, a64_compact_bulk_stats_t *bulk_stats,
+        a64_compact_tlb_stats_t *tlb_stats,
+        unsigned *completed, unsigned *native_completed,
+        unsigned *fallback_completed) {
     uint64_t code_end;
 
     if (!completed || !native_completed || !fallback_completed) return false;
@@ -2550,6 +2646,7 @@ bool a64_compact_raw_run_code_window_resident_bulk(
     *fallback_completed = 0u;
     if (window_cache_hits) *window_cache_hits = 0u;
     if (bulk_stats) memset(bulk_stats, 0, sizeof *bulk_stats);
+    if (tlb_stats) memset(tlb_stats, 0, sizeof *tlb_stats);
     code_end = (uint64_t)code_base + code_bytes;
     if (!cpu || !code || !max_insns || code_bytes < 4u ||
         (code_base & 3u) != 0u || (code_bytes & 3u) != 0u ||
@@ -2577,7 +2674,8 @@ bool a64_compact_raw_run_code_window_resident_bulk(
         }
         context.fallback = fallback;
         context.fallback_opaque = fallback_opaque;
-        context.bulk_cpu = bulk_enabled && fallback && !priv ? cpu : NULL;
+        context.bulk_cpu = options && options->bulk_enabled && fallback && !priv
+            ? cpu : NULL;
         context.tlb_gen = cpu->tlb_gen;
         context.priv_tag = priv ? 1u : 0u;
         context.vfp_s = cpu->vfp_s;
@@ -2586,7 +2684,7 @@ bool a64_compact_raw_run_code_window_resident_bulk(
         context.vfp_access = vfp_cpacr_permits(cpu) ? 1u : 0u;
         context.cp15 = &cpu->cp15;
         context.window_cache_enabled =
-            window_cache_enabled && fallback && !priv &&
+            options && options->window_cache_enabled && fallback && !priv &&
             (code_base & UINT32_C(0x3ff)) == 0u &&
             code_bytes == UINT32_C(0x400) ? 1u : 0u;
         context.window_cache_next = 1u;
@@ -2594,6 +2692,24 @@ bool a64_compact_raw_run_code_window_resident_bulk(
         context.current_window.code_base = code_base;
         context.current_window.code_bytes = code_bytes;
         context.window_cache[0] = context.current_window;
+        if (options && options->ram_window && fallback && !priv &&
+            code_bytes == 1024u && (code_base & 1023u) == 0u &&
+            arm_ram_window_tlb_lookup(options->ram_window, cpu, code_base,
+                                      ARM_ACCESS_FETCH, false) == code) {
+            context.ram_window = options->ram_window;
+            context.tlb = cpu->tlb;
+            context.tlb_hits = &cpu->tlb_hits;
+            context.fetch_cache = &cpu->fetch_host;
+            context.owner_fetch_block = options->owner_fetch_block;
+            context.tlb_cpu = cpu;
+            context.tlb_cp15 = cpu->cp15;
+            context.guarded_fallback = fallback;
+            context.guarded_opaque = fallback_opaque;
+            context.fallback = compact_tlb_guarded_fallback;
+            context.fallback_opaque = &context;
+            /* Do not combine two independent window-reuse experiments. */
+            context.window_cache_enabled = 0u;
+        }
         uint32_t result = a64_compact_raw_execute(
             cpu->r, &cpu->cpsr, &cpu->cycles, code, code_base, code_bytes,
             max_insns, &context);
@@ -2616,6 +2732,7 @@ bool a64_compact_raw_run_code_window_resident_bulk(
         if (window_cache_hits)
             *window_cache_hits = context.window_cache_hits;
         if (bulk_stats) *bulk_stats = context.bulk_stats;
+        if (tlb_stats) *tlb_stats = context.tlb_stats;
         if (context.window_cache_enabled && context.current_window.code &&
             cpu->tlb_gen == context.tlb_gen &&
             ((cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR) == priv &&
@@ -2635,9 +2752,8 @@ bool a64_compact_raw_run_code_window_resident_bulk(
     (void)code_end;
     (void)fallback;
     (void)fallback_opaque;
-    (void)window_cache_enabled;
+    (void)options;
     (void)window_cache_hits;
-    (void)bulk_enabled;
     return false;
 #endif
 }

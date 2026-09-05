@@ -190,6 +190,53 @@ static bool mmu_stamp_matches(const arm_cpu_t *c) {
            c->tlb_stamp.context_id == c->cp15.context_id;
 }
 
+bool arm_ram_window_capture(arm_ram_window_t *w, const arm_cpu_t *c,
+                            uint32_t base, uint32_t bytes) {
+    if (!w) return false;
+    memset(w, 0, sizeof *w);
+    if (!c || !c->bus || !c->bus->host_ram || bytes < 1024u ||
+        (uint64_t)base + bytes > UINT64_C(0x100000000)) return false;
+    uint8_t *read_host = c->bus->host_ram(c->bus->ctx, base, bytes);
+    if (!read_host) return false;
+    w->bus = *c->bus;
+    w->identity = c->bus;
+    w->read_host = read_host;
+    w->write_host = c->bus->host_ram_write
+        ? c->bus->host_ram_write(c->bus->ctx, base, bytes) : NULL;
+    w->base = base;
+    w->bytes = bytes;
+    return true;
+}
+
+bool arm_ram_window_current(const arm_ram_window_t *w, const arm_cpu_t *c) {
+    if (!w || !c || !w->read_host || w->bytes < 1024u ||
+        !c->bus || c->bus != w->identity) return false;
+    const arm_bus_t *b = c->bus;
+    return b->ctx == w->bus.ctx && b->host_ram == w->bus.host_ram &&
+        b->host_ram_write == w->bus.host_ram_write &&
+        b->read32 == w->bus.read32 && b->read16 == w->bus.read16 &&
+        b->read8 == w->bus.read8 && b->write32 == w->bus.write32 &&
+        b->write16 == w->bus.write16 && b->write8 == w->bus.write8;
+}
+
+uint8_t *arm_ram_window_tlb_lookup(const arm_ram_window_t *w,
+                                  const arm_cpu_t *c, uint32_t va,
+                                  arm_access_t access, bool priv) {
+    if ((unsigned)access > ARM_ACCESS_FETCH ||
+        !arm_ram_window_current(w, c) || !c->tlb_gen ||
+        !(c->cp15.sctlr & ARM_SCTLR_M) || !mmu_stamp_matches(c)) return NULL;
+    const unsigned slot = mmu_tlb_slot(va, access);
+    if (c->tlb[slot].gen != c->tlb_gen ||
+        c->tlb[slot].tag != mmu_tlb_tag(va, access, priv) ||
+        c->tlb[slot].fsr != 0u) return NULL;
+    const uint32_t pa = c->tlb[slot].pa;
+    const uint32_t offset = pa - w->base;
+    uint8_t *host = access == ARM_ACCESS_WRITE ? w->write_host : w->read_host;
+    if (!host || (pa & 1023u) || pa < w->base ||
+        offset > w->bytes - 1024u) return NULL;
+    return host + offset;
+}
+
 /*
  * Flush is a generation bump, not a memset. The guest flushes on every context
  * switch -- pmap_switch writes TTBR0 -- so an O(entries) flush would put a
