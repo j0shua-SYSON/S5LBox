@@ -1218,6 +1218,16 @@ static void test_legacy_snapshot_requires_arm1176(void) {
     size_t legacy_len = 0;
     CHECK(snapshot_save_mem(&m, &legacy, &legacy_len) == SNAP_OK,
           "ARM1176 snapshot failed");
+    m.cpu.a8_l2actlr = 0x02000042u;
+    uint8_t *inactive = NULL;
+    size_t inactive_len = 0;
+    CHECK(snapshot_save_mem(&m, &inactive, &inactive_len) == SNAP_OK,
+          "inactive Cortex-A8 state changed ARM1176 save");
+    CHECK(legacy && inactive && legacy_len == inactive_len &&
+          memcmp(legacy, inactive, legacy_len) == 0,
+          "inactive L2 state changed legacy snapshot bytes");
+    CHECK(m.cpu.a8_l2actlr == 0x02000042u, "snapshot save mutated CPU state");
+    free(inactive);
     static const arm_arch_t other_profiles[] = {
         ARM_ARCH_V7_SWIFT, ARM_ARCH_V7_CORTEX_A8, (arm_arch_t)99
     };
@@ -1231,12 +1241,14 @@ static void test_legacy_snapshot_requires_arm1176(void) {
               "legacy format silently saved another CPU profile");
         CHECK(out == NULL && out_len == 0,
               "rejected snapshot returned data");
+        CHECK(m.cpu.a8_l2actlr == 0x02000042u, "rejected save mutated L2 state");
         free(out);
         if (legacy) {
             CHECK(snapshot_load_mem(&m, legacy, legacy_len) == SNAP_ERR_GEOMETRY,
                   "ARM1176 state restored into another CPU profile");
             CHECK(m.cpu.arch == other_profiles[i] &&
-                  m.cpu.r[0] == 0x12345678u && m.ram[42] == 0xa5,
+                  m.cpu.r[0] == 0x12345678u && m.ram[42] == 0xa5 &&
+                  m.cpu.a8_l2actlr == 0x02000042u,
                   "rejected restore mutated the target");
         }
     }
@@ -1244,8 +1256,8 @@ static void test_legacy_snapshot_requires_arm1176(void) {
     if (legacy) {
         CHECK(snapshot_load_mem(&m, legacy, legacy_len) == SNAP_OK,
               "legacy ARM1176 restore regressed");
-        CHECK(m.cpu.arch == ARM_ARCH_V6_ARM1176,
-              "legacy restore lost the default profile");
+        CHECK(m.cpu.arch == ARM_ARCH_V6_ARM1176 && m.cpu.a8_l2actlr == 0u,
+              "legacy restore lost the default profile or retained inactive L2 state");
     }
     free(legacy);
     s5l8900_free(&m);

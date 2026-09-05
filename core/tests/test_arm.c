@@ -1541,6 +1541,7 @@ static void test_cortex_a8_cp15_selector_boundary(void) {
       for (unsigned crm = 0; crm < 16u; crm++) {
        for (unsigned opc2 = 0; opc2 < 8u; opc2++) {
         bool backed = opc1 == 0u && crm == 0u && opc2 < limits[crn] && !(crn == 6u && opc2 == 1u);
+        backed |= opc1 == 1u && crn == 9u && crm == 0u && opc2 == 2u; /* L2ACTLR */
         if (backed || crn == 7u || crn == 8u) continue; /* Maintenance has its own test. */
         for (unsigned load = 0; load < 2u; load++) {
             arm_cpu_t c;
@@ -1553,7 +1554,7 @@ static void test_cortex_a8_cp15_selector_boundary(void) {
             uint32_t insn = 0xee009f10u | (load << 20) | (opc1 << 21) | (crn << 16) | (opc2 << 5) | crm;
             m_w32(NULL, 0, insn);
             CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.r[9] == 0x80000000u &&
-                  c.cpsr == flags && memcmp(&c.cp15, &before, sizeof before) == 0,
+                  c.cpsr == flags && memcmp(&c.cp15, &before, sizeof before) == 0 && c.a8_l2actlr == 0x42u,
                   "A8 aliased/unimplemented CP15 selector load=%u opc1=%u c%u,c%u,%u", load, opc1, crn, crm, opc2);
         }
        }
@@ -1653,6 +1654,110 @@ static void test_cortex_a8_cp15_maintenance_boundary(void) {
         m_w32(NULL, 0, 0xee07ef90u); /* Legacy WFI is a NOP on A8. */
         CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.r[14] == ignored[i] && calls == 0u,
               "A8 CP15 NOP used its operand or invoked wait");
+    }
+}
+
+static void test_cortex_a8_l2_auxiliary_control(void) {
+    /* DDI0344K 3.2.55, table3-3: reset 0x42, privileged Secure writes.
+     * This CPU configuration has no parity/ECC RAM, so bit21 cannot set.
+     * Test each defined field and every reserved bit, not just a boot value. */
+    static const unsigned fields[] = {0,1,2,3,6,7,8,16,21,22,23,24,25,27,28,29};
+    for (unsigned bit = 0; bit < 32u; bit++) {
+        bool defined = false;
+        for (unsigned i = 0; i < sizeof fields / sizeof fields[0]; i++)
+            if (bit == fields[i]) defined = true;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.r[1] = UINT32_MAX;
+        m_w32(NULL, 0, 0xee391f50u); /* MRC p15,1,r1,c9,c0,2 */
+        CHECK(arm_step(&c) == ARM_OK && c.r[1] == 0x42u && c.r[15] == 4u,
+              "A8 L2ACTLR reset/read lost documented latency state");
+        c.r[15] = 0; c.r[1] = 1u << bit;
+        uint32_t flags = c.cpsr;
+        uint32_t generation = c.tlb_gen;
+        uint64_t flushes = c.tlb_flushes;
+        arm_cp15_t before = c.cp15;
+        m_w32(NULL, 0, 0xee291f50u); /* MCR p15,1,r1,c9,c0,2 */
+        CHECK(arm_step(&c) == (defined ? ARM_OK : ARM_UNDEFINED) &&
+              c.r[15] == (defined ? 4u : 0u) && c.r[1] == (1u << bit) && c.cpsr == flags,
+              "A8 L2ACTLR field write permission/effects bit=%u", bit);
+        CHECK(memcmp(&c.cp15, &before, sizeof before) == 0 &&
+              c.tlb_gen == generation && c.tlb_flushes == flushes,
+              "A8 L2ACTLR aliased a legacy register or flushed translations");
+        c.r[15] = 0;
+        m_w32(NULL, 0, 0xee392f50u);
+        uint32_t expected = defined ? (bit == 21u ? 0u : 1u << bit) : 0x42u;
+        CHECK(arm_step(&c) == ARM_OK && c.r[2] == expected,
+              "A8 L2ACTLR bit=%u read=%08x expected=%08x", bit, c.r[2], expected);
+    }
+    /* Reset, read/modify/write and clearing persist independently of Rt.
+     * The matching kernel requests 0x10600000; absent ECC RAM must read its
+     * enable bit clear. Never report an error-protection unit from that write. */
+    static const uint32_t writes[] = {0x02000042u,0x42u,0x10600000u,0x3be101cfu,0u};
+    static const uint32_t reads[]  = {0x02000042u,0x42u,0x10400000u,0x3bc101cfu,0u};
+    static const uint32_t modes[] = {ARM_MODE_SVC,ARM_MODE_SYS,ARM_MODE_IRQ,
+                                    ARM_MODE_FIQ,ARM_MODE_ABT,ARM_MODE_UND};
+    for (unsigned mode = 0; mode < sizeof modes / sizeof modes[0]; mode++) {
+     for (unsigned rd = 0; rd < 16u; rd++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = modes[mode] | ARM_CPSR_I | ARM_CPSR_F | ARM_CPSR_Q | (5u << 16) | 0xf0000000u;
+        for (unsigned i = 0; i < sizeof writes / sizeof writes[0]; i++) {
+            c.r[0] = writes[i]; c.r[15] = 0;
+            uint32_t flags = c.cpsr;
+            m_w32(NULL, 0, 0xee290f50u);
+            CHECK(arm_step(&c) == ARM_OK && c.cpsr == flags, "A8 L2ACTLR write changed flags");
+            c.r[15] = 0;
+            m_w32(NULL, 0, 0xee390f50u | (rd << 12));
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u &&
+                  (rd == 15u ? c.cpsr == ((flags & 0x0fffffffu) | (reads[i] & 0xf0000000u)) :
+                               c.r[rd] == reads[i] && c.cpsr == flags),
+                  "A8 L2ACTLR stored read/NZCV mode=%u rd=%u value=%u", mode, rd, i);
+        }
+     }
+    }
+    for (unsigned load = 0; load < 2u; load++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_N; c.r[7] = 0x02000000u;
+        uint32_t flags = c.cpsr;
+        m_w32(NULL, 0, 0xee297f50u | (load << 20));
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u &&
+              c.r[7] == 0x02000000u && c.cpsr == flags, "User L2ACTLR access accepted");
+        c.cpsr = ARM_MODE_SVC;
+        m_w32(NULL, 0, 0xee397f50u);
+        CHECK(arm_step(&c) == ARM_OK && c.r[7] == 0x42u, "User L2ACTLR write leaked state");
+    }
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    m_w32(NULL, 0, 0xee29ff50u); /* MCR source PC is unpredictable. */
+    CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u, "L2ACTLR accepted MCR PC");
+    m_w32(NULL, 0, 0x0e29ff50u); /* Condition-failed invalid access has no effects. */
+    CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u, "L2ACTLR bypassed condition check");
+    c.r[15] = 0;
+    m_w32(NULL, 0, 0xee390f50u);
+    CHECK(arm_step(&c) == ARM_OK && c.r[0] == 0x42u, "refused/skipped L2ACTLR write changed state");
+
+    /* This profile remains in the Secure reset state. Do not grant L2 writes
+     * while silently accepting an unimplemented transition to another world. */
+    static const uint32_t transitions[] = {0xee010f11u, /* MCR SCR */
+        0xe1600070u, /* SMC #0 */ 0xf1020016u, /* CPS #Monitor */
+        0xe121f000u}; /* MSR CPSR_c,r0 with Monitor mode */
+    for (unsigned i = 0; i < sizeof transitions / sizeof transitions[0]; i++) {
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.r[0] = i == 3u ? 0x16u : 1u;
+        uint32_t flags = c.cpsr;
+        m_w32(NULL, 0, transitions[i]);
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.cpsr == flags,
+              "A8 accepted an unimplemented security transition %08x", transitions[i]);
+    }
+    static const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned i = 0; i < sizeof legacy / sizeof legacy[0]; i++) {
+        CHECK(arm_reset_profile(&c, &g_bus, legacy[i]), "reset");
+        c.r[0] = 0x02000000u;
+        m_w32(NULL, 0, 0xee290f50u); m_w32(NULL, 4, 0xee391f50u);
+        CHECK(arm_step(&c) == ARM_OK && arm_step(&c) == ARM_OK && c.r[1] == 0u,
+              "A8 L2ACTLR changed another profile's legacy CP15 path");
     }
 }
 
@@ -5974,6 +6079,7 @@ static void test_reset_initializes_the_default_profile(void) {
           "reset left the CPU profile uninitialized");
     CHECK(c.r[15] == 0u && c.bus == &g_bus,
           "default reset lost its PC or bus");
+    CHECK(c.a8_l2actlr == 0u, "default reset left inactive Cortex-A8 state");
 }
 
 static void test_explicit_profile_reset_and_invalid_configuration(void) {
@@ -5988,9 +6094,13 @@ static void test_explicit_profile_reset_and_invalid_configuration(void) {
               c.cp15.sctlr == 0u && c.tlb_gen == 1u && !c.excl_valid &&
               c.vfp_fpexc == 0u && c.cycles == 0u,
               "explicit profile reset left stale state");
+        CHECK(c.a8_l2actlr == (profiles[i] == ARM_ARCH_V7_CORTEX_A8 ? 0x42u : 0u),
+              "explicit reset lost profile-specific L2 reset state");
         c.r[3] = 0xabcdef01u;
+        c.a8_l2actlr = 0x02000000u;
         CHECK(arm_reset_profile(&c, &g_bus, profiles[i]) &&
-              c.arch == profiles[i] && c.r[3] == 0u,
+              c.arch == profiles[i] && c.r[3] == 0u &&
+              c.a8_l2actlr == (profiles[i] == ARM_ARCH_V7_CORTEX_A8 ? 0x42u : 0u),
               "repeated explicit reset lost profile or register reset");
     }
     memcpy(&before, &c, sizeof c);
@@ -8302,6 +8412,7 @@ int main(void) {
     test_cp15_wfi_uses_only_the_exact_privileged_hook();
     test_cortex_a8_cp15_selector_boundary();
     test_cortex_a8_cp15_maintenance_boundary();
+    test_cortex_a8_l2_auxiliary_control();
     test_high_vectors();
     test_mmu_disabled_is_identity();
     test_mmu_section_translation();

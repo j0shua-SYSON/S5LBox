@@ -598,6 +598,12 @@ typedef struct arm_cpu {
      */
     uint64_t dread_hits, dread_misses;
     uint64_t dwrite_hits, dwrite_misses;
+    /* Cortex-A8 CP15 p15,1,c9,c0,2. This core currently implements the
+     * documented configuration without L2 parity/ECC RAM (bit21 is RAZ/WI),
+     * in Secure reset state only. Cache latency controls are stored but this
+     * is not a cycle-accurate cache model. Inactive on other CPU profiles;
+     * omitted from ARM1176 snapshots, which reject active Cortex-A8 state. */
+    uint32_t a8_l2actlr;
 } arm_cpu_t;
 
 /*

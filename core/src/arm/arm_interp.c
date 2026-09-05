@@ -725,6 +725,26 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
     arm_cp15_t *p = &c->cp15;
 
     if (c->arch == ARM_ARCH_V7_CORTEX_A8) {
+        if (opc1 == 1u && crn == 9u && crm == 0u && opc2 == 2u) {
+            /* DDI0344K 3.2.55: L2ACTLR is privileged R/W in Secure state.
+             * This profile stays in the Secure reset state: SCR, SMC and
+             * Monitor-mode transitions remain unsupported and refused.
+             * Reserved bits are UNP/SBZP; refuse a nonzero reserved write.
+             * No parity/ECC RAM is configured, so bit21 cannot be set.
+             * Other fields control cache timing/allocation; synchronous,
+             * coherent memory needs no extra queued work or TLB flush. */
+            if (!cpu_is_priv(c) || (!load && rd == 15u)) return ARM_UNDEFINED;
+            if (load) {
+                uint32_t v = c->a8_l2actlr;
+                if (rd == 15u) c->cpsr = (c->cpsr & 0x0fffffffu) | (v & 0xf0000000u);
+                else c->r[rd] = v;
+            } else {
+                uint32_t v = c->r[rd];
+                if (v & ~0x3be101cfu) return ARM_UNDEFINED;
+                c->a8_l2actlr = v & ~0x00200000u;
+            }
+            return ARM_OK;
+        }
         /* DDI0344K table3-3 and 3.2.40/41/73: check the full selector
          * before entering the legacy register storage below. Unimplemented
          * identity/cache-size, translation-result, debug/performance and
@@ -941,6 +961,7 @@ bool arm_reset_profile(arm_cpu_t *cpu, const arm_bus_t *bus, arm_arch_t arch) {
     }
     for (int i = 0; i < 5; i++) { cpu->fiq_r8_12[i] = 0; cpu->usr_r8_12[i] = 0; }
     { arm_cp15_t z = {0}; cpu->cp15 = z; }   /* MMU off, low vectors */
+    cpu->a8_l2actlr = arch == ARM_ARCH_V7_CORTEX_A8 ? 0x42u : 0u;
     /*
      * Generation 1, never 0. Entries carry the generation they were filled in
      * and a hit needs a match; a zeroed cpu has every entry at 0, so starting

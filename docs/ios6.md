@@ -81,6 +81,20 @@ processor and does not call the ARM1176 wait hook. These rules follow
 Control-register bit fields, reset signals and the complete MMU/security
 model remain separate work.
 
+Cortex-A8 L2 auxiliary control (`p15,1,c9,c0,2`) now stores its defined
+fields separately from ARM1176 CP15 state and resets to `0x00000042`.
+The implemented configuration has no L2 parity/ECC RAM, so bit 21 stays clear
+after writes, as specified by
+[DDI0344K, section 3.2.55](https://documentation-service.arm.com/static/5e8e1ac688295d1e18d35fde).
+This is a CPU configuration, not evidence of the S5L8920 cache integration.
+Cache allocation and latency controls persist; coherent synchronous memory
+has no dirty cache lines, timing model or error-protection unit. Nonzero
+reserved-bit writes are refused before mutation. Execution remains in the
+Secure reset state, with privileged access only; SCR, SMC and Monitor-mode
+transitions are refused. Nonsecure execution still requires implementation.
+Legacy snapshot bytes and version stay unchanged, with inactive L2 state
+cleared on ARM1176 restore and Cortex-A8 save/load still refused.
+
 Thumb-2 framing fetches both halfwords and retires once. The second halfword
 is translated independently, including across noncontiguous physical pages.
 A fetch fault there vectors before any instruction result is committed.
@@ -379,6 +393,12 @@ the old path silently returned zero for an earlier L2 auxiliary-control read.
 With explicit Cortex-A8 refusal, the current probe stops after 61,644 steps
 at physical `0x40086348`, A32 `ee39bf50` (`MRC p15,1,r11,c9,c0,2`). That
 register requires implementation before returning to the later CPU-ID read.
+With L2 auxiliary-control storage implemented, the guarded diagnostic reaches
+61,650 steps at physical `0x40086360`, A32 `ee29bf50`. The kernel requests
+`0x10600000`, including ECC enable. The diagnostic stops before that write:
+the current CPU configuration has no parity/ECC RAM, and neither the kernel's
+request nor iBoot's bit-25 write-combining toggles establishes its presence
+in S5L8920. This remains a hardware-configuration gap, not a passed boot stage.
 Unprepared tree properties and remaining argument fields retain their guards.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and

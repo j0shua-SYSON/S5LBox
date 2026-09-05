@@ -115,7 +115,11 @@ SNAP_SIZE_GUARD(arm_cp15_t,        64,    "snap_cpu");
  * below, and justified the same way. Measured with the compiler's failed size
  * guard and confirmed by the successful guard below, not assumed from source
  * arithmetic; the padding is exactly why. */
-SNAP_SIZE_GUARD(arm_cpu_t,         68112,   "snap_cpu");
+/* a8_l2actlr adds 4 bytes plus 4 bytes of alignment padding (compiler-measured
+ * size 68120). It is inactive on ARM1176 and therefore also omitted: this
+ * format rejects Cortex-A8 on save/load before it could drop live L2 state.
+ * Clear the inactive field on ARM1176 restore without changing format v32. */
+SNAP_SIZE_GUARD(arm_cpu_t,         68120,   "snap_cpu");
 SNAP_SIZE_GUARD(s5l_uart_t,        8280,  "snap_uart");
 SNAP_SIZE_GUARD(s5l_vic_t,         16,    "snap_vic");
 SNAP_SIZE_GUARD(s5l_timer_t,       40,    "snap_timer");
@@ -215,9 +219,11 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * fits existing padding before its edram pointer and also stays out of
  * snap_mbx(). 127936 adds uart4's host-only demand-refill callback pointer;
  * like its existing peer callbacks it is retained from the live destination
- * and does not change the snapshot stream. The size below must be read from the
+ * and does not change the snapshot stream. 127944 includes the CPU's inactive
+ * Cortex-A8 L2 state and padding, excluded for the ARM1176-only format above.
+ * The size below must be read from the
  * compiler's emitted `.space`, not inferred from source padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         127936, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         127944, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -411,6 +417,8 @@ static void snap_cp15(sn_io_t *io, arm_cp15_t *p) {
  * Deliberately NOT serialised: `bus`, a host pointer into the machine struct.
  * snapshot_load re-points it at the live machine's bus, which is what lets a
  * tool wrap the bus callbacks and still restore underneath the wrapper.
+ * a8_l2actlr is likewise absent because this format accepts ARM1176 only;
+ * it is cleared on restore, not reconstructed as Cortex-A8 state.
  */
 static void snap_cpu(sn_io_t *io, arm_cpu_t *c) {
     FA32(c->r, 16);
@@ -455,6 +463,7 @@ static void snap_cpu(sn_io_t *io, arm_cpu_t *c) {
      * would misdescribe what it did.
      */
     if (sn_reading(io)) {
+        c->a8_l2actlr = 0u;
         memset(c->tlb, 0, sizeof c->tlb);
         /* And generation 1, for the same reason arm_reset does: an entry at
          * generation 0 in a table whose counter is also 0 is a false hit. */
