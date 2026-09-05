@@ -7792,6 +7792,73 @@ static void test_cortex_a8_vfp_multiple_memory_aborts(void) {
     }
 }
 
+static void test_cortex_a8_vfp_bitwise_fetch_and_retry(void) {
+    static const uint32_t insns[] = {0xeef7fb00u,0xeef0fb60u,0xeef0fbe0u,0xeef1fb60u};
+    static const uint64_t expected[] = {
+        UINT64_C(0x3ff0000000000000), UINT64_C(0xfff0000000000001),
+        UINT64_C(0x7ff0000000000001), UINT64_C(0x7ff0000000000001)
+    };
+    for (unsigned host = 0; host < 2u; host++)
+     for (unsigned op = 0; op < 4u; op++)
+      for (unsigned fault = 0; fault < 4u; fault++) {
+        memset(g_ram, 0, sizeof g_ram);
+        arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP;
+        c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u; c.cp15.cpacr = 0x00f00000u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N | test_it_bits(0x1cu);
+        c.vfp_fpscr = 0x4bc00080u; c.vfp_fpexc = fault ? 0u : ARM_FPEXC_EN;
+        c.a8_vfp_hi[0] = UINT64_C(0xfff0000000000001);
+        c.a8_vfp_hi[15] = UINT64_C(0x123456789abcdef0);
+        c.r[15] = 0xffeu;
+        uint32_t flags = c.cpsr;
+        m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x8032u);
+        m_w32(NULL, 0x6004u, fault == 1u ? 0u : fault == 2u ? 0xa033u : fault == 3u ? 0xa012u : 0xa032u);
+        m_w16(NULL, 0x8ffeu, (uint16_t)(insns[op] >> 16));
+        m_w16(NULL, 0xa000u, (uint16_t)insns[op]);
+        m_w16(NULL, 0x9000u, 0u); /* unrelated physical neighbor */
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u, "Thumb raw FP fetch disposition");
+        CHECK(c.vfp_fpscr == 0x4bc00080u && c.a8_vfp_hi[0] == UINT64_C(0xfff0000000000001),
+              "Thumb raw FP fetch changed controls/source");
+        if (!fault) {
+            CHECK(c.r[15] == 0x1002u && c.a8_vfp_hi[15] == expected[op] &&
+                  c.cpsr == ((flags & ~TEST_IT_MASK) | test_it_bits(0x18u)),
+                  "Thumb raw FP used physical neighbor or lost IT retirement");
+        } else {
+            CHECK(c.r[15] == ARM_VEC_PREFETCH && c.r[14] == 0x1002u && c.cp15.ifar == 0x1000u &&
+                  c.spsr[ARM_BANK_ABT] == flags && !(c.cpsr & (ARM_CPSR_T | TEST_IT_MASK)) &&
+                  c.a8_vfp_hi[15] == UINT64_C(0x123456789abcdef0) && c.vfp_fpexc == 0u &&
+                  (c.cp15.ifsr & 15u) == (fault == 1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION),
+                  "Thumb raw FP availability/effects preceded second-half fetch");
+        }
+      }
+    for (unsigned op = 0; op < 4u; op++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_Z | ARM_CPSR_Q;
+        c.cp15.cpacr = 0x00f00000u;
+        c.a8_vfp_hi[0] = UINT64_C(0xfff0000000000001);
+        c.r[15] = 0x100u; c.r[5] = ARM_FPEXC_EN; c.r[2] = 0x12345678u;
+        m_w16(NULL, 0x100u, 0xbf04u); /* ITT EQ */
+        m_w16(NULL, 0x102u, (uint16_t)(insns[op] >> 16));
+        m_w16(NULL, 0x104u, (uint16_t)insns[op]);
+        m_w16(NULL, 0x106u, 0x2201u); /* MOVS r2,#1, second EQ slot */
+        put_vfp_system_transfer(0u, ARM_VEC_UNDEFINED, 0u, 8u, 5u);
+        m_w32(NULL, 8u, 0xe25ef002u); /* SUBS pc,lr,#2 */
+        CHECK(arm_step(&c) == ARM_OK, "raw FP retry IT setup");
+        uint32_t interrupted = c.cpsr;
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == 0x104u &&
+              c.spsr[ARM_BANK_UND] == interrupted && c.a8_vfp_hi[15] == 0u, "raw FP lazy exception");
+        CHECK(arm_step(&c) == ARM_OK && c.vfp_fpexc == ARM_FPEXC_EN, "raw FP handler enable");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x102u && c.cpsr == interrupted, "raw FP exception return");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x106u && c.a8_vfp_hi[15] == expected[op] &&
+              c.cpsr == ((interrupted & ~TEST_IT_MASK) | test_it_bits(0x08u)), "raw FP exact retry/IT retirement");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x108u && c.r[2] == 1u &&
+              c.cpsr == (interrupted & ~TEST_IT_MASK) && c.cycles == 6u, "raw FP changed following IT condition");
+    }
+}
+
 static void test_cortex_a8_vfp_fetch_and_refusals(void) {
     for (unsigned host = 0; host < 2u; host++) {
      for (unsigned load = 0; load < 2u; load++) {
@@ -7861,7 +7928,7 @@ static void test_cortex_a8_vfp_fetch_and_refusals(void) {
       }
      }
     }
-    const uint32_t neighbors[] = {0xeef14b10u,0xee514b10u,0xeef14a00u,0xfef14a10u};
+    const uint32_t neighbors[] = {0xeef14b10u,0xee514b10u,0xeef14aa0u,0xfef14a10u};
     for (unsigned n = 0; n < sizeof neighbors / sizeof neighbors[0]; n++) {
         arm_cpu_t c;
         CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
@@ -9397,6 +9464,7 @@ int main(void) {
     test_cortex_a8_vfp_control_fields();
     test_cortex_a8_vfp_core_registers();
     test_cortex_a8_vfp_undefined_retry();
+    test_cortex_a8_vfp_bitwise_fetch_and_retry();
     test_cortex_a8_vfp_single_memory_aborts();
     test_cortex_a8_vfp_multiple_memory_aborts();
     test_cortex_a8_vfp_fetch_and_refusals();

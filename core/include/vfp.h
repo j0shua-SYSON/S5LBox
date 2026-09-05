@@ -5,8 +5,8 @@
  * registers s0-s31 aliased onto 16 double-precision registers d0-d15. There is
  * no d16-d31 and there is no Advanced SIMD/NEON on this part.
  *
- * Cortex-A8 adds D16-D31 and checked system, core and memory transfers. Its
- * remaining VFPv3/NEON instruction families are not implemented here.
+ * Cortex-A8 adds D16-D31, checked system/core/memory transfers and raw-bit
+ * data operations. Its remaining VFPv3/NEON families are not complete here.
  *
  * Everything about WHY this exists, and every floating-point semantic this
  * implementation does and does not model, is documented at the top of
@@ -135,6 +135,15 @@ static inline bool vfp_is_memory_transfer(uint32_t insn) {
     return (insn & 0x0e000e00u) == 0x0c000a00u;
 }
 
+/* VFP VMOV immediate/register, VABS and VNEG. Immediate reserved bits stay
+ * in this space so the checked decoder can refuse them before access checks.
+ * This excludes VSQRT, other arithmetic and Advanced SIMD encodings. */
+static inline bool vfp_is_bitwise_data(uint32_t insn) {
+    return (insn & 0x0fb00e10u) == 0x0eb00a00u &&
+           (!(insn & 0x40u) || (insn & 0x000f0000u) == 0u ||
+            (insn & 0x000f0080u) == 0x00010000u);
+}
+
 /*
  * Execute one VFP encoding. `insn` must already have been identified as a
  * cp10/cp11 encoding by the caller and its condition code must already have
@@ -143,7 +152,7 @@ static inline bool vfp_is_memory_transfer(uint32_t insn) {
  * architecturally denied access. arm_step recognizes the disabled-unit
  * ARM_UNDEFINED separately and routes it plus ARM_GUEST_UNDEFINED to the
  * guest's handler while keeping capability gaps fail-closed. Cortex-A8
- * system/core/memory transfers return ARM_GUEST_UNDEFINED for access denials;
+ * checked transfers/data operations return ARM_GUEST_UNDEFINED for access denials;
  * their ARM_UNDEFINED results must never be reclassified as lazy-enable faults.
  *
  * VFP never writes r15, so the caller's `next` is unaffected.

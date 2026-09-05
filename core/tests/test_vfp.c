@@ -18,6 +18,7 @@
 #include "arm.h"
 #include "vfp.h"
 
+#include <fenv.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -159,6 +160,259 @@ static void a8_move_reset(arm_cpu_t *c, unsigned thumb) {
     /* Nondefault controls cannot change a bitwise transfer. */
     c->vfp_fpscr = ARM_FPSCR_QC | ARM_FPSCR_RMODE | ARM_FPSCR_DN | ARM_FPSCR_FZ | ARM_FPSCR_IDC;
     c->r[15] = 0x100u;
+}
+
+/* A8.8.280/339/340/355: op 0=copy, 1=absolute, 2=negate, 3=immediate.
+ * The immediate case takes the encoded imm8 as its source argument. */
+static uint32_t a8_fp_bits(unsigned op, unsigned dbl, unsigned dst, unsigned src) {
+    uint32_t insn = 0xeeb00a00u | (dbl << 8) |
+        (dbl ? ((dst & 15u) << 12) | ((dst >> 4) << 22) :
+               ((dst >> 1) << 12) | ((dst & 1u) << 22));
+    if (op == 3u) return insn | ((src >> 4) << 16) | (src & 15u);
+    return insn | (op == 2u ? 0x10040u : op == 1u ? 0xc0u : 0x40u) |
+        (dbl ? (src & 15u) | ((src >> 4) << 5) : (src >> 1) | ((src & 1u) << 5));
+}
+
+static uint64_t a8_fp_value(const arm_cpu_t *c, unsigned dbl, unsigned reg) {
+    return dbl ? vfp_get_d(c, reg) : vfp_get_s(c, reg);
+}
+
+static void a8_fp_value_set(arm_cpu_t *c, unsigned dbl, unsigned reg, uint64_t value) {
+    if (dbl) vfp_set_d(c, reg, value);
+    else vfp_set_s(c, reg, (uint32_t)value);
+}
+
+static uint64_t a8_fp_sign_result(unsigned op, unsigned dbl, uint64_t value) {
+    uint64_t sign = dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+    return op == 1u ? value & ~sign : op == 2u ? value ^ sign : value;
+}
+
+/* Numeric definition from Table A7-18, independent of the production bit
+ * expansion. All values are exactly representable in both IEEE formats. */
+static uint64_t a8_fp_constant(unsigned dbl, unsigned imm) {
+    int exponent = (int)(((imm >> 4) & 7u) ^ 4u) - 3;
+    double value = (double)(16u + (imm & 15u)) / 16.0;
+    if (exponent < 0) value /= (double)(1u << (unsigned)-exponent);
+    else value *= (double)(1u << (unsigned)exponent);
+    if (imm & 128u) value = -value;
+    return dbl ? d2u(value) : f2u((float)value);
+}
+
+static void test_a8_vfp_bitwise_scalar_registers(void) {
+    static const uint64_t patterns[] = {
+        0u, UINT64_C(0x8000000080000000), UINT64_C(0x0000000000000001),
+        UINT64_C(0x8000000000000001), UINT64_C(0x7ff000007f800000),
+        UINT64_C(0xfff00000ff800000), UINT64_C(0x7ff000017f800001),
+        UINT64_C(0xfff80001ffc00001), UINT64_C(0x0010000000800000),
+        UINT64_C(0x7fefffffffffffff), UINT64_C(0x1234567887654321)
+    };
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned op = 0; op < 3u; op++)
+       for (unsigned dst = 0; dst < 32u; dst++)
+        for (unsigned src = 0; src < 32u; src++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c, d, UINT64_C(0xdead1234beef0000) + d);
+            unsigned pattern = (dst + src * 3u) % (sizeof patterns / sizeof patterns[0]);
+            a8_fp_value_set(&c, dbl, src, patterns[pattern]);
+            uint64_t before[32], value = a8_fp_sign_result(op, dbl, a8_fp_value(&c, dbl, src));
+            for (unsigned d = 0; d < 32u; d++) before[d] = vfp_get_d(&c, d);
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c, thumb, a8_fp_bits(op, dbl, dst, src)) == ARM_OK &&
+                  c.r[15] == 0x104u && c.cpsr == flags && c.vfp_fpscr == fpscr && c.cycles == 1u,
+                  "A8 raw FP disposition T=%u D=%u op=%u dst=%u src=%u", thumb, dbl, op, dst, src);
+            if (dbl) before[dst] = value;
+            else {
+                unsigned shift = (dst & 1u) * 32u;
+                before[dst / 2u] = (before[dst / 2u] & ~(UINT64_C(0xffffffff) << shift)) | (value << shift);
+            }
+            for (unsigned d = 0; d < 32u; d++)
+                CHECK(vfp_get_d(&c, d) == before[d], "A8 raw FP bits/alias D%u T=%u D=%u op=%u dst=%u src=%u",
+                      d, thumb, dbl, op, dst, src);
+        }
+}
+
+static void test_a8_vfp_all_immediate_constants(void) {
+    CHECK(a8_fp_bits(3u, 0u, 0u, 0x70u) == 0xeeb70a00u &&
+          a8_fp_bits(3u, 1u, 31u, 0xf0u) == 0xeefffb00u,
+          "independent VFP immediate encoding anchors");
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned imm = 0; imm < 256u; imm++) {
+            unsigned dst = imm % 32u;
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c, d, UINT64_C(0x123456789abcdef0) + d);
+            uint64_t expected = a8_fp_constant(dbl, imm);
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c, thumb, a8_fp_bits(3u, dbl, dst, imm)) == ARM_OK &&
+                  c.r[15] == 0x104u && c.cpsr == flags && c.vfp_fpscr == fpscr &&
+                  a8_fp_value(&c, dbl, dst) == expected,
+                  "A8 VFP immediate T=%u D=%u dst=%u imm=%02x", thumb, dbl, dst, imm);
+            for (unsigned d = 0; d < 32u; d++) {
+                uint64_t want = UINT64_C(0x123456789abcdef0) + d;
+                if (dbl && d == dst) want = expected;
+                if (!dbl && d == dst / 2u) {
+                    unsigned shift = (dst & 1u) * 32u;
+                    want = (want & ~(UINT64_C(0xffffffff) << shift)) | (expected << shift);
+                }
+                CHECK(vfp_get_d(&c, d) == want, "VFP immediate modified wrong register D%u", d);
+            }
+       }
+}
+
+static void test_a8_vfp_bitwise_vectors(void) {
+    /* Table K-1 is global even with a scalar-bank destination. D16-D19 is
+     * a second scalar bank. Source/destination vector banks are kept distinct. */
+    static const unsigned destinations[] = {0u,3u,7u,11u,15u,16u,19u,23u,27u,31u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned op = 0; op < 4u; op++)
+       for (unsigned destination = 0; destination < sizeof destinations / sizeof destinations[0]; destination++)
+        for (unsigned src_bank = 0; src_bank < (dbl ? 8u : 4u); src_bank++)
+         for (unsigned len = 0; len < 8u; len++)
+          for (unsigned stride = 0; stride < 4u; stride++) {
+            unsigned dst = destinations[destination];
+            unsigned bank = dbl ? 4u : 8u, src = src_bank * bank + bank - 1u;
+            if (src / bank == dst / bank) continue;
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.vfp_fpscr |= (len << 16) | (stride << 20);
+            for (unsigned r = 0; r < 32u; r++) a8_fp_value_set(&c, dbl, r, UINT64_C(0x8000000080000010) + r);
+            uint64_t expected[32];
+            for (unsigned r = 0; r < 32u; r++) expected[r] = a8_fp_value(&c, dbl, r);
+            bool scalar_dst = dbl ? dst < 4u || (dst >= 16u && dst < 20u) : dst < 8u;
+            bool scalar_src = dbl ? src < 4u || (src >= 16u && src < 20u) : src < 8u;
+            unsigned count = scalar_dst ? 1u : len + 1u, step = stride == 3u ? 2u : 1u;
+            bool valid = stride == 0u || (stride == 3u && len >= 1u && len <= 3u);
+            valid = valid && (scalar_dst || count * step <= bank);
+            if (valid) for (unsigned i = 0; i < count; i++) {
+                unsigned dr = dst / bank * bank + (dst % bank + i * step) % bank;
+                unsigned sr = scalar_dst || scalar_src ? src : src / bank * bank + (src % bank + i * step) % bank;
+                expected[dr] = op == 3u ? a8_fp_constant(dbl, 0xabu) :
+                    a8_fp_sign_result(op, dbl, a8_fp_value(&c, dbl, sr));
+            }
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c, thumb, a8_fp_bits(op, dbl, dst, op == 3u ? 0xabu : src)) ==
+                  (valid ? ARM_OK : ARM_UNDEFINED) && c.r[15] == (valid ? 0x104u : 0x100u) &&
+                  c.cpsr == flags && c.vfp_fpscr == fpscr,
+                  "A8 vector shape T=%u D=%u op=%u dst=%u src=%u len=%u stride=%u",
+                  thumb, dbl, op, dst, src, len, stride);
+            for (unsigned r = 0; r < 32u; r++) CHECK(a8_fp_value(&c, dbl, r) == expected[r],
+                "A8 vector value r=%u T=%u D=%u op=%u dst=%u src=%u len=%u stride=%u",
+                r, thumb, dbl, op, dst, src, len, stride);
+          }
+}
+
+static void test_a8_vfp_bitwise_access_and_host_state(void) {
+    static const unsigned permissions[] = {0u, 1u, 3u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned op = 0; op < 4u; op++)
+       for (unsigned user = 0; user < 2u; user++)
+        for (unsigned enabled = 0; enabled < 2u; enabled++)
+         for (unsigned access = 0; access < 3u; access++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permissions[access] * 0x00500000u;
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            a8_fp_value_set(&c, dbl, 17u, UINT64_C(0xfff00001ff800001));
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            uint64_t want = op == 3u ? a8_fp_constant(dbl, 0x70u) :
+                a8_fp_sign_result(op, dbl, a8_fp_value(&c, dbl, 17u));
+            bool allowed = enabled && (permissions[access] == 3u || (permissions[access] == 1u && !user));
+            CHECK(a8_move_step(&c, thumb, a8_fp_bits(op, dbl, 31u, op == 3u ? 0x70u : 17u)) == ARM_OK &&
+                  c.vfp_fpscr == fpscr && a8_fp_value(&c, dbl, 31u) == (allowed ? want : 0u),
+                  "A8 bitwise access T=%u D=%u op=%u U=%u EN=%u permission=%u", thumb, dbl, op, user, enabled, access);
+            CHECK(allowed ? c.r[15] == 0x104u && c.cpsr == flags :
+                  c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == (thumb ? 0x102u : 0x104u) &&
+                  c.spsr[ARM_BANK_UND] == flags && (c.cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_UND,
+                  "A8 bitwise access exception state");
+         }
+    fenv_t saved;
+    CHECK(fegetenv(&saved) == 0, "save host FP environment");
+    static const int rounds[] = {FE_TONEAREST, FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO};
+    for (unsigned host = 0; host < 4u; host++)
+     for (unsigned guest = 0; guest < 4u; guest++)
+      for (unsigned op = 0; op < 4u; op++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, 1u);
+        c.vfp_fpscr = (c.vfp_fpscr & ~ARM_FPSCR_RMODE) | (guest << 22);
+        vfp_set_d(&c, 31u, UINT64_C(0x7ff0000000000001));
+        CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
+              feraiseexcept(FE_INVALID | FE_DIVBYZERO) == 0, "prepare host FP environment");
+        int exceptions = fetestexcept(FE_ALL_EXCEPT);
+        CHECK(a8_move_step(&c, 1u, a8_fp_bits(op, 1u, 16u, op == 3u ? 0x80u : 31u)) == ARM_OK,
+              "raw operation refused a host rounding mode");
+        CHECK(fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == exceptions,
+              "raw operation touched host rounding/exception flags");
+      }
+    CHECK(fesetenv(&saved) == 0, "restore host FP environment");
+}
+
+static void test_a8_vfp_bitwise_invalid_and_conditional(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned enabled = 0; enabled < 2u; enabled++)
+      for (unsigned skip = 0; skip < 2u; skip++)
+       for (unsigned kind = 0; kind < 7u; kind++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, thumb);
+        for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c, d, UINT64_C(0x7ff01234dead0000) + d);
+        c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+        if (skip) c.cp15.cpacr = 0u;
+        if (thumb) { m_w16(NULL, 0x100u, skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK, "FP bits IT setup"); }
+        uint32_t insn = a8_fp_bits(kind < 4u ? kind : 3u, 1u, 31u, kind == 3u ? 0x70u : 16u);
+        bool valid = kind < 4u;
+        if (!valid) insn |= kind == 4u ? 0x20u : kind == 5u ? 0x80u : 0xa0u;
+        if (!thumb && skip) insn &= 0x0fffffffu;
+        uint32_t pc = c.r[15], flags = c.cpsr, fpscr = c.vfp_fpscr;
+        arm_status_t status = a8_move_step(&c, thumb, insn);
+        CHECK(status == (skip || valid ? ARM_OK : ARM_UNDEFINED), "FP bits conditional disposition");
+        if (skip || !valid) {
+            CHECK(c.r[15] == (skip ? pc + 4u : pc) && c.vfp_fpscr == fpscr &&
+                  c.cpsr == (thumb && skip ? flags & ~0x0600fc00u : flags), "skipped/refused FP bits effects");
+            for (unsigned d = 0; d < 32u; d++) CHECK(vfp_get_d(&c, d) == UINT64_C(0x7ff01234dead0000) + d,
+                "skipped/refused FP bits modified D%u", d);
+        }
+       }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++)
+     for (unsigned op = 0; op < 4u; op++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, legacy[profile]), "legacy reset");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        c.vfp_s[0] = 0xff800001u;
+        CHECK(a8_move_step(&c, 0u, a8_fp_bits(op, 1u, 16u, 0u)) == ARM_UNDEFINED && c.r[15] == 0u &&
+              c.vfp_s[0] == 0xff800001u, "A8 raw FP enabled on a legacy profile");
+     }
+    /* Neither instruction-set prefix nor the neighboring sqrt/conversion
+     * encodings may become a raw move. These upper-bank operations remain
+     * unsupported with access enabled. CDP2 stays refused even with EN=0. */
+    static const uint32_t neighbors[] = {0xfef7fb00u,0xeef1fbe0u,0xeef7fbe0u,0xeef8fb60u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned n = 0; n < sizeof neighbors / sizeof neighbors[0]; n++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, thumb);
+        vfp_set_d(&c, 31u, UINT64_C(0xabcdef1234567890));
+        if (n == 0u) c.vfp_fpexc = 0u;
+        CHECK(a8_move_step(&c, thumb, neighbors[n]) == ARM_UNDEFINED && c.r[15] == 0x100u &&
+              vfp_get_d(&c, 31u) == UINT64_C(0xabcdef1234567890), "raw FP swallowed neighboring encoding");
+     }
+    /* CPSR.E changes memory byte order, not register bit positions. */
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned op = 0; op < 4u; op++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, thumb);
+        c.cpsr |= ARM_CPSR_E;
+        vfp_set_d(&c, 31u, UINT64_C(0xfff0000000000001));
+        uint32_t flags = c.cpsr;
+        uint64_t expected = op == 3u ? UINT64_C(0x3ff0000000000000) :
+            a8_fp_sign_result(op, 1u, UINT64_C(0xfff0000000000001));
+        CHECK(a8_move_step(&c, thumb, a8_fp_bits(op, 1u, 16u, op == 3u ? 0x70u : 31u)) == ARM_OK &&
+              c.cpsr == flags && vfp_get_d(&c, 16u) == expected, "CPSR.E changed raw FP register bits");
+     }
 }
 
 static void test_a8_vfp_full_bank_core_moves(void) {
@@ -2277,6 +2531,11 @@ static void test_condition_codes_apply(void) {
 
 /* --------------------------------------------------------------- main ---- */
 int main(void) {
+    test_a8_vfp_bitwise_scalar_registers();
+    test_a8_vfp_all_immediate_constants();
+    test_a8_vfp_bitwise_vectors();
+    test_a8_vfp_bitwise_access_and_host_state();
+    test_a8_vfp_bitwise_invalid_and_conditional();
     test_a8_vfp_multiple_memory_register_lists();
     test_a8_vfp_multiple_memory_rejections_and_pc();
     test_a8_vfp_multiple_odd_word_gap();

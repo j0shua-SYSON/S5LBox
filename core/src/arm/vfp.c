@@ -1,7 +1,7 @@
 /*
  * S5LBox — VFPv2 (the ARM1176JZF-S's VFP11 unit).
  *
- * Cortex-A8 system/core/memory transfers use checked paths with D0-D31. The
+ * Cortex-A8 transfers and raw-bit data operations use checked paths with D0-D31. The
  * register-file and arithmetic descriptions below concern the legacy VFP11
  * implementation; they do not establish complete Cortex-A8 VFPv3/NEON support.
  *
@@ -635,6 +635,59 @@ static unsigned vfp_short_vector_reg(const vfp_short_vector_t *shape,
         return reg;
     return (reg & ~shape->bank_mask) |
            ((reg + lane * shape->stride) & shape->bank_mask);
+}
+
+/* DDI0406C.b A8.8.280/339/340/355 and Appendix K; DDI0344K 13.3.
+ * VFP copies and sign operations never classify or round their operands.
+ * In particular, moving a signaling NaN must not touch the host FPU. */
+static arm_status_t vfp_a8_bitwise_data(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
+    g_reason = NULL;
+    bool dbl = BIT(8), immediate = !BIT(6);
+    unsigned rd = dbl ? FIELD(12) | (BIT(22) << 4) : SREG(FIELD(12), BIT(22));
+    unsigned rm = dbl ? (insn & 15u) | (BIT(5) << 4) : SREG(insn & 15u, BIT(5));
+    unsigned len = (c->vfp_fpscr & ARM_FPSCR_LEN) >> 16;
+    unsigned stride = (c->vfp_fpscr & ARM_FPSCR_STRIDE) >> 20;
+    vfp_short_vector_t shape;
+    const char *why = NULL;
+    if (immediate && (insn & 0xa0u))
+        return vfp_trap(pc, insn, "reserved Cortex-A8 VFP immediate bits");
+    /* K-1's global stride-two limit applies even to a scalar destination.
+     * D16-D19 is the second scalar bank, equivalent to D0-D3. */
+    if (stride == 3u && len > 3u)
+        return vfp_trap(pc, insn, "invalid Cortex-A8 short-vector length/stride");
+    if (!vfp_short_vector_shape(c->vfp_fpscr, dbl, dbl ? rd & 15u : rd, &shape, &why))
+        return vfp_trap(pc, insn, why);
+    if (!vfp_cpacr_permits(c) || !vfp_enabled(c))
+        return vfp_guest_undefined("Cortex-A8 VFP data requires CPACR access and FPEXC.EN");
+
+    uint64_t constant = 0u, result[8];
+    if (immediate) {
+        unsigned imm = (FIELD(16) << 4) | (insn & 15u);
+        /* VFPExpandImm, A7.5.1: sign, inverted exponent bit, repeated
+         * exponent bit, six immediate bits, then zero fraction bits. */
+        constant = dbl ? ((uint64_t)(imm & 0x80u) << 56) |
+            ((imm & 0x40u) ? UINT64_C(0x3fc0000000000000) : UINT64_C(0x4000000000000000)) |
+            ((uint64_t)(imm & 0x3fu) << 48) :
+            ((uint64_t)(imm & 0x80u) << 24) | ((imm & 0x40u) ? 0x3e000000u : 0x40000000u) |
+            ((uint64_t)(imm & 0x3fu) << 19);
+    }
+    bool scalar_source = dbl ? (rm & 15u) < 4u : rm < 8u;
+    uint64_t sign = dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+    for (unsigned lane = 0; lane < shape.count; lane++) {
+        unsigned sr = scalar_source ? rm : vfp_short_vector_reg(&shape, rm, lane, false);
+        uint64_t value = immediate ? constant : dbl ? vfp_get_d(c, sr) : vfp_get_s(c, sr);
+        if (!immediate) {
+            if (FIELD(16) == 1u) value ^= sign; /* VNEG */
+            else if (BIT(7)) value &= ~sign;  /* VABS */
+        }
+        result[lane] = value;
+    }
+    for (unsigned lane = 0; lane < shape.count; lane++) {
+        unsigned dr = vfp_short_vector_reg(&shape, rd, lane, false);
+        if (dbl) vfp_set_d(c, dr, result[lane]);
+        else vfp_set_s(c, dr, (uint32_t)result[lane]);
+    }
+    return ARM_OK;
 }
 
 /* ================================================= load / store group ==== *
@@ -1469,6 +1522,8 @@ arm_status_t vfp_execute(arm_cpu_t *c, uint32_t pc, uint32_t insn,
         return vfp_a8_core_transfer(c, pc, insn);
     if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_memory_transfer(insn))
         return vfp_a8_memory(c, pc, insn, bus);
+    if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_bitwise_data(insn))
+        return vfp_a8_bitwise_data(c, pc, insn);
     if (!c || (c->vfp_fpscr & ARM_FPSCR_RMODE) == 0u)
         return vfp_execute_inner(c, pc, insn, bus);
 

@@ -163,6 +163,27 @@ The extra 128 bytes are inactive on legacy profiles. Snapshot version 32
 still accepts only ARM1176, omits the inactive A8 bank and clears it on
 restore. Its byte stream is unchanged.
 
+ARM and Thumb VFP VMOV register/immediate, VABS and VNEG now operate on
+all 32 S or D registers through a checked A8 path. Copies preserve raw bits;
+absolute and negate only clear or invert the sign bit. Immediate expansion
+uses the architectural eight-bit constant format. These operations preserve
+FPSCR, ARM flags and the host floating-point environment, including for
+signaling NaNs, denormals and signed zero. Access denials enter the guest
+Undefined handler; reserved immediate bits stop before mutation. See
+[DDI0406C.b, A7.5.1 and A8.8.280/339/340/355](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Their short-vector behavior follows
+[DDI0344K, section 13.3](https://documentation-service.arm.com/static/5e8e1ac688295d1e18d35fde)
+and [DDI0406C.b, Appendix K](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+D16-D19 is a second scalar bank: a destination there stays scalar, and a
+source there broadcasts into a vector destination. Vector registers wrap
+within their bank. Invalid length/stride combinations are refused, including
+the global stride-two limit with a scalar destination. Tests cover all
+register pairs, all 256 immediates, bank/stride boundaries, conditional
+execution and access checks. Thumb tests cross unrelated physical pages and
+verify a guest handler enabling VFP and retrying the original IT slot.
+Other upper-bank arithmetic and Advanced SIMD encodings remain separate work.
+
 ARM and Thumb VLDR/VSTR now move one S or D register through the translating
 memory accessors, including D16-D31. They use signed, scaled immediate
 offsets and require word alignment even for doubleword registers. Thumb
@@ -439,7 +460,8 @@ establish that result.
   also implemented. Other instruction families remain to implement. IT state
   and conditional execution are implemented for the supported Thumb families.
   Cortex-A8 MRC/MCR transfers cover the currently implemented CP15 registers.
-- Cortex-A8 stores d0-d31 and supports system/core/memory transfers.
+- Cortex-A8 stores d0-d31 and supports system/core/memory transfers plus
+  VFP copies, immediate constants and sign operations with short vectors.
   Upper-bank arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Shared lower-bank arithmetic
   still derives from VFP11 and requires a complete Cortex-A8 semantic audit.
