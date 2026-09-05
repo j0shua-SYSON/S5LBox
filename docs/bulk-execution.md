@@ -44,3 +44,20 @@ Keep the control off until same-build physical runs from matched guest
 checkpoints demonstrate a substantial wall-clock improvement for real work,
 with identical resulting package/catalog contents and no lifecycle regression.
 Host correctness tests and successful invocation counters alone are insufficient.
+
+## First physical result
+
+Build `cd6f350` passed all eight core CI jobs (including native ARM64 execution
+on both Mac runners) and the iOS build. Same-build, profiler-off real catalog
+refreshes from the same paired ready checkpoint did not demonstrate a
+substantial improvement. With bulk execution off, completion was observed in
+`(178.049, 239.996]` seconds; with it on, `(213.111, 255.215]` seconds. These are
+observation bounds, not exact timings. They overlap and initial idle histories
+differed, so they do not establish a precise percentage or definite regression.
+
+The enabled run recorded 76,241,464 successful bulk operations representing
+887,929,969 original instructions. High invocation counts did not translate
+into a usability win. About 1.326 MB of host input had arrived long before the
+catalog UI became ready in both runs. The experiment remains off. The next
+investigation is the repeated ordered-list search above these short string
+operations, not further tuning of the per-operation dispatch path.

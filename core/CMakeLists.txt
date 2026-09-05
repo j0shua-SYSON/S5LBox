@@ -206,6 +206,13 @@ target_include_directories(test_arm_bulk PRIVATE ../tools)
 target_link_libraries(test_arm_bulk PRIVATE emucore)
 add_test(NAME arm_bulk COMMAND test_arm_bulk)
 
+# Host-only algorithm experiment: no guest binary or host-app integration.
+add_executable(test_guest_apt_index tests/test_guest_apt_index.c
+    ../tools/guest_apt_index.c)
+target_include_directories(test_guest_apt_index PRIVATE ../tools)
+target_compile_definitions(test_guest_apt_index PRIVATE S5LBOX_APT_INDEX_TESTING=1)
+add_test(NAME guest_apt_index COMMAND test_guest_apt_index)
+
 add_executable(test_vfp tests/test_vfp.c)
 target_link_libraries(test_vfp PRIVATE emucore)
 add_test(NAME vfp COMMAND test_vfp)
