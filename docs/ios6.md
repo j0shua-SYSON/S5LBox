@@ -161,7 +161,26 @@ lower-bank S aliases and upper-bank independence, preserve untouched halves,
 and cover permissions, register overlaps, reset and conditional execution.
 The extra 128 bytes are inactive on legacy profiles. Snapshot version 32
 still accepts only ARM1176, omits the inactive A8 bank and clears it on
-restore. Its byte stream is unchanged. Upper-bank memory transfers,
+restore. Its byte stream is unchanged.
+
+ARM and Thumb VLDR/VSTR now move one S or D register through the translating
+memory accessors, including D16-D31. They use signed, scaled immediate
+offsets and require word alignment even for doubleword registers. Thumb
+literal loads use aligned PC+4; ARM PC bases use PC+8, and Thumb stores
+with PC as their base are refused. These rules follow
+[DDI0406C.b, A8.8.333/413](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Access denials enter the guest Undefined handler before memory access.
+Big-endian transfers remain explicitly unsupported.
+
+Tests cover every S/D register, offset limits, PC/SP bases, conditional
+execution and access-denial priority. Page-crossing tests use separate
+physical frames with host memory shortcuts enabled and disabled. For the
+partial effects left UNKNOWN by
+[DDI0406C.b, B1.9.8](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92),
+this implementation preserves a failed load's destination and retains any
+completed first store word. Alignment, translation and
+permission faults preserve the base and report the faulting address, access
+direction and exception state. Upper-bank multiple-register transfers,
 arithmetic and the remaining NEON instruction families are still unfinished.
 
 Cortex-A8 L2 auxiliary control (`p15,1,c9,c0,2`) now stores its defined
@@ -184,7 +203,7 @@ Thumb additionally forbids SP in the transfer register. Refused accesses leave
 flags and IT state unchanged. IT conditions, privileged
 state changes and permitted User thread-ID/barrier accesses retain their
 normal semantics. CP14 and Swift CP15 transfers remain unsupported in
-Thumb; VFP transfers cover the Cortex-A8 system registers and core VMOV forms above.
+Thumb; VFP transfers cover the Cortex-A8 system registers, core VMOV and single-register memory forms above.
 CP15 MRC2/MCR2 encodings are undefined and refused. The ARM1176
 instruction path is unchanged.
 See [DDI0406C.b, A8.8.98/107](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
@@ -395,8 +414,8 @@ establish that result.
   also implemented. Other instruction families remain to implement. IT state
   and conditional execution are implemented for the supported Thumb families.
   Cortex-A8 MRC/MCR transfers cover the currently implemented CP15 registers.
-- Cortex-A8 stores d0-d31 and supports system/core transfers. Upper-bank
-  memory transfers and arithmetic, the remaining NEON families, and full
+- Cortex-A8 stores d0-d31 and supports system/core transfers and VLDR/VSTR.
+  Upper-bank multiple transfers and arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Shared lower-bank arithmetic
   still derives from VFP11 and requires a complete Cortex-A8 semantic audit.
 - The SoC, interrupt wiring, storage, graphics, input and power devices are

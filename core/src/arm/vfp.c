@@ -1,7 +1,7 @@
 /*
  * S5LBox — VFPv2 (the ARM1176JZF-S's VFP11 unit).
  *
- * Cortex-A8 VMRS/VMSR and core VMOV use separate checked paths with D0-D31. The
+ * Cortex-A8 system/core transfers and VLDR/VSTR use checked paths with D0-D31. The
  * register-file and arithmetic descriptions below concern the legacy VFP11
  * implementation; they do not establish complete Cortex-A8 VFPv3/NEON support.
  *
@@ -885,6 +885,43 @@ static arm_status_t vfp_a8_core_transfer(arm_cpu_t *c, uint32_t pc, uint32_t ins
     return ARM_OK;
 }
 
+/* DDI0406C.b A8.8.333/413: raw words with MemA word alignment, including
+ * D registers at addresses that are not doubleword-aligned. The supplied bus
+ * performs alignment checks and translation, latching the first data fault.
+ * A D load commits only after both words succeed; a store can complete its
+ * first word before the second faults. Neither form writes back its base. */
+static arm_status_t vfp_a8_single_memory(arm_cpu_t *c, uint32_t pc, uint32_t insn,
+                                         const vfp_bus_t *bus) {
+    bool load = BIT(20), dbl = BIT(8), add = BIT(23);
+    bool thumb = (c->cpsr & ARM_CPSR_T) != 0u;
+    unsigned rn = FIELD(16), vd = FIELD(12);
+    unsigned fp = dbl ? vd | (BIT(22) << 4) : SREG(vd, BIT(22));
+    g_reason = NULL;
+    if (thumb && !load && rn == 15u)
+        return vfp_trap(pc, insn, "PC as a Thumb VSTR base is UNPREDICTABLE");
+    if (!vfp_cpacr_permits(c) || !vfp_enabled(c))
+        return vfp_guest_undefined("Cortex-A8 VLDR/VSTR requires CPACR access and FPEXC.EN");
+    if (c->cpsr & ARM_CPSR_E)
+        return vfp_trap(pc, insn, "big-endian Cortex-A8 VFP memory transfers are not implemented");
+
+    uint32_t base = rn == 15u ? ((pc + (thumb ? 4u : 8u)) & ~3u) : c->r[rn];
+    uint32_t offset = (insn & 0xffu) << 2;
+    uint32_t address = add ? base + offset : base - offset;
+    if (load) {
+        uint32_t lo = bus->read32(c, address);
+        if (c->abort_pending) return ARM_OK;
+        if (dbl) {
+            uint32_t hi = bus->read32(c, address + 4u);
+            if (!c->abort_pending) vfp_set_d(c, fp, (uint64_t)hi << 32 | lo);
+        } else vfp_set_s(c, fp, lo);
+    } else {
+        uint64_t value = dbl ? vfp_get_d(c, fp) : vfp_get_s(c, fp);
+        bus->write32(c, address, (uint32_t)value);
+        if (dbl && !c->abort_pending) bus->write32(c, address + 4u, (uint32_t)(value >> 32));
+    }
+    return ARM_OK;
+}
+
 static arm_status_t vfp_xfer32(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
     unsigned opc1 = (insn >> 21) & 7u;
     bool     L    = BIT(20);
@@ -1413,6 +1450,8 @@ arm_status_t vfp_execute(arm_cpu_t *c, uint32_t pc, uint32_t insn,
         return vfp_a8_system_transfer(c, pc, insn);
     if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_core_transfer(insn))
         return vfp_a8_core_transfer(c, pc, insn);
+    if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_single_memory_transfer(insn))
+        return vfp_a8_single_memory(c, pc, insn, bus);
     if (!c || (c->vfp_fpscr & ARM_FPSCR_RMODE) == 0u)
         return vfp_execute_inner(c, pc, insn, bus);
 

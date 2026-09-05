@@ -366,12 +366,188 @@ static void test_a8_vfp_core_move_refusals_and_it(void) {
       }
      }
     }
-    /* Upper-bank arithmetic and memory transfers are still separate work. */
+    /* Upper-bank arithmetic and multiple transfers are still separate work. */
     arm_cpu_t c;
     a8_move_reset(&c, 0u);
     vfp_set_d(&c, 16u, UINT64_C(0x1122334455667788));
-    CHECK(a8_move_step(&c, 0u, VFP_LS(1,1,1,0,1,4,0,1,0)) == ARM_UNDEFINED &&
-          vfp_get_d(&c, 16u) == UINT64_C(0x1122334455667788), "core VMOV enabled upper-bank VLDR");
+    CHECK(a8_move_step(&c, 0u, VFP_LS(0,1,1,0,1,4,0,1,2)) == ARM_UNDEFINED &&
+          vfp_get_d(&c, 16u) == UINT64_C(0x1122334455667788), "core VMOV enabled upper-bank VLDM");
+}
+
+/* VLDR/VSTR use D:Vd for doublewords and Vd:D for singlewords. */
+static uint32_t a8_single_memory(unsigned load, unsigned dbl, unsigned fp,
+                                  unsigned rn, unsigned add, unsigned imm8) {
+    return VFP_LS(1,add,dbl ? fp >> 4 : fp & 1u,0,load,rn,
+                  dbl ? fp & 15u : fp >> 1,dbl,imm8);
+}
+
+static void test_a8_vfp_single_memory_bank_and_offsets(void) {
+    const unsigned offsets[] = {0u,1u,255u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned dbl = 0; dbl < 2u; dbl++) {
+      for (unsigned fp = 0; fp < 32u; fp++) {
+       for (unsigned add = 0; add < 2u; add++) {
+        for (unsigned i = 0; i < sizeof offsets / sizeof offsets[0]; i++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.r[4] = 0x4004u; /* Four-byte alignment suffices for D registers. */
+            uint32_t address = add ? c.r[4] + offsets[i] * 4u : c.r[4] - offsets[i] * 4u;
+            uint32_t lo = 0x7f800001u + fp, hi = 0xff800001u + fp;
+            if (dbl) vfp_set_d(&c, fp, (uint64_t)hi << 32 | lo);
+            else vfp_set_s(&c, fp, lo);
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            m_w32(NULL, address - 4u, 0x11223344u);
+            m_w32(NULL, address, 0u); m_w32(NULL, address + 4u, 0xaabbccddu);
+            m_w32(NULL, address + 8u, 0x55667788u);
+            CHECK(a8_move_step(&c, thumb, a8_single_memory(0u,dbl,fp,4u,add,offsets[i])) == ARM_OK &&
+                  m_r32(NULL, address) == lo && m_r32(NULL, address + 4u) == (dbl ? hi : 0xaabbccddu) &&
+                  m_r32(NULL, address - 4u) == 0x11223344u && m_r32(NULL, address + 8u) == 0x55667788u,
+                  "A8 VSTR bank/size/address T=%u D=%u reg=%u add=%u imm8=%u", thumb, dbl, fp, add, offsets[i]);
+            m_w32(NULL, address, lo ^ 0x12345678u); m_w32(NULL, address + 4u, hi ^ 0x87654321u);
+            CHECK(a8_move_step(&c, thumb, a8_single_memory(1u,dbl,fp,4u,add,offsets[i])) == ARM_OK &&
+                  (dbl ? vfp_get_d(&c, fp) == ((uint64_t)(hi ^ 0x87654321u) << 32 | (lo ^ 0x12345678u)) :
+                         vfp_get_s(&c, fp) == (lo ^ 0x12345678u)),
+                  "A8 VLDR bank/size/address T=%u D=%u reg=%u add=%u imm8=%u", thumb, dbl, fp, add, offsets[i]);
+            CHECK(c.r[4] == 0x4004u && c.r[15] == 0x108u && c.cycles == 2u && c.cpsr == flags &&
+                  c.vfp_fpscr == fpscr && c.vfp_fpexc == ARM_FPEXC_EN,
+                  "single FP memory transfer changed base, flags, controls or retirement");
+        }
+       }
+      }
+     }
+    }
+}
+
+static void test_a8_vfp_single_memory_bases_and_conditions(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned half = 0; half < (thumb ? 2u : 1u); half++) {
+      for (unsigned dbl = 0; dbl < 2u; dbl++) {
+       for (unsigned load = 0; load < 2u; load++) {
+        for (unsigned rn = 0; rn < 16u; rn++) {
+         for (unsigned add = 0; add < 2u; add++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            for (unsigned n = 0; n < 15u; n++) c.r[n] = 0x2004u;
+            c.r[15] += half * 2u;
+            uint32_t pc = c.r[15], regs[16], flags = c.cpsr;
+            memcpy(regs, c.r, sizeof regs);
+            uint32_t base = rn == 15u ? ((pc + (thumb ? 4u : 8u)) & ~3u) : 0x2004u;
+            uint32_t address = add ? base + 64u : base - 64u;
+            m_w32(NULL, address, 0x01234567u); m_w32(NULL, address + 4u, 0x89abcdefu);
+            if (dbl) vfp_set_d(&c, 31u, UINT64_C(0xff8000017f800001));
+            else vfp_set_s(&c, 31u, 0x7f800001u);
+            bool allowed = !(thumb && !load && rn == 15u);
+            CHECK(a8_move_step(&c, thumb, a8_single_memory(load,dbl,31u,rn,add,16u)) ==
+                  (allowed ? ARM_OK : ARM_UNDEFINED), "A8 VLDR/VSTR base T=%u half=%u D=%u L=%u Rn=%u",
+                  thumb, half, dbl, load, rn);
+            if (allowed) regs[15] += 4u;
+            CHECK(memcmp(regs, c.r, sizeof regs) == 0 && c.cpsr == flags,
+                  "A8 VLDR/VSTR changed a core register or flags");
+            CHECK((dbl ? vfp_get_d(&c, 31u) == (allowed && load ? UINT64_C(0x89abcdef01234567) :
+                                                                               UINT64_C(0xff8000017f800001)) :
+                         vfp_get_s(&c, 31u) == (allowed && load ? 0x01234567u : 0x7f800001u)) &&
+                  m_r32(NULL, address) == (allowed && !load ? 0x7f800001u : 0x01234567u) &&
+                  m_r32(NULL, address + 4u) == (allowed && !load && dbl ? 0xff800001u : 0x89abcdefu),
+                  "A8 VLDR/VSTR PC/offset/data semantics T=%u half=%u D=%u L=%u Rn=%u",
+                  thumb, half, dbl, load, rn);
+         }
+        }
+       }
+      }
+     }
+     for (unsigned load = 0; load < 2u; load++) {
+      for (unsigned dbl = 0; dbl < 2u; dbl++) {
+       for (unsigned skip = 0; skip < 2u; skip++) {
+        for (unsigned big = 0; big < 2u; big++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.r[4] = 0x2004u;
+            if (big) c.cpsr |= ARM_CPSR_E; /* Shared memory accessors are LE-only. */
+            if (skip) { c.cp15.cpacr = 0u; c.vfp_fpexc = 0u; }
+            if (thumb) {
+                m_w16(NULL, c.r[15], skip ? 0xbf0cu : 0xbf1cu); /* First ITE EQ/NE slot. */
+                CHECK(arm_step(&c) == ARM_OK, "single memory IT setup");
+            }
+            uint32_t pc = c.r[15], flags = c.cpsr, insn = a8_single_memory(load,dbl,31u,4u,1u,0u);
+            if (!thumb && skip) insn &= 0x0fffffffu;
+            m_w32(NULL, 0x2004u, 0x12345678u); m_w32(NULL, 0x2008u, 0x9abcdef0u);
+            bool completed = skip || !big;
+            CHECK(a8_move_step(&c, thumb, insn) == (completed ? ARM_OK : ARM_UNDEFINED) &&
+                  c.r[15] == (completed ? pc + 4u : pc) && c.r[4] == 0x2004u &&
+                  c.cpsr == (completed && thumb ? (flags & ~0x0600fc00u) | 0x1800u : flags),
+                  "A8 single FP memory skip/BE/IT T=%u L=%u D=%u skip=%u E=%u", thumb, load, dbl, skip, big);
+            CHECK((dbl ? vfp_get_d(&c, 31u) == (!skip && !big && load ? UINT64_C(0x9abcdef012345678) : 0u) :
+                         vfp_get_s(&c, 31u) == (!skip && !big && load ? 0x12345678u : 0u)) &&
+                  m_r32(NULL, 0x2004u) == (!skip && !big && !load ? 0u : 0x12345678u) &&
+                  m_r32(NULL, 0x2008u) == (!skip && !big && !load && dbl ? 0u : 0x9abcdef0u),
+                  "skipped/refused single FP memory transfer touched data");
+        }
+       }
+      }
+     }
+    }
+}
+
+static void test_a8_vfp_single_memory_permissions(void) {
+    const unsigned permissions[] = {0u,1u,3u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned load = 0; load < 2u; load++) {
+      for (unsigned dbl = 0; dbl < 2u; dbl++) {
+       for (unsigned user = 0; user < 2u; user++) {
+        for (unsigned enabled = 0; enabled < 2u; enabled++) {
+         for (unsigned a = 0; a < 3u; a++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permissions[a] * 0x00500000u;
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            c.r[4] = 0x2005u; /* Valid access reaches an alignment abort; denied FP must fault first. */
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            bool allowed = enabled && (permissions[a] == 3u || (permissions[a] == 1u && !user));
+            CHECK(a8_move_step(&c, thumb, a8_single_memory(load,dbl,31u,4u,1u,0u)) == ARM_OK &&
+                  c.r[15] == (allowed ? ARM_VEC_DATA_ABORT : ARM_VEC_UNDEFINED) &&
+                  c.r[14] == (allowed ? 0x108u : thumb ? 0x102u : 0x104u) &&
+                  c.spsr[allowed ? ARM_BANK_ABT : ARM_BANK_UND] == flags &&
+                  c.r[4] == 0x2005u && vfp_get_d(&c, 31u) == 0u && vfp_get_s(&c, 31u) == 0u &&
+                  c.vfp_fpscr == fpscr && c.vfp_fpexc == (enabled ? ARM_FPEXC_EN : 0u),
+                  "A8 single memory access priority T=%u L=%u D=%u U=%u EN=%u acc=%u",
+                  thumb, load, dbl, user, enabled, permissions[a]);
+         }
+        }
+       }
+      }
+     }
+    }
+}
+
+static void test_a8_vfp_single_memory_decode_boundaries(void) {
+    const uint32_t neighbors[] = {
+        0xfdc4fb00u, 0xfdd4fb00u, /* LDC2/STC2 are not Thumb VFP forms. */
+        0xedc4f900u, 0xedd4fc00u, /* Other coprocessors. */
+        0xedf4fb02u, 0xede4fb02u, /* P=U=W=1 is undefined. */
+        0xecf4fb02u, 0xed64fb02u  /* Upper-bank VLDMIA/VPUSH still unsupported. */
+    };
+    for (unsigned n = 0; n < sizeof neighbors / sizeof neighbors[0]; n++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, 1u);
+        c.r[4] = 0x2004u;
+        uint32_t flags = c.cpsr;
+        m_w32(NULL, 0x2004u, 0x12345678u);
+        CHECK(a8_move_step(&c, 1u, neighbors[n]) == ARM_UNDEFINED && c.r[15] == 0x100u &&
+              c.r[4] == 0x2004u && c.cpsr == flags && vfp_get_d(&c, 31u) == 0u &&
+              m_r32(NULL, 0x2004u) == 0x12345678u, "single FP memory route aliased neighbor %u", n);
+    }
+    const arm_arch_t profiles[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned p = 0; p < 2u; p++) {
+     for (unsigned load = 0; load < 2u; load++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset legacy");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        c.r[4] = 0x2004u;
+        CHECK(a8_move_step(&c, 0u, a8_single_memory(load,1u,31u,4u,1u,0u)) == ARM_UNDEFINED &&
+              c.r[15] == 0u && c.r[4] == 0x2004u, "upper single FP transfer enabled on legacy profile");
+     }
+    }
 }
 
 /*
@@ -1938,6 +2114,10 @@ static void test_condition_codes_apply(void) {
 
 /* --------------------------------------------------------------- main ---- */
 int main(void) {
+    test_a8_vfp_single_memory_bank_and_offsets();
+    test_a8_vfp_single_memory_bases_and_conditions();
+    test_a8_vfp_single_memory_permissions();
+    test_a8_vfp_single_memory_decode_boundaries();
     test_a8_vfp_core_move_refusals_and_it();
     test_a8_vfp_full_bank_core_moves();
     test_a8_vfp_core_move_permissions_and_registers();

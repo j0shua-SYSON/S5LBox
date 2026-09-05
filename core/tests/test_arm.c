@@ -7650,6 +7650,77 @@ static void test_cortex_a8_vfp_undefined_retry(void) {
     }
 }
 
+/* Actual translating accesses, including a D31 transfer split across unrelated
+ * physical frames. S31 uses the same start address but must touch one word. */
+static void test_cortex_a8_vfp_single_memory_aborts(void) {
+    for (unsigned host = 0; host < 2u; host++) {
+     for (unsigned thumb = 0; thumb < 2u; thumb++) {
+      for (unsigned load = 0; load < 2u; load++) {
+       for (unsigned dbl = 0; dbl < 2u; dbl++) {
+        for (unsigned fault = 0; fault < 7u; fault++) {
+            arm_bus_t bus = g_bus;
+            if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
+            arm_cpu_t c;
+            memset(g_ram, 0xee, sizeof g_ram);
+            CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+            c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP | (fault == 6u ? ARM_SCTLR_A : 0u);
+            c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+            c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+            c.vfp_fpscr = 0x0bc00080u;
+            c.cpsr = ARM_MODE_USR | ARM_CPSR_N | ARM_CPSR_C |
+                     (thumb ? ARM_CPSR_T | test_it_bits(0x18u) : 0u);
+            c.r[4] = fault >= 5u ? 0x1ff9u : 0x1ff8u;
+            c.vfp_s[31] = 0x44332211u;
+            c.a8_vfp_hi[15] = UINT64_C(0x8877665544332211);
+            uint32_t flags = c.cpsr, base = c.r[4];
+            m_w32(NULL, 0x4000u, 0x6001u);
+            m_w32(NULL, 0x6000u, 0x803eu);
+            m_w32(NULL, 0x6004u, fault == 1u ? 0u : fault == 3u ? 0xa01eu : 0xa03eu);
+            m_w32(NULL, 0x6008u, fault == 2u ? 0u : fault == 4u ? 0xc01eu : 0xc03eu);
+            uint32_t insn = 0xedc4fa01u | (load << 20) | (dbl << 8); /* [r4,#4] */
+            if (thumb) {
+                m_w16(NULL, 0x8000u, (uint16_t)(insn >> 16)); m_w16(NULL, 0x8002u, (uint16_t)insn);
+            } else m_w32(NULL, 0x8000u, insn);
+            m_w32(NULL, 0xaffcu, 0x12345678u); m_w32(NULL, 0xc000u, 0x9abcdef0u);
+            g_watch_addr = 0xc000u; g_watch_reads32 = g_watch_writes32 = 0u;
+            bool aborts = fault && (dbl || (fault != 2u && fault != 4u));
+            CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u && c.r[4] == base,
+                  "single FP transfer did not retire once or changed base T=%u L=%u D=%u fault=%u",
+                  thumb, load, dbl, fault);
+            if (aborts) {
+                uint32_t fsr = fault >= 5u ? ARM_FSR_ALIGNMENT : fault >= 3u ? ARM_FSR_PAGE_PERMISSION :
+                                                                                           ARM_FSR_PAGE_TRANSLATION;
+                uint32_t address = fault >= 5u ? 0x1ffdu : fault == 1u || fault == 3u ? 0x1ffcu : 0x2000u;
+                CHECK(c.r[15] == ARM_VEC_DATA_ABORT && c.r[14] == 8u && c.spsr[ARM_BANK_ABT] == flags &&
+                      c.cp15.dfar == address && c.cp15.dfsr == (fsr | (load ? 0u : 1u << 11)) &&
+                      !(c.cpsr & TEST_IT_MASK) && g_watch_reads32 == 0u && g_watch_writes32 == 0u,
+                      "single FP abort lost first fault/IT or touched second frame T=%u L=%u D=%u fault=%u",
+                      thumb, load, dbl, fault);
+            } else {
+                CHECK(c.r[15] == 4u && c.cpsr == (flags & ~TEST_IT_MASK),
+                      "single FP transfer lost PC/IT/flags T=%u L=%u D=%u fault=%u", thumb, load, dbl, fault);
+                if (!dbl) CHECK(g_watch_reads32 == 0u && g_watch_writes32 == 0u, "S load/store accessed second word");
+            }
+            CHECK(c.vfp_s[31] == (load && !dbl && !aborts ? 0x12345678u : 0x44332211u) &&
+                  c.a8_vfp_hi[15] == (load && dbl && !aborts ? UINT64_C(0x9abcdef012345678) :
+                                                             UINT64_C(0x8877665544332211)) &&
+                  c.vfp_fpexc == ARM_FPEXC_EN && c.vfp_fpscr == 0x0bc00080u,
+                  "single FP fault partially changed a register or controls T=%u L=%u D=%u fault=%u",
+                  thumb, load, dbl, fault);
+            g_watch_addr = 0xffffffffu;
+            bool first_written = !load && (fault == 0u || fault == 2u || fault == 4u);
+            CHECK(m_r32(NULL, 0xaffcu) == (first_written ? 0x44332211u : 0x12345678u) &&
+                  m_r32(NULL, 0xc000u) == (!load && dbl && !aborts ? 0x88776655u : 0x9abcdef0u) &&
+                  m_r32(NULL, 0xb000u) == 0xeeeeeeeeu,
+                  "single FP store lost completed first word or touched wrong frame T=%u D=%u fault=%u",
+                  thumb, dbl, fault);
+        }
+       }
+      }
+     }
+    }
+}
+
 static void test_cortex_a8_vfp_fetch_and_refusals(void) {
     for (unsigned host = 0; host < 2u; host++) {
      for (unsigned load = 0; load < 2u; load++) {
@@ -9255,6 +9326,7 @@ int main(void) {
     test_cortex_a8_vfp_control_fields();
     test_cortex_a8_vfp_core_registers();
     test_cortex_a8_vfp_undefined_retry();
+    test_cortex_a8_vfp_single_memory_aborts();
     test_cortex_a8_vfp_fetch_and_refusals();
     test_cortex_a8_thumb_cp15_transfers();
     test_cortex_a8_thumb_cp15_fetch_and_maintenance();
