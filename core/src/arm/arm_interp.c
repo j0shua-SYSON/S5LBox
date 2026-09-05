@@ -724,6 +724,33 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
     unsigned crm  = insn & 0xfu;
     arm_cp15_t *p = &c->cp15;
 
+    if (c->arch == ARM_ARCH_V7_CORTEX_A8) {
+        /* DDI0344K table3-3 and 3.2.40/41/73: check the full selector
+         * before entering the legacy register storage below. Unimplemented
+         * identity/cache-size, translation-result, debug/performance and
+         * security banks must not alias ARM1176 registers or return zero.
+         * Register bit fields and reset signals still need their own audit. */
+        if (opc1 != 0u || (!load && rd == 15u)) return ARM_UNDEFINED;
+        bool data_register = crm == 0u &&
+            (((crn == 1u || crn == 2u) && opc2 <= 2u) ||
+             (crn == 3u && opc2 == 0u) || (crn == 5u && opc2 <= 1u) ||
+             (crn == 6u && (opc2 == 0u || opc2 == 2u)) || (crn == 13u && opc2 <= 4u));
+        bool barrier = !load && crn == 7u &&
+            ((crm == 5u && opc2 == 4u) || (crm == 10u && (opc2 == 4u || opc2 == 5u)));
+        bool cache = !load && crn == 7u &&
+            ((crm == 0u && opc2 == 4u) ||
+             (crm == 5u && (opc2 <= 1u || opc2 == 4u || opc2 >= 6u)) ||
+             ((crm == 6u || crm == 10u || crm == 14u) && (opc2 == 1u || opc2 == 2u)) ||
+             (crm == 11u && opc2 == 1u) || barrier);
+        bool tlb = !load && crn == 8u && crm >= 5u && crm <= 7u && opc2 <= 2u;
+        bool user_thread = crn == 13u && crm == 0u && (opc2 == 2u || (load && opc2 == 3u));
+        if (!(data_register || cache || tlb) || (!cpu_is_priv(c) && !(barrier || user_thread)))
+            return ARM_UNDEFINED;
+        /* Cortex-A8 defines the old CP15 WFI encoding as a NOP (3.1).
+         * Only the separate WFI instruction may invoke a wait operation. */
+        if (cache && crm == 0u) return ARM_OK;
+    }
+
     /*
      * ARM1176JZ-S TRM (DDI0333H) 3.2.22:
      *
@@ -839,7 +866,9 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
                 break;
             default: v = 0; break;              /* unmodelled: reads as zero */
         }
-        c->r[rd] = v;
+        if (c->arch == ARM_ARCH_V7_CORTEX_A8 && rd == 15u)
+            c->cpsr = (c->cpsr & 0x0fffffffu) | (v & 0xf0000000u); /* MRC APSR_nzcv */
+        else c->r[rd] = v;
     } else {
         uint32_t v = reg_read(c, pc, rd);
         switch (crn) {

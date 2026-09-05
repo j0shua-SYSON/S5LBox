@@ -70,6 +70,17 @@ also requires reserved options to execute as full-system barriers. Tests
 cover all options in User and SVC modes, ARM1176/unknown-profile refusals,
 exclusive-monitor preservation and a store followed by instruction refetch.
 
+Cortex-A8 CP15 accesses validate the complete opcode and register selector
+before using existing storage. Unimplemented identity, cache-size, security,
+performance and other banks are refused, preventing accidental ARM1176
+identity and register aliases. User access is limited to the documented
+barriers and thread-ID permissions. MRC to APSR updates NZCV without writing
+PC; MCR cannot source PC. The legacy CP15 WFI encoding is a no-op on this
+processor and does not call the ARM1176 wait hook. These rules follow
+[DDI0344K, table 3-3 and sections 3.1, 3.2.40/41/73](https://documentation-service.arm.com/static/5e8e1ac688295d1e18d35fde).
+Control-register bit fields, reset signals and the complete MMU/security
+model remain separate work.
+
 Thumb-2 framing fetches both halfwords and retires once. The second halfword
 is translated independently, including across noncontiguous physical pages.
 A fetch fault there vectors before any instruction result is committed.
@@ -232,10 +243,10 @@ establish that result.
 - Thumb-2 currently implements MOVW/MOVT, modified-immediate logical operations
   and arithmetic (also with shifted registers), immediate LDR/STR and
   byte/halfword transfers (including signed loads and pre/post indexing),
-  literals, and doubleword transfers.
-  Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple transfers are also implemented. Other
-  instruction families remain to implement. IT state and conditional execution
-  are implemented for the supported Thumb decoder families.
+  literals, doubleword transfers, extend/add forms, bitfields and word/long
+  multiply/accumulate. Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple transfers are
+  also implemented. Other instruction families remain to implement. IT state
+  and conditional execution are implemented for the supported Thumb families.
 - VFP stores only d0-d15 and models VFP11/VFPv2. Cortex-A8 VFPv3 and NEON,
   including the wider register file and context-switch semantics, are absent.
 - The SoC, interrupt wiring, storage, graphics, input and power devices are
@@ -362,10 +373,13 @@ execution then reaches 75,223 steps at `0x802b797c`, halfwords `f3c0 0040`
 (`UBFX r0,r0,#1,#1`). Bitfield execution then advances to 75,639 steps at
 `0x8008b968`, halfwords `fba6 0101` (`UMULL r0,r1,r6,r1`). Multiply execution
 then reaches 75,770 steps at `0x80088278`, halfwords `ee10 0f10`
-(`MRC p15,0,r0,c0,c0,0`). This Thumb CP15 form is unsupported; the existing
-A32 CP15 identity still describes ARM1176 and cannot supply a Cortex-A8
-identity. Unprepared tree properties and remaining argument fields retain
-their guards.
+(`MRC p15,0,r0,c0,c0,0`). This Thumb CP15 form is unsupported. A subsequent
+CP15 selector audit invalidates that trace as the current execution boundary:
+the old path silently returned zero for an earlier L2 auxiliary-control read.
+With explicit Cortex-A8 refusal, the current probe stops after 61,644 steps
+at physical `0x40086348`, A32 `ee39bf50` (`MRC p15,1,r11,c9,c0,2`). That
+register requires implementation before returning to the later CPU-ID read.
+Unprepared tree properties and remaining argument fields retain their guards.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim

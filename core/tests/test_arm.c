@@ -1532,6 +1532,130 @@ static void test_cp15_wfi_uses_only_the_exact_privileged_hook(void) {
     }
 }
 
+static void test_cortex_a8_cp15_selector_boundary(void) {
+    /* These are the backed data-register coordinates in DDI0344K table3-3.
+     * A legal selector does not by itself prove all of its control bits. */
+    const unsigned limits[] = {0,3,3,1,0,2,3,0,0,0,0,0,0,5,0,0};
+    for (unsigned crn = 0; crn < 16u; crn++) {
+     for (unsigned opc1 = 0; opc1 < 8u; opc1++) {
+      for (unsigned crm = 0; crm < 16u; crm++) {
+       for (unsigned opc2 = 0; opc2 < 8u; opc2++) {
+        bool backed = opc1 == 0u && crm == 0u && opc2 < limits[crn] && !(crn == 6u && opc2 == 1u);
+        if (backed || crn == 7u || crn == 8u) continue; /* Maintenance has its own test. */
+        for (unsigned load = 0; load < 2u; load++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+            c.cpsr |= ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_Q;
+            c.r[9] = 0x80000000u; c.cp15.tpidrurw = 0x12345678u;
+            c.cp15.ttbr0 = 0x4000u; c.cp15.context_id = 0xabcdu;
+            uint32_t flags = c.cpsr;
+            arm_cp15_t before = c.cp15;
+            uint32_t insn = 0xee009f10u | (load << 20) | (opc1 << 21) | (crn << 16) | (opc2 << 5) | crm;
+            m_w32(NULL, 0, insn);
+            CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.r[9] == 0x80000000u &&
+                  c.cpsr == flags && memcmp(&c.cp15, &before, sizeof before) == 0,
+                  "A8 aliased/unimplemented CP15 selector load=%u opc1=%u c%u,c%u,%u", load, opc1, crn, crm, opc2);
+        }
+       }
+      }
+     }
+    }
+    /* Keep real stateful thread-ID access in privileged and allowed User
+     * modes, including flag transfer through Rt=15 without a PC write. */
+    for (unsigned user = 0; user < 2u; user++) {
+     for (unsigned op = 1; op <= 4; op++) {
+      for (unsigned load = 0; load < 2u; load++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = (user ? ARM_MODE_USR : ARM_MODE_SVC) | ARM_CPSR_I | ARM_CPSR_F | ARM_CPSR_N;
+        c.r[9] = 0xabcdef80u;
+        c.cp15.context_id = 0x12345678u; c.cp15.tpidrurw = 0x12345678u;
+        c.cp15.tpidruro = 0x12345678u; c.cp15.tpidrprw = 0x12345678u;
+        arm_cp15_t before = c.cp15;
+        bool allowed = !user || op == 2u || (op == 3u && load);
+        m_w32(NULL, 0, 0xee0d9f10u | (load << 20) | (op << 5));
+        CHECK(arm_step(&c) == (allowed ? ARM_OK : ARM_UNDEFINED) &&
+              c.r[15] == (allowed ? 4u : 0u) && c.r[9] == (allowed && load ? 0x12345678u : 0xabcdef80u),
+              "A8 thread-ID permissions/result op=%u load=%u user=%u", op, load, user);
+        uint32_t value = op == 1u ? c.cp15.context_id : op == 2u ? c.cp15.tpidrurw :
+                         op == 3u ? c.cp15.tpidruro : c.cp15.tpidrprw;
+        CHECK(value == (allowed && !load ? 0xabcdef80u : 0x12345678u), "A8 thread-ID write lost stored state");
+        if (!allowed) CHECK(memcmp(&c.cp15, &before, sizeof before) == 0, "denied CP15 access changed state");
+      }
+     }
+     for (unsigned nzcv = 0; nzcv < 16u; nzcv++) {
+     arm_cpu_t c;
+     CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+     c.cpsr = (user ? ARM_MODE_USR : ARM_MODE_SVC) | ARM_CPSR_I | ARM_CPSR_F | ARM_CPSR_Q |
+              (5u << 16) | ((15u ^ nzcv) << 28);
+     uint32_t flags = c.cpsr;
+     c.cp15.tpidrurw = (nzcv << 28) | 0x01234567u;
+     m_w32(NULL, 0, 0xee1dff50u); /* MRC p15,0,APSR_nzcv,c13,c0,2 */
+     CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cpsr == ((flags & 0x0fffffffu) | (nzcv << 28)),
+           "A8 MRC Rt=15 lost NZCV or wrote PC");
+     c.r[15] = 0; flags = c.cpsr;
+     m_w32(NULL, 0, 0xee0dff50u); /* MCR cannot source PC. */
+     CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.cpsr == flags &&
+           c.cp15.tpidrurw == ((nzcv << 28) | 0x01234567u),
+           "A8 MCR accepted PC source");
+     }
+    }
+}
+
+static void test_cortex_a8_cp15_maintenance_boundary(void) {
+    /* Explicitly enumerate the TRM's operations instead of duplicating the
+     * production predicate. Current coherent memory has no dirty cache. */
+    const unsigned caches[][2] = {{0,4},{5,0},{5,1},{5,4},{5,6},{5,7},{6,1},{6,2},
+                                 {10,1},{10,2},{10,4},{10,5},{11,1},{14,1},{14,2}};
+    for (unsigned crn = 7; crn <= 8; crn++) {
+     for (unsigned opc1 = 0; opc1 < 2u; opc1++) {
+      for (unsigned crm = 0; crm < 16u; crm++) {
+       for (unsigned opc2 = 0; opc2 < 8u; opc2++) {
+        for (unsigned load = 0; load < 2u; load++) {
+         for (unsigned user = 0; user < 2u; user++) {
+            unsigned calls = 0;
+            arm_bus_t bus = g_bus; bus.ctx = &calls; bus.wait_for_interrupt = count_wfi;
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+            c.cpsr = (user ? ARM_MODE_USR : ARM_MODE_SVC) | ARM_CPSR_I | ARM_CPSR_F | ARM_CPSR_N;
+            c.r[9] = 0; c.excl_valid = true; c.excl_addr = 0x1234u;
+            bool listed = false;
+            if (crn == 7u) {
+                for (unsigned i = 0; i < sizeof caches / sizeof caches[0]; i++)
+                    if (caches[i][0] == crm && caches[i][1] == opc2) listed = true;
+            } else listed = crm >= 5u && crm <= 7u && opc2 <= 2u;
+            bool user_allowed = crn == 7u && ((crm == 5u && opc2 == 4u) ||
+                                (crm == 10u && (opc2 == 4u || opc2 == 5u)));
+            bool allowed = listed && !load && !opc1 && (!user || user_allowed);
+            uint32_t flags = c.cpsr;
+            uint32_t generation = c.tlb_gen;
+            uint64_t flushes = c.tlb_flushes;
+            m_w32(NULL, 0, 0xee009f10u | (load << 20) | (opc1 << 21) | (crn << 16) | (opc2 << 5) | crm);
+            CHECK(arm_step(&c) == (allowed ? ARM_OK : ARM_UNDEFINED) && c.r[15] == (allowed ? 4u : 0u) &&
+                  calls == 0u && c.cpsr == flags && c.excl_valid && c.excl_addr == 0x1234u && c.r[9] == 0,
+                  "A8 maintenance load=%u opc1=%u c%u,c%u,%u user=%u lost permission/NOP semantics", load, opc1, crn, crm, opc2, user);
+            CHECK(allowed && crn == 8u ? c.tlb_gen != generation && c.tlb_flushes == flushes + 1u :
+                                       c.tlb_gen == generation && c.tlb_flushes == flushes,
+                  "A8 TLB maintenance did not flush only on an accepted operation");
+         }
+        }
+       }
+      }
+     }
+    }
+    const uint32_t ignored[] = {0u,1u,UINT32_MAX};
+    for (unsigned i = 0; i < sizeof ignored / sizeof ignored[0]; i++) {
+        unsigned calls = 0;
+        arm_bus_t bus = g_bus; bus.ctx = &calls; bus.wait_for_interrupt = count_wfi;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.r[14] = ignored[i];
+        m_w32(NULL, 0, 0xee07ef90u); /* Legacy WFI is a NOP on A8. */
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.r[14] == ignored[i] && calls == 0u,
+              "A8 CP15 NOP used its operand or invoked wait");
+    }
+}
+
 static void test_high_vectors(void) {
     /* Setting SCTLR.V (bit 13) moves the vector table to 0xFFFF0000, so a SWI
      * must vector to 0xFFFF0008 instead of 0x8. */
@@ -8176,6 +8300,8 @@ int main(void) {
     test_cp15_ttbcr_masks_only_reserved_bits();
     test_cp15_cache_op_is_accepted();
     test_cp15_wfi_uses_only_the_exact_privileged_hook();
+    test_cortex_a8_cp15_selector_boundary();
+    test_cortex_a8_cp15_maintenance_boundary();
     test_high_vectors();
     test_mmu_disabled_is_identity();
     test_mmu_section_translation();
