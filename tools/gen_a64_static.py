@@ -2772,14 +2772,16 @@ def compact_vfp_memory_body() -> list[str]:
     ]
 
 
-def compact_tlb_refill_body(fetch: bool) -> list[str]:
+def compact_tlb_refill_body(fetch: bool, thumb: bool = False) -> list[str]:
     """Exact User TLB hit -> full-range RAM capability, x0-x5 scratch only.
 
     The C entry and guarded callback prove the invariant translation/bus
     context. No admitted native User instruction can change that context.
     Entry kind, generation, fault status and physical bounds remain live tests.
     """
-    fail = ".La64cr_fallback" if fetch else ".La64cr_memory_publish_miss"
+    fail = (".La64cr_fallback" if fetch else
+            ".La64cr_thumb_memory_publish_miss" if thumb else
+            ".La64cr_memory_publish_miss")
     va = "w26" if fetch else "w10"
     out = [
         "    ldr x5, [x27, #368]",
@@ -2892,9 +2894,9 @@ def compact_tlb_refill_body(fetch: bool) -> list[str]:
             "    csel x1, x2, x1, eq",
             "    and w3, w10, #0x3ff",
             "    add x0, x0, w3, uxtw",
-            "    mov w2, #1",
-            "    ret",
         ]
+        out += (["    b .La64cr_thumb_memory_host"] if thumb else
+                ["    mov w2, #1", "    ret"])
     return out
 
 
@@ -5073,6 +5075,8 @@ def compact_raw_function() -> list[str]:
         "    mov w0, #1",
         "    ret",
         ".La64cr_thumb_memory_cache_fail:",
+        *compact_tlb_refill_body(False, thumb=True),
+        ".La64cr_thumb_memory_publish_miss:",
         "    str w10, [x27, #324]",
         "    str w26, [x27, #328]",
         "    eor w2, w15, #1",

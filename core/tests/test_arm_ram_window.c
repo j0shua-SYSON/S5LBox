@@ -410,21 +410,24 @@ static void test_native_refusals(void) {
 
 static void test_native_memory_families(void) {
     if (!a64_static_host_available()) return;
-    static const struct { uint32_t opcode; bool thumb, write; } cases[] = {
-        {0xe5910000u, false, false}, {0xe5d10000u, false, false},
-        {0xe1d100b0u, false, false}, {0xe1d100d0u, false, false},
-        {0xe1d100f0u, false, false}, {0xe5810000u, false, true},
-        {0xe5c10000u, false, true}, {0xe1c100b0u, false, true},
-        {0xe8910015u, false, false}, {0xe8810015u, false, true},
-        {0xe4910004u, false, false}, {0xe4810004u, false, true},
-        {0xe4b10004u, false, false}, {0xe4a10004u, false, true},
-        {0xed910a00u, false, false}, {0xed810a00u, false, true},
-        {0xed910b00u, false, false}, {0xed810b00u, false, true},
-        {0x6808u, true, false}, {0x7808u, true, false},
-        {0x8808u, true, false}, {0x6008u, true, true},
-        {0x7008u, true, true}, {0x8008u, true, true},
-        {0xc915u, true, false}, {0xc115u, true, true},
-        {0x5688u, true, false}, {0x5e88u, true, false},
+    static const struct {
+        uint32_t opcode;
+        bool thumb, write, unsupported;
+    } cases[] = {
+        {0xe5910000u, false, false, false}, {0xe5d10000u, false, false, false},
+        {0xe1d100b0u, false, false, true}, {0xe1d100d0u, false, false, true},
+        {0xe1d100f0u, false, false, true}, {0xe5810000u, false, true, false},
+        {0xe5c10000u, false, true, false}, {0xe1c100b0u, false, true, true},
+        {0xe8910015u, false, false, false}, {0xe8810015u, false, true, false},
+        {0xe4910004u, false, false, false}, {0xe4810004u, false, true, false},
+        {0xe4b10004u, false, false, false}, {0xe4a10004u, false, true, false},
+        {0xed910a00u, false, false, false}, {0xed810a00u, false, true, false},
+        {0xed910b00u, false, false, false}, {0xed810b00u, false, true, false},
+        {0x6808u, true, false, false}, {0x7808u, true, false, false},
+        {0x8808u, true, false, false}, {0x6008u, true, true, false},
+        {0x7008u, true, true, false}, {0x8008u, true, true, false},
+        {0xc915u, true, false, false}, {0xc115u, true, true, false},
+        {0x5688u, true, false, false}, {0x5e88u, true, false, false},
     };
     static uint8_t expected_ram[SIZE];
     for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
@@ -446,6 +449,7 @@ static void test_native_memory_families(void) {
             prime(DATA, access, false, BASE + 0xc000u);
             arm_ram_window_t w;
             CHECK(arm_ram_window_capture(&w, &cpu, BASE, SIZE), "family capture");
+            before = cpu;
             reference = cpu;
             memcpy(saved_ram, ram, SIZE);
             CHECK(arm_step(&reference) == ARM_OK, "family reference %08x", cases[i].opcode);
@@ -458,6 +462,22 @@ static void test_native_memory_families(void) {
             CHECK(a64_compact_raw_run_code_window_resident_options(&cpu,
                       ram + 0x8000u, CODE, 1024u, 1u, fallback, &f, &options,
                       NULL, NULL, &stats, &total, &native, &slow), "family run");
+            if (cases[i].unsupported) {
+                /* The compact runner never admitted these A32 extra-transfer
+                 * shapes. Refilling memory must not broaden instruction
+                 * semantics or accidentally execute an unsupported form. */
+                CHECK(a64_compact_raw_classify_instruction(&before,
+                          cases[i].opcode, false) == A64_COMPACT_RAW_REJECT_CLASS,
+                      "existing extra-transfer rejection %08x", cases[i].opcode);
+                CHECK(total == 0u && native == 0u && slow == 0u && f.calls == 1u &&
+                          stats.fetch == 0u && stats.read == 0u && stats.write == 0u &&
+                          !memcmp(cpu.r, before.r, sizeof cpu.r) &&
+                          cpu.cpsr == before.cpsr && cpu.cycles == before.cycles &&
+                          !memcmp(ram, saved_ram, SIZE),
+                      "unsupported instruction still falls back untouched %08x",
+                      cases[i].opcode);
+                continue;
+            }
             CHECK(total == 1u && native == 1u && slow == 0u && f.calls == 0u,
                   "family admitted %08x offset %u", cases[i].opcode, offset);
             CHECK(!memcmp(cpu.r, reference.r, sizeof cpu.r) &&
