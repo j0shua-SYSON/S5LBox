@@ -218,6 +218,8 @@ static bool vm_execution_telemetry_not_before(
            VM_EXEC_NOT_BEFORE(compact_privileged_window_refills) &&
            VM_EXEC_NOT_BEFORE(compact_privileged_boundary_retired) &&
            VM_EXEC_NOT_BEFORE(compact_window_cache_hits) &&
+           VM_EXEC_NOT_BEFORE(compact_bulk_calls) &&
+           VM_EXEC_NOT_BEFORE(compact_bulk_retired) &&
            VM_EXEC_NOT_BEFORE(compact_pc_profile_polls) &&
            VM_EXEC_NOT_BEFORE(compact_pc_profile_not_running) &&
            VM_EXEC_NOT_BEFORE(compact_pc_profile_state_failures) &&

@@ -450,6 +450,7 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
              "compact_data_refill_attempts=%llu,"
              "compact_data_fast_refills=%llu,"
              "compact_window_cache_hits=%llu,compact_window_stops=%llu,"
+             "compact_bulk_calls=%llu,compact_bulk_retired=%llu,"
              "compact_refused_guard=%llu,"
              "compact_refused_privileged=%llu,"
              "compact_refused_alignment=%llu,"
@@ -529,6 +530,8 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
             (unsigned long long)VM_EXEC_DELTA(compact_data_fast_refills),
             (unsigned long long)VM_EXEC_DELTA(compact_window_cache_hits),
             (unsigned long long)VM_EXEC_DELTA(compact_window_stops),
+            (unsigned long long)VM_EXEC_DELTA(compact_bulk_calls),
+            (unsigned long long)VM_EXEC_DELTA(compact_bulk_retired),
             (unsigned long long)VM_EXEC_DELTA(compact_refused_guard),
             (unsigned long long)VM_EXEC_DELTA(compact_refused_privileged),
             (unsigned long long)VM_EXEC_DELTA(compact_refused_alignment),

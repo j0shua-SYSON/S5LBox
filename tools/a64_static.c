@@ -1,5 +1,6 @@
 /* See a64_static.h. Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "a64_static.h"
+#include "arm_bulk.h"
 #include "vfp.h"
 
 #include <limits.h>
@@ -2001,6 +2002,8 @@ typedef struct {
     a64_compact_raw_code_window_t
         window_cache[A64_COMPACT_RAW_WINDOW_CACHE_ENTRIES];
     a64_compact_raw_data_miss_t data_miss;
+    arm_cpu_t *bulk_cpu;
+    a64_compact_bulk_stats_t bulk_stats;
 } a64_compact_raw_context_t;
 
 _Static_assert(sizeof(void *) == 8u,
@@ -2043,7 +2046,9 @@ _Static_assert(offsetof(a64_compact_raw_context_t, flat_ram) == 0u &&
                             window_cache) == 192u &&
                    offsetof(a64_compact_raw_context_t,
                             data_miss) == 320u &&
-                   sizeof(a64_compact_raw_context_t) == 344u,
+                   offsetof(a64_compact_raw_context_t, bulk_cpu) == 344u &&
+                   offsetof(a64_compact_raw_context_t, bulk_stats) == 352u &&
+                   sizeof(a64_compact_raw_context_t) == 368u,
                "compact raw native context layout drifted");
 _Static_assert(offsetof(arm_cp15_t, tpidrurw) == 52u &&
                    offsetof(arm_cp15_t, tpidruro) == 56u &&
@@ -2065,6 +2070,28 @@ extern uint32_t a64_compact_raw_execute(uint32_t *regs, uint32_t *cpsr,
                                         uint32_t code_bytes,
                                         uint32_t max_insns,
                                         a64_compact_raw_context_t *context);
+
+/* Called only from the three candidate instruction shapes in signed text.
+ * The helper sees the live PC and full FETCH witness; it neither observes nor
+ * commits the runner's pending cycles. Its returned exact prefix is retired
+ * by that runner through the same budget/device boundary as ordinary code. */
+unsigned a64_compact_raw_bulk_try(a64_compact_raw_context_t *context,
+                                  const uint8_t *code, uint32_t code_base,
+                                  uint32_t code_bytes, unsigned budget,
+                                  uint32_t pc) {
+    if (!context->bulk_cpu) return 0u;
+    arm_bulk_memory_t memory = {
+        .code = code, .code_base = code_base, .code_bytes = code_bytes,
+        .data_cache = context->dread != NULL,
+    };
+    context->bulk_cpu->r[15] = pc;
+    unsigned n = arm_bulk_string_try(context->bulk_cpu, &memory, budget);
+    if (n) {
+        context->bulk_stats.calls++;
+        context->bulk_stats.retired += n;
+    }
+    return n;
+}
 #endif
 
 #if defined(S5LBOX_STATIC_A64_NATIVE) && defined(__APPLE__) && \
@@ -2573,6 +2600,20 @@ bool a64_compact_raw_run_code_window_resident_cached(
         bool window_cache_enabled, uint64_t *window_cache_hits,
         unsigned *completed, unsigned *native_completed,
         unsigned *fallback_completed) {
+    return a64_compact_raw_run_code_window_resident_bulk(
+        cpu, code, code_base, code_bytes, max_insns, fallback, fallback_opaque,
+        window_cache_enabled, window_cache_hits, false, NULL, completed,
+        native_completed, fallback_completed);
+}
+
+bool a64_compact_raw_run_code_window_resident_bulk(
+        arm_cpu_t *cpu, const uint8_t *code, uint32_t code_base,
+        uint32_t code_bytes, unsigned max_insns,
+        a64_compact_raw_fallback_fn fallback, void *fallback_opaque,
+        bool window_cache_enabled, uint64_t *window_cache_hits,
+        bool bulk_enabled, a64_compact_bulk_stats_t *bulk_stats,
+        unsigned *completed, unsigned *native_completed,
+        unsigned *fallback_completed) {
     uint64_t code_end;
 
     if (!completed || !native_completed || !fallback_completed) return false;
@@ -2580,6 +2621,7 @@ bool a64_compact_raw_run_code_window_resident_cached(
     *native_completed = 0u;
     *fallback_completed = 0u;
     if (window_cache_hits) *window_cache_hits = 0u;
+    if (bulk_stats) memset(bulk_stats, 0, sizeof *bulk_stats);
     code_end = (uint64_t)code_base + code_bytes;
     if (!cpu || !code || !max_insns || code_bytes < 4u ||
         (code_base & 3u) != 0u || (code_bytes & 3u) != 0u ||
@@ -2607,6 +2649,7 @@ bool a64_compact_raw_run_code_window_resident_cached(
         }
         context.fallback = fallback;
         context.fallback_opaque = fallback_opaque;
+        context.bulk_cpu = bulk_enabled && fallback && !priv ? cpu : NULL;
         context.tlb_gen = cpu->tlb_gen;
         context.priv_tag = priv ? 1u : 0u;
         context.vfp_s = cpu->vfp_s;
@@ -2644,6 +2687,7 @@ bool a64_compact_raw_run_code_window_resident_cached(
         *fallback_completed = (unsigned)context.fallback_retired;
         if (window_cache_hits)
             *window_cache_hits = context.window_cache_hits;
+        if (bulk_stats) *bulk_stats = context.bulk_stats;
         if (context.window_cache_enabled && context.current_window.code &&
             cpu->tlb_gen == context.tlb_gen &&
             ((cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR) == priv &&
@@ -2665,6 +2709,7 @@ bool a64_compact_raw_run_code_window_resident_cached(
     (void)fallback_opaque;
     (void)window_cache_enabled;
     (void)window_cache_hits;
+    (void)bulk_enabled;
     return false;
 #endif
 }

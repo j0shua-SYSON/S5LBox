@@ -296,6 +296,21 @@ bool a64_compact_raw_run_code_window_resident_cached(
     unsigned *completed, unsigned *native_completed,
     unsigned *fallback_completed);
 
+/* Same execution contract, with independently gated witnessed bulk loops.
+ * Bulk retirements are a subset of native_completed, never extra guest time.
+ * The switch is host policy only and defaults off in existing entry points. */
+typedef struct {
+    uint64_t calls, retired;
+} a64_compact_bulk_stats_t;
+bool a64_compact_raw_run_code_window_resident_bulk(
+    arm_cpu_t *cpu, const uint8_t *code, uint32_t code_base,
+    uint32_t code_bytes, unsigned max_insns,
+    a64_compact_raw_fallback_fn fallback, void *fallback_opaque,
+    bool window_cache_enabled, uint64_t *window_cache_hits,
+    bool bulk_enabled, a64_compact_bulk_stats_t *bulk_stats,
+    unsigned *completed, unsigned *native_completed,
+    unsigned *fallback_completed);
+
 /* Opt-in statistical attribution for the build-time-linked compact runner. A
  * marker-created sampler polls only the pthread executing the public SoC run
  * slice, rejects observations while that thread is not running, and assigns

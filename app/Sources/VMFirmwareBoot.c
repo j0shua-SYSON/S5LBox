@@ -811,13 +811,15 @@ static bool vm_firmware_guest_restart(void *opaque) {
 static bool reapply_engine_controls_after_reset(
         s5l8900_t *machine, bool forced_interpreter,
         bool compact_user_only, bool compact_window_refill_off,
-        bool compact_window_cache, bool compact_privileged_window_refill) {
+        bool compact_window_cache, bool compact_privileged_window_refill,
+        bool compact_bulk) {
     (void)machine;
     (void)forced_interpreter;
     (void)compact_user_only;
     (void)compact_window_refill_off;
     (void)compact_window_cache;
     (void)compact_privileged_window_refill;
+    (void)compact_bulk;
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     if (forced_interpreter &&
         !s5l8900_static_a64_set_enabled(machine, false))
@@ -831,6 +833,8 @@ static bool reapply_engine_controls_after_reset(
         return false;
     if (compact_window_cache &&
         !s5l8900_static_a64_set_compact_raw_window_cache(machine, true))
+        return false;
+    if (compact_bulk && !s5l8900_static_a64_set_compact_bulk(machine, true))
         return false;
     if (!forced_interpreter && compact_privileged_window_refill &&
         !s5l8900_static_a64_set_compact_raw_privileged_window_refill(
@@ -1107,6 +1111,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     bool compact_user_only = false;
     bool compact_window_refill_off = false;
     bool compact_window_cache = false;
+    bool compact_bulk = false;
     bool compact_privileged_window_refill = false;
     bool compact_pc_profile = false;
     bool active_clock_off = false;
@@ -1206,6 +1211,24 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                    "window-cache experiment unavailable");
         return false;
     }
+    char compact_bulk_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    if (!join_path(compact_bulk_path, sizeof compact_bulk_path, paths->work,
+                   VM_FW_BOOT_COMPACT_BULK_FILE)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The compact bulk-control path is too long to use.");
+        set_detail(report->summary, sizeof report->summary, "path too long");
+        return false;
+    }
+    compact_bulk = file_size(compact_bulk_path) > 0u;
+    if (compact_bulk && (forced_interpreter ||
+        !s5l8900_static_a64_set_compact_bulk(machine, true))) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The bulk-loop experiment requires the signed compact "
+                   "engine and conflicts with the interpreter control.");
+        set_detail(report->summary, sizeof report->summary,
+                   "bulk-loop experiment unavailable");
+        return false;
+    }
     char compact_privileged_window_refill_path[
         VM_FW_BOOT_PATH_CAPACITY + 64u];
     if (!join_path(compact_privileged_window_refill_path,
@@ -1263,6 +1286,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     (void)compact_window_cache;
     (void)compact_privileged_window_refill;
     (void)compact_pc_profile;
+    (void)compact_bulk;
 
 #if defined(S5LBOX_IOS_ACTIVE_REALTIME_CLOCK)
     char active_clock_off_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
@@ -1518,7 +1542,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         if (!reapply_engine_controls_after_reset(
                 machine, forced_interpreter, compact_user_only,
                 compact_window_refill_off, compact_window_cache,
-                compact_privileged_window_refill)) {
+                compact_privileged_window_refill, compact_bulk)) {
             free(kernel);
             free(tree);
             (void)file_block_close(boot->media);

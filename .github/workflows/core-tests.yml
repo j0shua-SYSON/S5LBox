@@ -167,6 +167,18 @@ jobs:
       - name: Test
         run: ctest --test-dir build-jit --output-on-failure
 
+      - name: Verify signed bulk-loop execution coverage
+        run: |
+          set -euo pipefail
+          output="$(./build-jit/core/test_arm_bulk)"
+          printf '%s\n' "$output"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            grep -Eq 'arm_bulk native integration: [1-9][0-9]* bulk calls' <<<"$output"
+          else
+            grep -Fq 'arm_bulk native integration: SKIP (host has no signed A64 runner)' <<<"$output"
+          fi
+          grep -Eq 'arm_bulk: [1-9][0-9]* checks, 0 failures' <<<"$output"
+
       - name: Verify JIT and signed-static execution verdicts
         run: |
           set -euo pipefail

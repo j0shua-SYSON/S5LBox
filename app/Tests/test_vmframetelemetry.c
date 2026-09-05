@@ -153,6 +153,8 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.compact_privileged_window_refills = base + 38u;
     value.compact_privileged_boundary_retired = base + 39u;
     value.compact_window_cache_hits = base + 40u;
+    value.compact_bulk_calls = base + 140u;
+    value.compact_bulk_retired = base + 141u;
     value.compact_pc_profile_samples = base + 41u;
     value.compact_pc_profile_outside = base + 42u;
     value.compact_pc_profile_entry = base + 43u;
@@ -493,6 +495,8 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.compact_privileged_window_refills == 2038u &&
            state.execution_last.compact_privileged_boundary_retired == 2039u &&
            state.execution_last.compact_window_cache_hits == 2040u &&
+           state.execution_last.compact_bulk_calls == 2140u &&
+           state.execution_last.compact_bulk_retired == 2141u &&
            state.execution_last.compact_pc_profile_polls == 2063u &&
            state.execution_last.compact_pc_profile_not_running == 2064u &&
            state.execution_last.compact_pc_profile_state_failures == 2065u &&

@@ -18,6 +18,7 @@ endif()
 # This same static library is what the iOS app links against.
 add_library(emucore STATIC
     src/arm/arm_interp.c
+    src/arm/arm_bulk.c
     src/arm/vfp.c
     src/arm/a64_static_engine.c
     src/mmu.c
@@ -199,6 +200,11 @@ endif()
 add_executable(test_arm tests/test_arm.c)
 target_link_libraries(test_arm PRIVATE emucore)
 add_test(NAME arm_interp COMMAND test_arm)
+
+add_executable(test_arm_bulk tests/test_arm_bulk.c)
+target_include_directories(test_arm_bulk PRIVATE ../tools)
+target_link_libraries(test_arm_bulk PRIVATE emucore)
+add_test(NAME arm_bulk COMMAND test_arm_bulk)
 
 add_executable(test_vfp tests/test_vfp.c)
 target_link_libraries(test_vfp PRIVATE emucore)

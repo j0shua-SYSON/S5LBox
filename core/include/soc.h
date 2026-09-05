@@ -4684,6 +4684,12 @@ bool s5l8900_static_a64_set_compact_raw_privileged_window_refill(
  * and defaults off until physical cadence evidence justifies rollout. */
 bool s5l8900_static_a64_set_compact_raw_window_cache(s5l8900_t *m,
                                                       bool enabled);
+/* Off-by-default bulk string/range execution inside the compact runner.
+ * Complete live instruction and RAM witnesses are mandatory; original
+ * instruction counts still bound device/interrupt service intervals. */
+bool s5l8900_static_a64_set_compact_bulk(s5l8900_t *m, bool enabled);
+uint64_t s5l8900_static_a64_compact_bulk_calls(const s5l8900_t *m);
+uint64_t s5l8900_static_a64_compact_bulk_retired(const s5l8900_t *m);
 /* Explicit diagnostic-only sampling for the compact runner. On a supported
  * Apple AArch64 host a marker-created sampler polls only the pthread executing
  * s5l8900_run(), and retains a PC only when that target is running before and
