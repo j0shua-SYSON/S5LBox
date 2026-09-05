@@ -7637,6 +7637,150 @@ static void test_thumb2_extend(void) {
           "ARM1176 no longer uses its legacy 16-bit BL suffix framing");
 }
 
+static void write_thumb2_shifted(unsigned op, bool set, unsigned rn, unsigned rd,
+                                  unsigned rm, unsigned type, unsigned amount) {
+    m_w16(NULL, 0, (uint16_t)(0xea00u | (op << 5) | (set ? 0x10u : 0u) | rn));
+    m_w16(NULL, 2, (uint16_t)(((amount >> 2) << 12) | (rd << 8) |
+                             ((amount & 3u) << 6) | (type << 4) | rm));
+}
+
+static void test_thumb2_shifted_data_processing(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    /* Rn=80000000, Rm=80000003 LSR#1. The shifter carry is1;
+     * ADC/SBC must still use the original CPSR.C as their arithmetic input. */
+    static const struct { unsigned op; bool move; uint32_t result[2], nzcv; } cases[] = {
+        {0,false,{0u,0u},0x70000000u}, {1,false,{0x80000000u,0x80000000u},0xb0000000u},
+        {2,false,{0xc0000001u,0xc0000001u},0xb0000000u},
+        {3,false,{0xbffffffeu,0xbffffffeu},0xb0000000u},
+        {4,false,{0xc0000001u,0xc0000001u},0xb0000000u},
+        {8,false,{0xc0000001u,0xc0000001u},0x80000000u},
+        {10,false,{0xc0000001u,0xc0000002u},0x80000000u},
+        {11,false,{0x3ffffffeu,0x3fffffffu},0x30000000u},
+        {13,false,{0x3fffffffu,0x3fffffffu},0x30000000u},
+        {14,false,{0xc0000001u,0xc0000001u},0x90000000u},
+        {2,true,{0x40000001u,0x40000001u},0x30000000u},
+        {3,true,{0xbffffffeu,0xbffffffeu},0xb0000000u},
+    };
+    for (unsigned p = 0; p < 2; p++) {
+     for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+      for (unsigned cin = 0; cin < 2; cin++) {
+       for (unsigned set = 0; set < 2; set++) {
+        for (unsigned dest = 0; dest < 4; dest++) {
+         for (unsigned execute = 0; execute < 2; execute++) {
+            unsigned op = cases[i].op;
+            if (dest == 3 && (!set || cases[i].move || (op != 0 && op != 4 && op != 8 && op != 13))) continue;
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+            c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_Z | ARM_CPSR_V | ARM_CPSR_Q |
+                      (0x5u << 16) | (cin ? ARM_CPSR_C : 0u) | test_it_bits(execute ? 0x08u : 0x18u);
+            uint32_t flags = c.cpsr & ~TEST_IT_MASK;
+            unsigned rd = dest == 0 ? 0u : dest == 1 ? 8u : dest == 2 ? 14u : 15u;
+            c.r[0] = 0x12345678u; c.r[8] = 0x80000000u; c.r[14] = 0x80000003u;
+            uint32_t before[15]; memcpy(before, c.r, sizeof before);
+            write_thumb2_shifted(op, set != 0, cases[i].move ? 15u : 8u, rd, 14u, 1u, 1u);
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u &&
+                  c.cpsr == (execute && set ? (flags & 0x0fffffffu) | cases[i].nzcv : flags),
+                  "shifted ALU op=%u move=%u lost explicit flags, arithmetic carry or IT", op, cases[i].move);
+            for (unsigned reg = 0; reg < 15; reg++)
+                CHECK(c.r[reg] == (execute && reg == rd ? cases[i].result[cin] : before[reg]),
+                      "shifted ALU op=%u wrote wrong result or an aliased source", op);
+         }
+        }
+       }
+      }
+     }
+    }
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.cpsr |= ARM_CPSR_T | ARM_CPSR_C; c.r[8] = 0x80324db0u; c.r[4] = 0x12u;
+    m_w16(NULL, 0, 0xeb08u); m_w16(NULL, 2, 0x0004u);
+    CHECK(arm_step(&c) == ARM_OK && c.r[0] == 0x80324dc2u && c.r[15] == 4u && (c.cpsr & ARM_CPSR_C),
+          "real ADD.W firmware blocker failed");
+    const uint32_t rrx_expected[2][2] = {{1u,0x80000002u},{0xfffffffeu,0x7fffffffu}};
+    for (unsigned sub = 0; sub < 2; sub++) for (unsigned cin = 0; cin < 2; cin++) {
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | (cin ? ARM_CPSR_C : 0u); c.r[2] = 2u;
+        write_thumb2_shifted(sub ? 11u : 10u, true, 1u, 0u, 2u, 3u, 0u);
+        CHECK(arm_step(&c) == ARM_OK && c.r[0] == rrx_expected[sub][cin] && !(c.cpsr & ARM_CPSR_C),
+              "RRX consumed/overwrote carry before ADC/SBC arithmetic");
+    }
+}
+
+static void test_thumb2_immediate_shift_aliases(void) {
+    /* Fixed outputs for80000003. carry=2 denotes preservation. */
+    static const struct { unsigned type, amount; uint32_t value; unsigned carry; } cases[] = {
+        {0,0,0x80000003u,2}, {0,1,6u,1}, {0,4,0x30u,0}, {0,31,0x80000000u,1},
+        {1,0,0u,1}, {1,1,0x40000001u,1}, {1,4,0x08000000u,0}, {1,31,1u,0},
+        {2,0,0xffffffffu,1}, {2,1,0xc0000001u,1}, {2,4,0xf8000000u,0}, {2,31,0xffffffffu,0},
+        {3,0,0x40000001u,1}, {3,1,0xc0000001u,1}, {3,4,0x38000000u,0}, {3,31,7u,0},
+    };
+    for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+     for (unsigned cin = 0; cin < 2; cin++) {
+      for (unsigned invert = 0; invert < 2; invert++) {
+       for (unsigned set = 0; set < 2; set++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_V | ARM_CPSR_Z | (cin ? ARM_CPSR_C : 0u);
+        uint32_t flags = c.cpsr;
+        c.r[14] = 0x80000003u;
+        uint32_t expected = cases[i].value;
+        if (cases[i].type == 3u && cases[i].amount == 0u) expected |= cin << 31;
+        if (invert) expected = ~expected;
+        bool carry = cases[i].carry == 2u ? cin != 0u : cases[i].carry != 0u;
+        uint32_t nzcv = (expected & ARM_CPSR_N) | (!expected ? ARM_CPSR_Z : 0u) |
+                        (carry ? ARM_CPSR_C : 0u) | ARM_CPSR_V;
+        write_thumb2_shifted(invert ? 3u : 2u, set != 0u, 15u, 14u, 14u, cases[i].type, cases[i].amount);
+        CHECK(arm_step(&c) == ARM_OK && c.r[14] == expected && c.r[15] == 4u &&
+              c.cpsr == (set ? (flags & 0x0fffffffu) | nzcv : flags),
+              "shift/MVN alias lost zero/32 rule, split shift amount, RRX input, sign or carry");
+       }
+      }
+     }
+    }
+}
+
+static void test_thumb2_shifted_register_constraints(void) {
+    static const struct { unsigned op, set, rn, rd, rm, type, amount; bool valid; uint32_t result; } cases[] = {
+        {2,0,15,13,0,0,0,true,4u}, {2,0,15,0,13,0,0,true,0x100u},
+        {2,0,15,13,13,0,0,false,0u}, {2,1,15,13,0,0,0,false,0u}, {2,1,15,0,13,0,0,false,0u},
+        {2,0,15,13,0,0,1,false,0u}, {2,0,15,0,13,3,0,false,0u}, {3,0,15,13,0,0,0,false,0u},
+        {8,0,13,13,0,0,3,true,0x120u}, {8,0,13,13,0,0,4,false,0u}, {8,0,13,13,0,1,1,false,0u},
+        {8,1,13,15,0,3,0,true,0u}, {13,0,13,13,0,0,3,true,0xe0u}, {13,1,13,13,0,0,3,true,0xe0u},
+        {8,0,13,12,0,1,0,true,0x100u}, {13,0,13,12,0,2,0,true,0x100u},
+        {8,0,8,13,0,0,0,false,0u}, {8,0,13,0,13,0,0,false,0u},
+        {8,0,15,0,1,0,0,false,0u}, {8,0,1,15,0,0,0,false,0u},
+        {0,1,13,15,0,0,0,false,0u}, {4,1,15,15,0,0,0,false,0u},
+        {10,0,13,0,2,0,0,false,0u}, {11,0,1,0,15,0,0,false,0u}, {14,1,1,15,0,0,0,false,0u},
+    };
+    for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_Q | ARM_CPSR_C;
+        c.r[0] = 4u; c.r[13] = 0x100u;
+        uint32_t flags = c.cpsr, before[15]; memcpy(before, c.r, sizeof before);
+        write_thumb2_shifted(cases[i].op, cases[i].set != 0, cases[i].rn, cases[i].rd,
+                            cases[i].rm, cases[i].type, cases[i].amount);
+        CHECK(arm_step(&c) == (cases[i].valid ? ARM_OK : ARM_UNDEFINED) &&
+              c.r[15] == (cases[i].valid ? 4u : 0u), "shifted SP/PC constraints wrong for case%u", i);
+        if (cases[i].valid) {
+            if (cases[i].rd != 15u) CHECK(c.r[cases[i].rd] == cases[i].result, "SP form result wrong");
+            if (!cases[i].set) CHECK(c.cpsr == flags, "non-S SP form changed flags");
+        } else CHECK(!memcmp(before, c.r, sizeof before) && c.cpsr == flags, "invalid shifted form changed state");
+    }
+    for (unsigned op = 0; op < 16; op++) {
+        if (op != 5u && op != 6u && op != 7u && op != 9u && op != 12u && op != 15u) continue;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset"); c.cpsr |= ARM_CPSR_T;
+        write_thumb2_shifted(op, false, 1u, 0u, 2u, 0u, 0u);
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u, "shifted ALU overmatched PKH or unallocated op");
+    }
+    arm_cpu_t c;
+    arm_reset(&c, &g_bus); c.cpsr |= ARM_CPSR_T; c.r[14] = 0x1000u; c.r[0] = 0x12345678u;
+    m_w16(NULL, 0, 0xeb08u); m_w16(NULL, 2, 0x0004u);
+    CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x1610u && c.r[14] == 3u &&
+          !(c.cpsr & ARM_CPSR_T) && c.r[0] == 0x12345678u, "ARM1176 BLX suffix framing changed");
+}
+
 static void test_thumb_compare_and_branch(void) {
     const arm_arch_t profiles[] = {ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
     const uint32_t offsets[] = {0u, 62u, 64u, 126u};
@@ -7713,6 +7857,9 @@ int main(void) {
     test_thumb2_small_loads();
     test_thumb2_small_load_aborts();
     test_thumb2_extend();
+    test_thumb2_shifted_data_processing();
+    test_thumb2_immediate_shift_aliases();
+    test_thumb2_shifted_register_constraints();
     test_thumb_compare_and_branch();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();

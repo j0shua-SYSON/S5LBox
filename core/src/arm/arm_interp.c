@@ -3025,23 +3025,34 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         if (wb && !c->abort_pending) c->r[rn] = adjusted;
         return ARM_OK;
     }
-    /* Modified immediate data processing (DDI0406C.b A6.3.1/2). Logical
-     * operations use ThumbExpandImm's carry; arithmetic uses its ALU carry.
+    /* Modified-immediate and shifted-register data processing share their
+     * operations (A6.3.1/2/11). Logical flags use the expansion/shifter carry;
+     * arithmetic uses the original C input and its own carry/overflow output.
      * Validate MOV/MVN and flag-only aliases before touching registers/flags. */
-    if ((first & 0xfa00u) == 0xf000u && !(second & 0x8000u)) {
+    bool shifted = (first & 0xfe00u) == 0xea00u;
+    if ((shifted || (first & 0xfa00u) == 0xf000u) && !(second & 0x8000u)) {
         unsigned op = (first >> 5) & 15u, rn = first & 15u;
         unsigned rd = (second >> 8) & 15u;
+        unsigned rm = second & 15u, type = (second >> 4) & 3u;
+        unsigned amount = ((second >> 10) & 0x1cu) | ((second >> 6) & 3u);
         bool set = (first & 0x10u) != 0u;
         bool move = (op == 2u || op == 3u) && rn == 15u;
+        /* MOV.W without S permits SP in exactly one operand, unlike its
+         * shifted and MVN aliases (A8.8.103). PC remains forbidden. */
+        bool sp_move = shifted && op == 2u && move && !set && type == 0u && amount == 0u;
+        if (shifted && (rm == 15u || (rm == 13u && (!sp_move || rd == 13u))))
+            return ARM_UNDEFINED;
         if (op <= 4u) {
             bool test = (op == 0u || op == 4u) && rd == 15u && set; /* TST/TEQ */
-            if (rd == 13u || (rd == 15u && !test) || (!move && (rn == 13u || rn == 15u)))
+            if ((rd == 13u && !sp_move) || (rd == 15u && !test) || (!move && (rn == 13u || rn == 15u)))
                 return ARM_UNDEFINED;
         } else if (op == 8u || op == 13u) {
             /* ADD/SUB allow SP as a source, and as destination only in
              * that form. Rd=PC,S=1 means CMN/CMP, never a PC write. */
             if (rn == 15u || (rd == 13u && rn != 13u) || (rd == 15u && !set))
                 return ARM_UNDEFINED;
+            if (shifted && rd == 13u && (type != 0u || amount > 3u))
+                return ARM_UNDEFINED; /* SP update allows only LSL #0..3. */
         } else if (op == 10u || op == 11u || op == 14u) {
             if (rn == 13u || rn == 15u || rd == 13u || rd == 15u)
                 return ARM_UNDEFINED;
@@ -3052,7 +3063,9 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
                          ((second & 0x7000u) >> 4) | (second & 0xffu);
         uint32_t value = imm12 & 0xffu;
         bool carry = (c->cpsr & ARM_CPSR_C) != 0;
-        if (imm12 < 0x400u) {
+        if (shifted) {
+            value = barrel_shift(c->r[rm], type, amount, false, &carry);
+        } else if (imm12 < 0x400u) {
             unsigned pattern = imm12 >> 8;
             if (pattern && !value) return ARM_UNDEFINED;
             if (pattern == 1u) value |= value << 16;

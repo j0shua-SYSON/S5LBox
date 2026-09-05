@@ -157,6 +157,14 @@ Tests cover sign boundaries, wrapped additions, lane isolation, overlapping
 operands, IT conditions and preservation of NZCV/Q/GE. ARM1176 keeps its
 legacy 16-bit framing for these first-halfword bit patterns.
 
+Shifted-register logical and arithmetic operations share the existing Thumb
+ALU with modified immediates. Their split shift amounts implement LSL, LSR,
+ASR, ROR and RRX, including the MOV/MVN and flag-only aliases. Logical flags
+use the shifter carry; ADC/SBC retain the original carry input for arithmetic.
+Non-flag-setting plain MOV permits SP in exactly one operand. ADD/SUB updates
+to SP require an SP base and LSL of 0..3. Tests cover those constraints,
+shift boundaries, sign/carry behavior, aliases, IT and ARM1176 framing.
+
 The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates
 C only as prescribed by the immediate form, preserving V. Invalid zero
@@ -207,8 +215,9 @@ establish that result.
   and memory translation paths still need a Cortex-A8 audit and implementation.
   The instruction profile is not a complete system-register model.
 - Thumb-2 currently implements MOVW/MOVT, modified-immediate logical operations
-  and arithmetic, immediate LDR/STR and byte/halfword transfers (including
-  signed loads and pre/post indexing), literals, and doubleword transfers.
+  and arithmetic (also with shifted registers), immediate LDR/STR and
+  byte/halfword transfers (including signed loads and pre/post indexing),
+  literals, and doubleword transfers.
   Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple transfers are also implemented. Other
   instruction families remain to implement. IT state and conditional execution
   are implemented for the supported Thumb decoder families.
@@ -333,9 +342,10 @@ iBoot constructs a 256-byte command line at `0x4ff10c44..82`. The normal
 non-ramdisk, non-tethered configuration supplies no kernel options. Using
 that configuration reaches 74,914 steps at `0x8027a8c0`, halfwords
 `fa5f f088` (`UXTB.W r0,r8`). Extend execution then advances to 75,175 steps
-at `0x80089d5e`, halfwords `eb08 0004` (`ADD.W r0,r8,r4`), an unsupported
-shifted-register operation. All unprepared tree properties and remaining
-argument fields retain their guards.
+at `0x80089d5e`, halfwords `eb08 0004` (`ADD.W r0,r8,r4`). Shifted-register
+execution then reaches 75,223 steps at `0x802b797c`, halfwords `f3c0 0040`
+(`UBFX r0,r0,#1,#1`), which remains unsupported. Unprepared tree properties
+and remaining argument fields retain their guards.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim
