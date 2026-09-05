@@ -2816,13 +2816,34 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         }
         return ARM_OK;
     }
-    /* STR immediate T3: positive unscaled imm12, no writeback. SP is valid
-     * for either register; PC is not (DDI0406C.b A8.8.203). Use the common
-     * data path for translation, alignment, page crossings and aborts. */
-    if ((first & 0xfff0u) == 0xf8c0u) {
+    /* LDR/STR immediate T3 and LDR literal T2 (DDI0406C.b A8.8.62/64/203).
+     * Ordinary imm12 offsets add to Rn; a literal uses Align(PC+4,4) and U.
+     * No writeback. SP is permitted, and a PC load interworks. */
+    if ((first & 0xffe0u) == 0xf8c0u || first == 0xf85fu) {
         unsigned rn = first & 15u, rt = second >> 12;
-        if (rn == 15u || rt == 15u) return ARM_UNDEFINED;
-        mem_w32(c, c->r[rn] + (second & 0xfffu), c->r[rt]);
+        bool load = (first & 0x10u) != 0u;
+        if (!load && (rn == 15u || rt == 15u)) return ARM_UNDEFINED;
+        uint32_t base = rn == 15u ? ((pc + 4u) & ~3u) : c->r[rn];
+        uint32_t offset = second & 0xfffu;
+        uint32_t address = (first & 0x80u) ? base + offset : base - offset;
+        if (load) {
+            if (rt == 15u && (address & 3u)) {
+                if (!(c->cp15.sctlr & ARM_SCTLR_A)) return ARM_UNDEFINED;
+                note_alignment_abort(c, address, false);
+                return ARM_OK;
+            }
+            uint32_t value = mem_r32(c, address);
+            if (c->abort_pending) return ARM_OK;
+            if (rt == 15u && (value & 3u) == 2u) return ARM_UNDEFINED;
+            if (rt == 15u) {
+                set_flag(c, ARM_CPSR_T, (value & 1u) != 0u);
+                *next = value & ~1u;
+            } else {
+                c->r[rt] = value;
+            }
+        } else {
+            mem_w32(c, address, c->r[rt]);
+        }
         return ARM_OK;
     }
     /* Modified immediate data processing (DDI0406C.b A6.3.1/2). MOV and

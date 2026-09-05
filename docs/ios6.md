@@ -96,6 +96,12 @@ path. Tests cover noncontiguous pages, permission and translation faults on
 either side, alignment checking, and the Thumb data-abort return address.
 Bytes stored before a second-page fault remain committed.
 
+Wide LDR supports the unsigned imm12 form and signed PC-relative literals.
+Literal addresses use the word-aligned Thumb PC. SP/LR destinations and
+base/destination aliases are permitted; loading PC interworks. Tests cover
+literal alignment, offset limits, page faults without partial register
+updates, and refusal of unaligned PC accesses or ARM branch targets.
+
 ARMv7 always provides modern unaligned access support (DDI0406C.b A3.2 and
 AppxP.7.29), independent of raw SCTLR.U. Ordinary accesses use byte addresses
 unless SCTLR.A requires an alignment fault; multiword, exclusive and SWP
@@ -125,7 +131,7 @@ establish that result.
   and memory translation paths still need a Cortex-A8 audit and implementation.
   The instruction profile is not a complete system-register model.
 - Thumb-2 currently implements MOVW/MOVT, modified-immediate MOV/MOVS and
-  arithmetic, and STR with an unsigned immediate offset.
+  arithmetic, LDR/STR with unsigned immediate offsets and LDR literals.
   Wide B/BL/BLX and IA/DB multiple transfers are also implemented. Other
   instruction families and IT state remain to implement.
 - VFP stores only d0-d15 and models VFP11/VFPv2. Cortex-A8 VFPv3 and NEON,
@@ -187,6 +193,8 @@ Wide branches carry the trace through calls and ARM/Thumb returns to
 `0x802b840c`, halfwords `e8bd 40f0` (`POP.W {r4-r7,lr}`), after 63,130 steps.
 Multiple transfers advance to `0x802bd23c`, halfwords `f8df c004`
 (`LDR.W ip,[pc,#4]`), after 63,132 steps.
+Wide loads advance the trace to `0x8027b966`, halfword `bb18`
+(`CBNZ r0,0x8027b9b0`), after 63,181 steps.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim

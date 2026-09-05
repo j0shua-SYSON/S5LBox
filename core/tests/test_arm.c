@@ -6603,6 +6603,110 @@ static void test_thumb2_multiple_transfer_aborts(void) {
     }
 }
 
+static void test_thumb2_word_loads(void) {
+    for (unsigned host = 0; host < 2; host++) {
+      for (unsigned half_aligned = 0; half_aligned < 2; half_aligned++) {
+       for (unsigned subtract = 0; subtract < 2; subtract++) {
+        for (unsigned large = 0; large < 2; large++) {
+            arm_bus_t bus = g_bus;
+            if (host) bus.host_ram = m_host_ram;
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+            c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_V;
+            uint32_t cpsr = c.cpsr, pc = half_aligned ? 0x2002u : 0x2000u;
+            uint32_t offset = large ? 0xfffu : 0x10u;
+            uint32_t address = subtract ? 0x2004u - offset : 0x2004u + offset;
+            c.r[15] = pc;
+            m_w16(NULL, pc, subtract ? 0xf85fu : 0xf8dfu);
+            m_w16(NULL, pc + 2u, (uint16_t)(0xc000u | offset)); /* LDR.W ip,[pc,+/-imm12] */
+            m_w32(NULL, address, 0x76543210u);
+            CHECK(arm_step(&c) == ARM_OK && c.r[12] == 0x76543210u &&
+                  c.r[15] == pc + 4u && c.cpsr == cpsr && c.cycles == 1u,
+                  "literal load used the wrong PC alignment, sign or byte offset");
+        }
+       }
+      }
+      const unsigned destinations[] = {2u, 5u, 13u, 14u};
+      for (unsigned i = 0; i < 4; i++) {
+        arm_bus_t bus = g_bus;
+        if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T; c.r[5] = 0x10000u;
+        m_w16(NULL, 0, 0xf8d5u); m_w16(NULL, 2, (uint16_t)((destinations[i] << 12) | 0xfffu));
+        m_w32(NULL, 0x10fffu, 0x12345678u);
+        CHECK(arm_step(&c) == ARM_OK && c.r[destinations[i]] == 0x12345678u &&
+              (destinations[i] == 5u || c.r[5] == 0x10000u) && c.r[15] == 4u,
+              "wide load rejected SP/LR/base alias or aligned down the address");
+      }
+    }
+    for (unsigned literal = 0; literal < 2; literal++) {
+      for (unsigned target = 0; target < 3; target++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C;
+        uint32_t before = c.cpsr;
+        c.r[15] = 0x100u; c.r[5] = 0x110u;
+        m_w16(NULL, 0x100u, literal ? 0xf8dfu : 0xf8d5u);
+        m_w16(NULL, 0x102u, literal ? 0xf00cu : 0xf000u);
+        m_w32(NULL, 0x110u, 0x20u + target);
+        CHECK(arm_step(&c) == (target == 2 ? ARM_UNDEFINED : ARM_OK) &&
+              c.r[15] == (target == 2 ? 0x100u : 0x20u) && c.r[5] == 0x110u &&
+              c.cpsr == (target == 0 ? (before & ~ARM_CPSR_T) : before),
+              "wide LDR PC did not interwork or reject an unaligned ARM target");
+      }
+      for (unsigned check_alignment = 0; check_alignment < 2; check_alignment++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T; c.cp15.sctlr = check_alignment ? ARM_SCTLR_A : 0u;
+        c.r[15] = 0x100u; c.r[5] = 0x111u;
+        m_w16(NULL, 0x100u, literal ? 0xf8dfu : 0xf8d5u);
+        m_w16(NULL, 0x102u, literal ? 0xf00du : 0xf000u);
+        g_watch_addr = 0x111u; g_watch_reads32 = 0u;
+        CHECK(arm_step(&c) == (check_alignment ? ARM_OK : ARM_UNDEFINED) &&
+              c.r[15] == (check_alignment ? ARM_VEC_DATA_ABORT : 0x100u) &&
+              g_watch_reads32 == 0u && (!check_alignment ||
+              (c.cp15.dfar == 0x111u && c.cp15.dfsr == ARM_FSR_ALIGNMENT)),
+              "unaligned LDR PC accessed memory or lost the alignment fault");
+        g_watch_addr = 0xffffffffu;
+      }
+    }
+}
+
+static void test_thumb2_word_load_aborts(void) {
+    for (unsigned host = 0; host < 2; host++) {
+      for (unsigned fault = 0; fault < 4; fault++) {
+        memset(g_ram, 0, sizeof g_ram);
+        arm_bus_t bus = g_bus;
+        if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP;
+        c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N;
+        c.r[4] = 0x1ffeu; c.r[2] = 0x12345678u;
+        uint32_t cpsr = c.cpsr;
+        m_w32(NULL, 0x4000u, 0x6001u);
+        m_w32(NULL, 0x6000u, 0x803eu);
+        m_w32(NULL, 0x6004u, fault == 1 ? 0u : 0xa03eu);
+        m_w32(NULL, 0x6008u, fault == 2 ? 0u : fault == 3 ? 0xc01eu : 0xc03eu);
+        m_w16(NULL, 0x8000u, 0xf8d4u); m_w16(NULL, 0x8002u, 0x2000u);
+        m_w16(NULL, 0xaffeu, 0x2211u); m_w16(NULL, 0xc000u, 0x4433u);
+        CHECK(arm_step(&c) == ARM_OK && c.r[4] == 0x1ffeu, "wide load status or base changed");
+        if (!fault) {
+            CHECK(c.r[2] == 0x44332211u && c.r[15] == 4u && c.cpsr == cpsr,
+                  "wide load assumed contiguous pages");
+        } else {
+            CHECK(c.r[2] == 0x12345678u && c.r[15] == ARM_VEC_DATA_ABORT && c.r[14] == 8u &&
+                  c.cp15.dfar == (fault == 1 ? 0x1ffeu : 0x2000u) &&
+                  c.cp15.dfsr == (fault == 3 ? ARM_FSR_PAGE_PERMISSION : ARM_FSR_PAGE_TRANSLATION) &&
+                  c.spsr[ARM_BANK_ABT] == cpsr,
+                  "wide load abort committed its result or lost DFAR/WnR/saved state");
+        }
+      }
+    }
+}
+
 int main(void) {
     test_reset_initializes_the_default_profile();
     test_explicit_profile_reset_and_invalid_configuration();
@@ -6620,6 +6724,8 @@ int main(void) {
     test_thumb2_wide_branches();
     test_thumb2_multiple_transfers();
     test_thumb2_multiple_transfer_aborts();
+    test_thumb2_word_loads();
+    test_thumb2_word_load_aborts();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();
     test_add_reg();
