@@ -16,6 +16,7 @@
 #define S5LBOX_APP_VMNETWORKSESSION_H
 
 #include "soc.h"
+#include "guest_packet_bridge.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -43,6 +44,9 @@ typedef struct {
 typedef struct {
     bool     attached;
     bool     nat_enabled;
+    bool     packet_offload;
+    uint64_t bulk_tx_packets, bulk_tx_bytes, bulk_rx_packets, bulk_rx_bytes;
+    uint64_t bulk_stale_tokens, bulk_failures;
     bool     peer_opened;
     bool     lcp_open;
     bool     ipcp_open;
@@ -147,6 +151,11 @@ typedef struct {
 vm_network_session_t *vm_network_session_create(
     s5l8900_t *machine, bool nat_enabled,
     char *detail, size_t detail_capacity);
+
+/* Attach only when both exact-gated instructions are present in current RAM.
+ * An older checkpoint keeps ordinary PPP; it is never sent offload tokens. */
+bool vm_network_session_attach_packet_bridge(vm_network_session_t *session,
+                                             guest_packet_bridge_t *bridge);
 
 /*
  * Give protocol restart, DNS, and TCP timers a monotonic host clock. Network

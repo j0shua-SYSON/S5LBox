@@ -1664,6 +1664,10 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
             return false;
         }
 #endif
+        if (nat_enabled && !vm_network_session_attach_packet_bridge(
+                boot->network, &boot->bridges->packet))
+            (void)fprintf(stderr, "[network] current kernel has no bulk packet "
+                                 "sites; retaining serial PPP fallback\n");
         if (restored &&
             !vm_network_session_reopen_after_restore(boot->network)) {
             (void)file_block_close(boot->media);

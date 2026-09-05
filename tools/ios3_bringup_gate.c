@@ -62,4 +62,11 @@ void ios3_bringup_gate_configure(s5l_bringup_request_t *request,
     request->md_write_site_pc = IOS3_KERNEL_PATCH_MD_WRITE_VA;
     request->md_raw_site_pc = IOS3_KERNEL_PATCH_RAW_WATCHER_VA;
     request->uiomove_pc = IOS3_KERNEL_UIOMOVE_VA;
+    request->packet_sites = (guest_packet_sites_t){
+        .rx_pc = IOS3_KERNEL_PATCH_PACKET_RX_VA,
+        .tx_pc = IOS3_KERNEL_PATCH_PACKET_TX_VA,
+        .free_thumb_pc = IOS3_KERNEL_MBUF_FREE_VA,
+        .tx_done_pc = IOS3_KERNEL_PACKET_TX_DONE_VA,
+        .rx_drop_pc = IOS3_KERNEL_PACKET_RX_DROP_VA
+    };
 }

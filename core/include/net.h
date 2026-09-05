@@ -225,6 +225,9 @@ typedef struct {
     uint32_t local_ip;   /* 10.0.2.2  — us, the gateway                      */
     uint32_t dns_ip;     /* 10.0.2.3  — us again, wearing a resolver's hat   */
     uint32_t iss;        /* seed for our TCP initial send sequences          */
+    /* Zero keeps the conservative serial-link ceiling. A packet transport may
+     * raise the ceiling, never the initial congestion window or peer window. */
+    uint32_t tcp_cwnd_segments;
 } net_config_t;
 
 /* --------------------------------------------------------------- state --- */
@@ -261,10 +264,12 @@ typedef struct {
     uint32_t irs;               /* the guest's initial sequence number       */
     uint32_t rcv_nxt;           /* next sequence we will accept from it      */
     uint32_t snd_una;           /* oldest sequence we sent and it has not ack*/
-    uint32_t snd_nxt;           /* highest sequence we have sent, plus one   */
+    uint32_t snd_nxt;           /* next send/retransmit cursor               */
+    uint32_t snd_max;           /* furthest emitted sequence, plus one       */
     uint32_t snd_wnd;           /* what the guest last advertised            */
     uint16_t mss;               /* clamped to NET_TCP_MSS_MAX                */
     uint32_t cwnd;              /* congestion window toward the guest       */
+    uint32_t cwnd_limit;        /* transport ceiling, fixed when flow opens */
     uint32_t ssthresh;          /* slow-start threshold after a timeout      */
     bool     fin_sent;          /* our FIN occupies snd_una + txlen          */
     bool     host_eof;          /* the egress reported an orderly close      */
@@ -277,8 +282,9 @@ typedef struct {
                                  * while still in SYN-RCVD, where TIME-WAIT
                                  * cannot yet be running                     */
 
-    /* txbuf[0] is sequence snd_una. Bytes in [snd_una, snd_nxt) are in
-     * flight; bytes from snd_nxt to snd_una+txlen have not been sent yet. */
+    /* txbuf[0] is sequence snd_una. snd_max bounds data actually emitted;
+     * snd_nxt may rewind for retransmission. The buffer may also contain
+     * bytes that have never been sent and therefore cannot be acknowledged. */
     uint8_t  txbuf[NET_TCP_TXBUF]; uint32_t txlen;
     uint8_t  rxbuf[NET_TCP_RXBUF]; uint32_t rxlen;
 } net_flow_t;

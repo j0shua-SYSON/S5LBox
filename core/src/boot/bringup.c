@@ -447,7 +447,9 @@ static arm_svc_result_t bringup_svc_handler(void *context, arm_cpu_t *cpu,
     if (md == NULL || !md->installed) return ARM_SVC_ERROR;
     result = md_bridge_handle_svc(&md->strategy, cpu, pc, encoding);
     if (result != ARM_SVC_UNHANDLED) return result;
-    return md_raw_bridge_handle_svc(&md->raw, cpu, pc, encoding);
+    result = md_raw_bridge_handle_svc(&md->raw, cpu, pc, encoding);
+    if (result != ARM_SVC_UNHANDLED) return result;
+    return guest_packet_bridge_svc(&md->packet, cpu, pc, encoding);
 }
 
 /* A boot-argument key is one complete whitespace-delimited token up to '='.
@@ -1129,6 +1131,12 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
 
         md_bridge_init(&md->strategy, &strategy);
         md_raw_bridge_init(&md->raw, &raw);
+        md->packet = (guest_packet_bridge_t){
+            .sites = request->packet_sites,
+            .ram = machine->ram,
+            .ram_base = machine->ram_base,
+            .ram_size = machine->ram_size
+        };
         md->installed = true;
         arm_bus_set_privileged_svc_handler(&machine->bus, bringup_svc_handler,
                                            md);

@@ -529,6 +529,85 @@ static void test_invalid_create_fails_closed(void) {
     vm_network_session_destroy(NULL);
 }
 
+static void test_bulk_packets_use_tokens_and_recover_lost_notifications(void) {
+    s5l8900_t machine;
+    char detail[192];
+    CHECK(s5l8900_init(&machine, 0u, 1u << 20), "machine init failed");
+    vm_network_session_t *session = vm_network_session_create(
+        &machine, true, detail, sizeof detail);
+    if (!session) { CHECK(false, "create failed: %s", detail); s5l8900_free(&machine); return; }
+    fake_host_clock_t clock = {UINT64_C(1000000000), true};
+    CHECK(vm_network_session_set_host_clock(session, fake_host_now, &clock),
+          "clock attach failed");
+    guest_packet_bridge_t bridge = {
+        .sites = {0xc0000800u, 0xc0000804u, 0xc0000900u, 0xc0000a00u, 0xc0000b00u},
+        .ram = machine.ram, .ram_base = 0u, .ram_size = machine.ram_size
+    };
+    CHECK(!vm_network_session_attach_packet_bridge(session, &bridge),
+          "an old unpatched checkpoint enabled bulk tokens");
+    machine.bus.write32(machine.bus.ctx, 0x800u, GUEST_PACKET_RX_SVC);
+    CHECK(!vm_network_session_attach_packet_bridge(session, &bridge),
+          "a partially patched checkpoint enabled bulk tokens");
+    machine.bus.write32(machine.bus.ctx, 0x804u, GUEST_PACKET_TX_SVC);
+    CHECK(vm_network_session_attach_packet_bridge(session, &bridge), "bulk attach failed");
+    CHECK(!vm_network_session_attach_packet_bridge(session, &bridge), "double attach accepted");
+    ppp_peer_t guest;
+    CHECK(open_test_ppp_link(&machine, session, &guest), "bulk setup lost stock IPCP");
+    guest_ip_sink_t sink = {0};
+    ppp_set_ip_sink(&guest, capture_guest_ip, &sink);
+    uint8_t packet[64];
+    for (unsigned i = 0u; i < 3u; i++) {
+        size_t n = build_echo_request(packet, sizeof packet, (uint16_t)(i+1u));
+        CHECK(bridge.send(bridge.ctx, packet, n), "bulk guest output failed");
+    }
+    vm_network_status_t before, status;
+    vm_network_session_status(session, &before);
+    CHECK(run_service_boundary(&machine), "bulk service failed");
+    receive_host_ppp_bytes(&machine, &guest);
+    vm_network_session_status(session, &status);
+    CHECK(status.packet_offload && status.net_to_guest == before.net_to_guest+3u,
+          "bulk transport retained one-packet scheduling");
+    /* This fixture uses PIO, not the real driver's demand-refilled DMA. Its
+     * 16-byte FIFO needs further service boundaries to carry the tokens. */
+    for (unsigned turn = 0u; turn < 16u && sink.packets < 3u; turn++) {
+        CHECK(run_service_boundary(&machine), "token refill failed");
+        receive_host_ppp_bytes(&machine, &guest);
+    }
+    CHECK(sink.packets == 3u && sink.length == GUEST_PACKET_TOKEN_SIZE,
+          "UART notification packets/length=%u/%zu ip=%llu bad=%llu pending=%u",
+          sink.packets, sink.length, (unsigned long long)guest.stats.ip_frames_in,
+          (unsigned long long)guest.stats.fcs_errors, machine.uart4.rx_count);
+    const uint8_t *reply = NULL;
+    size_t n = bridge.peek(bridge.ctx, sink.last, &reply);
+    CHECK(n == 32u && reply && reply[20] == 0u && net_checksum(reply, 20u) == 0u,
+          "guest packet queue did not retain the actual ICMP reply");
+    bridge.consume(bridge.ctx); /* the first two notifications were lost */
+    vm_network_session_status(session, &status);
+    CHECK(status.net_to_guest_lost == 2u,
+          "lost earlier notifications wedged or silently disappeared");
+    CHECK(bridge.peek(bridge.ctx, sink.last, &reply) == 0u,
+          "duplicate notification reused a consumed packet");
+    n = build_echo_request(packet, sizeof packet, 4u);
+    CHECK(bridge.send(bridge.ctx, packet, n), "send after notification loss failed");
+    CHECK(run_service_boundary(&machine), "second bulk service failed");
+    receive_host_ppp_bytes(&machine, &guest);
+    for (unsigned turn = 0u; turn < 16u && sink.packets < 4u; turn++) {
+        CHECK(run_service_boundary(&machine), "second token refill failed");
+        receive_host_ppp_bytes(&machine, &guest);
+    }
+    CHECK(sink.packets == 4u, "notification after lost tokens did not arrive");
+    clock.now_ns += UINT64_C(5000000000);
+    CHECK(run_service_boundary(&machine), "expiration service failed");
+    CHECK(bridge.peek(bridge.ctx, sink.last, &reply) == 0u,
+          "fully lost notifications retained their slots forever");
+    vm_network_session_status(session, &status);
+    CHECK(status.net_to_guest_lost == 3u, "expired notification loss unreported");
+    vm_network_session_destroy(&session);
+    CHECK(!bridge.ctx && !bridge.send && !bridge.peek && !bridge.consume,
+          "destroy left dangling host packet callbacks");
+    s5l8900_free(&machine);
+}
+
 int main(void) {
     printf("S5LBox iOS PPP/NAT attachment tests\n");
     test_ppp_attachment_closes_the_uart_loop();
@@ -537,6 +616,7 @@ int main(void) {
     test_restored_guest_reopens_replaced_host_peer();
     test_restore_retry_uses_monotonic_host_time();
     test_invalid_create_fails_closed();
+    test_bulk_packets_use_tokens_and_recover_lost_notifications();
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

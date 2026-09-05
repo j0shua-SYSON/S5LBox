@@ -642,6 +642,7 @@ void net_config_default(net_config_t *cfg) {
      * invisible.
      */
     cfg->iss = 0x5335384cu;        /* "S58L" */
+    cfg->tcp_cwnd_segments = 0u;
 }
 
 void net_init(net_stack_t *ns, const net_config_t *cfg,

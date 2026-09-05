@@ -36,6 +36,7 @@
 #include "macho.h"
 #include "md_bridge.h"
 #include "md_raw_bridge.h"
+#include "guest_packet_bridge.h"
 #include "soc.h"
 #include "vm_block.h"
 
@@ -309,6 +310,8 @@ typedef struct {
     uint32_t md_write_site_pc;
     uint32_t md_raw_site_pc;
     uint32_t uiomove_pc;
+    /* Optional packet-copy sites, supplied only by an exact firmware gate. */
+    guest_packet_sites_t packet_sites;
 
     /* NULL selects S5L_BRINGUP_DEFAULT_CMDLINE. "rd=md0" is appended when a
      * root medium is supplied and the caller has not already named one. */
@@ -382,6 +385,7 @@ typedef struct {
 typedef struct {
     md_bridge_t     strategy;
     md_raw_bridge_t raw;
+    guest_packet_bridge_t packet;
     bool            installed;
 } s5l_bringup_md_t;
 

@@ -95,6 +95,14 @@ static bool tcp_out(net_stack_t *ns, net_flow_t *f, uint8_t flags,
                                        NET_PROTO_TCP, seg, total));
 
     if (net_emit(ns, f->dst_ip, ns->cfg.guest_ip, NET_PROTO_TCP, seg, total)) {
+        /* Only a successful emission commits sequence space. Keep the high
+         * water mark when snd_nxt later rewinds for go-back-N recovery. */
+        if (n || (flags & (TCP_SYN | TCP_FIN))) {
+            uint32_t end = seq + (uint32_t)n;
+            if (flags & TCP_SYN) end++;
+            if (flags & TCP_FIN) end++;
+            if (net_seq_lt(f->snd_max, end)) f->snd_max = end;
+        }
         ns->stats.tcp_out++;
         if (n) ns->stats.tcp_bytes_to_guest += n;
         if (flags & TCP_ACK) f->need_ack = false;
@@ -223,7 +231,9 @@ static uint32_t tcp_initial_cwnd(uint16_t mss) {
 }
 
 static uint32_t tcp_cwnd_ceiling(const net_flow_t *f) {
-    uint32_t ceiling = NET_TCP_CWND_MAX_SEGMENTS * (uint32_t)f->mss;
+    uint32_t segments = f->cwnd_limit ? f->cwnd_limit : NET_TCP_CWND_MAX_SEGMENTS;
+    if (segments > NET_OUT_SLOTS) segments = NET_OUT_SLOTS;
+    uint32_t ceiling = segments * (uint32_t)f->mss;
     return ceiling < NET_TCP_TXBUF ? ceiling : NET_TCP_TXBUF;
 }
 
@@ -316,29 +326,11 @@ static bool tcp_guest_finished(net_tcp_state_t s) {
 }
 
 static void tcp_consume_ack(net_stack_t *ns, net_flow_t *f, uint32_t ack) {
-    /*
-     * RFC 793 §3.9's acceptance test is SND.UNA < SEG.ACK =< SND.NXT, and the
-     * ceiling has to be BOTH of the things below because neither alone is it.
-     *
-     * The buffer end — snd_una + txlen, plus one if our FIN is committed —
-     * does not count the SYN. A SYN occupies a sequence number of its own and
-     * is not buffer content, so in SYN-RCVD that expression evaluates to
-     * snd_una and the handshake's own ACK, which is snd_una + 1, lands one past
-     * it and is rejected. Every connection then sat in SYN-RCVD forever.
-     * core/tests/test_net.c's handshake case is that bug, and it is the reason
-     * this suite exists at all: nothing above a NAT that cannot open a
-     * connection produces a diagnosable symptom.
-     *
-     * snd_nxt alone is not it either, because a retransmission rewinds snd_nxt
-     * to snd_una (the go-back-N in net_tcp_tick), and an ACK for data we really
-     * did send before the rewind would then read as acking something unsent.
-     *
-     * Whichever is higher covers both and invents nothing: it is exactly "the
-     * furthest sequence this connection has either sent or committed to send".
-     */
-    uint32_t end = f->snd_una + f->txlen + (f->fin_sent ? 1u : 0u);
-    if (net_seq_lt(end, f->snd_nxt)) end = f->snd_nxt;
-    if (!net_seq_lt(f->snd_una, ack) || !net_seq_le(ack, end)) return;
+    /* snd_max is RFC 9293's transmitted right edge, including SYN/FIN but
+     * excluding buffered, unsent bytes. Our snd_nxt is also a retransmit
+     * cursor, so it alone cannot validate an ACK after go-back-N rewinds it. */
+    if (!net_seq_lt(f->snd_una, ack) ||
+        !net_seq_le(ack, f->snd_max)) return;
 
     uint32_t dat = ack - f->snd_una;
     bool fin_acked = f->fin_sent && dat > f->txlen;
@@ -400,6 +392,7 @@ static void tcp_syn(net_stack_t *ns, uint32_t dst_ip,
     if (f->mss > NET_TCP_MSS_MAX) f->mss = NET_TCP_MSS_MAX;
     if (f->mss < 64u) f->mss = 64u;                /* a hostile tiny MSS     */
     f->cwnd = tcp_initial_cwnd(f->mss);
+    f->cwnd_limit = ns->cfg.tcp_cwnd_segments;
     f->ssthresh = tcp_cwnd_ceiling(f);
 
     /*
@@ -410,7 +403,7 @@ static void tcp_syn(net_stack_t *ns, uint32_t dst_ip,
      * reach it is the guest at the other end of a UART.
      */
     ns->iss_walk += 0x9e3779b9u;
-    f->snd_una = f->snd_nxt = ns->iss_walk;
+    f->snd_una = f->snd_nxt = f->snd_max = ns->iss_walk;
 
     f->handle = ns->eg.open ? ns->eg.open(ns->eg.ctx, NET_PROTO_TCP,
                                           dst_ip, dport)
@@ -486,6 +479,22 @@ void net_tcp_input(net_stack_t *ns, uint32_t src, uint32_t dst,
     }
 
     if (!(flags & TCP_ACK)) return;      /* everything past the SYN carries it */
+
+    /* Validate before admitting the advertised window, payload or FIN.
+     * Buffered bytes and a committed-but-unsent FIN are not acknowledgeable.
+     * In SYN-RCVD there must also be a genuinely emitted SYN to acknowledge;
+     * an ACK cannot turn a pending host connect into an established flow. */
+    bool future_ack = net_seq_lt(f->snd_max, sack);
+    if (f->state == NET_TCP_SYN_RCVD &&
+        (future_ack || !net_seq_lt(f->snd_una, sack))) {
+        tcp_reject(ns, dst, seg, n, paylen);
+        return;
+    }
+    if (future_ack) {
+        f->need_ack = true;
+        tcp_out(ns, f, TCP_ACK, f->snd_nxt, NULL, 0u);
+        return;
+    }
 
     f->snd_wnd = net_rd16(seg + 14);
     tcp_consume_ack(ns, f, sack);

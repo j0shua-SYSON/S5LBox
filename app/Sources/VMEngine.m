@@ -2242,6 +2242,16 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
                     (unsigned long long)networkStatus.dma_guest_rx.bytes]
                 : @"none"];
     }
+    if (haveNetwork && networkStatus.packet_offload) {
+        networkText = [networkText stringByAppendingFormat:
+            @"  | bulk tx/rx %llu/%llu pkt %llu/%llu B stale/fail %llu/%llu",
+            (unsigned long long)networkStatus.bulk_tx_packets,
+            (unsigned long long)networkStatus.bulk_rx_packets,
+            (unsigned long long)networkStatus.bulk_tx_bytes,
+            (unsigned long long)networkStatus.bulk_rx_bytes,
+            (unsigned long long)networkStatus.bulk_stale_tokens,
+            (unsigned long long)networkStatus.bulk_failures];
+    }
     /* The mode leads, because "3.2 M insn/s" means something different
      * depending on what is retiring them, and a user who cannot see which
      * guest is running has no way to tell. */

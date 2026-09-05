@@ -49,6 +49,13 @@ struct vm_network_session {
     vm_network_dgram_t inbound[NET_OUT_SLOTS];
     unsigned      inbound_head;
     unsigned      inbound_tail;
+    guest_packet_bridge_t *packet_bridge; /* borrowed from boot bridges */
+    vm_network_dgram_t bulk_rx[NET_OUT_SLOTS];
+    uint8_t bulk_token[NET_OUT_SLOTS][GUEST_PACKET_TOKEN_SIZE];
+    uint32_t bulk_queued_ms[NET_OUT_SLOTS];
+    unsigned bulk_head, bulk_tail;
+    unsigned bulk_peek;
+    uint64_t bulk_id;
 };
 
 static void anchor_host_clock(vm_network_session_t *session) {
@@ -92,6 +99,73 @@ static void queue_guest_ip(void *ctx, const uint8_t *packet, size_t length) {
     memcpy(slot->bytes, packet, length);
     session->inbound_tail = next;
     session->guest_ip_queued++;
+}
+
+static bool bulk_guest_send(void *ctx, const uint8_t *packet, size_t length) {
+    vm_network_session_t *s = (vm_network_session_t *)ctx;
+    if (!s || !s->peer || !ppp_ipcp_open(s->peer) ||
+        inbound_next(s->inbound_tail) == s->inbound_head || !packet ||
+        length < 20u || length > NET_MTU) return false;
+    queue_guest_ip(s, packet, length);
+    return true;
+}
+
+static size_t bulk_guest_peek(void *ctx, const uint8_t token[16],
+                               const uint8_t **packet) {
+    vm_network_session_t *s = (vm_network_session_t *)ctx;
+    if (!ppp_ipcp_open(s->peer)) return 0u;
+    for (unsigned i = s->bulk_head; i != s->bulk_tail; i = inbound_next(i)) {
+        if (memcmp(token, s->bulk_token[i], 16u)) continue;
+        s->bulk_peek = i;
+        *packet = s->bulk_rx[i].bytes;
+        return s->bulk_rx[i].len;
+    }
+    return 0u;
+}
+
+static void bulk_guest_consume(void *ctx) {
+    vm_network_session_t *s = (vm_network_session_t *)ctx;
+    /* UART is ordered. A later token means earlier notifications were lost;
+     * account for loss and let guest TCP recover, never wedge the whole link. */
+    while (s->bulk_head != s->bulk_peek) {
+        s->bulk_rx[s->bulk_head].len = 0u;
+        s->bulk_head = inbound_next(s->bulk_head);
+        s->net_to_guest_lost++;
+    }
+    s->bulk_rx[s->bulk_head].len = 0u;
+    s->bulk_head = inbound_next(s->bulk_head);
+}
+
+bool vm_network_session_attach_packet_bridge(vm_network_session_t *s,
+                                             guest_packet_bridge_t *b) {
+    if (!s || !s->machine || !s->net || !b || b->ctx || s->packet_bridge ||
+        b->ram != s->machine->ram || !b->sites.rx_pc || !b->sites.tx_pc)
+        return false;
+    const uint32_t sites[] = {b->sites.rx_pc, b->sites.tx_pc};
+    const uint32_t opcodes[] = {GUEST_PACKET_RX_SVC, GUEST_PACKET_TX_SVC};
+    for (unsigned i = 0u; i < 2u; i++) {
+        if (sites[i] < UINT32_C(0xc0000000)) return false;
+        uint64_t offset = sites[i] - UINT32_C(0xc0000000);
+        if (offset > b->ram_size || b->ram_size - offset < 4u) return false;
+        uint32_t word;
+        memcpy(&word, b->ram + offset, sizeof word);
+        if (word != opcodes[i]) return false;
+    }
+    uint64_t now = 0u;
+    if (s->host_now) (void)s->host_now(s->host_now_ctx, &now);
+    /* Epoch separates stale checkpoint notifications from this socket owner.
+     * Production uses host monotonic nanoseconds; pointer salt also separates
+     * deterministic-clock owners in tests. Tokens grant no host privileges. */
+    s->bulk_id = now ^ ((uint64_t)(uintptr_t)s << 17);
+    b->ctx = s;
+    b->send = bulk_guest_send;
+    b->peek = bulk_guest_peek;
+    b->consume = bulk_guest_consume;
+    s->packet_bridge = b;
+    s->net->cfg.tcp_cwnd_segments = NET_OUT_SLOTS;
+    (void)fprintf(stderr, "[network] bulk packet transport attached; "
+                         "serial carries setup and delivery notifications only\n");
+    return true;
 }
 
 static bool open_peer(vm_network_session_t *session, const char *trigger) {
@@ -207,6 +281,15 @@ static void uart4_host_service(void *ctx, unsigned retired) {
         session->retired_since_open += (uint64_t)retired;
     uint32_t now_ms = network_milliseconds(session);
     ppp_tick(session->peer, now_ms);
+    /* Host queues are bounded and transient. Lost serial notifications must
+     * not reserve their packet slots forever or block all later connections. */
+    while (session->bulk_head != session->bulk_tail &&
+           (!ppp_ipcp_open(session->peer) ||
+            (uint32_t)(now_ms - session->bulk_queued_ms[session->bulk_head]) >= 4000u)) {
+        session->bulk_rx[session->bulk_head].len = 0u;
+        session->bulk_head = inbound_next(session->bulk_head);
+        session->net_to_guest_lost++;
+    }
 
     if (session->net) {
         /* Input gets this boundary's time before it can restart a TCP timer.
@@ -215,7 +298,7 @@ static void uart4_host_service(void *ctx, unsigned retired) {
         drain_guest_ip(session, now_ms);
         net_tick(session->net, now_ms);
         for (unsigned sent = 0u;
-             sent < VM_NETWORK_IP_DATAGRAMS_PER_SERVICE;
+             sent < (session->packet_bridge ? 16u : VM_NETWORK_IP_DATAGRAMS_PER_SERVICE);
              sent++) {
             /* net_output() consumes a datagram. Reserve enough encoded space
              * before consuming it so a full PPP ring is ordinary
@@ -226,6 +309,25 @@ static void uart4_host_service(void *ctx, unsigned retired) {
             if (!ppp_ipcp_open(session->peer) ||
                 ppp_output_capacity(session->peer) < worst_frame)
                 break;
+            if (session->packet_bridge) {
+                unsigned slot = session->bulk_tail;
+                unsigned next = inbound_next(slot);
+                if (next == session->bulk_head) break;
+                vm_network_dgram_t *d = &session->bulk_rx[slot];
+                size_t n = net_output(session->net, d->bytes, sizeof d->bytes);
+                if (!n) break;
+                d->len = (uint16_t)n;
+                session->bulk_queued_ms[slot] = now_ms;
+                guest_packet_token(session->bulk_token[slot], ++session->bulk_id);
+                if (!ppp_send_ip(session->peer, session->bulk_token[slot],
+                                 GUEST_PACKET_TOKEN_SIZE)) {
+                    session->net_to_guest_lost++;
+                    break;
+                }
+                session->bulk_tail = next;
+                session->net_to_guest++;
+                continue;
+            }
             uint8_t packet[NET_MTU];
             size_t length = net_output(session->net, packet, sizeof packet);
             if (!length) break;
@@ -349,6 +451,16 @@ void vm_network_session_status(const vm_network_session_t *session,
     out->attached = session->machine &&
                     session->machine->uart4_host_ctx == session;
     out->nat_enabled = session->nat_enabled;
+    out->packet_offload = session->packet_bridge != NULL;
+    if (session->packet_bridge) {
+        const guest_packet_bridge_t *b = session->packet_bridge;
+        out->bulk_tx_packets = b->tx_packets;
+        out->bulk_tx_bytes = b->tx_bytes;
+        out->bulk_rx_packets = b->rx_packets;
+        out->bulk_rx_bytes = b->rx_bytes;
+        out->bulk_stale_tokens = b->stale_tokens;
+        out->bulk_failures = b->failures;
+    }
     out->peer_opened = session->peer_opened;
     out->host_clock_enabled = session->host_now != NULL;
     out->host_clock_anchored = session->host_clock_anchored;
@@ -489,6 +601,12 @@ void vm_network_session_status(const vm_network_session_t *session,
 void vm_network_session_destroy(vm_network_session_t **slot) {
     if (!slot || !*slot) return;
     vm_network_session_t *session = *slot;
+    if (session->packet_bridge && session->packet_bridge->ctx == session) {
+        session->packet_bridge->send = NULL;
+        session->packet_bridge->peek = NULL;
+        session->packet_bridge->consume = NULL;
+        session->packet_bridge->ctx = NULL;
+    }
     if (session->machine &&
         session->machine->uart4_host_tx == uart4_guest_tx &&
         session->machine->uart4_host_service == uart4_host_service &&

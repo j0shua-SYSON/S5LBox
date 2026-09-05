@@ -1138,6 +1138,132 @@ static void test_bulk_data_starts_with_a_bounded_ack_clocked_flight(void) {
           "paced bulk output still overfilled its bounded queue");
 }
 
+/* Acknowledging bytes merely buffered for transmission must not remove them
+ * or admit any other state changes carried by that invalid segment. */
+static void test_future_ack_cannot_discard_unsent_data_or_admit_its_payload(void) {
+    pkt_t r;
+    uint32_t gseq;
+    start(true, false);
+    uint32_t ours = handshake(50110u, &gseq);
+    drain();
+    send_tcp(PEER_IP, 50110u, 80u, gseq, ours, TCP_ACK, 8u,
+             NULL, 0u, NULL, 0u);
+    for (unsigned i = 0u; i < 16u; i++) g_mock.h[0].give[i] = (uint8_t)i;
+    g_mock.h[0].givelen = 16u;
+    net_tick(&g_ns, 10u);
+    CHECK(take(&r) && r.seq == ours && r.paylen == 8u && !take(&r),
+          "small window did not leave eight bytes unsent");
+    uint32_t deadline = g_ns.flow[0].rto_at;
+
+    /* The second half is buffered but has NEVER been emitted. An ACK for it
+     * must not discard that half, update the window, deliver data, or close
+     * the guest's side merely because this invalid segment also carries FIN. */
+    static const uint8_t bad[] = { 'b', 'a', 'd' };
+    send_tcp(PEER_IP, 50110u, 80u, gseq, ours + 16u,
+             TCP_ACK | TCP_FIN, 0u, bad, sizeof bad, NULL, 0u);
+    net_flow_t *f = &g_ns.flow[0];
+    CHECK(f->used && f->state == NET_TCP_ESTABLISHED &&
+          f->snd_una == ours && f->snd_nxt == ours + 8u && f->txlen == 16u,
+          "future ACK discarded unsent data or changed connection state");
+    CHECK(f->snd_wnd == 8u && f->rcv_nxt == gseq &&
+          f->rto_on && f->rto_at == deadline &&
+          g_mock.h[0].sentlen == 0u && !g_mock.h[0].shutdown,
+          "invalid ACK changed window/timer or admitted its data/FIN");
+    CHECK(take(&r) && r.flags == TCP_ACK && r.seq == ours + 8u &&
+          r.ack == gseq && r.paylen == 0u && !take(&r),
+          "future ACK did not receive only the current empty acknowledgement");
+
+    send_tcp(PEER_IP, 50110u, 80u, gseq, ours + 8u, TCP_ACK, 8u,
+             NULL, 0u, NULL, 0u);
+    CHECK(take(&r) && r.seq == ours + 8u && r.paylen == 8u &&
+          memcmp(r.pay, g_mock.h[0].give + 8u, 8u) == 0,
+          "the valid ACK could not release the preserved unsent bytes");
+}
+
+static void test_packet_transport_grows_after_real_acks(void) {
+    pkt_t r;
+    uint32_t gseq;
+    start(true, false);
+    g_ns.cfg.tcp_cwnd_segments = NET_OUT_SLOTS;
+    uint32_t ours = handshake(50017u, &gseq);
+    CHECK(ours != 0u, "packet transport handshake failed");
+    drain();
+    send_tcp(PEER_IP, 50017u, 80u, gseq, ours, TCP_ACK, 65535u,
+             NULL, 0u, NULL, 0u);
+    drain();
+    g_mock.h[0].stream_left = 512u * 1024u;
+    g_mock.h[0].recv_err = NET_EG_WOULDBLOCK;
+    net_tick(&g_ns, 10u);
+    CHECK(net_output_pending(&g_ns) == 3u,
+          "packet offload bypassed the initial congestion window");
+    size_t max_flight = 0u;
+    for (unsigned round = 0; round < 20u; round++) {
+        size_t bytes = 0u;
+        while (take(&r)) bytes += r.paylen;
+        if (bytes > max_flight) max_flight = bytes;
+        ours += (uint32_t)bytes;
+        send_tcp(PEER_IP, 50017u, 80u, gseq, ours, TCP_ACK, 65535u,
+                 NULL, 0u, NULL, 0u);
+        net_tick(&g_ns, 11u + round);
+    }
+    CHECK(max_flight > 3u * NET_TCP_MSS_MAX,
+          "new packet transport still has the serial three-packet ceiling");
+    CHECK(max_flight <= NET_OUT_SLOTS * NET_TCP_MSS_MAX,
+          "packet transport exceeded its bounded flight capacity");
+    CHECK(g_ns.stats.tcp_retransmits == 0u,
+          "ideal packet transport unexpectedly retransmitted");
+}
+
+static void test_ack_cannot_establish_before_syn_ack_was_sent(void) {
+    pkt_t r;
+    start(true, false);
+    g_mock.open_status = NET_ST_PENDING;
+    send_tcp(PEER_IP, 50111u, 80u, 1000u, 0u, TCP_SYN, 8192u,
+             NULL, 0u, NULL, 0u);
+    CHECK(!take(&r), "pending host connect unexpectedly sent a SYN-ACK");
+    net_flow_t *f = &g_ns.flow[0];
+    uint32_t iss = f->snd_una;
+    static const uint8_t payload = 0x5au;
+    send_tcp(PEER_IP, 50111u, 80u, 1001u, iss, TCP_ACK, 8192u,
+             &payload, 1u, NULL, 0u);
+    CHECK(f->used && f->state == NET_TCP_SYN_RCVD &&
+          g_ns.stats.tcp_established == 0u && g_mock.h[0].sentlen == 0u,
+          "ACK established or sent data through a still-pending connection");
+    CHECK(take(&r) && r.flags == TCP_RST && r.seq == iss && !take(&r),
+          "unacceptable handshake ACK was not rejected with a reset");
+    g_mock.h[0].status = NET_ST_READY;
+    net_tick(&g_ns, 10u);
+    CHECK(take(&r) && r.flags == (TCP_SYN | TCP_ACK) && r.seq == iss,
+          "rejecting an invalid ACK broke the eventual real handshake");
+}
+
+static void test_ack_of_original_flight_survives_retransmit_rewind(void) {
+    pkt_t r;
+    uint32_t gseq;
+    start(true, false);
+    uint32_t ours = handshake(50112u, &gseq);
+    drain();
+    g_mock.h[0].stream_left = 6u * NET_TCP_MSS_MAX;
+    net_tick(&g_ns, 10u);
+    CHECK(drain() == 3u, "initial flight was not three segments");
+    net_tick(&g_ns, 10u + NET_TCP_RTO_MS);
+    CHECK(take(&r) && r.seq == ours && r.paylen == NET_TCP_MSS_MAX &&
+          !take(&r), "timeout did not rewind to one retransmitted segment");
+
+    uint32_t original_end = ours + 3u * NET_TCP_MSS_MAX;
+    send_tcp(PEER_IP, 50112u, 80u, gseq, original_end, TCP_ACK, 0u,
+             NULL, 0u, NULL, 0u);
+    net_flow_t *f = &g_ns.flow[0];
+    CHECK(f->snd_una == original_end && f->snd_nxt == original_end &&
+          f->txlen == 3u * NET_TCP_MSS_MAX && f->rtx == 0u,
+          "a real ACK beyond the rewind point was incorrectly refused");
+    drain();
+    send_tcp(PEER_IP, 50112u, 80u, gseq, original_end + 1u, TCP_ACK, 0u,
+             NULL, 0u, NULL, 0u);
+    CHECK(f->snd_una == original_end && f->txlen == 3u * NET_TCP_MSS_MAX,
+          "the rewind exception admitted a byte never in the original flight");
+}
+
 /* A full bounded queue is backpressure, not evidence that bytes reached the
  * guest. Once room returns, TCP must send immediately rather than waiting an
  * emulated-second RTO for data it only imagined it had emitted. */
@@ -1921,6 +2047,10 @@ int main(void) {
     RUN(test_data_crosses_in_both_directions);
     RUN(test_a_bigboss_sized_stream_arrives_byte_exact);
     RUN(test_bulk_data_starts_with_a_bounded_ack_clocked_flight);
+    RUN(test_future_ack_cannot_discard_unsent_data_or_admit_its_payload);
+    RUN(test_packet_transport_grows_after_real_acks);
+    RUN(test_ack_cannot_establish_before_syn_ack_was_sent);
+    RUN(test_ack_of_original_flight_survives_retransmit_rewind);
     RUN(test_a_full_output_queue_does_not_strand_tcp_data);
     RUN(test_the_guests_window_bounds_what_we_send);
     RUN(test_live_tcp_status_names_the_buffered_flow);

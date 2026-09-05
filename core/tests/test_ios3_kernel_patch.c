@@ -87,6 +87,16 @@ static const expected_site_t expected_sites[] = {
         {0xf0u, 0xb5u, 0x46u, 0x46u},
         {0xe3u, 0xdfu, 0xe4u, 0xdfu},
         IOS3_KERNEL_PATCH_SITE_RAW_WATCHER
+    },
+    {
+        IOS3_KERNEL_PATCH_PACKET_RX_VA, 4u,
+        {0x02u, 0x10u, 0x46u, 0xe2u}, {0xf0u, 0x00u, 0x00u, 0xefu},
+        IOS3_KERNEL_PATCH_SITE_PACKET_RX
+    },
+    {
+        IOS3_KERNEL_PATCH_PACKET_TX_VA, 4u,
+        {0x36u, 0xffu, 0x2fu, 0xe1u}, {0xf1u, 0x00u, 0x00u, 0xefu},
+        IOS3_KERNEL_PATCH_SITE_PACKET_TX
     }
 };
 
@@ -134,6 +144,8 @@ static size_t ram_offset_for_va(uint32_t va) {
 }
 
 static size_t text_file_offset_for_va(uint32_t va) {
+    if (va >= UINT32_C(0xc02cd000))
+        return (size_t)(va - UINT32_C(0xc02cd000) + UINT32_C(0x0028f000));
     return (size_t)(va - UINT32_C(0xc0008000));
 }
 

@@ -60,6 +60,22 @@ static const guest_patch_entry_t kernel_patches[] = {
          * has resolved any user-page fault and returned.
          */
         .replacement = {0xe3u, 0xdfu, 0xe4u, 0xdfu}
+    },
+    {
+        /* After FCS removal and chain detachment, before pkthdr_setlen.
+         * Unoffloaded frames execute the original sub r1,r6,#2 in the bridge. */
+        .virtual_address = IOS3_KERNEL_PATCH_PACKET_RX_VA,
+        .length = 4u,
+        .expected = {0x02u, 0x10u, 0x46u, 0xe2u},
+        .replacement = {0xf0u, 0x00u, 0x00u, 0xefu}
+    },
+    {
+        /* pppserial_lk_output's first mbuf_type call. The original blx r6 is
+         * retained for every control packet and whenever offload is detached. */
+        .virtual_address = IOS3_KERNEL_PATCH_PACKET_TX_VA,
+        .length = 4u,
+        .expected = {0x36u, 0xffu, 0x2fu, 0xe1u},
+        .replacement = {0xf1u, 0x00u, 0x00u, 0xefu}
     }
 };
 
@@ -699,6 +715,8 @@ const char *ios3_kernel_patch_site_string(uint32_t site) {
     case IOS3_KERNEL_PATCH_SITE_MD_READ: return "mdevstrategy read";
     case IOS3_KERNEL_PATCH_SITE_MD_WRITE: return "mdevstrategy write";
     case IOS3_KERNEL_PATCH_SITE_RAW_WATCHER: return "mdevrw raw watcher";
+    case IOS3_KERNEL_PATCH_SITE_PACKET_RX: return "packet receive handoff";
+    case IOS3_KERNEL_PATCH_SITE_PACKET_TX: return "packet transmit handoff";
     case IOS3_KERNEL_PATCH_NO_SITE: return "none";
     default: return "unknown kernel patch site";
     }
