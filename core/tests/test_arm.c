@@ -6093,6 +6093,58 @@ static void test_thumb2_fetch_across_page_boundary(void) {
     }
 }
 
+static void test_thumb2_modified_immediate_moves(void) {
+    /* Independent expected constants cover every replication form and the
+     * edges of the rotated form in DDI0406C.b table A6-11. */
+    static const struct { uint16_t imm12; uint32_t value; } cases[] = {
+        {0x000u, 0u}, {0x080u, 0x80u}, {0x0ffu, 0xffu},
+        {0x112u, 0x00120012u}, {0x234u, 0x34003400u},
+        {0x3abu, 0xababababu}, {0x3ffu, 0xffffffffu},
+        {0x400u, 0x80000000u}, {0x47fu, 0xff000000u},
+        {0x480u, 0x40000000u}, {0x7ffu, 0x01fe0000u},
+        {0x800u, 0x00800000u}, {0xf80u, 0x100u}, {0xfffu, 0x1feu}
+    };
+    for (unsigned flag = 0; flag < 2; flag++) {
+        for (unsigned carry = 0; carry < 2; carry++) {
+            for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+                arm_cpu_t c;
+                CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+                c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_Z | ARM_CPSR_V | ARM_CPSR_Q;
+                if (carry) c.cpsr |= ARM_CPSR_C;
+                uint32_t flags = c.cpsr;
+                c.r[1] = 0x12345678u;
+                c.r[14] = 0x777u;
+                uint16_t imm = cases[i].imm12;
+                m_w16(NULL, 0, (uint16_t)(0xf04fu | (flag << 4) | ((imm & 0x800u) >> 1)));
+                m_w16(NULL, 2, (uint16_t)(0x100u | ((imm & 0x700u) << 4) | (imm & 0xffu)));
+                if (flag) {
+                    flags &= ~(ARM_CPSR_N | ARM_CPSR_Z | ARM_CPSR_C);
+                    if (cases[i].value & 0x80000000u) flags |= ARM_CPSR_N;
+                    if (!cases[i].value) flags |= ARM_CPSR_Z;
+                    if (imm < 0x400u ? carry : cases[i].value >> 31) flags |= ARM_CPSR_C;
+                }
+                CHECK(arm_step(&c) == ARM_OK && c.r[1] == cases[i].value &&
+                      c.r[14] == 0x777u && c.r[15] == 4u && c.cycles == 1u && c.cpsr == flags,
+                      "MOV%s.W immediate %03x, carry %u: result=%08x flags=%08x",
+                      flag ? "S" : "", imm, carry, c.r[1], c.cpsr);
+            }
+        }
+    }
+    for (unsigned bad = 0; bad < 5; bad++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_C;
+        uint32_t flags = c.cpsr;
+        c.r[1] = 0x12345678u; c.r[13] = 0x888u;
+        uint16_t second = bad < 3 ? (uint16_t)(((bad + 1u) << 12) | 0x100u) :
+                                   bad == 3 ? 0x0d01u : 0x0f01u;
+        m_w16(NULL, 0, 0xf05fu); m_w16(NULL, 2, second);
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[1] == 0x12345678u &&
+              c.r[13] == 0x888u && c.r[15] == 0u && c.cpsr == flags,
+              "unpredictable zero replication or SP/PC destination accepted");
+    }
+}
+
 int main(void) {
     test_reset_initializes_the_default_profile();
     test_explicit_profile_reset_and_invalid_configuration();
@@ -6101,6 +6153,7 @@ int main(void) {
     test_a32_barriers_observe_completed_stores();
     test_thumb2_movw_movt_and_unknown_width();
     test_thumb2_fetch_across_page_boundary();
+    test_thumb2_modified_immediate_moves();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();
     test_add_reg();

@@ -2757,6 +2757,36 @@ static arm_status_t thumb_step(arm_cpu_t *c, uint32_t pc, uint16_t insn,
 #undef TB
 
 static arm_status_t thumb32_step(arm_cpu_t *c, uint16_t first, uint16_t second) {
+    /* MOV/MOVS immediate T2 uses ThumbExpandImm_C, not the A32 rotated
+     * immediate. Replication forms preserve C; rotated forms supply bit 31.
+     * Zero replication is unpredictable (DDI0406C.b A6.3.2, A8.8.102). */
+    if ((first & 0xfbefu) == 0xf04fu && !(second & 0x8000u)) {
+        unsigned rd = (second >> 8) & 15u;
+        if (rd == 13u || rd == 15u) return ARM_UNDEFINED;
+        uint32_t imm12 = ((uint32_t)(first & 0x400u) << 1) |
+                         ((second & 0x7000u) >> 4) | (second & 0xffu);
+        uint32_t value = imm12 & 0xffu;
+        bool carry = (c->cpsr & ARM_CPSR_C) != 0;
+        if (imm12 < 0x400u) {
+            unsigned pattern = imm12 >> 8;
+            if (pattern && !value) return ARM_UNDEFINED;
+            if (pattern == 1u) value |= value << 16;
+            else if (pattern == 2u) value = (value << 24) | (value << 8);
+            else if (pattern == 3u) value *= 0x01010101u;
+        } else {
+            uint32_t unrotated = 0x80u | (imm12 & 0x7fu);
+            unsigned shift = imm12 >> 7; /* always 8..31 */
+            value = ror32(unrotated, shift);
+            carry = (value >> 31) != 0;
+        }
+        c->r[rd] = value;
+        if (first & 0x10u) {
+            set_flag(c, ARM_CPSR_N, (value >> 31) != 0);
+            set_flag(c, ARM_CPSR_Z, value == 0u);
+            set_flag(c, ARM_CPSR_C, carry);
+        }
+        return ARM_OK;
+    }
     /* MOVW T3 / MOVT T1: imm4:i:imm3:imm8, no flag changes. ARMv7 forbids
      * SP and PC here (DDI0406C.b A8.8.102/106). Check before any register write. */
     uint16_t operation = first & 0xfbf0u;

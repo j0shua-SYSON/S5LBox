@@ -69,6 +69,11 @@ restrictions from DDI0406C.b A8.8.102/106. Other wide operations stop as
 unsupported, rather than being misread as legacy BL halves. ARM1176 retains
 its existing two-step BL/BLX behavior.
 
+The wide MOV/MOVS immediate form implements Thumb's byte replication and
+rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates
+C only as prescribed by the immediate form, preserving V. Invalid zero
+replication and SP/PC destinations are refused before changing state.
+
 `arm_reset()` explicitly selects ARM1176 and is safe on uninitialized storage.
 `arm_reset_profile()` resets the implemented state with a validated explicit
 profile. Board reset/wake paths must select their own profile when a new board
@@ -90,8 +95,8 @@ establish that result.
 - The CP15 identification, cache/TLB controls, reset values, exception state,
   and memory translation paths still need a Cortex-A8 audit and implementation.
   The instruction profile is not a complete system-register model.
-- Thumb-2 currently implements MOVW/MOVT. Its other instruction families,
-  wide branches and IT state remain to implement.
+- Thumb-2 currently implements MOVW/MOVT and modified-immediate MOV/MOVS.
+  Its other instruction families, wide branches and IT state remain to implement.
 - VFP stores only d0-d15 and models VFP11/VFPv2. Cortex-A8 VFPv3 and NEON,
   including the wider register file and context-switch semantics, are absent.
 - The SoC, interrupt wiring, storage, graphics, input and power devices are
@@ -140,6 +145,8 @@ enables the MMU. The first wide-Thumb stop was MOVW at `0x802b826a`, after
 `0x802b827c`, Thumb halfwords `f04f 31ff` (`MOV.W r1,#0xffffffff`), after
 62,790 steps. This partial CPU execution does not establish a bootloader
 handoff, complete S5L8920 realization, kernel initialization or device boot.
+Adding the modified-immediate form advances the same trace to `0x802b8288`,
+halfwords `f8c4 2224` (`STR.W r2,[r4,#0x224]`), after 62,794 steps.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim
