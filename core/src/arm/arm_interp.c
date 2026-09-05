@@ -2775,6 +2775,25 @@ static arm_status_t thumb_step(arm_cpu_t *c, uint32_t pc, uint16_t insn,
 
 #undef TB
 
+static arm_status_t thumb_load_word(arm_cpu_t *c, uint32_t address, unsigned rt,
+                                    uint32_t *next) {
+    if (rt == 15u && (address & 3u)) {
+        if (!(c->cp15.sctlr & ARM_SCTLR_A)) return ARM_UNDEFINED;
+        note_alignment_abort(c, address, false);
+        return ARM_OK;
+    }
+    uint32_t value = mem_r32(c, address);
+    if (c->abort_pending) return ARM_OK;
+    if (rt == 15u && (value & 3u) == 2u) return ARM_UNDEFINED;
+    if (rt == 15u) {
+        set_flag(c, ARM_CPSR_T, (value & 1u) != 0u);
+        *next = value & ~1u;
+    } else {
+        c->r[rt] = value;
+    }
+    return ARM_OK;
+}
+
 static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
                                  uint16_t second, uint32_t *next) {
     /* Thumb LDM/STM IA/DB, including PUSH/POP (DDI0406C.b A6.3.5).
@@ -2847,24 +2866,33 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         uint32_t base = rn == 15u ? ((pc + 4u) & ~3u) : c->r[rn];
         uint32_t offset = second & 0xfffu;
         uint32_t address = (first & 0x80u) ? base + offset : base - offset;
+        if (load) return thumb_load_word(c, address, rt, next);
+        mem_w32(c, address, c->r[rt]);
+        return ARM_OK;
+    }
+    /* Signed imm8, pre/post-indexed LDR/STR and STRB/STRH, including
+     * single-register PUSH/POP aliases. P=U=1,W=0 belongs to the separate
+     * unprivileged family, and P=W=0 is unallocated. Validate before access. */
+    uint16_t indexed = first & 0xfff0u;
+    if ((indexed == 0xf800u || indexed == 0xf820u ||
+         indexed == 0xf840u || indexed == 0xf850u) && (second & 0x800u)) {
+        unsigned rn = first & 15u, rt = second >> 12;
+        bool load = indexed == 0xf850u, word = (first & 0x40u) != 0u;
+        bool pre = (second & 0x400u) != 0u, add = (second & 0x200u) != 0u;
+        bool wb = (second & 0x100u) != 0u;
+        if (rn == 15u || (!pre && !wb) || (pre && add && !wb) ||
+            (wb && rn == rt) || (!load && (rt == 15u || (!word && rt == 13u))))
+            return ARM_UNDEFINED;
+        uint32_t offset = second & 0xffu;
+        uint32_t adjusted = add ? c->r[rn] + offset : c->r[rn] - offset;
+        uint32_t address = pre ? adjusted : c->r[rn];
         if (load) {
-            if (rt == 15u && (address & 3u)) {
-                if (!(c->cp15.sctlr & ARM_SCTLR_A)) return ARM_UNDEFINED;
-                note_alignment_abort(c, address, false);
-                return ARM_OK;
-            }
-            uint32_t value = mem_r32(c, address);
-            if (c->abort_pending) return ARM_OK;
-            if (rt == 15u && (value & 3u) == 2u) return ARM_UNDEFINED;
-            if (rt == 15u) {
-                set_flag(c, ARM_CPSR_T, (value & 1u) != 0u);
-                *next = value & ~1u;
-            } else {
-                c->r[rt] = value;
-            }
-        } else {
-            mem_w32(c, address, c->r[rt]);
-        }
+            arm_status_t status = thumb_load_word(c, address, rt, next);
+            if (status != ARM_OK) return status;
+        } else if (word) mem_w32(c, address, c->r[rt]);
+        else if (first & 0x20u) mem_w16(c, address, (uint16_t)c->r[rt]);
+        else mem_w8(c, address, (uint8_t)c->r[rt]);
+        if (wb && !c->abort_pending) c->r[rn] = adjusted;
         return ARM_OK;
     }
     /* Modified immediate data processing (DDI0406C.b A6.3.1/2). MOV and

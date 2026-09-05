@@ -6796,6 +6796,139 @@ static void test_thumb2_small_store_aborts(void) {
     }
 }
 
+static void test_thumb2_indexed_transfers(void) {
+    const uint16_t opcodes[] = {0xf800u, 0xf820u, 0xf840u, 0xf850u};
+    const uint16_t offsets[] = {0u, 4u, 255u};
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2; profile++) {
+     for (unsigned host = 0; host < 2; host++) {
+      for (unsigned op = 0; op < 4; op++) {
+       for (unsigned puw = 0; puw < 8; puw++) {
+        for (unsigned imm = 0; imm < 3; imm++) {
+            arm_bus_t bus = g_bus;
+            if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &bus, profiles[profile]), "reset");
+            c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_V;
+            c.cp15.sctlr = 0u;
+            c.r[4] = 0x1100u; c.r[8] = 0x44332211u;
+            bool pre = (puw & 4u) != 0u, add = (puw & 2u) != 0u, wb = (puw & 1u) != 0u;
+            bool valid = (pre || wb) && puw != 6u; /* 110 is unprivileged, not ordinary. */
+            uint32_t adjusted = add ? 0x1100u + offsets[imm] : 0x1100u - offsets[imm];
+            uint32_t address = pre ? adjusted : 0x1100u, cpsr = c.cpsr;
+            memset(g_ram + 0x1000u, 0xee, 0x208u);
+            if (op == 3u) m_w32(NULL, address, 0x12345678u);
+            m_w16(NULL, 0, (uint16_t)(opcodes[op] | 4u));
+            m_w16(NULL, 2, (uint16_t)(0x8800u | (puw << 8) | offsets[imm]));
+            CHECK(arm_step(&c) == (valid ? ARM_OK : ARM_UNDEFINED) && c.cycles == 1u &&
+                  c.r[15] == (valid ? 4u : 0u) && c.cpsr == cpsr &&
+                  c.r[4] == (valid && wb ? adjusted : 0x1100u) &&
+                  c.r[8] == (valid && op == 3u ? 0x12345678u : 0x44332211u),
+                  "indexed wide transfer op=%u PUW=%u immediate=%u has wrong state", op, puw, offsets[imm]);
+            uint32_t expected = op == 3u ? 0x12345678u : !valid ? 0xeeeeeeeeu :
+                                op == 0u ? 0xeeeeee11u : op == 1u ? 0xeeee2211u : 0x44332211u;
+            CHECK(m_r32(NULL, address) == expected && g_ram[address - 1u] == 0xeeu &&
+                  g_ram[address + 4u] == 0xeeu, "indexed transfer wrote the wrong address or width");
+        }
+       }
+      }
+     }
+    }
+    for (unsigned op = 0; op < 4; op++) {
+     for (unsigned bad = 0; bad < 4; bad++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T;
+        c.r[4] = 0x100u;
+        /* Overlap; PC store; SP byte/halfword store. For loads, the latter
+         * cases exercise the unprivileged and P=W=0 encodings instead. */
+        unsigned rt = bad == 0 ? 4u : bad == 1 ? 15u : 13u;
+        unsigned puw = 7u;
+        if (op == 3u && bad) { rt = 8u; puw = bad == 1 ? 6u : 0u; }
+        if (op == 2u && bad == 2u) continue; /* STR permits SP as source. */
+        if (bad == 3u) {
+            if (op == 3u) continue; /* Rn=PC is the separately tested LDR literal. */
+            rt = 8u;
+        }
+        m_w16(NULL, 0, (uint16_t)(opcodes[op] | (bad == 3u ? 15u : 4u)));
+        m_w16(NULL, 2, (uint16_t)((rt << 12) | 0x800u | (puw << 8) | 4u));
+        m_w32(NULL, 0x104u, 0xeeeeeeeeu);
+        uint32_t cpsr = c.cpsr;
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.r[4] == 0x100u &&
+              c.cpsr == cpsr && m_r32(NULL, 0x104u) == 0xeeeeeeeeu,
+              "indexed transfer accepted restricted source, overlap or unprivileged alias");
+     }
+    }
+    /* Actual single-register PUSH and POP encodings, with SP writeback. */
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.cpsr |= ARM_CPSR_T; c.r[13] = 0x200u; c.r[8] = 0x13579bdfu;
+    m_w16(NULL, 0, 0xf84du); m_w16(NULL, 2, 0x8d04u);
+    m_w16(NULL, 4, 0xf85du); m_w16(NULL, 6, 0x8b04u);
+    CHECK(arm_step(&c) == ARM_OK && c.r[13] == 0x1fcu &&
+          m_r32(NULL, 0x1fcu) == 0x13579bdfu, "single-register PUSH failed");
+    c.r[8] = 0u;
+    CHECK(arm_step(&c) == ARM_OK && c.r[13] == 0x200u && c.r[8] == 0x13579bdfu &&
+          c.r[15] == 8u, "single-register POP failed");
+    c.r[4] = 0x200u;
+    m_w16(NULL, 8, 0xf844u); m_w16(NULL, 10, 0xdc04u); /* STR sp,[r4,#-4] */
+    m_w16(NULL, 12, 0xf854u); m_w16(NULL, 14, 0xdc04u); /* LDR sp,[r4,#-4] */
+    CHECK(arm_step(&c) == ARM_OK && m_r32(NULL, 0x1fcu) == 0x200u,
+          "indexed word store rejected SP source");
+    c.r[13] = 0u;
+    CHECK(arm_step(&c) == ARM_OK && c.r[13] == 0x200u && c.r[4] == 0x200u,
+          "indexed word load rejected SP destination or changed base without writeback");
+    for (unsigned target = 0; target < 4; target++) {
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T; c.r[13] = 0x200u;
+        m_w16(NULL, 0, 0xf85du); m_w16(NULL, 2, 0xfb04u); /* POP {pc} */
+        m_w32(NULL, 0x200u, 0x100u | target);
+        uint32_t cpsr = c.cpsr;
+        CHECK(arm_step(&c) == (target == 2u ? ARM_UNDEFINED : ARM_OK) &&
+              c.r[13] == (target == 2u ? 0x200u : 0x204u) &&
+              c.r[15] == (target == 2u ? 0u : (0x100u | target) & ~1u) &&
+              c.cpsr == (target == 0u ? cpsr & ~ARM_CPSR_T : cpsr),
+              "POP PC failed interworking or committed writeback for an invalid target");
+    }
+}
+
+static void test_thumb2_indexed_transfer_aborts(void) {
+    for (unsigned host = 0; host < 2; host++) {
+     for (unsigned load = 0; load < 2; load++) {
+      for (unsigned pre = 0; pre < 2; pre++) {
+       for (unsigned fault = 0; fault < 4; fault++) {
+        arm_cpu_t c;
+        arm_bus_t bus = g_bus;
+        if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
+        memset(g_ram, 0xee, sizeof g_ram);
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C;
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP | (fault == 3 ? ARM_SCTLR_A : 0u);
+        c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.r[4] = pre ? 0x1ffdu : 0x1ffeu; c.r[8] = 0x44332211u;
+        uint32_t cpsr = c.cpsr, base = c.r[4];
+        m_w32(NULL, 0x4000u, 0x6001u);
+        m_w32(NULL, 0x6000u, 0x803eu);
+        m_w32(NULL, 0x6004u, fault == 0u ? 0u : 0xa03eu);
+        m_w32(NULL, 0x6008u, fault == 1u ? 0u : 0xc01eu); /* user denied */
+        m_w16(NULL, 0x8000u, (uint16_t)(load ? 0xf854u : 0xf844u));
+        m_w16(NULL, 0x8002u, (uint16_t)(pre ? 0x8f01u : 0x8b01u));
+        uint32_t fsr = fault == 3u ? ARM_FSR_ALIGNMENT : fault == 2u ?
+                       ARM_FSR_PAGE_PERMISSION : ARM_FSR_PAGE_TRANSLATION;
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == ARM_VEC_DATA_ABORT && c.r[14] == 8u &&
+              c.r[4] == base && c.r[8] == 0x44332211u && c.spsr[ARM_BANK_ABT] == cpsr &&
+              c.cp15.dfar == (fault == 0u || fault == 3u ? 0x1ffeu : 0x2000u) &&
+              c.cp15.dfsr == (fsr | (load ? 0u : (1u << 11))),
+              "indexed transfer abort committed writeback/result or lost fault state");
+        CHECK(m_r16(NULL, 0xaffeu) == (!load && (fault == 1u || fault == 2u) ? 0x2211u : 0xeeeeu) &&
+              m_r32(NULL, 0xc000u) == 0xeeeeeeeeu,
+              "indexed transfer abort committed incorrect memory bytes");
+       }
+      }
+     }
+    }
+}
+
 static void test_thumb_compare_and_branch(void) {
     const arm_arch_t profiles[] = {ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
     const uint32_t offsets[] = {0u, 62u, 64u, 126u};
@@ -6858,6 +6991,8 @@ int main(void) {
     test_thumb2_word_load_aborts();
     test_thumb2_small_stores();
     test_thumb2_small_store_aborts();
+    test_thumb2_indexed_transfers();
+    test_thumb2_indexed_transfer_aborts();
     test_thumb_compare_and_branch();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();

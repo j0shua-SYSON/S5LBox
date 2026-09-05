@@ -100,6 +100,14 @@ before using the common multiple-transfer path. Tests check register order,
 writeback, loaded-PC interworking and transactional register restoration
 on a data abort; previously completed stores remain visible.
 
+Indexed wide LDR/STR and STRB/STRH implement signed imm8 offsets, pre/post
+indexing and single-register PUSH/POP. Writeback waits for a successful
+access; base/register overlap, invalid source registers and the separate
+unprivileged encodings are refused before accessing data. PC loads use the
+same alignment and interworking checks as unsigned-offset loads. Tests cover
+all P/U/W combinations, offset limits, stack aliases, invalid loaded targets
+and preserved base/result state after first/second-page faults.
+
 The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates
 C only as prescribed by the immediate form, preserving V. Invalid zero
@@ -150,7 +158,8 @@ establish that result.
   and memory translation paths still need a Cortex-A8 audit and implementation.
   The instruction profile is not a complete system-register model.
 - Thumb-2 currently implements MOVW/MOVT, modified-immediate MOV/MOVS and
-  arithmetic, LDR/STR and STRB/STRH with unsigned immediate offsets and LDR literals.
+  arithmetic, immediate LDR/STR and STRB/STRH (including pre/post indexing),
+  and LDR literals.
   Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple transfers are also implemented. Other
   instruction families and IT state remain to implement.
 - VFP stores only d0-d15 and models VFP11/VFPv2. Cortex-A8 VFPv3 and NEON,
@@ -227,9 +236,10 @@ video RAM reservation changes the early loop count, so its step counts are
 not directly comparable to the earlier harness. It first stops after 62,224
 steps at `0x8027b98e`, `f886 0064` (`STRB.W r0,[r6,#0x64]`). With byte stores
 implemented, it reaches `0x80089d80`, `f84d 8d04`
-(`STR.W r8,[sp,#-4]!`), after 62,237 steps. Indexed wide memory transfers
-remain unsupported. No device-tree placeholders or board registers are
-fabricated to advance this trace.
+(`STR.W r8,[sp,#-4]!`), after 62,237 steps. Indexed transfers then advance
+this same harness to `0x8027a3fe`, halfword `bf18` (`IT NE`), after 62,385
+steps. IT execution remains unsupported. No device-tree placeholders or
+board registers are fabricated to advance this trace.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim
