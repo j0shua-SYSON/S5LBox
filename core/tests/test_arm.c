@@ -9012,6 +9012,136 @@ static void test_thumb2_register_shift_fetch(void) {
      }
 }
 
+static void test_thumb2_barrier_options_and_it(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    const unsigned states[] = {0u, 0x1cu, 0x08u}, next_states[] = {0u, 0x18u, 0u};
+    for (unsigned profile = 0; profile < 2u; profile++)
+     for (unsigned user = 0; user < 2u; user++)
+      for (unsigned kind = 4u; kind <= 6u; kind++)
+       for (unsigned option = 0; option < 16u; option++)
+        for (unsigned it = 0; it < 3u; it++)
+         for (unsigned zero = 0; zero < 2u; zero++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &g_bus, profiles[profile]), "reset");
+            c.cpsr = (user ? ARM_MODE_USR : ARM_MODE_SVC) | ARM_CPSR_T | ARM_CPSR_E |
+                     ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_V | ARM_CPSR_Q | (10u << 16) |
+                     (zero ? ARM_CPSR_Z : 0u) | test_it_bits(states[it]);
+            for (unsigned reg = 0; reg < 15u; reg++) c.r[reg] = 0x12340000u + reg;
+            c.excl_valid = true; c.excl_addr = 0x200u;
+            uint32_t before[15], flags = c.cpsr, generation = c.tlb_gen;
+            memcpy(before, c.r, sizeof before);
+            m_w16(NULL, 0u, 0xf3bfu); m_w16(NULL, 2u, (uint16_t)(0x8f00u | (kind << 4) | option));
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u &&
+                  c.cpsr == ((flags & ~TEST_IT_MASK) | test_it_bits(next_states[it])),
+                  "Thumb barrier kind=%u option=%u failed privilege, IT or retirement", kind, option);
+            CHECK(memcmp(before, c.r, sizeof before) == 0 && c.excl_valid &&
+                  c.excl_addr == 0x200u && c.tlb_gen == generation && !c.abort_pending,
+                  "Thumb barrier changed registers, monitor or TLB");
+         }
+    static const uint16_t invalid[][2] = {
+        {0xf3bfu,0x8f2fu}, /* CLREX is a separate, currently unsupported family. */
+        {0xf3bfu,0x8f3fu},{0xf3bfu,0x8f7fu},{0xf3bfu,0x8e5bu},{0xf3afu,0x8f5bu}
+    };
+    for (unsigned n = 0; n < sizeof invalid / sizeof invalid[0]; n++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_SYS | ARM_CPSR_T; c.excl_valid = true; c.excl_addr = 0x200u;
+        m_w16(NULL, 0u, invalid[n][0]); m_w16(NULL, 2u, invalid[n][1]);
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.excl_valid && c.excl_addr == 0x200u,
+              "Thumb barrier swallowed a neighboring encoding");
+    }
+    for (unsigned kind = 4u; kind <= 6u; kind++) {
+        arm_cpu_t c;
+        arm_reset(&c, &g_bus);
+        c.cpsr = ARM_MODE_SYS | ARM_CPSR_T | ARM_CPSR_C;
+        c.r[15] = 0x100u; c.r[14] = 0x200u; c.excl_valid = true;
+        uint32_t flags = c.cpsr;
+        m_w16(NULL, 0x100u, 0xf3bfu); m_w16(NULL, 0x102u, (uint16_t)(0x8f0fu | (kind << 4)));
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x102u && c.r[14] == 0x3bf104u &&
+              c.cpsr == flags && c.excl_valid, "Thumb barrier changed ARM1176 legacy BL prefix framing");
+        c.arch = (arm_arch_t)99; c.r[15] = 0x100u;
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0x100u && c.cycles == 1u,
+              "unknown profile executed a Thumb barrier");
+    }
+}
+
+static void test_thumb2_barrier_fetch(void) {
+    for (unsigned host = 0; host < 2u; host++)
+     for (unsigned kind = 4u; kind <= 6u; kind++)
+      for (unsigned fault = 0; fault < 4u; fault++)
+       for (unsigned execute = 0; execute < 2u; execute++) {
+        arm_bus_t bus = g_bus;
+        if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c;
+        memset(g_ram, 0, sizeof g_ram);
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP; c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_Z | test_it_bits(execute ? 0x08u : 0x18u);
+        c.r[15] = 0xffeu; c.r[8] = 0x12345678u; c.excl_valid = true; c.excl_addr = 0x200u;
+        uint32_t flags = c.cpsr;
+        m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x8032u);
+        m_w32(NULL, 0x6004u, fault == 1u ? 0u : fault == 2u ? 0xa033u : fault == 3u ? 0xa012u : 0xa032u);
+        m_w16(NULL, 0x8ffeu, 0xf3bfu); m_w16(NULL, 0xa000u, (uint16_t)(0x8f0bu | (kind << 4)));
+        m_w16(NULL, 0x9000u, 0xffffu);
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u && c.r[8] == 0x12345678u,
+              "Thumb barrier failed complete instruction fetch");
+        if (!fault) CHECK(c.r[15] == 0x1002u && c.cpsr == (flags & ~TEST_IT_MASK) &&
+                          c.excl_valid && c.excl_addr == 0x200u, "Thumb barrier wrong second page or premature effects");
+        else CHECK(c.r[15] == ARM_VEC_PREFETCH && c.r[14] == 0x1002u && c.cp15.ifar == 0x1000u &&
+                   c.spsr[ARM_BANK_ABT] == flags && !c.excl_valid && (c.cp15.ifsr & 15u) ==
+                   (fault == 1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION),
+                   "Thumb barrier lost fetch fault or saved retry state");
+       }
+}
+
+static void test_thumb2_barriers_observe_completed_operations(void) {
+    for (unsigned host = 0; host < 2u; host++) {
+        arm_bus_t bus = g_bus;
+        if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_SYS | ARM_CPSR_T;
+        c.r[0] = 16u; c.r[1] = 0xbf002400u;
+        m_w16(NULL, 0u, 0x6001u);   /* STR r1,[r0] */
+        m_w16(NULL, 2u, 0xf3bfu); m_w16(NULL, 4u, 0x8f5bu);  /* DMB ISH */
+        m_w16(NULL, 6u, 0xf3bfu); m_w16(NULL, 8u, 0x8f4fu);  /* DSB SY */
+        m_w16(NULL, 10u, 0xf3bfu); m_w16(NULL, 12u, 0x8f6fu); /* ISB SY */
+        m_w16(NULL, 14u, 0x6802u); /* LDR r2,[r0] */
+        m_w32(NULL, 16u, 0xbf002400u); /* MOVS r4,#0; NOP */
+        CHECK(arm_step(&c) == ARM_OK, "warm store");
+        c.r[15] = 16u;
+        CHECK(arm_step(&c) == ARM_OK && c.r[4] == 0u, "warm instruction fetch");
+        c.r[15] = 0u; c.cycles = 0u; c.r[1] = 0xbf00242au; /* MOVS r4,#42 */
+        g_watch_addr = 16u; g_watch_writes32 = 0u;
+        for (unsigned step = 0; step < 6u; step++) {
+            CHECK(arm_step(&c) == ARM_OK, "Thumb barrier program stopped at step=%u", step);
+            CHECK(m_r32(NULL, 16u) == 0xbf00242au && g_watch_writes32 == (host ? 0u : 1u),
+                  "Thumb barrier did not observe a completed store");
+        }
+        CHECK(c.r[15] == 18u && c.cycles == 6u && c.r[2] == 0xbf00242au && c.r[4] == 42u &&
+              (!host || c.dwrite_hits != 0u), "Thumb ISB used stale instruction bytes or missed direct-write path");
+        g_watch_addr = 0xffffffffu;
+
+        /* The real CP15 transfer changes the translation context. ISB and
+         * the following instruction must use it, including the MMU's lazy
+         * context-stamp update on the first subsequent translation. */
+        memset(g_ram, 0, sizeof g_ram);
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_SVC | ARM_CPSR_T;
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP; c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.r[1] = 0xc000u;
+        m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x8032u);
+        m_w32(NULL, 0xc000u, 0xe001u); m_w32(NULL, 0xe000u, 0xa032u);
+        m_w16(NULL, 0x8000u, 0xee02u); m_w16(NULL, 0x8002u, 0x1f10u); /* MCR TTBR0 */
+        m_w16(NULL, 0x8004u, 0xffffu); m_w16(NULL, 0x8006u, 0xffffu);
+        m_w16(NULL, 0xa004u, 0xf3bfu); m_w16(NULL, 0xa006u, 0x8f6fu);
+        m_w16(NULL, 0xa008u, 0x242au);
+        CHECK(arm_step(&c) == ARM_OK && c.cp15.ttbr0 == 0xc000u && c.r[15] == 4u, "Thumb context-changing CP15 transfer");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 8u, "Thumb ISB lost new translation context");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 10u && c.r[4] == 42u, "post-ISB instruction used old translation context");
+    }
+}
+
 static void put_thumb_register_store(uint32_t pc, unsigned width, unsigned rn,
                                       unsigned rt, unsigned rm, unsigned shift) {
     m_w16(NULL, pc, (uint16_t)(0xf800u | (width << 5) | rn));
@@ -9810,6 +9940,9 @@ int main(void) {
     test_profile_instruction_boundaries();
     test_a32_barrier_profile_boundaries();
     test_a32_barriers_observe_completed_stores();
+    test_thumb2_barrier_options_and_it();
+    test_thumb2_barrier_fetch();
+    test_thumb2_barriers_observe_completed_operations();
     test_thumb2_register_shift_values();
     test_thumb2_register_shift_operands_and_it();
     test_thumb2_register_shift_fetch();

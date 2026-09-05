@@ -70,6 +70,14 @@ also requires reserved options to execute as full-system barriers. Tests
 cover all options in User and SVC modes, ARM1176/unknown-profile refusals,
 exclusive-monitor preservation and a store followed by instruction refetch.
 
+Thumb DMB/DSB/ISB now use the same synchronous execution model, including
+all reserved option values. They obey IT conditions in User and privileged
+modes, preserve flags and exclusive state, and require both instruction
+halfwords to be fetched before retirement. Tests also exercise instruction
+replacement through a populated direct-write cache and a real CP15 TTBR0
+change followed by ISB and execution from the new mapping. ARM1176 keeps
+its legacy 16-bit framing for these first-halfword patterns.
+
 Cortex-A8 CP15 accesses validate the complete opcode and register selector
 before using existing storage. Unimplemented identity, cache-size, security,
 performance and other banks are refused, preventing accidental ARM1176
@@ -411,9 +419,14 @@ Tests cover full-width offsets and address wrap, aliases, IT, data faults,
 complete instruction fetch and legacy framing with host RAM access enabled
 and disabled. An unchanged matching-driver fixture now passes the PL192
 unmask method's `LSL.W` at `0x807e5d80` and handler's register-offset
-`STRB.W` at `0x807e5ca2`, then stops at the unsupported `DMB ISH` at
-`0x807e5caa`. That fixture uses synthetic objects and one controller bank;
-it does not establish interrupt entry, callback execution or board boot.
+`STRB.W` at `0x807e5ca2`. Thumb barriers also pass its `DMB ISH` at
+`0x807e5caa`, allowing all 64 isolated cases to complete: each of 32 local
+sources held active or withdrawn after acknowledgement. The real guest
+methods initialize a vector, unmask the source, read its vector and issue
+end-of-interrupt. Checks verify those accesses, the resulting IRQ level and
+cleared service records. The fixture uses synthetic objects, unregistered
+records and one controller bank; it does not establish CPU interrupt entry,
+registered callbacks, daisy-chain wiring or board boot.
 
 Thumb UBFX/SBFX and BFI/BFC implement bitfield extraction, sign extension,
 insertion and clearing. They validate ranges before shifting and preserve

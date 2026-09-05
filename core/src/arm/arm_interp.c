@@ -2995,6 +2995,13 @@ static arm_status_t thumb_load_word(arm_cpu_t *c, uint32_t address, unsigned rt,
 static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
                                  uint16_t second, uint32_t *next) {
     if (first == 0xf3afu && second == 0x8003u) return exec_a8_wfi(c); /* WFI T2 */
+    /* DSB/DMB/ISB T1 (DDI0406C.b A8.8.43/44/53), including reserved
+     * options as full-system operations. The dispatcher has checked IT and
+     * the ARMv7 wide framing. As in A32, bus accesses/CP15 changes complete
+     * synchronously and the next step reads current instruction bytes. */
+    uint16_t barrier = second & 0xfff0u;
+    if (first == 0xf3bfu && (barrier == 0x8f40u || barrier == 0x8f50u || barrier == 0x8f60u))
+        return ARM_OK;
     uint32_t insn = ((uint32_t)first << 16) | second;
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn >> 28) == 0xeu &&
         (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn) ||
