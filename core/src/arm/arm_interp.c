@@ -1460,6 +1460,29 @@ static arm_status_t exec_single_transfer(arm_cpu_t *c, uint32_t pc, uint32_t ins
     return ARM_OK;
 }
 
+/* A32/T32 dual transfers without LPAE are two ordered word accesses. Each
+ * word uses the shared little-endian translation path. Buffer a load pair until
+ * both accesses succeed; a completed first store remains visible on abort.
+ * Register/addressing constraints and writeback belong to the decoder. */
+static bool transfer_doubleword(arm_cpu_t *c, uint32_t address, unsigned rt,
+                                unsigned rt2, bool store) {
+    if (!prepare_multiword_address(c, &address, 4u, store)) return false;
+    if (store) {
+        mem_w32(c, address, c->r[rt]);
+        if (c->abort_pending) return false;
+        mem_w32(c, address + 4u, c->r[rt2]);
+        if (c->abort_pending) return false;
+    } else {
+        uint32_t first = mem_r32(c, address);
+        if (c->abort_pending) return false;
+        uint32_t second = mem_r32(c, address + 4u);
+        if (c->abort_pending) return false;
+        c->r[rt] = first;
+        c->r[rt2] = second;
+    }
+    return true;
+}
+
 /* Extra load/store: LDRH/STRH/LDRSB/LDRSH (halfword and sign-extending forms)
  * plus the doubleword pair LDRD/STRD.
  * Encoding: cccc 000 P U I W L nnnn tttt iiii 1SH1 iiii, with SH != 00.
@@ -1531,25 +1554,7 @@ static arm_status_t exec_extra_transfer(arm_cpu_t *c, uint32_t pc, uint32_t insn
          * pre-indexed writeback below, exactly as LDM/STM computes its own
          * writeback independently of the address it transfers from.
          */
-        uint32_t xfer = addr;
-        if (!prepare_multiword_address(c, &xfer, 4u, store)) return ARM_OK;
-
-        if (store) {
-            mem_w32(c, xfer, reg_read(c, pc, rd));
-            if (c->abort_pending) return ARM_OK;   /* second word not issued */
-            mem_w32(c, xfer + 4u, reg_read(c, pc, rd + 1u));
-            if (c->abort_pending) return ARM_OK;
-        } else {
-            /* Base-restored abort model: both halves are buffered and committed
-             * only once both accesses have succeeded, so a fault on either word
-             * leaves the pair and the base exactly as the handler found them. */
-            uint32_t lo = mem_r32(c, xfer);
-            if (c->abort_pending) return ARM_OK;   /* second word not issued */
-            uint32_t hi = mem_r32(c, xfer + 4u);
-            if (c->abort_pending) return ARM_OK;
-            c->r[rd]      = lo;
-            c->r[rd + 1u] = hi;
-        }
+        if (!transfer_doubleword(c, addr, rd, rd + 1u, store)) return ARM_OK;
     } else if (L) {
         uint32_t val;
         switch (sh) {
@@ -2863,6 +2868,26 @@ static arm_status_t thumb_load_word(arm_cpu_t *c, uint32_t address, unsigned rt,
 
 static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
                                  uint16_t second, uint32_t *next) {
+    /* LDRD/STRD immediate T1 and LDRD literal T1 (A8.8.72/73/210).
+     * T32 names two independent data registers; only a load forbids equal
+     * destinations. P=W=0 encodes exclusive/table-branch instructions. */
+    if ((first & 0xfe40u) == 0xe840u && (first & 0x0120u)) {
+        unsigned rn = first & 15u, rt = second >> 12, rt2 = (second >> 8) & 15u;
+        bool pre = (first & 0x100u) != 0u, add = (first & 0x80u) != 0u;
+        bool wb = (first & 0x20u) != 0u, load = (first & 0x10u) != 0u;
+        if (rt == 13u || rt == 15u || rt2 == 13u || rt2 == 15u ||
+            (load && rt == rt2) || (wb && (rn == rt || rn == rt2)) ||
+            (rn == 15u && (!load || wb)))
+            return ARM_UNDEFINED;
+        /* SETEND BE is also refused: the shared data path is little-endian. */
+        if (c->cpsr & ARM_CPSR_E) return ARM_UNDEFINED;
+        uint32_t base = rn == 15u ? ((pc + 4u) & ~3u) : c->r[rn];
+        uint32_t offset = (second & 0xffu) << 2;
+        uint32_t adjusted = add ? base + offset : base - offset;
+        if (!transfer_doubleword(c, pre ? adjusted : base, rt, rt2, !load)) return ARM_OK;
+        if (wb) c->r[rn] = adjusted;
+        return ARM_OK;
+    }
     /* Thumb LDM/STM IA/DB, including PUSH/POP (DDI0406C.b A6.3.5).
      * Thumb forbids SP in a list, PC in a store, LR+PC in a load, single
      * register lists, and every writeback/base-list overlap. Once those

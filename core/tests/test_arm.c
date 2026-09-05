@@ -7264,6 +7264,163 @@ static void test_thumb2_logical_immediates(void) {
     }
 }
 
+static void test_thumb2_doubleword_transfers(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    const unsigned offsets[] = {0u, 4u, 1020u};
+    for (unsigned p = 0; p < 2; p++) {
+     for (unsigned host = 0; host < 2; host++) {
+      for (unsigned load = 0; load < 2; load++) {
+       for (unsigned form = 0; form < 8; form++) {
+        bool pre = (form & 4u) != 0u, add = (form & 2u) != 0u, wb = (form & 1u) != 0u;
+        if (!pre && !wb) continue;
+        for (unsigned i = 0; i < 3; i++) {
+         for (unsigned big = 0; big < 2; big++) {
+            arm_bus_t bus = g_bus;
+            if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &bus, profiles[p]), "reset");
+            c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_V | ARM_CPSR_Q |
+                      (big ? ARM_CPSR_E : 0u) | test_it_bits(0xe8u);
+            c.cp15.sctlr = 0u; /* ARMv7 requires word alignment even with raw U=0. */
+            c.r[13] = 0x2004u; c.r[14] = 0x11223344u; c.r[3] = 0x55667788u;
+            uint32_t adjusted = add ? 0x2004u + offsets[i] : 0x2004u - offsets[i];
+            uint32_t address = pre ? adjusted : 0x2004u, cpsr = c.cpsr & ~TEST_IT_MASK;
+            /* Reversed, nonadjacent data registers with LR first; SP base. */
+            m_w16(NULL, 0, (uint16_t)(0xe84du | (pre ? 0x100u : 0u) | (add ? 0x80u : 0u) |
+                                     (wb ? 0x20u : 0u) | (load ? 0x10u : 0u)));
+            m_w16(NULL, 2, (uint16_t)(0xe300u | (offsets[i] / 4u)));
+            m_w32(NULL, address, 0xa1b2c3d4u); m_w32(NULL, address + 4u, 0xe5f60718u);
+            if (big) {
+                CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u &&
+                      c.cpsr == (cpsr | test_it_bits(0xe8u)) && c.r[13] == 0x2004u &&
+                      c.r[14] == 0x11223344u && c.r[3] == 0x55667788u &&
+                      m_r32(NULL, address) == 0xa1b2c3d4u && m_r32(NULL, address + 4u) == 0xe5f60718u,
+                      "Unsupported big-endian dual transfer changed memory or CPU state");
+                continue;
+            }
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u &&
+                  c.cpsr == cpsr && c.r[13] == (wb ? adjusted : 0x2004u),
+                  "Thumb dual transfer form=%u offset=%u lost writeback, flags or retirement", form, offsets[i]);
+            if (load) {
+                CHECK(c.r[14] == 0xa1b2c3d4u && c.r[3] == 0xe5f60718u,
+                      "LDRD reversed its explicit registers, bytes or word order");
+            } else {
+                CHECK(m_r32(NULL, address) == 0x11223344u && m_r32(NULL, address + 4u) == 0x55667788u &&
+                      c.r[14] == 0x11223344u && c.r[3] == 0x55667788u,
+                      "STRD reversed its explicit registers, bytes or word order");
+            }
+         }
+        }
+       }
+      }
+     }
+    }
+    for (unsigned rn = 0; rn < 3; rn++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T; c.r[rn] = 0x204u;
+        m_w16(NULL, 0, (uint16_t)(0xe9d0u | rn)); m_w16(NULL, 2, 0x0200u);
+        m_w32(NULL, 0x204u, 0x12345678u); m_w32(NULL, 0x208u, 0x9abcdef0u);
+        CHECK(arm_step(&c) == ARM_OK && c.r[0] == 0x12345678u && c.r[2] == 0x9abcdef0u && c.r[15] == 4u,
+              "LDRD without writeback lost an aliased base");
+    }
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.cpsr |= ARM_CPSR_T; c.r[3] = 0x204u;
+    m_w16(NULL, 0, 0xe9c3u); m_w16(NULL, 2, 0x3300u); /* STRD permits identical sources. */
+    CHECK(arm_step(&c) == ARM_OK && m_r32(NULL, 0x204u) == 0x204u &&
+          m_r32(NULL, 0x208u) == 0x204u, "STRD rejected duplicate/base source");
+    for (unsigned half = 0; half < 2; half++) {
+     for (unsigned add = 0; add < 2; add++) {
+      for (unsigned i = 0; i < 2; i++) {
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T; c.r[15] = 0x1000u + 2u * half;
+        uint32_t offset = i ? 1020u : 4u, address = add ? 0x1004u + offset : 0x1004u - offset;
+        m_w16(NULL, c.r[15], (uint16_t)(add ? 0xe9dfu : 0xe95fu));
+        m_w16(NULL, c.r[15] + 2u, (uint16_t)(0x3500u | offset / 4u));
+        /* Negative small offset would overlap the instruction: use the actual
+         * code bytes there as data, without altering the fetched instruction. */
+        if (address >= 0x1008u || address + 8u <= 0x1000u) {
+            m_w32(NULL, address, 0x76543210u); m_w32(NULL, address + 4u, 0xfedcba98u);
+        }
+        uint32_t first = m_r32(NULL, address), second = m_r32(NULL, address + 4u);
+        CHECK(arm_step(&c) == ARM_OK && c.r[3] == first && c.r[5] == second && c.r[15] == 0x1004u + 2u * half,
+              "LDRD literal used wrong PC alignment, offset scale or sign");
+      }
+     }
+    }
+    static const uint16_t bad[][2] = {
+        {0xe9d4u,0xd100u}, {0xe9d4u,0x0d00u}, {0xe9d4u,0xf100u}, {0xe9d4u,0x0f00u},
+        {0xe9d4u,0x1100u}, {0xe9f0u,0x0100u}, {0xe9f1u,0x0100u},
+        {0xe9c4u,0xd100u}, {0xe9c4u,0x0d00u}, {0xe9c4u,0xf100u}, {0xe9c4u,0x0f00u},
+        {0xe9e0u,0x0100u}, {0xe9e1u,0x0100u}, {0xe9cfu,0x0100u},
+        {0xe9ffu,0x0100u}, {0xe8ffu,0x0100u}, /* literal writeback */
+        {0xe854u,0x0100u}, {0xe8c4u,0x0100u}, /* P=W=0 belongs to other instructions */
+    };
+    for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_C;
+        for (unsigned reg = 0; reg < 15; reg++) c.r[reg] = 0x204u;
+        m_w16(NULL, 0, bad[i][0]); m_w16(NULL, 2, bad[i][1]);
+        g_watch_addr = 0x204u; g_watch_reads32 = g_watch_writes32 = 0u;
+        uint32_t before = c.cpsr;
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.cpsr == before &&
+              c.r[0] == 0x204u && c.r[1] == 0x204u && c.r[4] == 0x204u &&
+              g_watch_reads32 == 0u && g_watch_writes32 == 0u,
+              "Invalid dual transfer %u touched memory/state", i);
+        g_watch_addr = 0xffffffffu;
+    }
+}
+
+static void test_thumb2_doubleword_aborts(void) {
+    for (unsigned host = 0; host < 2; host++) {
+     for (unsigned load = 0; load < 2; load++) {
+      for (unsigned fault = 0; fault < 7; fault++) {
+        arm_bus_t bus = g_bus;
+        if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
+        arm_cpu_t c;
+        memset(g_ram, 0xee, sizeof g_ram);
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP | (fault == 6 ? ARM_SCTLR_A : 0u);
+        c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N | test_it_bits(0x18u);
+        c.r[4] = fault >= 5 ? 0x1ff9u : 0x1ff8u;
+        c.r[2] = 0x44332211u; c.r[3] = 0x88776655u;
+        uint32_t cpsr = c.cpsr, base = c.r[4];
+        m_w32(NULL, 0x4000u, 0x6001u);
+        m_w32(NULL, 0x6000u, 0x803eu);
+        m_w32(NULL, 0x6004u, fault == 1 ? 0u : fault == 3 ? 0xa01eu : 0xa03eu);
+        m_w32(NULL, 0x6008u, fault == 2 ? 0u : fault == 4 ? 0xc01eu : 0xc03eu);
+        m_w16(NULL, 0x8000u, (uint16_t)(load ? 0xe9f4u : 0xe9e4u));
+        m_w16(NULL, 0x8002u, 0x2301u); /* Pre-index +4 with writeback, crossing two mapped frames. */
+        m_w32(NULL, 0xaffcu, 0x12345678u); m_w32(NULL, 0xc000u, 0x9abcdef0u);
+        g_watch_addr = 0xc000u; g_watch_reads32 = g_watch_writes32 = 0u;
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u, "dual transfer did not retire");
+        if (fault) {
+            uint32_t fsr = fault >= 5 ? ARM_FSR_ALIGNMENT : fault >= 3 ? ARM_FSR_PAGE_PERMISSION : ARM_FSR_PAGE_TRANSLATION;
+            uint32_t address = fault >= 5 ? 0x1ffdu : fault == 1 || fault == 3 ? 0x1ffcu : 0x2000u;
+            CHECK(c.r[15] == ARM_VEC_DATA_ABORT && c.r[14] == 8u && c.r[4] == base &&
+                  c.r[2] == 0x44332211u && c.r[3] == 0x88776655u && c.spsr[ARM_BANK_ABT] == cpsr &&
+                  c.cp15.dfar == address && c.cp15.dfsr == (fsr | (load ? 0u : (1u << 11))) &&
+                  !(c.cpsr & TEST_IT_MASK) && g_watch_reads32 == 0u && g_watch_writes32 == 0u,
+                  "dual transfer abort lost pair/base, DFAR/WnR, exception IT state or touched second frame");
+        } else {
+            CHECK(c.r[15] == 4u && c.r[4] == 0x1ffcu && c.cpsr == (cpsr & ~TEST_IT_MASK) &&
+                  c.r[2] == (load ? 0x12345678u : 0x44332211u) &&
+                  c.r[3] == (load ? 0x9abcdef0u : 0x88776655u),
+                  "dual transfer lost noncontiguous frame data or writeback");
+        }
+        g_watch_addr = 0xffffffffu;
+        bool first_written = !load && (fault == 0 || fault == 2 || fault == 4);
+        CHECK(m_r32(NULL, 0xaffcu) == (first_written ? 0x44332211u : 0x12345678u) &&
+              m_r32(NULL, 0xc000u) == (!load && !fault ? 0x88776655u : 0x9abcdef0u) &&
+              m_r32(NULL, 0xb000u) == 0xeeeeeeeeu,
+              "dual transfer did not preserve exactly the first completed store before a fault");
+      }
+     }
+    }
+}
+
 static void test_thumb_compare_and_branch(void) {
     const arm_arch_t profiles[] = {ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
     const uint32_t offsets[] = {0u, 62u, 64u, 126u};
@@ -7335,6 +7492,8 @@ int main(void) {
     test_thumb_it_fetch_faults();
     test_thumb_it_svc_hooks();
     test_thumb2_logical_immediates();
+    test_thumb2_doubleword_transfers();
+    test_thumb2_doubleword_aborts();
     test_thumb_compare_and_branch();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();

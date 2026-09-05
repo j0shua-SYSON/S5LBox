@@ -129,6 +129,17 @@ TST/TEQ use the flag-only destination encodings. Tests exercise replicated
 and rotated constants, carry preservation/replacement, aliases inside IT,
 and rejected registers and reserved immediate forms.
 
+Thumb LDRD/STRD immediate and LDRD literal use explicit independent data
+registers and scaled offsets. They share the existing A32 ordered word
+transfer path after validating the stricter Thumb register constraints.
+Loads and base writeback commit only after both words succeed; a completed
+first store remains visible if the second word faults. Tests cover offset,
+pre/post indexing, literal alignment, nonadjacent registers, legal duplicate
+store sources, two separately translated pages, alignment and permission
+faults, and exception IT state. The shared data path is little-endian;
+these new forms explicitly refuse CPSR.E rather than execute incorrect
+big-endian accesses. General big-endian data support remains unimplemented.
+
 The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates
 C only as prescribed by the immediate form, preserving V. Invalid zero
@@ -180,7 +191,7 @@ establish that result.
   The instruction profile is not a complete system-register model.
 - Thumb-2 currently implements MOVW/MOVT, modified-immediate logical operations
   and arithmetic, immediate LDR/STR and STRB/STRH (including pre/post indexing),
-  and LDR literals.
+  LDR literals, and immediate/literal doubleword transfers.
   Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple transfers are also implemented. Other
   instruction families remain to implement. IT state and conditional execution
   are implemented for the supported Thumb decoder families.
@@ -264,8 +275,31 @@ steps. IT execution advances the same trace to `0x8027a47e`, halfwords
 `f020 0003` (`BIC.W r0,r0,#3`), after 62,446 steps. Logical operations then
 advance to 70,735 steps, when the instruction at `0x8027aee8` reads physical
 `0x41103204`, the guarded zero-valued `timebase-frequency` property of
-`/device-tree/cpus/cpu0`. It must be prepared from firmware evidence before continuing. No device-tree
-placeholders or board registers are fabricated to advance this trace.
+`/device-tree/cpus/cpu0`.
+
+Matching iBoot writes 24 MHz into clock state at `0x4ff13c2c..38` and copies
+it to that property via getter index 5 at `0x4ff136d6..de`. The matching
+iBSS restore bootloader explicitly programs its three PLLs to 600, 162 and
+200 MHz. Its table at `0x8400d650` selects PLL2 divided by two for the bus;
+iBoot's clock-state reader and getter index 3 propagate the resulting
+100 MHz into `bus-frequency`. iBSS SHA-256 is
+`30095f39be26acbb13677c7705de7bb9cbd2e3d04b90eb9d6380e1c1c413aa5d`.
+The constants, M/P/S calculations and getter branch-table destinations were
+cross-checked against both firmware files. This selects a matching firmware
+clock configuration; it does not establish physical PLL behavior or measure
+the normal LLB boot path.
+
+Preparing those two properties in the private RAM copy advances the trace
+to 71,289 steps at `0x8027af1e`, halfwords `e9c4 010c`
+(`STRD r0,r1,[r4,#0x30]`). Doubleword execution then reaches 71,736 steps
+at `0x8027af58`, reading another guarded property at physical `0x4110318c`.
+That property is `memory-frequency`. The same firmware configuration establishes
+200 MHz for memory, 600 MHz for the nominal CPU clock, 100 MHz for peripherals
+and 24 MHz for the fixed clock. Preparing the remaining four CPU clock
+properties advances to 73,287 steps at `0x8027a520`, halfwords `f813 0f01`
+(`LDRB.W r0,[r3,#1]!`), which remains unsupported. Every other zero-valued
+property remains guarded, and the original device-tree file is unchanged.
+No board registers are fabricated to advance this trace.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim
