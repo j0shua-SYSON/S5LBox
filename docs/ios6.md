@@ -109,6 +109,14 @@ instruction path is unchanged.
 See [DDI0406C.b, A8.8.98/107](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 This adds transfer execution without supplying unverified CPU identity.
 
+Cortex-A8 access-flag faults are not cached. After an AF-clear descriptor
+faults, software can set its flag and retry without a TLB invalidation, as
+required by [DDI0406C.b, B3.7.4](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+The previous fault cache returned the stale fault on that retry. Tests cover
+sections, supersections, small and large pages, all access kinds and domain
+tags, repeated AF-clear walks and subsequent caching of valid translations.
+The legacy CPU profiles retain their existing cache policy.
+
 Thumb-2 framing fetches both halfwords and retires once. The second halfword
 is translated independently, including across noncontiguous physical pages.
 A fetch fault there vectors before any instruction result is committed.

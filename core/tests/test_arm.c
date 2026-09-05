@@ -2422,6 +2422,60 @@ static void test_page_translation_fault_precedes_page_domain_fault(void) {
           "valid L2 plus disabled domain produced fsr=%x, expect page domain", f);
 }
 
+static void test_cortex_a8_access_flag_retry_without_tlbi(void) {
+    /* DDI0406C.b B3.7.4: AF=0 descriptors are never held in the TLB.
+     * Software sets AF and retries without invalidating a faulting entry.
+     * Cover all short-descriptor sizes, access kinds and domain FSR tags. */
+    const arm_access_t accesses[] = {ARM_ACCESS_READ,ARM_ACCESS_WRITE,ARM_ACCESS_FETCH};
+    for (unsigned kind = 0; kind < 4u; kind++) {
+     for (unsigned domain = 0; domain < 16u; domain++) {
+      if (kind == 3u && domain != 0u) continue; /* Supersections use domain 0. */
+      for (unsigned access = 0; access < sizeof accesses / sizeof accesses[0]; access++) {
+       for (unsigned priv = 0; priv < 2u; priv++) {
+        memset(g_ram, 0, sizeof g_ram);
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP | ARM_SCTLR_FA;
+        c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u << (domain * 2u);
+        bool page = kind == 1u || kind == 2u;
+        uint32_t entry = page ? 0x8000u : 0x6000u;
+        uint32_t flag = page ? 0x10u : 0x400u;
+        uint32_t descriptor = kind == 0u ? 0x802u | (domain << 5) :
+                              kind == 1u ? 0x22u : kind == 2u ? 0x21u : 0x40802u;
+        unsigned copies = kind >= 2u ? 16u : 1u;
+        if (page) m_w32(NULL, 0x6000u, 0x8001u | (domain << 5));
+        for (unsigned i = 0; i < copies; i++) m_w32(NULL, entry + 4u * i, descriptor);
+        uint32_t pa = 0xdeadbeefu;
+        uint32_t expected_fsr = (page ? ARM_FSR_PAGE_ACCESS_FLAG : ARM_FSR_SECTION_ACCESS_FLAG) |
+                               (domain << 4) | (accesses[access] == ARM_ACCESS_WRITE ? 0x800u : 0u);
+        g_watch_addr = entry; g_watch_reads32 = g_watch_writes32 = 0u;
+        CHECK(arm_mmu_translate(&c, 0x80000040u, accesses[access], priv != 0u, &pa) == expected_fsr &&
+              pa == 0xdeadbeefu && g_watch_reads32 == 1u && g_watch_writes32 == 0u,
+              "A8 AF fault status/tag/side effects kind=%u domain=%u access=%u priv=%u", kind, domain, access, priv);
+        uint32_t generation = c.tlb_gen;
+        uint64_t flushes = c.tlb_flushes;
+        CHECK(arm_mmu_translate(&c, 0x80000040u, accesses[access], priv != 0u, &pa) == expected_fsr &&
+              pa == 0xdeadbeefu && g_watch_reads32 == 2u && g_watch_writes32 == 0u,
+              "A8 cached an AF-clear descriptor instead of walking again");
+        /* Software updates the descriptor. No CP15 maintenance occurs. */
+        g_watch_addr = UINT32_MAX;
+        for (unsigned i = 0; i < copies; i++) m_w32(NULL, entry + 4u * i, descriptor | flag);
+        g_watch_addr = entry;
+        CHECK(arm_mmu_translate(&c, 0x80000040u, accesses[access], priv != 0u, &pa) == 0u && pa == 0x40u &&
+              g_watch_reads32 == 3u && g_watch_writes32 == 0u,
+              "A8 retry did not observe software setting AF without TLBI");
+        CHECK(c.tlb_gen == generation && c.tlb_flushes == flushes && c.tlb_hits == 0u && c.tlb_misses == 3u,
+              "A8 AF retries flushed unrelated translations or reported cache hits");
+        CHECK(arm_mmu_translate(&c, 0x80000040u, accesses[access], priv != 0u, &pa) == 0u && pa == 0x40u &&
+              g_watch_reads32 == 3u && c.tlb_hits == 1u && c.tlb_misses == 3u,
+              "A8 AF fix disabled caching of valid translations");
+        g_watch_addr = UINT32_MAX;
+       }
+      }
+     }
+    }
+}
+
 static void test_force_access_flag_faults_precede_domain_permissions(void) {
     arm_cpu_t c;
     uint32_t pa, fsr;
@@ -8593,6 +8647,7 @@ int main(void) {
     test_arm1176_rejects_fine_page_tables();
     test_page_translation_fault_precedes_page_domain_fault();
     test_force_access_flag_faults_precede_domain_permissions();
+    test_cortex_a8_access_flag_retry_without_tlbi();
     test_fetch_cache_refill_requires_an_exact_live_witness();
     test_data_cache_refill_requires_an_exact_live_witness();
     test_abort_restores_base_register();

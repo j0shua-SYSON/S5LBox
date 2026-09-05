@@ -305,6 +305,15 @@ uint32_t arm_mmu_translate(arm_cpu_t *c, uint32_t va, arm_access_t acc,
     /* Straight into the caller's pa, so the untouched-on-fault contract is the
      * walk's own rather than something restated here. */
     uint32_t fsr = mmu_walk(c, va, acc, priv, pa);
+    /* ARMv7 software-managed Access flags (DDI0406C.b B3.7.4): an AF=0
+     * descriptor is never held in the TLB. Software sets AF and retries
+     * without TLBI, so caching this fault would keep rejecting the page.
+     * FS is split across [10] and [3:0]; exclude domain and WnR bits.
+     * Preserve the existing cache policy of the other CPU profiles. */
+    uint32_t status = fsr & 0x40fu;
+    if (c->arch == ARM_ARCH_V7_CORTEX_A8 &&
+        (status == ARM_FSR_SECTION_ACCESS_FLAG || status == ARM_FSR_PAGE_ACCESS_FLAG))
+        return fsr;
     c->tlb[slot].gen = c->tlb_gen;
     c->tlb[slot].tag = tag;
     c->tlb[slot].fsr = fsr;
