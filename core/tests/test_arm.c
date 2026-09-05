@@ -7452,6 +7452,309 @@ static uint32_t test_it_bits(unsigned state) {
     return ((state & 0xfcu) << 8) | ((state & 3u) << 25);
 }
 
+static void put_vfp_system_transfer(unsigned thumb, uint32_t pc, unsigned load,
+                                     unsigned sysreg, unsigned rt) {
+    uint32_t insn = 0xeee00a10u | (load << 20) | (sysreg << 16) | (rt << 12);
+    if (thumb) {
+        m_w16(NULL, pc, (uint16_t)(insn >> 16));
+        m_w16(NULL, pc + 2u, (uint16_t)insn);
+    } else m_w32(NULL, pc, insn);
+}
+
+static void test_cortex_a8_vfp_system_access(void) {
+    /* DDI0344K 13.4; DDI0406C.b B9.3.21/22. Non-FPSCR accesses stay
+     * privileged even with EN=1. Unimplemented identity reads must stop,
+     * including with EN=0, instead of leaking VFP11's identity or repeatedly
+     * entering a lazy-enable handler that cannot supply missing hardware. */
+    static const unsigned permissions[] = {0,1,3};
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned user = 0; user < 2u; user++) {
+      for (unsigned enabled = 0; enabled < 2u; enabled++) {
+       for (unsigned acc = 0; acc < 3u; acc++) {
+        for (unsigned sysreg = 0; sysreg < 16u; sysreg++) {
+         for (unsigned load = 0; load < 2u; load++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+            CHECK(c.vfp_fpexc == 0u && c.vfp_fpscr == 0u, "A8 FP reset");
+            c.cpsr = (user ? ARM_MODE_USR : ARM_MODE_SVC) | ARM_CPSR_N |
+                     ARM_CPSR_C | ARM_CPSR_Q | ARM_CPSR_F | (9u << 16) |
+                     (thumb ? ARM_CPSR_T | test_it_bits(0x1cu) : 0u); /* NE */
+            c.cp15.cpacr = permissions[acc] * 0x00500000u;
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            c.vfp_fpscr = 0x48000080u; /* Z, QC, IDC */
+            for (unsigned n = 0; n < 32u; n++) c.vfp_s[n] = 0x12340000u + n;
+            uint32_t fp[32]; memcpy(fp, c.vfp_s, sizeof fp);
+            uint32_t source = sysreg == 8u ? (enabled ? 0u : ARM_FPEXC_EN) : 0x98000095u;
+            c.r[4] = source; c.r[15] = 0x100u;
+            c.excl_valid = true; c.excl_addr = 0x8000u;
+            uint32_t flags = c.cpsr, generation = c.tlb_gen;
+            arm_cp15_t cp15 = c.cp15;
+            put_vfp_system_transfer(thumb, 0x100u, load, sysreg, 4u);
+            bool legal = sysreg == 0u || sysreg == 1u || sysreg == 8u ||
+                         (load && (sysreg == 6u || sysreg == 7u));
+            bool access = permissions[acc] == 3u || (permissions[acc] == 1u && !user);
+            bool exception = legal && (!access || (user && sysreg != 1u) ||
+                                       (!enabled && sysreg == 1u));
+            bool complete = legal && !exception && !(load && sysreg != 1u && sysreg != 8u);
+            arm_status_t status = arm_step(&c);
+            CHECK(status == (complete || exception ? ARM_OK : ARM_UNDEFINED),
+                  "A8 FP disposition T=%u U=%u EN=%u acc=%u reg=%u L=%u status=%d",
+                  thumb, user, enabled, permissions[acc], sysreg, load, status);
+            uint32_t expected_r4 = complete && load ?
+                (sysreg == 1u ? 0x48000080u : enabled ? ARM_FPEXC_EN : 0u) : source;
+            CHECK(c.r[4] == expected_r4 &&
+                  c.vfp_fpscr == (complete && !load && sysreg == 1u ? source : 0x48000080u) &&
+                  c.vfp_fpexc == (complete && !load && sysreg == 8u ? source : enabled ? ARM_FPEXC_EN : 0u) &&
+                  memcmp(fp, c.vfp_s, sizeof fp) == 0 && memcmp(&cp15, &c.cp15, sizeof cp15) == 0 &&
+                  c.tlb_gen == generation && c.cycles == 1u,
+                  "A8 FP operand/control effects T=%u U=%u EN=%u acc=%u reg=%u L=%u",
+                  thumb, user, enabled, permissions[acc], sysreg, load);
+            if (exception) {
+                uint32_t handler_flags = (flags & ~(ARM_CPSR_MODE_MASK | ARM_CPSR_T | TEST_IT_MASK)) |
+                                         ARM_MODE_UND | ARM_CPSR_I;
+                CHECK(c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == (thumb ? 0x102u : 0x104u) &&
+                      c.spsr[ARM_BANK_UND] == flags && c.cpsr == handler_flags && !c.excl_valid,
+                      "A8 FP denial lost precise Undefined state T=%u reg=%u L=%u", thumb, sysreg, load);
+            } else {
+                uint32_t after = complete && thumb ? (flags & ~TEST_IT_MASK) | test_it_bits(0x18u) : flags;
+                CHECK(c.r[15] == (complete ? 0x104u : 0x100u) && c.cpsr == after &&
+                      c.excl_valid && c.excl_addr == 0x8000u,
+                      "A8 FP completion/refusal changed PC/IT/monitor T=%u reg=%u L=%u", thumb, sysreg, load);
+            }
+         }
+        }
+       }
+      }
+     }
+    }
+}
+
+static void test_cortex_a8_vfp_control_fields(void) {
+    /* List the documented fields independently of the production mask.
+     * FPEXC extra state is not implemented: EX and non-EN requests must stop
+     * before modifying the live enable state, not manufacture saved state. */
+    static const unsigned fpscr_bits[] = {0,1,2,3,4,7,16,17,18,20,21,22,23,24,25,27,28,29,30,31};
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned fpexc = 0; fpexc < 2u; fpexc++) {
+      for (unsigned bit = 0; bit <= 32u; bit++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_SVC | ARM_CPSR_N | ARM_CPSR_Q | (thumb ? ARM_CPSR_T : 0u);
+        c.cp15.cpacr = 0x00f00000u;
+        c.vfp_fpexc = ARM_FPEXC_EN; c.vfp_fpscr = 0x48000080u;
+        c.r[4] = bit == 32u ? 0u : 1u << bit; c.r[15] = 0x100u;
+        uint32_t flags = c.cpsr;
+        bool allowed = bit == 32u || (fpexc && bit == 30u);
+        if (!fpexc) for (unsigned n = 0; n < sizeof fpscr_bits / sizeof fpscr_bits[0]; n++)
+            if (bit == fpscr_bits[n]) allowed = true;
+        put_vfp_system_transfer(thumb, 0x100u, 0u, fpexc ? 8u : 1u, 4u);
+        CHECK(arm_step(&c) == (allowed ? ARM_OK : ARM_UNDEFINED) &&
+              c.vfp_fpscr == (!fpexc && allowed ? c.r[4] : 0x48000080u) &&
+              c.vfp_fpexc == (fpexc && allowed ? c.r[4] : ARM_FPEXC_EN) &&
+              c.r[15] == (allowed ? 0x104u : 0x100u) && c.cpsr == flags,
+              "A8 FP field T=%u FPEXC=%u bit=%u", thumb, fpexc, bit);
+        if (allowed) {
+            put_vfp_system_transfer(thumb, 0x104u, 1u, fpexc ? 8u : 1u, 2u);
+            CHECK(arm_step(&c) == ARM_OK && c.r[2] == c.r[4] && c.cpsr == flags,
+                  "A8 FP field failed guest readback T=%u FPEXC=%u bit=%u", thumb, fpexc, bit);
+        }
+      }
+     }
+    }
+}
+
+static void test_cortex_a8_vfp_core_registers(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned fpexc = 0; fpexc < 2u; fpexc++) {
+      for (unsigned load = 0; load < 2u; load++) {
+       for (unsigned rt = 0; rt < 16u; rt++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_SYS | ARM_CPSR_N | ARM_CPSR_Q | (10u << 16) |
+                 (thumb ? ARM_CPSR_T | test_it_bits(0x1cu) : 0u);
+        c.cp15.cpacr = 0x00f00000u;
+        c.vfp_fpexc = ARM_FPEXC_EN; c.vfp_fpscr = 0x48000080u;
+        for (unsigned n = 0; n < 15u; n++) c.r[n] = 0x12340000u + n;
+        if (rt != 15u) c.r[rt] = fpexc ? 0u : 0x98000095u;
+        c.r[15] = 0x100u;
+        uint32_t regs[16]; memcpy(regs, c.r, sizeof regs);
+        uint32_t flags = c.cpsr;
+        bool apsr = load && !fpexc && rt == 15u;
+        bool allowed = !(thumb && rt == 13u) && (rt != 15u || apsr);
+        put_vfp_system_transfer(thumb, 0x100u, load, fpexc ? 8u : 1u, rt);
+        CHECK(arm_step(&c) == (allowed ? ARM_OK : ARM_UNDEFINED),
+              "A8 VMRS/VMSR Rt legality T=%u FPEXC=%u L=%u Rt=%u", thumb, fpexc, load, rt);
+        if (allowed) {
+            if (load && !apsr) regs[rt] = fpexc ? ARM_FPEXC_EN : 0x48000080u;
+            if (apsr) flags = (flags & 0x0fffffffu) | 0x40000000u;
+            if (thumb) flags = (flags & ~TEST_IT_MASK) | test_it_bits(0x18u);
+            regs[15] = 0x104u;
+        }
+        CHECK(memcmp(regs, c.r, sizeof regs) == 0 && c.cpsr == flags &&
+              c.vfp_fpscr == (allowed && !load && !fpexc ? 0x98000095u : 0x48000080u) &&
+              c.vfp_fpexc == (allowed && !load && fpexc ? 0u : ARM_FPEXC_EN),
+              "A8 VMRS/VMSR register/flag effects T=%u FPEXC=%u L=%u Rt=%u", thumb, fpexc, load, rt);
+       }
+      }
+     }
+    }
+    /* Every flag combination, with QC deliberately different from APSR.Q. */
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned nzcv = 0; nzcv < 16u; nzcv++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_Q | (5u << 16) | (thumb ? ARM_CPSR_T : 0u);
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        c.vfp_fpscr = (nzcv << 28) | 0x80u;
+        uint32_t flags = c.cpsr;
+        put_vfp_system_transfer(thumb, 0u, 1u, 1u, 15u);
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cpsr == (flags | (nzcv << 28)),
+              "VMRS APSR transferred fields beyond NZCV T=%u flags=%u", thumb, nzcv);
+     }
+    }
+}
+
+static void test_cortex_a8_vfp_undefined_retry(void) {
+    /* B1.9.2: Thumb Undefined LR is fault PC+2 even for a 32-bit instruction.
+     * Guest code enables FPEXC, returns with SUBS pc,lr,#2, and re-executes
+     * the exact IT slot. VMRS then changes the condition of the next slot. */
+    for (unsigned user = 0; user < 2u; user++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = (user ? ARM_MODE_USR : ARM_MODE_SYS) | ARM_CPSR_T | ARM_CPSR_Z |
+                 ARM_CPSR_Q | (9u << 16);
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpscr = 0x80000000u;
+        c.r[15] = 0x100u; c.r[5] = ARM_FPEXC_EN; c.r[2] = 0x12345678u;
+        m_w16(NULL, 0x100u, 0xbf04u); /* ITT EQ */
+        put_vfp_system_transfer(1u, 0x102u, 1u, 1u, 15u);
+        m_w16(NULL, 0x106u, 0x2201u); /* MOVS r2,#1, second EQ slot */
+        put_vfp_system_transfer(0u, ARM_VEC_UNDEFINED, 0u, 8u, 5u);
+        m_w32(NULL, 8u, 0xe25ef002u); /* SUBS pc,lr,#2 */
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x102u &&
+              (c.cpsr & TEST_IT_MASK) == test_it_bits(0x04u), "FP retry IT setup");
+        uint32_t interrupted = c.cpsr;
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == 0x104u &&
+              c.spsr[ARM_BANK_UND] == interrupted && !(c.cpsr & (ARM_CPSR_T | TEST_IT_MASK)) &&
+              c.vfp_fpexc == 0u, "disabled Thumb FPSCR did not enter precise Undefined handler");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 8u && c.vfp_fpexc == ARM_FPEXC_EN,
+              "guest Undefined handler did not enable VFP");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x102u && c.cpsr == interrupted,
+              "Undefined return did not restore Thumb instruction and original IT slot");
+        uint32_t after = (interrupted & ~(0xf0000000u | TEST_IT_MASK)) |
+                         ARM_CPSR_N | test_it_bits(0x08u);
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x106u && c.cpsr == after,
+              "VMRS retry did not transfer NZCV and retire its IT slot once");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x108u && c.r[2] == 0x12345678u &&
+              c.cpsr == (after & ~TEST_IT_MASK) && c.cycles == 6u,
+              "post-retry IT condition did not see new FPSCR comparison flags");
+    }
+}
+
+static void test_cortex_a8_vfp_fetch_and_refusals(void) {
+    for (unsigned host = 0; host < 2u; host++) {
+     for (unsigned load = 0; load < 2u; load++) {
+      for (unsigned fault = 0; fault < 4u; fault++) {
+        memset(g_ram, 0, sizeof g_ram);
+        arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP;
+        c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u; c.cp15.cpacr = 0x00f00000u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N | test_it_bits(0x1cu);
+        c.vfp_fpscr = 0x48000080u; c.vfp_fpexc = fault ? 0u : ARM_FPEXC_EN;
+        c.r[15] = 0xffeu; c.r[4] = 0x98000095u;
+        uint32_t flags = c.cpsr;
+        m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x8032u);
+        m_w32(NULL, 0x6004u, fault == 1u ? 0u : fault == 2u ? 0xa033u : fault == 3u ? 0xa012u : 0xa032u);
+        m_w16(NULL, 0x8ffeu, (uint16_t)(0xeee1u | (load << 4)));
+        m_w16(NULL, 0xa000u, 0x4a10u); m_w16(NULL, 0x9000u, 0x5a10u); /* wrong physical neighbor */
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u, "Thumb FP fetch disposition");
+        if (!fault) {
+            CHECK(c.r[15] == 0x1002u && c.r[4] == (load ? 0x48000080u : 0x98000095u) &&
+                  c.vfp_fpscr == (load ? 0x48000080u : 0x98000095u) &&
+                  c.cpsr == ((flags & ~TEST_IT_MASK) | test_it_bits(0x18u)),
+                  "Thumb FP lost noncontiguous second-half fetch or IT retirement");
+        } else {
+            CHECK(c.r[15] == ARM_VEC_PREFETCH && c.r[14] == 0x1002u &&
+                  c.cp15.ifar == 0x1000u && c.spsr[ARM_BANK_ABT] == flags &&
+                  !(c.cpsr & (ARM_CPSR_T | TEST_IT_MASK)) &&
+                  c.vfp_fpscr == 0x48000080u && c.vfp_fpexc == 0u && c.r[4] == 0x98000095u &&
+                  (c.cp15.ifsr & 15u) == (fault == 1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION),
+                  "Thumb FP effects/availability preceded complete instruction fetch");
+        }
+      }
+     }
+    }
+    /* Reserved VMRS/VMSR bits must not reach a backed register. Refusals
+     * stay capability stops even with EN=0; a failed condition suppresses
+     * the whole transfer, including the availability/permission check. */
+    static const unsigned reserved[] = {0,1,2,3,5,6,7};
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned enabled = 0; enabled < 2u; enabled++) {
+      for (unsigned skip = 0; skip < 2u; skip++) {
+       for (unsigned load = 0; load < 2u; load++) {
+        for (unsigned n = 0; n <= sizeof reserved / sizeof reserved[0]; n++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+            c.cpsr = ARM_MODE_SVC | ARM_CPSR_N |
+                     (thumb ? ARM_CPSR_T | test_it_bits(skip ? 0x08u : 0x18u) : 0u);
+            c.cp15.cpacr = skip ? 0u : 0x00f00000u;
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            c.vfp_fpscr = 0x48000080u; c.r[4] = 0u; c.r[15] = 0x100u;
+            uint32_t flags = c.cpsr;
+            uint32_t insn = 0xeee84a10u | (load << 20); /* FPEXC valid with either EN */
+            bool valid = n == sizeof reserved / sizeof reserved[0];
+            if (!valid) insn |= 1u << reserved[n];
+            if (thumb) { m_w16(NULL, 0x100u, (uint16_t)(insn >> 16)); m_w16(NULL, 0x102u, (uint16_t)insn); }
+            else m_w32(NULL, 0x100u, skip ? insn & 0x0fffffffu : insn); /* EQ false */
+            CHECK(arm_step(&c) == (skip || valid ? ARM_OK : ARM_UNDEFINED) &&
+                  c.r[15] == (skip || valid ? 0x104u : 0x100u) &&
+                  c.cpsr == (thumb && (skip || valid) ? flags & ~TEST_IT_MASK : flags) &&
+                  c.vfp_fpscr == 0x48000080u &&
+                  c.vfp_fpexc == (!skip && valid && !load ? 0u : enabled ? ARM_FPEXC_EN : 0u) &&
+                  c.r[4] == (!skip && valid && load && enabled ? ARM_FPEXC_EN : 0u),
+                  "FP reserved/conditional transfer T=%u EN=%u skip=%u L=%u n=%u", thumb, enabled, skip, load, n);
+        }
+       }
+      }
+     }
+    }
+    const uint32_t neighbors[] = {0xeef14b10u,0xee114a10u,0xeef14a00u,0xfef14a10u};
+    for (unsigned n = 0; n < sizeof neighbors / sizeof neighbors[0]; n++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T; c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        c.vfp_fpscr = 0x48000080u; c.r[4] = 0x12345678u;
+        m_w16(NULL, 0u, (uint16_t)(neighbors[n] >> 16)); m_w16(NULL, 2u, (uint16_t)neighbors[n]);
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[4] == 0x12345678u && c.r[15] == 0u &&
+              c.vfp_fpscr == 0x48000080u, "Thumb system transfer aliased unrelated encoding n=%u", n);
+    }
+    /* The shared A32 VMOV remains a data-register transfer, not FPSCR. */
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+    c.vfp_fpscr = 0x48000080u; c.vfp_s[2] = 0x12345678u;
+    m_w32(NULL, 0u, 0xee114a10u);
+    CHECK(arm_step(&c) == ARM_OK && c.r[4] == 0x12345678u && c.vfp_fpscr == 0x48000080u,
+          "A8 VFP system decoder swallowed VMOV r4,s2");
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned n = 0; n < sizeof legacy / sizeof legacy[0]; n++) {
+        CHECK(arm_reset_profile(&c, &g_bus, legacy[n]), "reset");
+        c.cpsr = ARM_MODE_USR; c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        put_vfp_system_transfer(0u, 0u, 1u, 0u, 4u);
+        CHECK(arm_step(&c) == ARM_OK && c.r[4] == ARM1176_FPSID, "A8 FPSID permission changed legacy VFP");
+        c.cpsr = ARM_MODE_SVC; c.r[4] = UINT32_MAX;
+        put_vfp_system_transfer(0u, 4u, 0u, 1u, 4u);
+        put_vfp_system_transfer(0u, 8u, 0u, 8u, 4u);
+        CHECK(arm_step(&c) == ARM_OK && c.vfp_fpscr == 0xf3f79f9fu, "A8 FPSCR fields changed legacy VFP");
+        CHECK(arm_step(&c) == ARM_OK && c.vfp_fpexc == UINT32_MAX, "A8 FPEXC fields changed legacy VFP");
+    }
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_SWIFT), "reset");
+    c.cpsr |= ARM_CPSR_T; c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+    put_vfp_system_transfer(1u, 0u, 1u, 1u, 4u);
+    CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u, "A8 Thumb VFP enabled unaudited Swift path");
+}
+
 typedef struct wfi_probe {
     arm_cpu_t *cpu;
     unsigned calls;
@@ -8948,6 +9251,11 @@ static void test_cortex_a8_thumb_cp15_fetch_and_maintenance(void) {
 }
 
 int main(void) {
+    test_cortex_a8_vfp_system_access();
+    test_cortex_a8_vfp_control_fields();
+    test_cortex_a8_vfp_core_registers();
+    test_cortex_a8_vfp_undefined_retry();
+    test_cortex_a8_vfp_fetch_and_refusals();
     test_cortex_a8_thumb_cp15_transfers();
     test_cortex_a8_thumb_cp15_fetch_and_maintenance();
     test_reset_initializes_the_default_profile();

@@ -122,6 +122,29 @@ VFP access and denied access entering the guest Undefined handler. Legacy
 CPACR behavior is unchanged. This establishes access control; the full
 Cortex-A8 VFP/NEON register and instruction model remains separate work.
 
+Cortex-A8 VMRS/VMSR now use a separate system-register path in ARM and
+Thumb state. FPSCR requires FPEXC.EN; every other defined system register
+is privileged regardless of EN. CPACR and privilege/enable denials enter the
+guest Undefined handler. FPSCR preserves its Cortex-A8 fields, including QC,
+and refuses nonzero DNM/SBZP fields and unsupported exception trap enables.
+FPEXC supports EN; requests for EX or other extra-state controls stop before
+mutation. Privileged FPSID writes serialize the synchronous FP unit. FPSID
+and MVFR reads remain explicit capability stops until the target identity is
+established; MVFR writes and reserved selectors are refused. These rules use
+[DDI0344K, section 13.4](https://documentation-service.arm.com/static/5e8e1ac688295d1e18d35fde)
+and [DDI0406C.b, B9.3.21/22](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+The latter defines FPSID serialization but no valid MVFR VMSR selector.
+
+Tests cover access modes, control bits, core-register restrictions, APSR
+NZCV-only transfers, and complete instruction fetch before effects. A guest
+Undefined handler enables FPEXC and returns to the original Thumb IT slot,
+then the retried VMRS changes the condition seen by the next slot. Undefined
+entry saves fault PC+2 in Thumb even for a 32-bit instruction, following
+[DDI0406C.b, B1.9.2](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Unknown identity reads remain capability stops even with EN clear. The
+legacy VFP11 path and CPU/snapshot layouts are unchanged. This adds system
+transfers without expanding the FP data bank or implementing Thumb arithmetic.
+
 Cortex-A8 L2 auxiliary control (`p15,1,c9,c0,2`) now stores its defined
 fields separately from ARM1176 CP15 state and resets to `0x00000042`.
 The implemented configuration has no L2 parity/ECC RAM, so bit 21 stays clear
@@ -141,8 +164,9 @@ access path. Both halfwords must be fetched before any register changes;
 Thumb additionally forbids SP in the transfer register. Refused accesses leave
 flags and IT state unchanged. IT conditions, privileged
 state changes and permitted User thread-ID/barrier accesses retain their
-normal semantics. CP14, VFP and Swift CP15 transfers remain unsupported in
-Thumb. CP15 MRC2/MCR2 encodings are undefined and refused. The ARM1176
+normal semantics. CP14 and Swift CP15 transfers remain unsupported in
+Thumb; VFP transfers are limited to the Cortex-A8 system registers above.
+CP15 MRC2/MCR2 encodings are undefined and refused. The ARM1176
 instruction path is unchanged.
 See [DDI0406C.b, A8.8.98/107](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 This adds transfer execution without supplying unverified CPU identity.
@@ -352,8 +376,9 @@ establish that result.
   also implemented. Other instruction families remain to implement. IT state
   and conditional execution are implemented for the supported Thumb families.
   Cortex-A8 MRC/MCR transfers cover the currently implemented CP15 registers.
-- VFP stores only d0-d15 and models VFP11/VFPv2. Cortex-A8 VFPv3 and NEON,
-  including the wider register file and context-switch semantics, are absent.
+- VFP data paths store only d0-d15 and derive from VFP11/VFPv2. Cortex-A8
+  has checked system transfers, but the wider VFPv3/NEON register file,
+  instruction families and full context-switch semantics remain to implement.
 - The SoC, interrupt wiring, storage, graphics, input and power devices are
   currently S5L8900-specific. Build them from the N88 firmware requirements.
 - Boot arguments, device-tree relocation, importer/storage selection, and

@@ -1,6 +1,10 @@
 /*
  * S5LBox — VFPv2 (the ARM1176JZF-S's VFP11 unit).
  *
+ * Cortex-A8 VMRS/VMSR use a separate checked system-register path. The
+ * register-file and arithmetic descriptions below concern the legacy VFP11
+ * implementation; they do not establish complete Cortex-A8 VFPv3/NEON support.
+ *
  * WHY THIS EXISTS, AND WHY NOW
  * ----------------------------
  * The boot reaches launchd, which issues five syscalls and then executes a VFP
@@ -779,6 +783,56 @@ static arm_status_t vfp_ldst(arm_cpu_t *c, uint32_t pc, uint32_t insn,
  * disassemblers spelling them with the same lane syntax used by NEON. Only
  * the 32-bit low/high halves exist here; the 8/16-bit scalar forms are NEON.
  */
+/* Cortex-A8 system transfers (DDI0344K 13.4, DDI0406C.b B9.3.21/22).
+ * Decode them before VFP11 availability and host rounding: these accesses
+ * do not perform floating-point arithmetic. Non-FPSCR registers require
+ * privileged mode even when EN=1 and remain accessible with EN=0. */
+static arm_status_t vfp_a8_system_transfer(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
+    unsigned sysreg = (insn >> 16) & 15u, rt = (insn >> 12) & 15u;
+    bool load = (insn & (1u << 20)) != 0u;
+    g_reason = NULL;
+    if ((insn & 0x000000efu) || ((c->cpsr & ARM_CPSR_T) && rt == 13u) ||
+        (rt == 15u && (!load || sysreg != 1u)))
+        return vfp_trap(pc, insn, "reserved Cortex-A8 VMRS/VMSR encoding or core register");
+    if (sysreg != 0u && sysreg != 1u && sysreg != 8u &&
+        !(load && (sysreg == 6u || sysreg == 7u)))
+        return vfp_trap(pc, insn, "unsupported Cortex-A8 VFP system-register selector");
+    if (!vfp_cpacr_permits(c))
+        return vfp_guest_undefined("CPACR denies Cortex-A8 VFP access");
+    if (sysreg != 1u && (c->cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_USR)
+        return vfp_guest_undefined("Cortex-A8 non-FPSCR system registers are privileged");
+    if (sysreg == 1u && !vfp_enabled(c))
+        return vfp_guest_undefined("Cortex-A8 FPSCR requires FPEXC.EN");
+
+    if (load) {
+        if (sysreg != 1u && sysreg != 8u)
+            return vfp_trap(pc, insn, "Cortex-A8 FP identity is not established for this target");
+        uint32_t value = sysreg == 1u ? c->vfp_fpscr : c->vfp_fpexc;
+        if (rt == 15u) c->cpsr = (c->cpsr & ~ARM_FPSCR_NZCV) | (value & ARM_FPSCR_NZCV);
+        else c->r[rt] = value;
+        return ARM_OK;
+    }
+
+    /* FPSID writes serialize the unit without changing its read-only value.
+     * All supported FP operations complete synchronously. MVFR writes have
+     * no defined VMSR selector and were rejected above. */
+    if (sysreg == 0u) return ARM_OK;
+    uint32_t value = c->r[rt];
+    if (sysreg == 1u) {
+        if (value & ~ARM_FPSCR_A8_WMASK)
+            return vfp_trap(pc, insn, "nonzero Cortex-A8 FPSCR DNM/SBZP fields");
+        c->vfp_fpscr = value;
+    } else {
+        /* Extra-state handling is subarchitecture-defined. No EX/FPINST
+         * state contract is implemented here; do not invent it by storing
+         * unchecked bits. EN changes take effect on the next instruction. */
+        if (value & ~ARM_FPEXC_EN)
+            return vfp_trap(pc, insn, "unsupported Cortex-A8 FPEXC extra-state/control request");
+        c->vfp_fpexc = value;
+    }
+    return ARM_OK;
+}
+
 static arm_status_t vfp_xfer32(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
     unsigned opc1 = (insn >> 21) & 7u;
     bool     L    = BIT(20);
@@ -1303,6 +1357,8 @@ static arm_status_t vfp_execute_inner(arm_cpu_t *c, uint32_t pc, uint32_t insn,
 
 arm_status_t vfp_execute(arm_cpu_t *c, uint32_t pc, uint32_t insn,
                          const vfp_bus_t *bus) {
+    if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_system_transfer(insn))
+        return vfp_a8_system_transfer(c, pc, insn);
     if (!c || (c->vfp_fpscr & ARM_FPSCR_RMODE) == 0u)
         return vfp_execute_inner(c, pc, insn, bus);
 
@@ -1339,7 +1395,7 @@ static arm_status_t vfp_execute_inner(arm_cpu_t *c, uint32_t pc, uint32_t insn,
     if (!vfp_cpacr_permits(c)) return ARM_UNDEFINED;
     if (!vfp_enabled(c)) {
         /* VMRS/VMSR share one pattern; bit 20 (L) is left out of the mask. */
-        bool is_sysreg = (insn & 0x0fe00f10u) == 0x0ee00a10u;
+        bool is_sysreg = vfp_is_system_transfer(insn);
         unsigned crn = FIELD(16);
         if (!is_sysreg || (crn != 0u && crn != 8u)) return ARM_UNDEFINED;
     }

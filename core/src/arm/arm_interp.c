@@ -640,31 +640,26 @@ static bool insn_is_vfp_space(uint32_t insn) {
  *
  * True only for the lazy-enable case described above. */
 static bool vfp_lazy_enable_trap(const arm_cpu_t *c, uint32_t insn) {
+    /* A8 system transfers report every actual access denial explicitly as
+     * ARM_GUEST_UNDEFINED. An unsupported ID or invalid encoding is still
+     * a capability stop when EN=0, not a fault the guest can fix by enabling. */
+    if (c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_system_transfer(insn)) return false;
     if (!insn_is_vfp_space(insn)) return false;
     return !vfp_cpacr_permits(c) || !vfp_enabled(c);
 }
 
 /*
- * Final disposition of an ARM-state encoding this core did not execute. Either
- * the guest gets its Undefined exception, or we stop.
- *
- * ARM ARM (ARMv6, DDI0100I) A2.6.7: R14_und is the address of the instruction
- * following the undefined one — PC+4 in ARM state, PC+2 in Thumb — the mode
- * becomes Undefined (0b11011), SPSR_und takes the old CPSR, CPSR.I is set and
- * CPSR.T cleared. CPSR.A is NOT set, unlike the abort and interrupt vectors;
- * take_exception already draws that distinction. The kernel confirms the
- * +4/+2 split from the other side: _fleh_undef recovers the faulting PC with
- * "SUBEQ lr,lr,#4 / SUBNE lr,lr,#2" keyed on SPSR.T alone.
- *
- * Only the ARM-state form exists here, and that is not an omission. The Thumb
- * return address would be PC+2, but no Thumb encoding can qualify: ARMv6 Thumb
- * has no coprocessor instructions, so a Thumb undefined instruction is never a
- * lazy-VFP fault and always stops the machine. Writing the +2 case would be
- * unreachable code standing in for a case this part cannot produce.
+ * Enter the guest's Undefined handler after a defined access denial. Other
+ * unimplemented encodings stop the emulator. DDI0406C.b B1.9.2 saves fault
+ * PC+2 in Thumb, even for a 32-bit instruction, or PC+4 in ARM. The handler
+ * subtracts that offset to retry with the original CPSR/IT state from SPSR.
+ * take_exception preserves that state before clearing T/IT and setting I;
+ * Undefined does not set A. ARM1176's lazy-enable path remains ARM-only.
  */
 static arm_status_t take_undefined_instruction(arm_cpu_t *c, uint32_t pc) {
     uint32_t vec;
-    take_exception(c, ARM_VEC_UNDEFINED, ARM_MODE_UND, pc + 4u, false, &vec);
+    uint32_t link = pc + ((c->cpsr & ARM_CPSR_T) ? 2u : 4u);
+    take_exception(c, ARM_VEC_UNDEFINED, ARM_MODE_UND, link, false, &vec);
     c->r[15] = vec;
     return ARM_OK;
 }
@@ -2997,9 +2992,13 @@ static arm_status_t thumb_load_word(arm_cpu_t *c, uint32_t address, unsigned rt,
 static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
                                  uint16_t second, uint32_t *next) {
     if (first == 0xf3afu && second == 0x8003u) return exec_a8_wfi(c); /* WFI T2 */
+    uint32_t insn = ((uint32_t)first << 16) | second;
+    if (c->arch == ARM_ARCH_V7_CORTEX_A8 && (first & 0xff00u) == 0xee00u &&
+        vfp_is_system_transfer(insn))
+        return vfp_execute(c, pc, insn, &g_vfp_bus);
     /* MCR/MRC T1 (DDI0406C.b A8.8.98/107): CP15 uses the A32 fields,
-     * but Thumb forbids Rt=SP. Only Cortex-A8's checked CP15 bank is ready;
-     * other coprocessors/profiles remain separate work. MCR2/MRC2 to CP15
+     * but Thumb forbids Rt=SP. This route covers Cortex-A8's checked CP15
+     * bank; Swift CP15 remains separate work. MCR2/MRC2 to CP15
      * are undefined (B3.15.2) and must not alias these encodings. */
     if ((first & 0xff00u) == 0xee00u && (second & 0x0f10u) == 0x0f10u) {
         if (c->arch != ARM_ARCH_V7_CORTEX_A8 || (second >> 12) == 13u)
@@ -3440,6 +3439,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
             take_pending_data_abort(c, pc);
             return ARM_OK;
         }
+        if (tst == ARM_GUEST_UNDEFINED) return take_undefined_instruction(c, pc);
         if (tst == ARM_OK) {
             if (it && !exception_taken) thumb_advance_it(c, it);
             c->r[15] = tnext;

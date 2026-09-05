@@ -5,6 +5,9 @@
  * registers s0-s31 aliased onto 16 double-precision registers d0-d15. There is
  * no d16-d31 and there is no Advanced SIMD/NEON on this part.
  *
+ * Cortex-A8 has a separate checked system-register path. Its full VFPv3/NEON
+ * register file and instruction set are not implemented by this interface.
+ *
  * Everything about WHY this exists, and every floating-point semantic this
  * implementation does and does not model, is documented at the top of
  * core/src/arm/vfp.c. Read that before using anything here.
@@ -25,6 +28,7 @@
 #define ARM_FPSCR_C      (1u << 29)  /* comparison: >=, or unordered         */
 #define ARM_FPSCR_V      (1u << 28)  /* comparison: unordered                */
 #define ARM_FPSCR_NZCV   0xf0000000u
+#define ARM_FPSCR_QC     (1u << 27)  /* SIMD cumulative saturation; A8 only  */
 #define ARM_FPSCR_DN     (1u << 25)  /* default NaN mode                     */
 #define ARM_FPSCR_FZ     (1u << 24)  /* flush-to-zero mode                   */
 #define ARM_FPSCR_RMODE  (3u << 22)  /* 00 RN, 01 RP, 10 RM, 11 RZ           */
@@ -54,6 +58,10 @@
  * that writes 0xffffffff and reads it back must see hardware's answer.
  */
 #define ARM_FPSCR_WMASK  0xf3f79f9fu
+
+/* Cortex-A8 (DDI0344K 13.4.2): QC is implemented, exception trap enables
+ * are not. Nonzero DNM/SBZP fields are refused, rather than stored. */
+#define ARM_FPSCR_A8_WMASK 0xfbf7009fu
 
 /* ------------------------------------------------------- register file --- */
 /*
@@ -102,6 +110,12 @@ bool vfp_cpacr_permits(const arm_cpu_t *c);
 /* True when FPEXC.EN is set, i.e. VFP is enabled for the running thread. */
 bool vfp_enabled(const arm_cpu_t *c);
 
+/* VMRS/VMSR CP10 system-register space. The caller checks the instruction
+ * set/condition; the transfer decoder checks reserved bits, selector and Rt. */
+static inline bool vfp_is_system_transfer(uint32_t insn) {
+    return (insn & 0x0fe00f10u) == 0x0ee00a10u;
+}
+
 /*
  * Execute one VFP encoding. `insn` must already have been identified as a
  * cp10/cp11 encoding by the caller and its condition code must already have
@@ -109,7 +123,9 @@ bool vfp_enabled(const arm_cpu_t *c);
  * disabled-unit access (the lazy-enable trap); or ARM_GUEST_UNDEFINED for an
  * architecturally denied access. arm_step recognizes the disabled-unit
  * ARM_UNDEFINED separately and routes it plus ARM_GUEST_UNDEFINED to the
- * guest's handler while keeping capability gaps fail-closed.
+ * guest's handler while keeping capability gaps fail-closed. Cortex-A8
+ * system transfers return ARM_GUEST_UNDEFINED for all actual access denials;
+ * their ARM_UNDEFINED results must never be reclassified as lazy-enable faults.
  *
  * VFP never writes r15, so the caller's `next` is unaffected.
  */
