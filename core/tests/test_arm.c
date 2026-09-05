@@ -7421,6 +7421,149 @@ static void test_thumb2_doubleword_aborts(void) {
     }
 }
 
+static void test_thumb2_small_loads(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    static const struct { uint16_t first; uint32_t negative, positive; } kinds[] = {
+        {0xf810u,0x80u,0x7fu}, {0xf830u,0x8080u,0x7f7fu},
+        {0xf910u,0xffffff80u,0x7fu}, {0xf930u,0xffff8080u,0x7f7fu},
+    };
+    static const struct { uint16_t high, low; int access_delta, base_delta; } forms[] = {
+        {0x80u,0x000u,0,0}, {0x80u,0xfffu,4095,0},
+        {0u,0xcffu,-255,0}, {0u,0xfffu,255,255}, {0u,0xd01u,-1,-1},
+        {0u,0xb01u,0,1}, {0u,0x9ffu,0,-255},
+    };
+    for (unsigned p = 0; p < 2; p++) {
+     for (unsigned host = 0; host < 2; host++) {
+      for (unsigned kind = 0; kind < 4; kind++) {
+       for (unsigned form = 0; form < sizeof forms / sizeof forms[0]; form++) {
+        for (unsigned positive = 0; positive < 2; positive++) {
+            arm_bus_t bus = g_bus;
+            if (host) bus.host_ram = m_host_ram;
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &bus, profiles[p]), "reset");
+            c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_V | ARM_CPSR_Q | test_it_bits(0xe8u);
+            c.cp15.sctlr = 0u; c.r[13] = 0x10001u; c.r[14] = 0xdeadbeefu;
+            uint32_t flags = c.cpsr & ~TEST_IT_MASK;
+            m_w16(NULL, 0, (uint16_t)(kinds[kind].first | forms[form].high | 13u));
+            m_w16(NULL, 2, (uint16_t)(0xe000u | forms[form].low));
+            m_w16(NULL, 0x10001u + (uint32_t)forms[form].access_delta, positive ? 0x7f7fu : 0x8080u);
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u && c.cpsr == flags &&
+                  c.r[14] == (positive ? kinds[kind].positive : kinds[kind].negative) &&
+                  c.r[13] == 0x10001u + (uint32_t)forms[form].base_delta,
+                  "small load kind=%u form=%u lost extension, byte offset, writeback or flags", kind, form);
+        }
+       }
+       for (unsigned halfpc = 0; halfpc < 2; halfpc++) {
+        for (unsigned add = 0; add < 2; add++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+            c.cpsr |= ARM_CPSR_T; c.r[15] = 0x2000u + 2u * halfpc;
+            m_w16(NULL, c.r[15], (uint16_t)(kinds[kind].first | 15u | (add ? 0x80u : 0u)));
+            m_w16(NULL, c.r[15] + 2u, 0x3fffu);
+            m_w16(NULL, add ? 0x3003u : 0x1005u, 0x8080u);
+            CHECK(arm_step(&c) == ARM_OK && c.r[3] == kinds[kind].negative &&
+                  c.r[15] == 0x2004u + 2u * halfpc,
+                  "small literal load used wrong PC alignment, sign, offset scale or data width");
+        }
+       }
+       arm_cpu_t c;
+       CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+       c.cpsr |= ARM_CPSR_T; c.r[4] = 0x200u;
+       m_w16(NULL, 0, (uint16_t)(kinds[kind].first | 0x84u)); m_w16(NULL, 2, 0x4000u);
+       m_w16(NULL, 0x200u, 0x8080u);
+       CHECK(arm_step(&c) == ARM_OK && c.r[4] == kinds[kind].negative && c.r[15] == 4u,
+             "small load without writeback rejected the destination/base alias");
+      }
+     }
+    }
+    for (unsigned kind = 0; kind < 4; kind++) {
+     for (unsigned form = 0; form < 3; form++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_C; c.r[4] = 0x80010000u;
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP; c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        memset(g_ram + 0x4000u, 0, 0x4000u);
+        m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x803eu);
+        /* PC destinations in these forms encode PLD/PLDW/PLI or unallocated
+         * memory hints. They must not load, fault, branch or clear exclusives. */
+        uint16_t first = (uint16_t)(kinds[kind].first | (form == 0 ? 0x84u : form == 1 ? 15u : 4u));
+        m_w16(NULL, 0x8000u, first); m_w16(NULL, 0x8002u, form == 2 ? 0xfc20u : 0xffffu);
+        c.excl_valid = true;
+        uint32_t flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cpsr == flags &&
+              c.r[4] == 0x80010000u && c.excl_valid && !c.abort_pending,
+              "small-load hint alias issued a load or changed architectural state");
+     }
+     static const uint16_t bad[] = {0xdf01u,0x4f01u,0xff01u,0x3e01u,0x3a01u,0x3801u};
+     for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_C; c.r[4] = 0x200u; c.r[3] = 0x12345678u;
+        m_w16(NULL, 0, (uint16_t)(kinds[kind].first | 4u)); m_w16(NULL, 2, bad[i]);
+        uint32_t flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.cpsr == flags &&
+              c.r[4] == 0x200u && c.r[3] == 0x12345678u,
+              "small indexed load accepted bad registers/addressing or unsupported unprivileged alias");
+     }
+     for (unsigned literal = 0; literal < 2; literal++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T; c.r[4] = 0x200u; c.r[13] = 0x12345678u;
+        m_w16(NULL, 0, (uint16_t)(kinds[kind].first | 0x80u | (literal ? 15u : 4u)));
+        m_w16(NULL, 2, 0xd020u);
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.r[13] == 0x12345678u,
+              "small literal/imm12 load accepted SP destination");
+     }
+     arm_cpu_t c;
+     CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+     c.cpsr |= ARM_CPSR_T | ARM_CPSR_E; c.r[4] = 0x200u; c.r[3] = 0x12345678u;
+     m_w16(NULL, 0, (uint16_t)(kinds[kind].first | 4u)); m_w16(NULL, 2, 0x3f01u);
+     m_w16(NULL, 0x201u, 0x8080u);
+     CHECK(arm_step(&c) == ((kind & 1u) ? ARM_UNDEFINED : ARM_OK) &&
+           c.r[15] == ((kind & 1u) ? 0u : 4u) && c.r[4] == ((kind & 1u) ? 0x200u : 0x201u) &&
+           c.r[3] == ((kind & 1u) ? 0x12345678u : kinds[kind].negative),
+           "unsupported big-endian halfword load changed state or byte load depended on endianness");
+    }
+}
+
+static void test_thumb2_small_load_aborts(void) {
+    const uint16_t first[] = {0xf814u,0xf834u,0xf914u,0xf934u};
+    const uint32_t expected[] = {0x80u,0xfe80u,0xffffff80u,0xfffffe80u};
+    for (unsigned host = 0; host < 2; host++) {
+     for (unsigned kind = 0; kind < 4; kind++) {
+      for (unsigned fault = 0; fault < 5; fault++) {
+        arm_bus_t bus = g_bus;
+        if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c;
+        memset(g_ram, 0xee, sizeof g_ram);
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP | (fault == 4 ? ARM_SCTLR_A : 0u);
+        c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N | test_it_bits(0x18u);
+        c.r[4] = 0x1ffeu; c.r[2] = 0x12345678u;
+        uint32_t flags = c.cpsr;
+        m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x803eu);
+        m_w32(NULL, 0x6004u, fault == 1 ? 0u : 0xa03eu);
+        m_w32(NULL, 0x6008u, fault == 2 ? 0u : fault == 3 ? 0xc01eu : 0xc03eu);
+        m_w16(NULL, 0x8000u, first[kind]); m_w16(NULL, 0x8002u, 0x2f01u);
+        m_w8(NULL, 0xafffu, 0x80u); m_w8(NULL, 0xc000u, 0xfeu);
+        bool abort = fault == 1 || ((kind & 1u) && fault);
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u, "small indexed load did not retire");
+        if (abort) {
+            uint32_t fsr = fault == 4 ? ARM_FSR_ALIGNMENT : fault == 3 ? ARM_FSR_PAGE_PERMISSION : ARM_FSR_PAGE_TRANSLATION;
+            CHECK(c.r[15] == ARM_VEC_DATA_ABORT && c.r[14] == 8u && c.r[4] == 0x1ffeu &&
+                  c.r[2] == 0x12345678u && c.spsr[ARM_BANK_ABT] == flags && !(c.cpsr & TEST_IT_MASK) &&
+                  c.cp15.dfsr == fsr && c.cp15.dfar == (fault == 1 || fault == 4 ? 0x1fffu : 0x2000u),
+                  "small load abort lost base/result, exact DFAR or saved IT state");
+        } else {
+            CHECK(c.r[15] == 4u && c.r[4] == 0x1fffu && c.r[2] == expected[kind] && c.cpsr == (flags & ~TEST_IT_MASK),
+                  "small load crossed wrong physical frames or byte load accessed its neighbor");
+        }
+      }
+     }
+    }
+}
+
 static void test_thumb_compare_and_branch(void) {
     const arm_arch_t profiles[] = {ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
     const uint32_t offsets[] = {0u, 62u, 64u, 126u};
@@ -7494,6 +7637,8 @@ int main(void) {
     test_thumb2_logical_immediates();
     test_thumb2_doubleword_transfers();
     test_thumb2_doubleword_aborts();
+    test_thumb2_small_loads();
+    test_thumb2_small_load_aborts();
     test_thumb_compare_and_branch();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();

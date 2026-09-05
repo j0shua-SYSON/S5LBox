@@ -2847,6 +2847,16 @@ static bool thumb_it_placement(unsigned state, uint16_t first, uint16_t second,
     return true;
 }
 
+static arm_status_t thumb_load_small(arm_cpu_t *c, uint32_t address, unsigned rt,
+                                     bool half, bool sign) {
+    if (half && (c->cpsr & ARM_CPSR_E)) return ARM_UNDEFINED;
+    uint32_t value = half ? mem_r16(c, address) : mem_r8(c, address);
+    if (c->abort_pending) return ARM_OK;
+    if (sign) value = half ? (uint32_t)(int32_t)(int16_t)value : (uint32_t)(int32_t)(int8_t)value;
+    c->r[rt] = value;
+    return ARM_OK;
+}
+
 static arm_status_t thumb_load_word(arm_cpu_t *c, uint32_t address, unsigned rt,
                                     uint32_t *next) {
     if (rt == 15u && (address & 3u)) {
@@ -2937,6 +2947,34 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
             *next = base + offset;
         }
         return ARM_OK;
+    }
+    /* LDRB/H/SB/SH immediate and literal (A6.3.8/9). Rn=PC always
+     * selects a literal before interpreting bits11:8 as indexing controls.
+     * Register offsets and unprivileged aliases remain separate families. */
+    if ((first & 0xfe50u) == 0xf810u) {
+        unsigned rn = first & 15u, rt = second >> 12;
+        bool literal = rn == 15u, imm12 = (first & 0x80u) != 0u;
+        bool pre = true, add = imm12, wb = false;
+        uint32_t offset = second & 0xfffu;
+        if (!literal && !imm12) {
+            if (!(second & 0x800u)) return ARM_UNDEFINED; /* register offset */
+            pre = (second & 0x400u) != 0u;
+            add = (second & 0x200u) != 0u;
+            wb = (second & 0x100u) != 0u;
+            if ((!pre && !wb) || (pre && add && !wb)) return ARM_UNDEFINED;
+            offset = second & 0xffu;
+        }
+        /* These Rt=PC encodings are cache hints, never loads to PC. Our
+         * memory model ignores PLD/PLDW/PLI; unallocated hints are NOPs.
+         * In particular an unmapped hint address must not cause an abort. */
+        if (rt == 15u && (literal || imm12 || (pre && !add && !wb))) return ARM_OK;
+        if (rt == 13u || rt == 15u || (wb && rn == rt)) return ARM_UNDEFINED;
+        uint32_t base = literal ? ((pc + 4u) & ~3u) : c->r[rn];
+        uint32_t adjusted = add ? base + offset : base - offset;
+        arm_status_t status = thumb_load_small(c, pre ? adjusted : base, rt,
+                                               (first & 0x20u) != 0u, (first & 0x100u) != 0u);
+        if (status == ARM_OK && wb && !c->abort_pending) c->r[rn] = adjusted;
+        return status;
     }
     /* STRB/STRH immediate T2 (DDI0406C.b A8.8.206/216). Unlike STR,
      * these forms forbid SP as the source; SP remains a valid base. */

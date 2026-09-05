@@ -140,6 +140,16 @@ faults, and exception IT state. The shared data path is little-endian;
 these new forms explicitly refuse CPSR.E rather than execute incorrect
 big-endian accesses. General big-endian data support remains unimplemented.
 
+Wide LDRB/LDRH/LDRSB/LDRSH implement immediate, literal and pre/post-indexed
+forms, with byte offsets and the required zero/sign extension. Result and
+writeback commit only after a successful access. Tests cover addressing
+limits, SP bases, literal alignment, page crossings, permission/alignment
+faults and saved IT state. Halfword forms refuse the unsupported CPSR.E
+mode; byte loads are endian-independent. PC-destination aliases encode
+PLD/PLDW/PLI or unallocated hints and perform no data access, including when
+the hinted address is unmapped. Register-offset and unprivileged forms
+remain unsupported.
+
 The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates
 C only as prescribed by the immediate form, preserving V. Invalid zero
@@ -190,8 +200,8 @@ establish that result.
   and memory translation paths still need a Cortex-A8 audit and implementation.
   The instruction profile is not a complete system-register model.
 - Thumb-2 currently implements MOVW/MOVT, modified-immediate logical operations
-  and arithmetic, immediate LDR/STR and STRB/STRH (including pre/post indexing),
-  LDR literals, and immediate/literal doubleword transfers.
+  and arithmetic, immediate LDR/STR and byte/halfword transfers (including
+  signed loads and pre/post indexing), literals, and doubleword transfers.
   Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple transfers are also implemented. Other
   instruction families remain to implement. IT state and conditional execution
   are implemented for the supported Thumb decoder families.
@@ -297,8 +307,10 @@ That property is `memory-frequency`. The same firmware configuration establishes
 200 MHz for memory, 600 MHz for the nominal CPU clock, 100 MHz for peripherals
 and 24 MHz for the fixed clock. Preparing the remaining four CPU clock
 properties advances to 73,287 steps at `0x8027a520`, halfwords `f813 0f01`
-(`LDRB.W r0,[r3,#1]!`), which remains unsupported. Every other zero-valued
-property remains guarded, and the original device-tree file is unchanged.
+(`LDRB.W r0,[r3,#1]!`). Byte/halfword loads then advance the trace to 74,547
+steps at `0x80089784`, reading guarded physical `0x411026a0`: the zero-valued
+`/device-tree/chosen/debug-enabled` property. Every other unprepared
+zero-valued property remains guarded, and the original device-tree file is unchanged.
 No board registers are fabricated to advance this trace.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
