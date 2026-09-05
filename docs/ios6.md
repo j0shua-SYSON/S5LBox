@@ -165,6 +165,13 @@ Non-flag-setting plain MOV permits SP in exactly one operand. ADD/SUB updates
 to SP require an SP base and LSL of 0..3. Tests cover those constraints,
 shift boundaries, sign/carry behavior, aliases, IT and ARM1176 framing.
 
+Thumb UBFX/SBFX and BFI/BFC implement bitfield extraction, sign extension,
+insertion and clearing. They validate ranges before shifting and preserve
+flags and unrelated destination bits. Tests compare every encoded field
+range against a bit-by-bit reference, including full-width fields, register
+overlaps, invalid SP/PC operands and reserved encoding bits. A32 bitfield
+instructions remain a separate unimplemented family.
+
 The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates
 C only as prescribed by the immediate form, preserving V. Invalid zero
@@ -344,8 +351,10 @@ that configuration reaches 74,914 steps at `0x8027a8c0`, halfwords
 `fa5f f088` (`UXTB.W r0,r8`). Extend execution then advances to 75,175 steps
 at `0x80089d5e`, halfwords `eb08 0004` (`ADD.W r0,r8,r4`). Shifted-register
 execution then reaches 75,223 steps at `0x802b797c`, halfwords `f3c0 0040`
-(`UBFX r0,r0,#1,#1`), which remains unsupported. Unprepared tree properties
-and remaining argument fields retain their guards.
+(`UBFX r0,r0,#1,#1`). Bitfield execution then advances to 75,639 steps at
+`0x8008b968`, halfwords `fba6 0101` (`UMULL r0,r1,r6,r1`), which remains
+unsupported. Unprepared tree properties and remaining argument fields
+retain their guards.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim

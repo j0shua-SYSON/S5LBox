@@ -7781,6 +7781,83 @@ static void test_thumb2_shifted_register_constraints(void) {
           !(c.cpsr & ARM_CPSR_T) && c.r[0] == 0x12345678u, "ARM1176 BLX suffix framing changed");
 }
 
+static void test_thumb2_bitfields(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    const uint16_t first[] = {0xf340u,0xf3c0u,0xf360u,0xf36fu}; /* SBFX, UBFX, BFI, BFC */
+    for (unsigned p = 0; p < 2; p++) {
+     for (unsigned op = 0; op < 4; op++) {
+      for (unsigned lsb = 0; lsb < 32; lsb++) {
+       for (unsigned encoded = 0; encoded < 32; encoded++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_V | ARM_CPSR_Q |
+                  (0x9u << 16) | test_it_bits(0x18u);
+        uint32_t flags = c.cpsr;
+        c.r[14] = 0x80ff7f01u; c.r[9] = 0x5aa55aa5u;
+        unsigned rd = ((lsb ^ encoded) & 1u) ? 14u : 9u;
+        unsigned rn = op == 3u ? 15u : 14u;
+        uint32_t before = c.r[rd], expected = 0u;
+        bool valid = op < 2u ? lsb + encoded < 32u : encoded >= lsb;
+        unsigned width = op < 2u ? encoded + 1u : encoded - lsb + 1u;
+        /* Independent bit-by-bit oracle, including untouched destination
+         * bits and signed upper bits. No mask/shift-by-width arithmetic. */
+        for (unsigned bit = 0; valid && bit < 32u; bit++) {
+            unsigned value;
+            if (op < 2u) {
+                if (bit < width) value = (c.r[rn] >> (lsb + bit)) & 1u;
+                else value = op == 0u ? (c.r[rn] >> (lsb + width - 1u)) & 1u : 0u;
+            } else if (bit < lsb || bit > encoded) value = (before >> bit) & 1u;
+            else value = op == 3u ? 0u : (c.r[rn] >> (bit - lsb)) & 1u;
+            expected |= (uint32_t)value << bit;
+        }
+        m_w16(NULL, 0, (uint16_t)(first[op] | rn));
+        m_w16(NULL, 2, (uint16_t)(((lsb >> 2) << 12) | (rd << 8) | ((lsb & 3u) << 6) | encoded));
+        CHECK(arm_step(&c) == (valid ? ARM_OK : ARM_UNDEFINED) && c.r[15] == (valid ? 4u : 0u) &&
+              c.r[rd] == (valid ? expected : before) && c.cycles == 1u &&
+              c.cpsr == (valid ? flags & ~TEST_IT_MASK : flags),
+              "bitfield op=%u lsb=%u encoded=%u alias=%u lost range, field/sign bits or flags", op, lsb, encoded, rd == rn);
+        if (rd != 14u) CHECK(c.r[14] == 0x80ff7f01u, "bitfield changed separate source register");
+       }
+      }
+      const unsigned bad[][2] = {{13,0},{15,0},{0,13},{0,15}};
+      for (unsigned b = 0; b < sizeof bad / sizeof bad[0]; b++) {
+        if (op == 3u && b >= 2u) continue; /* BFC has no source operand. */
+        if (op == 2u && b == 3u) continue; /* Rn=PC is the valid BFC alias. */
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_C; c.r[0] = 0x12345678u; c.r[13] = 0x100u;
+        m_w16(NULL, 0, (uint16_t)(first[op] | (op == 3u ? 15u : bad[b][1])));
+        m_w16(NULL, 2, (uint16_t)((bad[b][0] << 8) | 3u));
+        uint32_t flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.cpsr == flags &&
+              c.r[0] == 0x12345678u && c.r[13] == 0x100u, "bitfield accepted forbidden SP/PC register");
+      }
+     }
+    }
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.cpsr |= ARM_CPSR_T; c.r[0] = 2u;
+    m_w16(NULL, 0, 0xf3c0u); m_w16(NULL, 2, 0x0040u);
+    CHECK(arm_step(&c) == ARM_OK && c.r[0] == 1u && c.r[15] == 4u, "real UBFX blocker failed");
+    const uint16_t malformed[][2] = {{0xf7c0u,0x0000u},{0xf3c0u,0x0020u},{0xf3c0u,0x8000u}};
+    for (unsigned i = 0; i < sizeof malformed / sizeof malformed[0]; i++) {
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T; c.r[0] = 0x12345678u;
+        m_w16(NULL, 0, malformed[i][0]); m_w16(NULL, 2, malformed[i][1]);
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[0] == 0x12345678u && c.r[15] == 0u,
+              "bitfield accepted nonzero reserved encoding bits");
+    }
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.cpsr |= ARM_CPSR_T | ARM_CPSR_Z | test_it_bits(0x18u); c.r[0] = 0x12345678u;
+    m_w16(NULL, 0, 0xf3c0u); m_w16(NULL, 2, 0x0040u);
+    CHECK(arm_step(&c) == ARM_OK && c.r[0] == 0x12345678u && c.r[15] == 4u && !(c.cpsr & TEST_IT_MASK),
+          "condition-failed UBFX changed its result or did not advance IT");
+    arm_reset(&c, &g_bus); c.cpsr |= ARM_CPSR_T; c.r[0] = 2u;
+    m_w16(NULL, 0, 0xf3c0u); m_w16(NULL, 2, 0x0040u);
+    CHECK(arm_step(&c) == ARM_OK && c.r[0] == 2u && c.r[15] == 2u && c.r[14] == 0x3c0004u,
+          "ARM1176 lost its legacy BL-prefix interpretation");
+}
+
 static void test_thumb_compare_and_branch(void) {
     const arm_arch_t profiles[] = {ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
     const uint32_t offsets[] = {0u, 62u, 64u, 126u};
@@ -7860,6 +7937,7 @@ int main(void) {
     test_thumb2_shifted_data_processing();
     test_thumb2_immediate_shift_aliases();
     test_thumb2_shifted_register_constraints();
+    test_thumb2_bitfields();
     test_thumb_compare_and_branch();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();

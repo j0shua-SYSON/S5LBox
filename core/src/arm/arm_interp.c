@@ -3096,6 +3096,31 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         if (rd != 15u) c->r[rd] = result;
         return ARM_OK;
     }
+    /* SBFX/UBFX and BFI/BFC (A8.8.19/20/164/246). The low field is
+     * width-1 for extraction, but the inclusive top bit for insertion.
+     * Check ranges before shifts, including the valid full-width case. */
+    uint16_t field_operation = first & 0xfff0u;
+    if ((field_operation == 0xf340u || field_operation == 0xf3c0u || field_operation == 0xf360u) &&
+        !(second & 0x8020u)) {
+        unsigned rn = first & 15u, rd = (second >> 8) & 15u;
+        unsigned lsb = ((second >> 10) & 0x1cu) | ((second >> 6) & 3u);
+        unsigned limit = second & 31u;
+        bool insert = field_operation == 0xf360u;
+        if (rd == 13u || rd == 15u || rn == 13u || (!insert && rn == 15u))
+            return ARM_UNDEFINED;
+        if (insert ? limit < lsb : lsb + limit >= 32u) return ARM_UNDEFINED;
+        unsigned width = insert ? limit - lsb + 1u : limit + 1u;
+        uint32_t mask = UINT32_MAX >> (32u - width);
+        uint32_t source = rn == 15u ? 0u : c->r[rn]; /* Rn=PC selects BFC. */
+        uint32_t result;
+        if (insert) result = (c->r[rd] & ~(mask << lsb)) | ((source & mask) << lsb);
+        else {
+            result = (source >> lsb) & mask;
+            if (field_operation == 0xf340u && (result & (1u << (width - 1u)))) result |= ~mask;
+        }
+        c->r[rd] = result;
+        return ARM_OK;
+    }
     /* MOVW T3 / MOVT T1: imm4:i:imm3:imm8, no flag changes. ARMv7 forbids
      * SP and PC here (DDI0406C.b A8.8.102/106). Check before any register write. */
     uint16_t operation = first & 0xfbf0u;
