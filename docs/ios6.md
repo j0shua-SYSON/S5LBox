@@ -172,6 +172,14 @@ range against a bit-by-bit reference, including full-width fields, register
 overlaps, invalid SP/PC operands and reserved encoding bits. A32 bitfield
 instructions remain a separate unimplemented family.
 
+Thumb MUL/MLA/MLS, SMULL/UMULL, SMLAL/UMLAL and UMAAL preserve flags and
+support source/destination overlaps. Standard long forms reuse the existing
+A32 arithmetic after validating Thumb register constraints. UMAAL adds the
+two destination words separately. Tests use an independent shift/add product
+reference and cover signed extremes, accumulation carry/wrap, nonadjacent
+destination pairs, IT execution/skips and reserved or forbidden operands.
+Separate DSP multiply and Thumb divide encodings remain unsupported.
+
 The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates
 C only as prescribed by the immediate form, preserving V. Invalid zero
@@ -352,9 +360,12 @@ that configuration reaches 74,914 steps at `0x8027a8c0`, halfwords
 at `0x80089d5e`, halfwords `eb08 0004` (`ADD.W r0,r8,r4`). Shifted-register
 execution then reaches 75,223 steps at `0x802b797c`, halfwords `f3c0 0040`
 (`UBFX r0,r0,#1,#1`). Bitfield execution then advances to 75,639 steps at
-`0x8008b968`, halfwords `fba6 0101` (`UMULL r0,r1,r6,r1`), which remains
-unsupported. Unprepared tree properties and remaining argument fields
-retain their guards.
+`0x8008b968`, halfwords `fba6 0101` (`UMULL r0,r1,r6,r1`). Multiply execution
+then reaches 75,770 steps at `0x80088278`, halfwords `ee10 0f10`
+(`MRC p15,0,r0,c0,c0,0`). This Thumb CP15 form is unsupported; the existing
+A32 CP15 identity still describes ARM1176 and cannot supply a Cortex-A8
+identity. Unprepared tree properties and remaining argument fields retain
+their guards.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim

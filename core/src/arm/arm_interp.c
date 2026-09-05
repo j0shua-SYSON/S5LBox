@@ -3096,6 +3096,41 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         if (rd != 15u) c->r[rd] = result;
         return ARM_OK;
     }
+    /* MUL/MLA/MLS (A8.8.100/101/114). Thumb wide multiply never sets
+     * flags. Read all sources before writing an overlapping destination. */
+    if ((first & 0xfff0u) == 0xfb00u && !(second & 0xe0u)) {
+        unsigned rn = first & 15u, rm = second & 15u;
+        unsigned rd = (second >> 8) & 15u, ra = second >> 12;
+        bool subtract = (second & 0x10u) != 0u;
+        if (rn == 13u || rn == 15u || rm == 13u || rm == 15u ||
+            rd == 13u || rd == 15u || ra == 13u || (subtract && ra == 15u))
+            return ARM_UNDEFINED;
+        uint32_t product = c->r[rn] * c->r[rm];
+        uint32_t addend = ra == 15u ? 0u : c->r[ra]; /* Ra=PC is MUL. */
+        c->r[rd] = subtract ? addend - product : addend + product;
+        return ARM_OK;
+    }
+    /* SMULL/UMULL/SMLAL/UMLAL and UMAAL (A8.8.178/189/255..257).
+     * Standard long forms share A32 arithmetic after Thumb's stricter
+     * register checks. UMAAL adds two unsigned words, not a 64-bit pair. */
+    if ((first & 0xff90u) == 0xfb80u &&
+        (!(second & 0xf0u) || ((first & 0xfff0u) == 0xfbe0u && (second & 0xf0u) == 0x60u))) {
+        unsigned rn = first & 15u, rm = second & 15u;
+        unsigned lo = second >> 12, hi = (second >> 8) & 15u;
+        if (rn == 13u || rn == 15u || rm == 13u || rm == 15u ||
+            lo == 13u || lo == 15u || hi == 13u || hi == 15u || lo == hi)
+            return ARM_UNDEFINED;
+        if (second & 0x60u) {
+            uint64_t result = (uint64_t)c->r[rn] * c->r[rm] + c->r[lo] + c->r[hi];
+            c->r[lo] = (uint32_t)result;
+            c->r[hi] = (uint32_t)(result >> 32);
+            return ARM_OK;
+        }
+        uint32_t a32 = 0xe0800090u | ((first & 0x20u) ? 0u : (1u << 22)) |
+                       ((first & 0x40u) ? (1u << 21) : 0u) |
+                       (hi << 16) | (lo << 12) | (rm << 8) | rn;
+        return exec_multiply_long(c, pc, a32);
+    }
     /* SBFX/UBFX and BFI/BFC (A8.8.19/20/164/246). The low field is
      * width-1 for extraction, but the inclusive top bit for insertion.
      * Check ranges before shifts, including the valid full-width case. */

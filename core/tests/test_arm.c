@@ -7858,6 +7858,174 @@ static void test_thumb2_bitfields(void) {
           "ARM1176 lost its legacy BL-prefix interpretation");
 }
 
+/* Independent shift/add oracle for the multiply decoder tests. Signed high
+ * halves are corrected modulo 2^64, without signed casts or host multiply. */
+static uint64_t test_wide_product(uint32_t a, uint32_t b, bool is_signed) {
+    uint64_t result = 0;
+    for (unsigned bit = 0; bit < 32u; bit++)
+        if ((b >> bit) & 1u) result += (uint64_t)a << bit;
+    if (is_signed && (a & 0x80000000u)) result -= (uint64_t)b << 32;
+    if (is_signed && (b & 0x80000000u)) result -= (uint64_t)a << 32;
+    return result;
+}
+
+static void test_thumb2_multiply(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    const uint32_t values[][2] = {
+        {0,UINT32_MAX},{1,UINT32_MAX},{UINT32_MAX,UINT32_MAX},
+        {0x80000000u,2},{0x80000000u,0x80000000u},{0x80000000u,UINT32_MAX},
+        {0x7fffffffu,0x7fffffffu},{0x12345678u,0x9abcdef0u}
+    };
+    /* Rd, Rn, Rm, Ra. Include destination/source/accumulator overlaps, LR,
+     * equal multiplicands and a completely aliased word operation. */
+    const unsigned regs[][4] = {{9,6,14,1},{6,6,14,1},{14,6,14,1},
+                               {1,6,14,1},{9,6,6,6},{6,6,6,6}};
+    for (unsigned p = 0; p < 2; p++) {
+     for (unsigned op = 0; op < 3; op++) { /* MUL, MLA, MLS */
+      for (unsigned v = 0; v < sizeof values / sizeof values[0]; v++) {
+       for (unsigned layout = 0; layout < sizeof regs / sizeof regs[0]; layout++) {
+        for (unsigned execute = 0; execute < 2; execute++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+            c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_V | ARM_CPSR_Q |
+                      (0xau << 16) | test_it_bits(execute ? 0x1cu : 0x0cu);
+            uint32_t flags = c.cpsr;
+            unsigned rd = regs[layout][0], rn = regs[layout][1], rm = regs[layout][2];
+            unsigned ra = op == 0u ? 15u : regs[layout][3];
+            c.r[1] = 0xffffffffu; c.r[9] = 0x12345678u;
+            c.r[6] = values[v][0]; c.r[14] = values[v][1];
+            uint32_t before[16]; memcpy(before, c.r, sizeof before);
+            uint32_t product = (uint32_t)test_wide_product(c.r[rn], c.r[rm], false);
+            uint32_t expected = op == 0u ? product : op == 1u ? product + c.r[ra] : c.r[ra] - product;
+            m_w16(NULL, 0, (uint16_t)(0xfb00u | rn));
+            m_w16(NULL, 2, (uint16_t)((ra << 12) | (rd << 8) | (op == 2u ? 0x10u : 0u) | rm));
+            CHECK(arm_step(&c) == ARM_OK && c.r[rd] == (execute ? expected : before[rd]) &&
+                  c.r[15] == 4u && c.cycles == 1u &&
+                  c.cpsr == ((flags & ~TEST_IT_MASK) | test_it_bits(0x18u)),
+                  "word multiply op=%u vector=%u layout=%u execute=%u lost result or flags/IT", op, v, layout, execute);
+            for (unsigned r = 0; r < 15u; r++)
+                if (r != rd) CHECK(c.r[r] == before[r], "word multiply changed another register");
+        }
+       }
+      }
+     }
+    }
+}
+
+static void test_thumb2_multiply_long(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    const uint16_t opcodes[] = {0xfb80u,0xfba0u,0xfbc0u,0xfbe0u,0xfbe0u};
+    const uint32_t values[][4] = { /* R6, LR, R9, R1 */
+        {0,UINT32_MAX,0,0},{1,UINT32_MAX,1,UINT32_MAX},
+        {UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX},
+        {0x80000000u,2,0,1},{0x80000000u,0x80000000u,0,0xc0000000u},
+        {0x80000000u,UINT32_MAX,0x80000000u,UINT32_MAX},
+        {0x7fffffffu,0x7fffffffu,UINT32_MAX,0x80000000u},
+        {0x12345678u,0x9abcdef0u,0x87654321u,0x13579bdfu}
+    };
+    /* RdLo, RdHi, Rn, Rm: independent, reversed/nonadjacent pairs and all
+     * source/destination alias positions. */
+    const unsigned regs[][4] = {{9,1,6,14},{6,1,6,14},{9,6,6,14},
+                               {14,1,6,14},{9,14,6,14},{6,14,6,14},
+                               {14,6,6,14},{9,1,6,6}};
+    CHECK(test_wide_product(UINT32_MAX, UINT32_MAX, false) == UINT64_C(0xfffffffe00000001) &&
+          test_wide_product(UINT32_MAX, UINT32_MAX, true) == 1u &&
+          test_wide_product(0x80000000u, 2u, true) == UINT64_C(0xffffffff00000000),
+          "multiply reference sign/high-word sanity check");
+    for (unsigned p = 0; p < 2; p++) {
+     for (unsigned op = 0; op < 5; op++) {
+      for (unsigned v = 0; v < sizeof values / sizeof values[0]; v++) {
+       for (unsigned layout = 0; layout < sizeof regs / sizeof regs[0]; layout++) {
+        for (unsigned execute = 0; execute < 2; execute++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+            c.cpsr |= ARM_CPSR_T | ARM_CPSR_Z | ARM_CPSR_V | (0x5u << 16) |
+                      test_it_bits(execute ? 0x08u : 0x18u);
+            uint32_t flags = c.cpsr;
+            unsigned lo = regs[layout][0], hi = regs[layout][1], rn = regs[layout][2], rm = regs[layout][3];
+            c.r[6] = values[v][0]; c.r[14] = values[v][1];
+            c.r[9] = values[v][2]; c.r[1] = values[v][3];
+            uint32_t before[16]; memcpy(before, c.r, sizeof before);
+            uint64_t expected = test_wide_product(c.r[rn], c.r[rm], op == 0u || op == 2u);
+            if (op == 2u || op == 3u) expected += ((uint64_t)c.r[hi] << 32) | c.r[lo];
+            if (op == 4u) expected += (uint64_t)c.r[hi] + c.r[lo];
+            m_w16(NULL, 0, (uint16_t)(opcodes[op] | rn));
+            m_w16(NULL, 2, (uint16_t)((lo << 12) | (hi << 8) | (op == 4u ? 0x60u : 0u) | rm));
+            CHECK(arm_step(&c) == ARM_OK && c.r[lo] == (execute ? (uint32_t)expected : before[lo]) &&
+                  c.r[hi] == (execute ? (uint32_t)(expected >> 32) : before[hi]) &&
+                  c.r[15] == 4u && c.cycles == 1u && c.cpsr == (flags & ~TEST_IT_MASK),
+                  "long multiply op=%u vector=%u layout=%u execute=%u lost sign/carry/alias or flags", op, v, layout, execute);
+            for (unsigned r = 0; r < 15u; r++)
+                if (r != lo && r != hi) CHECK(c.r[r] == before[r], "long multiply changed another register");
+        }
+       }
+      }
+     }
+    }
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.cpsr |= ARM_CPSR_T; c.r[6] = 0xaaaaaaabu; c.r[1] = 0x12345678u;
+    m_w16(NULL, 0, 0xfba6u); m_w16(NULL, 2, 0x0101u);
+    CHECK(arm_step(&c) == ARM_OK && c.r[0] == 0x06117228u && c.r[1] == 0x0c22e450u,
+          "real UMULL blocker failed");
+}
+
+static void test_thumb2_multiply_constraints(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    const uint16_t opcodes[][2] = {{0xfb06,0xf90e},{0xfb06,0x190e},{0xfb06,0x191e},
+                                 {0xfb86,0x910e},{0xfba6,0x910e},{0xfbc6,0x910e},
+                                 {0xfbe6,0x910e},{0xfbe6,0x916e}};
+    for (unsigned p = 0; p < 2; p++) {
+     for (unsigned op = 0; op < 8; op++) {
+      for (unsigned field = 0; field < 4; field++) {
+       if (op == 0u && field == 3u) continue; /* MUL has no accumulator. */
+       for (unsigned bad = 13; bad <= 15; bad += 2) {
+        if (op == 1u && field == 3u && bad == 15u) continue; /* MUL alias. */
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | test_it_bits(0x18u);
+        for (unsigned r = 0; r < 15u; r++) c.r[r] = 0x12345678u + r;
+        uint32_t before[16]; memcpy(before, c.r, sizeof before);
+        uint32_t flags = c.cpsr;
+        uint16_t first = opcodes[op][0], second = opcodes[op][1];
+        if (field == 0u) first = (uint16_t)((first & 0xfff0u) | bad);
+        else {
+            unsigned shift = field == 1u ? 0u : field == 2u ? 8u : 12u;
+            second = (uint16_t)((second & ~(15u << shift)) | (bad << shift));
+        }
+        m_w16(NULL, 0, first); m_w16(NULL, 2, second);
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.cpsr == flags &&
+              memcmp(c.r, before, sizeof before) == 0, "multiply op=%u accepted SP/PC field=%u", op, field);
+       }
+      }
+     }
+     for (unsigned op = 3; op < 8; op++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+        c.cpsr |= ARM_CPSR_T; c.r[9] = 0x12345678u;
+        m_w16(NULL, 0, opcodes[op][0]); m_w16(NULL, 2, (uint16_t)((opcodes[op][1] & 0xf0ffu) | 0x900u));
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[9] == 0x12345678u && c.r[15] == 0u,
+              "long multiply accepted equal destinations");
+     }
+     const uint16_t neighbors[][2] = {{0xfb06,0x192e},{0xfb16,0xf90e},{0xfb86,0x911e},
+                                    {0xfba6,0x911e},{0xfbc6,0x916e},{0xfbe6,0x915e},
+                                    {0xfb96,0xf9fe},{0xfbb6,0xf9fe}};
+     for (unsigned i = 0; i < sizeof neighbors / sizeof neighbors[0]; i++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+        c.cpsr |= ARM_CPSR_T; c.r[9] = 0x12345678u;
+        m_w16(NULL, 0, neighbors[i][0]); m_w16(NULL, 2, neighbors[i][1]);
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[9] == 0x12345678u && c.r[15] == 0u,
+              "multiply consumed a separate DSP/divide or reserved encoding");
+     }
+    }
+    arm_cpu_t c;
+    arm_reset(&c, &g_bus); c.cpsr |= ARM_CPSR_T; c.r[1] = 0x12345678u;
+    m_w16(NULL, 0, 0xfba6u); m_w16(NULL, 2, 0x0101u);
+    CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x74cu && c.r[14] == 3u && c.r[1] == 0x12345678u,
+          "ARM1176 lost its legacy BL-suffix interpretation");
+}
+
 static void test_thumb_compare_and_branch(void) {
     const arm_arch_t profiles[] = {ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
     const uint32_t offsets[] = {0u, 62u, 64u, 126u};
@@ -7938,6 +8106,9 @@ int main(void) {
     test_thumb2_immediate_shift_aliases();
     test_thumb2_shifted_register_constraints();
     test_thumb2_bitfields();
+    test_thumb2_multiply();
+    test_thumb2_multiply_long();
+    test_thumb2_multiply_constraints();
     test_thumb_compare_and_branch();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();
