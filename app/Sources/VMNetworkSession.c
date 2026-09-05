@@ -84,6 +84,7 @@ static void queue_guest_ip(void *ctx, const uint8_t *packet, size_t length) {
     unsigned next = inbound_next(session->inbound_tail);
     if (next == session->inbound_head) {
         session->guest_ip_dropped++;
+        s5l8900_request_uart4_host_service(session->machine);
         return;
     }
     vm_network_dgram_t *slot =
@@ -92,6 +93,10 @@ static void queue_guest_ip(void *ctx, const uint8_t *packet, size_t length) {
     memcpy(slot->bytes, packet, length);
     session->inbound_tail = next;
     session->guest_ip_queued++;
+    /* A complete guest packet is the useful scheduling edge: return from the
+     * current VM slice now so this ACK/window update can release the next
+     * paced host datagram without waiting for an arbitrary 100k instructions. */
+    s5l8900_request_uart4_host_service(session->machine);
 }
 
 static bool open_peer(vm_network_session_t *session, const char *trigger) {

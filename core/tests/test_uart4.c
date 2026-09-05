@@ -121,6 +121,8 @@ typedef struct {
     size_t refill_len;
     size_t refill_pos;
     uint64_t refill_push_failures;
+    s5l8900_t *request_service_machine;
+    bool request_once_during_service;
 } uart4_host_probe_t;
 
 static void uart4_host_tx_probe(void *ctx, uint8_t byte) {
@@ -128,6 +130,9 @@ static void uart4_host_tx_probe(void *ctx, uint8_t byte) {
     if (!probe) return;
     probe->tx_calls++;
     probe->last_tx = byte;
+    if (probe->request_service_machine)
+        s5l8900_request_uart4_host_service(
+            probe->request_service_machine);
 }
 
 static void uart4_host_service_probe(void *ctx, unsigned retired) {
@@ -135,6 +140,10 @@ static void uart4_host_service_probe(void *ctx, unsigned retired) {
     if (!probe) return;
     probe->service_calls++;
     probe->retired += retired;
+    if (probe->request_once_during_service) {
+        probe->request_once_during_service = false;
+        s5l8900_request_uart4_host_service(probe->request_service_machine);
+    }
 }
 
 static void uart4_host_refill_probe(void *ctx) {
@@ -472,6 +481,36 @@ static void test_host_peer_sees_the_live_stream_and_run_boundary(void) {
           (unsigned long long)probe.service_calls,
           (unsigned long long)probe.retired);
 
+    /* A complete host-side frame can be recognized synchronously in the UTXH
+     * callback. Its request must stop this public slice after the triggering
+     * instruction, then run the normal (non-recursive) service exactly once. */
+    static const uint32_t tx_code[] = {
+        UINT32_C(0xe5801000), /* str r1, [r0] */
+        UINT32_C(0xe5801000), /* str r1, [r0] */
+    };
+    s5l8900_load(&m, 0u, tx_code, sizeof tx_code);
+    m.cpu.r[15] = 0u;
+    m.cpu.r[0] = S5L8900_UART4_BASE + UART_UTXH;
+    m.cpu.r[1] = 0xa6u;
+    probe.request_service_machine = &m;
+    uint64_t tx_before = probe.tx_calls;
+    CHECK(s5l8900_run(&m, 2u, &status) == 1u && status == ARM_OK &&
+              m.cpu.r[15] == 4u,
+          "uart4 service request did not end the run at its first store");
+    CHECK(probe.tx_calls == tx_before + 1u &&
+              probe.service_calls == 2u && probe.retired == 3u &&
+              !m.uart4_host_service_requested,
+          "requested boundary saw %llu tx/%llu services/%llu retired or "
+          "retained its edge",
+          (unsigned long long)(probe.tx_calls - tx_before),
+          (unsigned long long)probe.service_calls,
+          (unsigned long long)probe.retired);
+    CHECK(s5l8900_run(&m, 1u, &status) == 1u && status == ARM_OK &&
+              m.cpu.r[15] == 8u && probe.tx_calls == tx_before + 2u &&
+              probe.service_calls == 3u && probe.retired == 4u,
+          "the instruction after a requested boundary did not resume exactly");
+    probe.request_service_machine = NULL;
+
     CHECK(s5l_uart_rx_push(&m.uart4, 0x5au),
           "could not seed uart4 RX for the PIO receive");
     CHECK(m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_URXH) == 0x5au &&
@@ -519,13 +558,52 @@ static void test_host_peer_sees_the_live_stream_and_run_boundary(void) {
           m.uart4_host_refill == uart4_host_refill_probe &&
           m.uart4_host_ctx == &probe,
           "a rejected detach changed the live peer");
+    s5l8900_request_uart4_host_service(&m);
+    CHECK(m.uart4_host_service_requested,
+          "an attached uart4 service request was lost");
     CHECK(s5l8900_set_uart4_host(&m, NULL, NULL, NULL, NULL),
           "complete uart4 host detach was refused");
+    CHECK(!m.uart4_host_service_requested,
+          "detaching uart4 retained a stale service request");
     m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTXH, 0xa5u);
     (void)s5l8900_run(&m, 0u, &status);
-    CHECK(probe.tx_calls == sent && probe.service_calls == 1u,
+    CHECK(probe.tx_calls == tx_before + 2u && probe.service_calls == 3u,
           "a detached uart4 host was still called");
 
+    s5l8900_free(&m);
+}
+
+static void test_service_request_survives_a_service_boundary(void) {
+    s5l8900_t m;
+    uart4_host_probe_t probe = {0};
+    CHECK(s5l8900_init(&m, 0u, 1u << 20), "machine init failed");
+    s5l8900_request_uart4_host_service(NULL);
+    s5l8900_request_uart4_host_service(&m);
+    CHECK(!m.uart4_host_service_requested,
+          "a callback-free machine acquired a service request");
+    CHECK(s5l8900_set_uart4_host(&m, uart4_host_tx_probe,
+                                 uart4_host_service_probe,
+                                 uart4_host_refill_probe, &probe),
+          "could not attach the test peer");
+    static const uint32_t code[] = {
+        UINT32_C(0xe1a00000), UINT32_C(0xe1a00000),
+    };
+    s5l8900_load(&m, 0u, code, sizeof code);
+    m.cpu.r[15] = 0u;
+    probe.request_service_machine = &m;
+    probe.request_once_during_service = true;
+    s5l8900_request_uart4_host_service(&m);
+    arm_status_t status = ARM_OK;
+    CHECK(s5l8900_run(&m, 2u, &status) == 0u && status == ARM_OK &&
+          probe.service_calls == 1u && m.uart4_host_service_requested,
+          "a service-time request was lost or serviced recursively");
+    CHECK(s5l8900_run(&m, 2u, &status) == 0u && status == ARM_OK &&
+          probe.service_calls == 2u && !m.uart4_host_service_requested &&
+          m.cpu.r[15] == 0u && m.cpu.cycles == 0u,
+          "pending service retired guest instructions or retained its edge");
+    CHECK(s5l8900_run(&m, 2u, &status) == 2u && status == ARM_OK &&
+          probe.service_calls == 3u && probe.retired == 2u,
+          "execution did not resume after consuming the service requests");
     s5l8900_free(&m);
 }
 
@@ -1797,6 +1875,7 @@ int main(void) {
     test_the_two_captures_do_not_alias();
     test_uart4_registers_route_through_the_bus();
     test_host_peer_sees_the_live_stream_and_run_boundary();
+    test_service_request_survives_a_service_boundary();
     test_crossed_dma_endpoint_reaches_only_the_uart4_peer();
     test_transmitting_alone_raises_no_interrupt_line();
     test_no_host_peer_means_no_receive_anything();

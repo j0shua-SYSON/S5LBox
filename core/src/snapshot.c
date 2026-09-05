@@ -1589,6 +1589,9 @@ static snapshot_status_t snap_apply(s5l8900_t *m, FILE *f,
      * only between run slices, and a restored instant never resumes inside a
      * host C call. */
     m->dma_access_active = false;
+    /* A request belongs to the run slice in which the live host peer decoded
+     * its guest frame. It cannot be imported from a saved guest instant. */
+    m->uart4_host_service_requested = false;
     /* A yield belongs to the host run call that observed the wait, not to the
      * restored guest instant. The callback, context and accumulated evidence
      * remain the live frontend's, exactly like the other host-only fields. */
