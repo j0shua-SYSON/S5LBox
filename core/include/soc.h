@@ -3959,8 +3959,7 @@ typedef bool (*s5l_active_host_now_fn)(void *ctx, uint64_t *nanoseconds);
  *
  * `tx` sees every low byte the guest writes to UTXH, including bytes beyond
  * uart4's bounded diagnostic capture. It runs inside the guest MMIO write and
- * must update host-owned state only: it may not call back into the machine,
- * except for the flag-only s5l8900_request_uart4_host_service() handoff.
+ * must update host-owned state only: it may not call back into the machine.
  *
  * `service` runs once after each public s5l8900_run() slice and receives the
  * number of guest instructions that slice retired. This is the safe handoff
@@ -4212,16 +4211,6 @@ typedef struct {
      * public run slices, and snapshot restore clears it explicitly.
      */
     bool       dma_access_active;
-
-    /*
-     * A host peer may discover a complete guest frame while uart4 UTXH is
-     * executing inside a long public run slice.  This transient edge asks the
-     * outer loop to return to its ordinary, non-recursive host-service boundary
-     * immediately instead of waiting for the frontend's arbitrary instruction
-     * budget.  It is host scheduling state, not guest state, and fits in the
-     * existing alignment padding beside the other transient bools above.
-     */
-    bool       uart4_host_service_requested;
 
     /*
      * What the last full refresh saw on the three inputs a HOST can move
@@ -4610,12 +4599,6 @@ bool s5l8900_set_uart4_host(s5l8900_t *m, s5l_uart4_host_tx_fn tx,
                             s5l_uart4_host_service_fn service,
                             s5l_uart4_host_refill_fn refill, void *ctx);
 
-/* Request the attached uart4 peer's ordinary between-run service boundary.
- * This is the sole machine call permitted from its synchronous tx callback:
- * it sets one transient flag and performs no device work or recursion. A NULL
- * machine or a machine without an attached service is a harmless no-op. */
-void s5l8900_request_uart4_host_service(s5l8900_t *m);
-
 /* Install or clear the host owner of a watchdog reboot edge. Installing and
  * clearing are between-run operations; a partial clear is rejected. */
 bool s5l8900_set_restart_host(s5l8900_t *m,
@@ -4914,9 +4897,7 @@ uint64_t s5l8900_static_a64_known_negative_bypasses(const s5l8900_t *m);
 unsigned s5l8900_static_a64_cached_witness_bytes(const s5l8900_t *m,
                                                  uint32_t pc, bool thumb);
 
-/* Run up to max_steps instructions, stopping early on a non-OK status or an
- * interactive WFI / uart4 host-service yield. A pending service request can
- * return zero retirements with ARM_OK; that is ordinary scheduling progress.
+/* Run up to max_steps instructions, stopping early on a non-OK status.
  * Returns the number of instructions retired. */
 unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status);
 /* Host diagnostics for User-mode interpreter intervals whose per-instruction

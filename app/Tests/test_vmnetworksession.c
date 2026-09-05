@@ -337,15 +337,12 @@ static void test_host_datagrams_cross_one_per_run_boundary(void) {
               "echo request %u could not be framed", sequence);
     }
     send_guest_ppp_bytes(&machine, &guest);
-    CHECK(machine.uart4_host_service_requested,
-          "complete guest IP frames did not request an immediate host boundary");
 
     vm_network_status_t status;
     CHECK(run_service_boundary(&machine), "the first service boundary failed");
     vm_network_session_status(session, &status);
     CHECK(status.net_to_guest == before.net_to_guest + 1u &&
-          status.tcp_output_pending == 2u &&
-          !machine.uart4_host_service_requested,
+          status.tcp_output_pending == 2u,
           "first boundary sent/pending=%llu/%u, expected %llu/2",
           (unsigned long long)status.net_to_guest,
           status.tcp_output_pending,
@@ -371,80 +368,6 @@ static void test_host_datagrams_cross_one_per_run_boundary(void) {
           (unsigned long long)status.net_to_guest_lost,
           (unsigned long long)status.guest_ip_dropped);
 
-    vm_network_session_destroy(&session);
-    s5l8900_free(&machine);
-}
-
-static void test_guest_ip_completion_ends_the_current_run(void) {
-    s5l8900_t machine;
-    char detail[192];
-    CHECK(s5l8900_init(&machine, 0u, 1u << 20), "machine init failed");
-    vm_network_session_t *session = vm_network_session_create(
-        &machine, true, detail, sizeof detail);
-    CHECK(session != NULL, "PPP/NAT attachment failed: %s", detail);
-    if (!session) {
-        s5l8900_free(&machine);
-        return;
-    }
-    ppp_peer_t guest;
-    CHECK(open_test_ppp_link(&machine, session, &guest),
-          "the test PPP link did not open");
-    static const uint32_t code[] = {
-        UINT32_C(0xe5801000), /* str r1, [r0]: complete the PPP frame */
-        UINT32_C(0xe2822001), /* add r2, r2, #1: must wait for next run */
-    };
-    s5l8900_load(&machine, 0u, code, sizeof code);
-    fake_host_clock_t clock = {UINT64_C(1000000000), true};
-    for (unsigned mode = 0u; mode < 2u; mode++) {
-        /* Exercise both ordinary privileged execution and the product's
-         * active-clock User-mode interpreter batching path. */
-        CHECK(s5l8900_set_active_host_clock(
-                  &machine, mode ? fake_host_now : NULL,
-                  mode ? &clock : NULL),
-              "could not select the test execution clock");
-        machine.cpu.cpsr = (mode ? ARM_MODE_USR : ARM_MODE_SVC) |
-                           ARM_CPSR_I | ARM_CPSR_F;
-        machine.cpu.r[15] = 0u;
-        machine.cpu.r[0] = S5L8900_UART4_BASE + UART_UTXH;
-        machine.cpu.r[2] = 0u;
-        uint8_t packet[64];
-        size_t length = build_echo_request(packet, sizeof packet,
-                                            (uint16_t)(0x40u + mode));
-        CHECK(length != 0u && ppp_send_ip(&guest, packet, length),
-              "could not frame the scheduling test packet");
-        /* Deliver all except the final flag between runs. No IP packet or
-         * request is visible until the guest CPU itself writes that flag. */
-        int last = ppp_output_byte(&guest);
-        int next;
-        while ((next = ppp_output_byte(&guest)) >= 0) {
-            machine.bus.write32(machine.bus.ctx,
-                                 S5L8900_UART4_BASE + UART_UTXH,
-                                 (uint32_t)(uint8_t)last);
-            last = next;
-        }
-        CHECK(last == 0x7e && !machine.uart4_host_service_requested,
-              "partial PPP frame requested service or had no closing flag");
-        machine.cpu.r[1] = (uint32_t)last;
-        s5l8900_tick(&machine, 0u);
-        vm_network_status_t before, after;
-        vm_network_session_status(session, &before);
-        arm_status_t status = ARM_OK;
-        unsigned retired = s5l8900_run(&machine, 100000u, &status);
-        vm_network_session_status(session, &after);
-        CHECK(retired == 1u && status == ARM_OK &&
-              machine.cpu.r[15] == 4u && machine.cpu.r[2] == 0u,
-              "mode %u frame completion retired %u, PC=%08x, marker=%u",
-              mode, retired, machine.cpu.r[15], machine.cpu.r[2]);
-        CHECK(after.service_calls == before.service_calls + 1u &&
-              after.guest_ip_queued == before.guest_ip_queued + 1u &&
-              after.net_to_guest == before.net_to_guest + 1u &&
-              after.guest_ip_dropped == 0u &&
-              !machine.uart4_host_service_requested,
-              "mode %u frame did not reach NAT at exactly one boundary", mode);
-        CHECK(s5l8900_run(&machine, 1u, &status) == 1u &&
-              status == ARM_OK && machine.cpu.r[2] == 1u,
-              "mode %u did not resume at the instruction after the frame", mode);
-    }
     vm_network_session_destroy(&session);
     s5l8900_free(&machine);
 }
@@ -611,7 +534,6 @@ int main(void) {
     test_ppp_attachment_closes_the_uart_loop();
     test_nat_socket_owner_starts_without_a_flow();
     test_host_datagrams_cross_one_per_run_boundary();
-    test_guest_ip_completion_ends_the_current_run();
     test_restored_guest_reopens_replaced_host_peer();
     test_restore_retry_uses_monotonic_host_time();
     test_invalid_create_fails_closed();

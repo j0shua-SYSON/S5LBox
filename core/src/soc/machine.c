@@ -815,7 +815,6 @@ bool s5l8900_set_uart4_host(s5l8900_t *m, s5l_uart4_host_tx_fn tx,
         m->uart4_host_tx = NULL;
         m->uart4_host_service = NULL;
         m->uart4_host_refill = NULL;
-        m->uart4_host_service_requested = false;
         m->uart4_host_ctx = NULL;
         return true;
     }
@@ -823,16 +822,10 @@ bool s5l8900_set_uart4_host(s5l8900_t *m, s5l_uart4_host_tx_fn tx,
 
     /* Publish the context before either callback becomes callable. */
     m->uart4_host_ctx = ctx;
-    m->uart4_host_service_requested = false;
     m->uart4_host_tx = tx;
     m->uart4_host_service = service;
     m->uart4_host_refill = refill;
     return true;
-}
-
-void s5l8900_request_uart4_host_service(s5l8900_t *m) {
-    if (m && m->uart4_host_service)
-        m->uart4_host_service_requested = true;
 }
 
 bool s5l8900_set_restart_host(s5l8900_t *m,
@@ -2191,7 +2184,6 @@ static unsigned retirement_batch_limit(const s5l8900_t *m,
 static unsigned run_retirement_batch_limit(const s5l8900_t *m,
                                            unsigned remaining,
                                            bool active_clock) {
-    if (m->uart4_host_service_requested) return 0u;
     if (!active_clock) return retirement_batch_limit(m, remaining);
     if (!remaining || m->level_dirty || ext_inputs(m) != m->ext_seen)
         return 0u;
@@ -2491,7 +2483,6 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
             st = ARM_RESTART;
             break;
         }
-        if (m->uart4_host_service_requested) break;
         if (pre_step_target_matches(m, m->cpu.r[15])) {
             m->pre_step_matches++;
             if (m->pre_step_hook(m->pre_step_ctx)) {
@@ -2548,8 +2539,7 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
                  * Do those checks now and fall directly into its one
                  * interpreter step. A timer/IRQ/input edge or changed byte
                  * cancels the bypass. */
-                if (!known_negative || n >= max_steps ||
-                    m->uart4_host_service_requested)
+                if (!known_negative || n >= max_steps)
                     continue;
                 if (run_retirement_batch_limit(
                         m, max_steps - n, active_clock) &&
@@ -2578,8 +2568,7 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
                 st = arm_step(&m->cpu);
                 if (st != ARM_OK) break;
                 retired++;
-                if (m->uart4_host_service_requested || m->level_dirty ||
-                    ext_inputs(m) != m->ext_seen ||
+                if (m->level_dirty || ext_inputs(m) != m->ext_seen ||
                     (m->cpu.cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR)
                     break;
             } while (retired < limit);
@@ -2607,7 +2596,7 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
                           m->wfi_pace_yield,
                           m->level_dirty ||
                           ext_inputs(m) != m->ext_seen);
-        if (m->wfi_pace_yield || m->uart4_host_service_requested) {
+        if (m->wfi_pace_yield) {
             m->wfi_pace_yield = false;
             break;
         }
@@ -2624,10 +2613,6 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
     if (compact_pc_profile_slice)
         s5l8900_static_a64_compact_raw_pc_profile_slice_end(m);
 #endif
-    /* Consume only the edge that selected this boundary. A new complete
-     * frame observed during service's final zero-tick refresh belongs to
-     * the next run call and must remain pending. */
-    m->uart4_host_service_requested = false;
     if (m->uart4_host_service)
         m->uart4_host_service(m->uart4_host_ctx, n);
     if (st == ARM_RESTART) {
