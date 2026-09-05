@@ -2774,12 +2774,27 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint16_t first, uint16_t second) 
         mem_w32(c, c->r[rn] + (second & 0xfffu), c->r[rt]);
         return ARM_OK;
     }
-    /* MOV/MOVS immediate T2 uses ThumbExpandImm_C, not the A32 rotated
-     * immediate. Replication forms preserve C; rotated forms supply bit 31.
-     * Zero replication is unpredictable (DDI0406C.b A6.3.2, A8.8.102). */
-    if ((first & 0xfbefu) == 0xf04fu && !(second & 0x8000u)) {
+    /* Modified immediate data processing (DDI0406C.b A6.3.1/2). MOV and
+     * arithmetic share ThumbExpandImm; arithmetic uses its ALU carry, not
+     * the expansion's shifter carry. Validate aliases before touching flags. */
+    if ((first & 0xfa00u) == 0xf000u && !(second & 0x8000u)) {
+        unsigned op = (first >> 5) & 15u, rn = first & 15u;
         unsigned rd = (second >> 8) & 15u;
-        if (rd == 13u || rd == 15u) return ARM_UNDEFINED;
+        bool set = (first & 0x10u) != 0u;
+        bool move = op == 2u && rn == 15u;
+        if (move) {
+            if (rd == 13u || rd == 15u) return ARM_UNDEFINED;
+        } else if (op == 8u || op == 13u) {
+            /* ADD/SUB allow SP as a source, and as destination only in
+             * that form. Rd=PC,S=1 means CMN/CMP, never a PC write. */
+            if (rn == 15u || (rd == 13u && rn != 13u) || (rd == 15u && !set))
+                return ARM_UNDEFINED;
+        } else if (op == 10u || op == 11u || op == 14u) {
+            if (rn == 13u || rn == 15u || rd == 13u || rd == 15u)
+                return ARM_UNDEFINED;
+        } else {
+            return ARM_UNDEFINED;
+        }
         uint32_t imm12 = ((uint32_t)(first & 0x400u) << 1) |
                          ((second & 0x7000u) >> 4) | (second & 0xffu);
         uint32_t value = imm12 & 0xffu;
@@ -2796,12 +2811,17 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint16_t first, uint16_t second) 
             value = ror32(unrotated, shift);
             carry = (value >> 31) != 0;
         }
-        c->r[rd] = value;
-        if (first & 0x10u) {
-            set_flag(c, ARM_CPSR_N, (value >> 31) != 0);
-            set_flag(c, ARM_CPSR_Z, value == 0u);
-            set_flag(c, ARM_CPSR_C, carry);
+        uint32_t result;
+        switch (op) {
+        case 2u:  result = value; alu_logic_flags(c, result, carry, set); break;
+        case 8u:  result = alu_add(c, c->r[rn], value, 0u, set); break;
+        case 10u: result = alu_add(c, c->r[rn], value, get_flag(c, ARM_CPSR_C), set); break;
+        case 11u: result = alu_sub(c, c->r[rn], value, get_flag(c, ARM_CPSR_C), set); break;
+        case 13u: result = alu_sub(c, c->r[rn], value, 1u, set); break;
+        case 14u: result = alu_sub(c, value, c->r[rn], 1u, set); break;
+        default: return ARM_UNDEFINED;
         }
+        if (rd != 15u) c->r[rd] = result;
         return ARM_OK;
     }
     /* MOVW T3 / MOVT T1: imm4:i:imm3:imm8, no flag changes. ARMv7 forbids

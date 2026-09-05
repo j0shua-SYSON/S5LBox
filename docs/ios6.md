@@ -73,6 +73,10 @@ The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates
 C only as prescribed by the immediate form, preserving V. Invalid zero
 replication and SP/PC destinations are refused before changing state.
+ADD/ADC/SUB/SBC/RSB now use the same immediate expansion with arithmetic
+carry and overflow, including the CMN/CMP aliases and permitted SP forms.
+Tests cover carry input, borrow, signed overflow, flag preservation and
+invalid register/replication encodings.
 
 Thumb STR immediate T3 supports its unsigned 12-bit byte offset and SP/LR
 operands, without writeback. It uses the shared data translation and abort
@@ -108,8 +112,8 @@ establish that result.
 - The CP15 identification, cache/TLB controls, reset values, exception state,
   and memory translation paths still need a Cortex-A8 audit and implementation.
   The instruction profile is not a complete system-register model.
-- Thumb-2 currently implements MOVW/MOVT, modified-immediate MOV/MOVS,
-  and STR with an unsigned immediate offset.
+- Thumb-2 currently implements MOVW/MOVT, modified-immediate MOV/MOVS and
+  arithmetic, and STR with an unsigned immediate offset.
   Its other instruction families, wide branches and IT state remain to implement.
 - VFP stores only d0-d15 and models VFP11/VFPv2. Cortex-A8 VFPv3 and NEON,
   including the wider register file and context-switch semantics, are absent.
@@ -164,6 +168,8 @@ halfwords `f8c4 2224` (`STR.W r2,[r4,#0x224]`), after 62,794 steps.
 With STR implemented, execution reaches `0x802b8328`, halfwords `f504 7090`
 (`ADD.W r0,r4,#0x120`), after 62,845 steps. Each trace stops explicitly at
 the next unsupported operation; none represents a complete kernel boot.
+Modified-immediate arithmetic advances the trace to `0x802b832c`, halfwords
+`f578 fb04` (`BL 0x80030938`), after 62,846 steps.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim

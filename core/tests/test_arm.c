@@ -6304,6 +6304,88 @@ static void test_armv7_multiword_and_sync_alignment(void) {
     }
 }
 
+static void test_thumb2_modified_immediate_arithmetic(void) {
+    static const struct {
+        uint16_t first, second;
+        uint32_t a, cin, result, nzcv;
+    } cases[] = {
+        {0xf504u, 0x7090u, 0x803020e0u, 0u, 0x80302200u, 0u}, /* real ADD.W */
+        {0xf114u, 0x0301u, 0xffffffffu, 0u, 0u, ARM_CPSR_Z | ARM_CPSR_C},
+        {0xf114u, 0x0301u, 0x7fffffffu, 0u, 0x80000000u, ARM_CPSR_N | ARM_CPSR_V},
+        {0xf154u, 0x0300u, 0xffffffffu, ARM_CPSR_C, 0u, ARM_CPSR_Z | ARM_CPSR_C},
+        {0xf154u, 0x0300u, 0x7fffffffu, ARM_CPSR_C, 0x80000000u, ARM_CPSR_N | ARM_CPSR_V},
+        {0xf154u, 0x0300u, 0x7fffffffu, 0u, 0x7fffffffu, 0u},
+        {0xf1b4u, 0x0301u, 0u, ARM_CPSR_C, 0xffffffffu, ARM_CPSR_N},
+        {0xf1b4u, 0x0301u, 0x80000000u, 0u, 0x7fffffffu, ARM_CPSR_C | ARM_CPSR_V},
+        {0xf1b4u, 0x0301u, 1u, 0u, 0u, ARM_CPSR_Z | ARM_CPSR_C},
+        {0xf174u, 0x0300u, 0u, 0u, 0xffffffffu, ARM_CPSR_N},
+        {0xf174u, 0x0300u, 0u, ARM_CPSR_C, 0u, ARM_CPSR_Z | ARM_CPSR_C},
+        {0xf174u, 0x0300u, 0x80000000u, 0u, 0x7fffffffu, ARM_CPSR_C | ARM_CPSR_V},
+        {0xf1d4u, 0x0300u, 1u, 0u, 0xffffffffu, ARM_CPSR_N},
+        {0xf1d4u, 0x0300u, 0x80000000u, ARM_CPSR_C, 0x80000000u, ARM_CPSR_N | ARM_CPSR_V},
+        {0xf1d4u, 0x4300u, 0xffffffffu, 0u, 0x80000001u, ARM_CPSR_N}, /* 0x80000000 - Rn */
+        {0xf514u, 0x7380u, 0xffffffffu, 0u, 0xffu, ARM_CPSR_C}, /* rotated 0x100 */
+        {0xf114u, 0x33ffu, 1u, 0u, 0u, ARM_CPSR_Z | ARM_CPSR_C}, /* replicated -1 */
+    };
+    const uint32_t flags = ARM_CPSR_N | ARM_CPSR_Z | ARM_CPSR_C | ARM_CPSR_V;
+    for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        for (unsigned set = 0; set < 2; set++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+            c.cpsr |= ARM_CPSR_T | ARM_CPSR_Q | ARM_CPSR_N | ARM_CPSR_Z | ARM_CPSR_V | cases[i].cin;
+            c.r[4] = cases[i].a;
+            uint32_t before = c.cpsr;
+            m_w16(NULL, 0, (uint16_t)((cases[i].first & ~0x10u) | (set ? 0x10u : 0u)));
+            m_w16(NULL, 2, cases[i].second);
+            unsigned rd = (cases[i].second >> 8) & 15u;
+            CHECK(arm_step(&c) == ARM_OK && c.r[rd] == cases[i].result &&
+                  c.r[4] == cases[i].a && c.r[15] == 4u && c.cycles == 1u,
+                  "modified arithmetic case %u set=%u result=%08x", i, set, c.r[rd]);
+            uint32_t expected_flags = i == 0 ? ARM_CPSR_N : cases[i].nzcv;
+            CHECK(c.cpsr == (set ? ((before & ~flags) | expected_flags) : before),
+                  "modified arithmetic case %u set=%u flags=%08x", i, set, c.cpsr);
+        }
+    }
+    /* SP forms and compare aliases have different register restrictions. */
+    for (unsigned subtract = 0; subtract < 2; subtract++) {
+        for (unsigned rd_index = 0; rd_index < 3; rd_index++) {
+            const unsigned rd_list[] = {13u, 14u, 15u};
+            unsigned rd = rd_list[rd_index];
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+            c.cpsr |= ARM_CPSR_T;
+            c.r[13] = 0x100u;
+            m_w16(NULL, 0, subtract ? 0xf1bdu : 0xf11du);
+            m_w16(NULL, 2, (uint16_t)((rd << 8) | 1u));
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u &&
+                  (rd == 15u || c.r[rd] == (subtract ? 0xffu : 0x101u)) &&
+                  (rd == 13u || c.r[13] == 0x100u) &&
+                  (c.cpsr & flags) == (subtract ? ARM_CPSR_C : 0u),
+                  "SP arithmetic/compare alias changed PC or used the wrong source");
+        }
+    }
+    static const uint16_t invalid[][2] = {
+        {0xf104u, 0x0d01u}, {0xf10fu, 0x0301u}, {0xf104u, 0x0f01u},
+        {0xf1a4u, 0x0d01u}, {0xf1bfu, 0x0f01u},
+        {0xf15du, 0x0301u}, {0xf154u, 0x0f01u}, {0xf154u, 0x0d01u},
+        {0xf17fu, 0x0301u}, {0xf174u, 0x0d01u}, {0xf174u, 0x0f01u},
+        {0xf1ddu, 0x0301u}, {0xf1d4u, 0x0f01u}, {0xf1d4u, 0x0d01u},
+        {0xf114u, 0x1300u}, {0xf154u, 0x2300u}, {0xf1b4u, 0x3300u}, /* zero replication */
+        {0xf124u, 0x0301u}, {0xf184u, 0x0301u}, {0xf1e4u, 0x0301u}, /* unallocated op */
+    };
+    for (unsigned i = 0; i < sizeof invalid / sizeof invalid[0]; i++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | flags;
+        c.r[3] = 0x12345678u; c.r[13] = 0x100u;
+        uint32_t before = c.cpsr;
+        m_w16(NULL, 0, invalid[i][0]); m_w16(NULL, 2, invalid[i][1]);
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u &&
+              c.r[3] == 0x12345678u && c.r[13] == 0x100u && c.cpsr == before,
+              "invalid arithmetic %u changed state", i);
+    }
+}
+
 int main(void) {
     test_reset_initializes_the_default_profile();
     test_explicit_profile_reset_and_invalid_configuration();
@@ -6317,6 +6399,7 @@ int main(void) {
     test_thumb2_str_immediate();
     test_thumb2_str_page_crossing_and_aborts();
     test_armv7_multiword_and_sync_alignment();
+    test_thumb2_modified_immediate_arithmetic();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();
     test_add_reg();
