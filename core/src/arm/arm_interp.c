@@ -105,13 +105,21 @@ static inline uint32_t legacy_rotate_word(uint32_t v, unsigned byte_offset) {
     return n ? (v >> n) | (v << (32u - n)) : v;
 }
 
+/* ARMv7 removed the U=0 legacy alignment model. Its ordinary accesses use
+ * byte addresses even when a raw SCTLR value has bit 22 clear; A still
+ * enables alignment checking. Keep ARM1176's selectable behavior intact. */
+static inline bool cpu_unaligned_support(const arm_cpu_t *c) {
+    return c->arch == ARM_ARCH_V7_CORTEX_A8 || c->arch == ARM_ARCH_V7_SWIFT ||
+           (c->cp15.sctlr & ARM_SCTLR_U) != 0u;
+}
+
 /* In the U=0/A=0 legacy model an odd ordinary halfword access is
  * architecturally UNPREDICTABLE (ARM1176 TRM Table 4-3). The memory interface
  * might align it down internally, but software is not entitled to that value. */
 static inline bool legacy_halfword_unpredictable(const arm_cpu_t *c,
                                                   uint32_t va) {
     return (va & 1u) != 0u &&
-           (c->cp15.sctlr & (ARM_SCTLR_U | ARM_SCTLR_A)) == 0u;
+           !cpu_unaligned_support(c) && (c->cp15.sctlr & ARM_SCTLR_A) == 0u;
 }
 /*
  * Page-crossing unaligned accesses.
@@ -310,7 +318,7 @@ static inline void dwrite_fill(arm_cpu_t *c, uint32_t va, uint32_t pa,
             if ((c->cp15.sctlr & ARM_SCTLR_A) != 0u) {                       \
                 note_alignment_abort(c, va, false); return 0;                 \
             }                                                                 \
-            if ((c->cp15.sctlr & ARM_SCTLR_U) == 0u)                         \
+            if (!cpu_unaligned_support(c))                                   \
                 va &= ~((bits) / 8u - 1u);                                   \
         }                                                                     \
         uint##bits##_t value;                                                 \
@@ -342,7 +350,7 @@ static inline void dwrite_fill(arm_cpu_t *c, uint32_t va, uint32_t pa,
             if ((c->cp15.sctlr & ARM_SCTLR_A) != 0u) {                       \
                 note_alignment_abort(c, va, true); return;                    \
             }                                                                 \
-            if ((c->cp15.sctlr & ARM_SCTLR_U) == 0u)                         \
+            if (!cpu_unaligned_support(c))                                   \
                 va &= ~((bits) / 8u - 1u);                                   \
         }                                                                     \
         if (mem_crosses_page(va, (bits) / 8u)) {                              \
@@ -371,7 +379,7 @@ static bool prepare_multiword_address(arm_cpu_t *c, uint32_t *va,
                                       unsigned alignment, bool write) {
     uint32_t mask = alignment - 1u;
     if ((*va & mask) == 0u) return true;
-    if ((c->cp15.sctlr & (ARM_SCTLR_U | ARM_SCTLR_A)) != 0u) {
+    if (cpu_unaligned_support(c) || (c->cp15.sctlr & ARM_SCTLR_A) != 0u) {
         note_alignment_abort(c, *va, write);
         return false;
     }
@@ -386,7 +394,7 @@ static bool prepare_multiword_address(arm_cpu_t *c, uint32_t *va,
 static bool prepare_sync_address(arm_cpu_t *c, uint32_t va, unsigned alignment,
                                  bool write, arm_status_t *status) {
     if ((va & (alignment - 1u)) == 0u) return true;
-    if ((c->cp15.sctlr & (ARM_SCTLR_U | ARM_SCTLR_A)) != 0u) {
+    if (cpu_unaligned_support(c) || (c->cp15.sctlr & ARM_SCTLR_A) != 0u) {
         note_alignment_abort(c, va, write);
         *status = ARM_OK;
     } else {
@@ -2757,6 +2765,15 @@ static arm_status_t thumb_step(arm_cpu_t *c, uint32_t pc, uint16_t insn,
 #undef TB
 
 static arm_status_t thumb32_step(arm_cpu_t *c, uint16_t first, uint16_t second) {
+    /* STR immediate T3: positive unscaled imm12, no writeback. SP is valid
+     * for either register; PC is not (DDI0406C.b A8.8.203). Use the common
+     * data path for translation, alignment, page crossings and aborts. */
+    if ((first & 0xfff0u) == 0xf8c0u) {
+        unsigned rn = first & 15u, rt = second >> 12;
+        if (rn == 15u || rt == 15u) return ARM_UNDEFINED;
+        mem_w32(c, c->r[rn] + (second & 0xfffu), c->r[rt]);
+        return ARM_OK;
+    }
     /* MOV/MOVS immediate T2 uses ThumbExpandImm_C, not the A32 rotated
      * immediate. Replication forms preserve C; rotated forms supply bit 31.
      * Zero replication is unpredictable (DDI0406C.b A6.3.2, A8.8.102). */
@@ -3376,7 +3393,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
             uint32_t addr = c->r[rn];
             bool access = true;
             if (!byte && (addr & 3u) != 0u &&
-                (c->cp15.sctlr & (ARM_SCTLR_U | ARM_SCTLR_A)) != 0u) {
+                (cpu_unaligned_support(c) || (c->cp15.sctlr & ARM_SCTLR_A) != 0u)) {
                 note_alignment_abort(c, addr, true);
                 access = false;
             }

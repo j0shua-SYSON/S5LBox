@@ -6145,6 +6145,165 @@ static void test_thumb2_modified_immediate_moves(void) {
     }
 }
 
+static void test_armv7_has_no_legacy_unaligned_mode(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_CORTEX_A8,
+                                  ARM_ARCH_V7_SWIFT};
+    for (unsigned p = 0; p < 3; p++) {
+        for (unsigned u = 0; u < 2; u++) {
+            for (unsigned a = 0; a < 2; a++) {
+                arm_cpu_t c;
+                CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+                c.cp15.sctlr = (u ? ARM_SCTLR_U : 0u) | (a ? ARM_SCTLR_A : 0u);
+                c.r[0] = 0x101u; c.r[1] = 0x44332211u;
+                memset(g_ram + 0x100u, 0xee, 8);
+                m_w32(NULL, 0, 0xe5801000u); /* STR r1,[r0] */
+                m_w32(NULL, 4, 0xe5903000u); /* LDR r3,[r0] */
+                CHECK(arm_step(&c) == ARM_OK, "word store status");
+                if (a) {
+                    CHECK(c.r[15] == ARM_VEC_DATA_ABORT &&
+                          c.cp15.dfar == 0x101u && c.cp15.dfsr == (ARM_FSR_ALIGNMENT | (1u << 11)) &&
+                          m_r32(NULL, 0x100u) == 0xeeeeeeeeu,
+                          "alignment checking failed before a store");
+                } else {
+                    bool modern = u || profiles[p] != ARM_ARCH_V6_ARM1176;
+                    CHECK(g_ram[modern ? 0x101u : 0x100u] == 0x11u &&
+                          g_ram[modern ? 0x104u : 0x103u] == 0x44u &&
+                          g_ram[modern ? 0x100u : 0x104u] == 0xeeu,
+                          "profile %u inherited the wrong unaligned store mode", p);
+                    CHECK(arm_step(&c) == ARM_OK &&
+                          c.r[3] == (modern ? 0x44332211u : 0x11443322u),
+                          "profile %u inherited the wrong unaligned load mode", p);
+                    m_w32(NULL, 8, 0xe1d030b0u); /* LDRH r3,[r0] */
+                    CHECK(arm_step(&c) == (modern ? ARM_OK : ARM_UNDEFINED) &&
+                          (!modern || c.r[3] == 0x2211u),
+                          "odd halfword was incorrectly treated as ARM1176 legacy");
+                }
+            }
+        }
+    }
+}
+
+static void test_thumb2_str_immediate(void) {
+    const uint16_t offsets[] = {0u, 0x224u, 0xfffu};
+    for (unsigned host = 0; host < 2; host++) {
+        for (unsigned i = 0; i < 3; i++) {
+            arm_bus_t bus = g_bus;
+            if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+            c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C;
+            c.r[4] = 0x10000u; c.r[2] = 0x44332211u;
+            uint32_t cpsr = c.cpsr;
+            memset(g_ram + 0x10000u, 0xee, 0x1008u);
+            m_w16(NULL, 0, 0xf8c4u);
+            m_w16(NULL, 2, (uint16_t)(0x2000u | offsets[i]));
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u &&
+                  c.r[4] == 0x10000u && c.r[2] == 0x44332211u && c.cpsr == cpsr,
+                  "STR.W did not retire without writeback or flag changes");
+            CHECK(m_r32(NULL, 0x10000u + offsets[i]) == 0x44332211u &&
+                  g_ram[0x10004u + offsets[i]] == 0xeeu,
+                  "STR.W used the wrong immediate or unaligned address");
+        }
+        arm_bus_t bus = g_bus;
+        if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T;
+        c.r[13] = 0x100u; c.r[14] = 0xfeedfaceu;
+        m_w16(NULL, 0, 0xf8cdu); m_w16(NULL, 2, 0xe000u); /* STR.W lr,[sp] */
+        m_w16(NULL, 4, 0xf8cdu); m_w16(NULL, 6, 0xd004u); /* STR.W sp,[sp,#4] */
+        CHECK(arm_step(&c) == ARM_OK && arm_step(&c) == ARM_OK &&
+              m_r32(NULL, 0x100u) == 0xfeedfaceu && m_r32(NULL, 0x104u) == 0x100u &&
+              c.r[13] == 0x100u, "SP/LR store registers or base alias mishandled");
+    }
+    for (unsigned bad = 0; bad < 2; bad++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T;
+        c.r[4] = 0x100u;
+        m_w16(NULL, 0, bad ? 0xf8cfu : 0xf8c4u);
+        m_w16(NULL, 2, bad ? 0x2000u : 0xf000u);
+        uint32_t instruction = m_r32(NULL, 0);
+        m_w32(NULL, 0x100u, 0xeeeeeeeeu);
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u &&
+              m_r32(NULL, 0) == instruction && m_r32(NULL, 0x100u) == 0xeeeeeeeeu,
+              "PC base/source accepted by STR.W");
+    }
+}
+
+static void test_thumb2_str_page_crossing_and_aborts(void) {
+    for (unsigned host = 0; host < 2; host++) {
+        /* Success, first/second page absent, second page denied, alignment. */
+        for (unsigned fault = 0; fault < 5; fault++) {
+            memset(g_ram, 0xee, sizeof g_ram);
+            arm_bus_t bus = g_bus;
+            if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+            c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP |
+                          (fault == 4 ? ARM_SCTLR_A : 0u); /* raw U=0 */
+            c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+            c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C;
+            c.r[4] = 0x1ffeu; c.r[2] = 0x44332211u; c.r[14] = 0x777u;
+            uint32_t cpsr = c.cpsr;
+            m_w32(NULL, 0x4000u, 0x6001u);
+            m_w32(NULL, 0x6000u, 0x803eu); /* executable, user RW, normal memory */
+            m_w32(NULL, 0x6004u, fault == 1 ? 0u : 0xa03eu);
+            m_w32(NULL, 0x6008u, fault == 2 ? 0u : fault == 3 ? 0xc01eu : 0xc03eu);
+            m_w16(NULL, 0x8000u, 0xf8c4u); m_w16(NULL, 0x8002u, 0x2000u);
+            CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u &&
+                  c.r[4] == 0x1ffeu && c.r[2] == 0x44332211u,
+                  "wide store changed its operands or retirement count");
+            if (!fault) {
+                CHECK(c.r[15] == 4u && c.cpsr == cpsr &&
+                      m_r16(NULL, 0xaffeu) == 0x2211u && m_r16(NULL, 0xc000u) == 0x4433u,
+                      "wide store did not independently translate both pages");
+            } else {
+                uint32_t far = (fault == 1 || fault == 4) ? 0x1ffeu : 0x2000u;
+                uint32_t fsr = fault == 4 ? ARM_FSR_ALIGNMENT : fault == 3 ?
+                               ARM_FSR_PAGE_PERMISSION : ARM_FSR_PAGE_TRANSLATION;
+                CHECK(c.r[15] == ARM_VEC_DATA_ABORT && c.r[14] == 8u &&
+                      c.cp15.dfar == far && c.cp15.dfsr == (fsr | (1u << 11)) &&
+                      c.spsr[ARM_BANK_ABT] == cpsr && c.bank_r14[ARM_BANK_USR] == 0x777u,
+                      "wide store abort lost fault VA, WnR, first-instruction LR or saved state");
+                CHECK(m_r16(NULL, 0xaffeu) == ((fault == 2 || fault == 3) ? 0x2211u : 0xeeeeu) &&
+                      m_r16(NULL, 0xc000u) == 0xeeeeu,
+                      "store abort committed the wrong bytes");
+            }
+            CHECK(m_r16(NULL, 0xaffcu) == 0xeeeeu && m_r32(NULL, 0xb000u) == 0xeeeeeeeeu &&
+                  m_r16(NULL, 0xc002u) == 0xeeeeu, "store crossed physical bounds");
+        }
+    }
+}
+
+static void test_armv7_multiword_and_sync_alignment(void) {
+    static const struct { uint32_t insn; bool write; } cases[] = {
+        {0xe8b00006u, false}, /* LDMIA r0!,{r1,r2} */
+        {0xe8a00006u, true},  /* STMIA r0!,{r1,r2} */
+        {0xe1901f9fu, false}, /* LDREX r1,[r0] */
+        {0xe1802f91u, true},  /* STREX r2,r1,[r0] */
+        {0xe1002091u, true},  /* SWP r2,r1,[r0] */
+    };
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    for (unsigned p = 0; p < 2; p++) {
+        for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+            c.cp15.sctlr = 0u; /* Neither U nor A permits legacy behavior on v7. */
+            c.r[0] = 0x101u; c.r[1] = 0x12345678u; c.r[2] = 0x87654321u;
+            m_w32(NULL, 0, cases[i].insn);
+            memset(g_ram + 0x100u, 0xee, 12);
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == ARM_VEC_DATA_ABORT &&
+                  c.cp15.dfar == 0x101u &&
+                  c.cp15.dfsr == (ARM_FSR_ALIGNMENT | (cases[i].write ? (1u << 11) : 0u)),
+                  "v7 multiword/exclusive/SWP access did not alignment-fault");
+            CHECK(c.r[0] == 0x101u && c.r[1] == 0x12345678u && c.r[2] == 0x87654321u &&
+                  m_r32(NULL, 0x100u) == 0xeeeeeeeeu && m_r32(NULL, 0x104u) == 0xeeeeeeeeu,
+                  "faulting multiword/sync access changed registers or memory");
+        }
+    }
+}
+
 int main(void) {
     test_reset_initializes_the_default_profile();
     test_explicit_profile_reset_and_invalid_configuration();
@@ -6154,6 +6313,10 @@ int main(void) {
     test_thumb2_movw_movt_and_unknown_width();
     test_thumb2_fetch_across_page_boundary();
     test_thumb2_modified_immediate_moves();
+    test_armv7_has_no_legacy_unaligned_mode();
+    test_thumb2_str_immediate();
+    test_thumb2_str_page_crossing_and_aborts();
+    test_armv7_multiword_and_sync_alignment();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();
     test_add_reg();
