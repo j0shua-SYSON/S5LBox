@@ -467,7 +467,8 @@ static void test_native_memory_families(void) {
                  * shapes. Refilling memory must not broaden instruction
                  * semantics or accidentally execute an unsupported form. */
                 CHECK(a64_compact_raw_classify_instruction(&before,
-                          cases[i].opcode, false) == A64_COMPACT_RAW_REJECT_CLASS,
+                          cases[i].opcode, false) ==
+                              A64_COMPACT_RAW_REJECT_DP_REGISTER_SHIFT,
                       "existing extra-transfer rejection %08x", cases[i].opcode);
                 CHECK(total == 0u && native == 0u && slow == 0u && f.calls == 1u &&
                           stats.fetch == 0u && stats.read == 0u && stats.write == 0u &&
@@ -553,6 +554,9 @@ static void test_native_machine(void) {
         literal.cpu.bus = &literal.bus;
         fast.cpu.fetch_host = fast.ram + 0x8000u;
         literal.cpu.fetch_host = literal.ram + 0x8000u;
+        CHECK(s5l8900_set_direct_ram_writes(&fast, true) &&
+                  s5l8900_set_direct_ram_writes(&literal, true),
+              "explicit machine write-observer consent");
         s5l8900_tick(&fast, 0u);
         s5l8900_tick(&literal, 0u);
         CHECK(s5l8900_static_a64_set_enabled(&fast, true) &&
