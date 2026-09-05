@@ -128,7 +128,9 @@ extern "C" {
 /* Explicit statistical diagnosis of where compact-runner CPU time lands.
  * The ordinary marker-free product installs no signal handler or host timer.
  * A nonempty marker is accepted only by the Apple-AArch64 compact engine and
- * reports broad signed-text regions; it never changes guest semantics. */
+ * reports broad signed-text regions and sampled outside PCs. It deliberately
+ * excludes the core API's expensive per-fallback event tracing, which would
+ * distort CPU attribution. It never changes guest semantics. */
 #define VM_FW_BOOT_COMPACT_PC_PROFILE_FILE \
     "engine.compact-pc-profile-on"
 /* Same-binary timing control for an exact navigation replay. A nonempty

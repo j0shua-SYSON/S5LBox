@@ -1741,7 +1741,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
      * ordinary host policy have passed validation. Marker-free boots never
      * create the dedicated sampler thread. */
     if (compact_pc_profile &&
-        !s5l8900_static_a64_enable_compact_raw_pc_profile(machine)) {
+        !s5l8900_static_a64_enable_compact_raw_pc_profile(machine, false)) {
         (void)file_block_close(boot->media);
         set_detail(report->detail, sizeof report->detail,
                    "The compact CPU profile is unavailable on this host or "

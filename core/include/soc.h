@@ -4695,8 +4695,12 @@ uint64_t s5l8900_static_a64_compact_bulk_retired(const s5l8900_t *m);
  * s5l8900_run(), and retains a PC only when that target is running before and
  * after state capture. Ordinary machines pay one disabled gate per public run
  * slice, never per guest instruction; they create no sampler thread. It emits
- * no runtime code and is never guest snapshot state. */
-bool s5l8900_static_a64_enable_compact_raw_pc_profile(s5l8900_t *m);
+ * no runtime code and is never guest snapshot state. fallback_details adds
+ * expensive per-fallback classification and event accounting; keep it false
+ * when attributing CPU time, since that instrumentation itself executes on the
+ * sampled thread. Enabling either mode resets all diagnostic counters. */
+bool s5l8900_static_a64_enable_compact_raw_pc_profile(
+    s5l8900_t *m, bool fallback_details);
 
 typedef enum {
     S5L_STATIC_A64_COMPACT_PC_ENTRY = 0,
@@ -4723,7 +4727,8 @@ typedef enum {
 #define S5L_STATIC_A64_COMPACT_PC_HOT_COUNT 8u
 
 /* Exact events observed at the compact runner's architectural fallback
- * boundary while the opt-in PC profiler is active. The outcome ordering is
+ * boundary while the opt-in PC profiler's fallback_details mode is active.
+ * Sampling-only mode leaves these counters zero. The outcome ordering is
  * pinned to a64_compact_raw_admission_t by a compile-time assertion in the
  * engine wrapper; keeping the public shape numeric avoids making soc.h depend
  * on the build tool's private decoder header. */

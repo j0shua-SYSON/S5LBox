@@ -93,6 +93,7 @@ typedef struct {
     bool compact_raw_window_cache_enabled;
     bool compact_bulk_enabled;
     bool compact_raw_pc_profile_enabled;
+    bool compact_fallback_profile_enabled;
     bool indirect_enabled;
     bool thumb_conditional_enabled;
     bool vstr_enabled;
@@ -199,7 +200,7 @@ static void compact_fallback_profile_note_current(
     a64_compact_raw_admission_t outcome;
 
     if (probe) memset(probe, 0, sizeof *probe);
-    if (!m || !state || !state->compact_raw_pc_profile_enabled) return;
+    if (!m || !state || !state->compact_fallback_profile_enabled) return;
     compact_profile_counter_add(&state->compact_fallback_profile_events, 1u);
     cpu = &m->cpu;
     if (probe) {
@@ -995,7 +996,8 @@ uint64_t s5l8900_static_a64_compact_bulk_retired(const s5l8900_t *m) {
 #endif
 }
 
-bool s5l8900_static_a64_enable_compact_raw_pc_profile(s5l8900_t *m) {
+bool s5l8900_static_a64_enable_compact_raw_pc_profile(
+        s5l8900_t *m, bool fallback_details) {
     if (!m) return false;
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     static_a64_state_t *state = static_state(m);
@@ -1025,8 +1027,10 @@ bool s5l8900_static_a64_enable_compact_raw_pc_profile(s5l8900_t *m) {
     memset(state->compact_fallback_profile_hot, 0,
            sizeof state->compact_fallback_profile_hot);
     state->compact_raw_pc_profile_enabled = true;
+    state->compact_fallback_profile_enabled = fallback_details;
     return true;
 #else
+    (void)fallback_details;
     return false;
 #endif
 }
@@ -1776,7 +1780,7 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
         }
     }
 
-    profile_fallback = context->state->compact_raw_pc_profile_enabled;
+    profile_fallback = context->state->compact_fallback_profile_enabled;
     if (profile_fallback) {
         compact_fallback_profile_note_current(context->machine,
                                               context->state, &data_probe);

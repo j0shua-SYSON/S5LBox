@@ -76,3 +76,11 @@ This fixes diagnostic coverage, not guest performance. The portable regression
 test includes a late hot phase beyond the former cutoff, full-table collisions,
 zero-address regions, saturation, and reset. Fresh physical profiles are required
 before attributing the old profile's full outside-runner share to specific code.
+
+The app's PC-profile marker now uses sampling-only mode. Previously it also
+classified and counted every interpreter fallback on the sampled thread; the
+old long-run trace recorded 545 million such events. Those extra operations can
+distort CPU attribution. Exact fallback tracing remains an explicit core API
+option for instruction-coverage diagnostics, separate from the sampling-only
+mode used to select performance work. Neither diagnostic is a timing oracle;
+all final performance comparisons must still have profiling disabled.

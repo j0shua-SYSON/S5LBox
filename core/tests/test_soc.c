@@ -6413,6 +6413,71 @@ static void test_signed_static_a64_thumb_read_oracle(void) {
     s5l8900_free(&reference);
 }
 
+static void test_compact_pc_sampling_excludes_fallback_tracing(void) {
+    s5l8900_t m = {0};
+    s5l_static_a64_compact_pc_profile_t profile;
+    CHECK(!s5l8900_static_a64_enable_compact_raw_pc_profile(NULL, false),
+          "NULL machine accepted sampling");
+    CHECK(!s5l8900_static_a64_enable_compact_raw_pc_profile(&m, true),
+          "uninitialized engine accepted fallback tracing");
+    bool initialized = s5l8900_init(&m, 0u, 1u << 20);
+    CHECK(initialized, "profile machine init failed");
+    if (!initialized) return;
+    if (!s5l8900_static_a64_available()) {
+        CHECK(!s5l8900_static_a64_enable_compact_raw_pc_profile(&m, false),
+              "unavailable engine accepted sampling");
+        s5l8900_static_a64_compact_raw_pc_profile(&m, &profile);
+        CHECK(!profile.enabled && profile.fallback_events == 0u,
+              "unsupported profile returned live counters");
+        s5l8900_free(&m);
+        return;
+    }
+    CHECK(s5l8900_static_a64_set_enabled(&m, true) &&
+              s5l8900_static_a64_set_compact_raw(&m, true),
+          "available compact engine could not be enabled");
+#if defined(__APPLE__) && defined(__aarch64__)
+    /* MOV r0,PC requires the exact interpreter; the branch is native. This
+     * makes the detailed-mode positive control prove a real fallback path,
+     * rather than accepting all-zero diagnostics in a native-only program. */
+    const uint32_t loop[] = {UINT32_C(0xe1a0000f), UINT32_C(0xeafffffd)};
+    s5l8900_load(&m, 0u, loop, sizeof loop);
+    m.cpu.cpsr = ARM_MODE_USR | ARM_CPSR_I | ARM_CPSR_F;
+    for (unsigned pass = 0u; pass < 3u; ++pass) {
+        bool details = pass == 1u;
+        m.cpu.r[15] = 0u;
+        uint64_t cycles = m.cpu.cycles;
+        CHECK(s5l8900_static_a64_enable_compact_raw_pc_profile(&m, details),
+              "Apple native sampler could not start in mode %u", pass);
+        arm_status_t status = ARM_OK;
+        CHECK(s5l8900_run(&m, 8192u, &status) == 8192u && status == ARM_OK,
+              "profiled guest loop stopped in mode %u", pass);
+        CHECK(m.cpu.r[0] == 8u && m.cpu.r[15] == 0u &&
+                  m.cpu.cycles == cycles + 8192u,
+              "profile mode %u changed architectural execution", pass);
+        s5l8900_static_a64_compact_raw_pc_profile(&m, &profile);
+        CHECK(profile.enabled, "native sample mode did not remain enabled");
+        CHECK(details ? profile.fallback_events > 0u
+                      : profile.fallback_events == 0u,
+              "fallback tracing did not follow mode %u", pass);
+        if (!details) {
+            CHECK(profile.fallback_dread_events == 0u &&
+                      profile.fallback_dwrite_events == 0u &&
+                      profile.fallback_no_data_events == 0u &&
+                      profile.fallback_hot[0].events == 0u,
+                  "sampling-only mode retained detailed fallback work");
+        }
+    }
+    CHECK(s5l8900_static_a64_compact_raw_retired(&m) > 0u &&
+              s5l8900_static_a64_compact_raw_fallback_retired(&m) > 0u,
+          "profile control loop did not execute both native and fallback paths");
+    printf("  STATIC-A64-PC-SAMPLING separate-fallback-tracing=yes\n");
+#else
+    CHECK(!s5l8900_static_a64_enable_compact_raw_pc_profile(&m, false),
+          "non-Apple host accepted Apple target-thread sampling");
+#endif
+    s5l8900_free(&m);
+}
+
 int main(void) {
     printf("S5LBox S5L8900 machine tests\n");
     test_ram_readback();
@@ -6441,6 +6506,7 @@ int main(void) {
     test_signed_static_a64_vstm_oracle();
     test_signed_static_a64_thumb_oracle();
     test_signed_static_a64_thumb_read_oracle();
+    test_compact_pc_sampling_excludes_fallback_tracing();
     test_stub_window_stores_and_counts();
     test_mmio_width_alignment_and_window_edges();
     test_address_space_wrap_is_refused();
