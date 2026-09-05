@@ -3300,6 +3300,19 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
                    (c->r[rd] & 0xffffu) | (immediate << 16) : immediate;
         return ARM_OK;
     }
+    /* LSL/LSR/ASR/ROR register T2 (A8.8.17/95/97/150). Unlike an
+     * immediate shift, zero means no shift for every operation. Only Rm's
+     * low byte is used; read both operands before writing an alias. */
+    if ((first & 0xff80u) == 0xfa00u && (second & 0xf0f0u) == 0xf000u) {
+        unsigned rn = first & 15u, rd = (second >> 8) & 15u, rm = second & 15u;
+        if (rn == 13u || rn == 15u || rd == 13u || rd == 15u || rm == 13u || rm == 15u)
+            return ARM_UNDEFINED;
+        bool carry = (c->cpsr & ARM_CPSR_C) != 0u;
+        uint32_t value = barrel_shift(c->r[rn], (first >> 5) & 3u, c->r[rm] & 255u, true, &carry);
+        c->r[rd] = value;
+        alu_logic_flags(c, value, carry, (first & 0x10u) != 0u);
+        return ARM_OK;
+    }
     /* Thumb extend/extend-and-add (A8.8.230..235/271..276). The A32
      * operation has identical rotation, extension and lane arithmetic,
      * but Thumb additionally forbids SP in every operand position. */

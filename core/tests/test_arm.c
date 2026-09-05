@@ -8874,6 +8874,144 @@ static void test_thumb2_extend(void) {
           "ARM1176 no longer uses its legacy 16-bit BL suffix framing");
 }
 
+/* Variable shifts use the bottom byte of Rm, unlike the immediate shifter.
+ * Repeated one-bit operations provide an independent oracle for all counts. */
+static uint32_t thumb_register_shift_reference(uint32_t value, unsigned type, unsigned count, bool *carry) {
+    for (unsigned bit = 0; bit < count; bit++) {
+        if (type == 0u) { *carry = (value >> 31) != 0u; value <<= 1; }
+        else {
+            *carry = (value & 1u) != 0u;
+            uint32_t top = type == 2u ? value & 0x80000000u : type == 3u ? (value & 1u) << 31 : 0u;
+            value = (value >> 1) | top;
+        }
+    }
+    return value;
+}
+
+static void put_thumb_register_shift(uint32_t pc, unsigned type, unsigned set, unsigned rd, unsigned rn, unsigned rm) {
+    m_w16(NULL,pc,(uint16_t)(0xfa00u | (type << 5) | (set << 4) | rn));
+    m_w16(NULL,pc+2u,(uint16_t)(0xf000u | (rd << 8) | rm));
+}
+
+static void test_thumb2_register_shift_values(void) {
+    static const uint32_t values[] = {0u,1u,0x80000000u,0x80000001u,0x7fffffffu,0x12345678u};
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8,ARM_ARCH_V7_SWIFT};
+    for (unsigned p=0;p<2u;p++)
+     for (unsigned type=0;type<4u;type++)
+      for (unsigned set=0;set<2u;set++)
+       for (unsigned carry_in=0;carry_in<2u;carry_in++)
+        for (unsigned v=0;v<sizeof values/sizeof values[0];v++)
+         for (unsigned count=0;count<256u;count++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c,&g_bus,profiles[p]),"reset");
+            c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_Z|ARM_CPSR_V|ARM_CPSR_Q|
+                   (9u<<16)|(carry_in ? ARM_CPSR_C : 0u);
+            c.r[2]=values[v]; c.r[10]=0xdeadbe00u|count; c.r[8]=0x13579bdfu;
+            c.excl_valid=true; c.excl_addr=0x1234u;
+            uint32_t flags=c.cpsr;
+            bool carry=carry_in != 0u;
+            uint32_t want=thumb_register_shift_reference(values[v],type,count,&carry);
+            if (set) flags=(flags & ~0xe0000000u)|(want & ARM_CPSR_N)|
+                (!want ? ARM_CPSR_Z : 0u)|(carry ? ARM_CPSR_C : 0u);
+            put_thumb_register_shift(0u,type,set,8u,2u,10u);
+            CHECK(arm_step(&c)==ARM_OK && c.r[15]==4u && c.r[8]==want && c.cpsr==flags &&
+                  c.r[2]==values[v] && c.r[10]==(0xdeadbe00u|count) && c.cycles==1u &&
+                  c.excl_valid && c.excl_addr==0x1234u && c.tlb_gen==1u,
+                  "Thumb variable shift profile=%u type=%u S=%u C=%u value=%08x count=%u",p,type,set,carry_in,values[v],count);
+         }
+}
+
+static void test_thumb2_register_shift_operands_and_it(void) {
+    for (unsigned type=0;type<4u;type++)
+     for (unsigned set=0;set<2u;set++)
+      for (unsigned role=0;role<3u;role++)
+       for (unsigned reg=0;reg<16u;reg++)
+        for (unsigned skip=0;skip<2u;skip++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+            c.cpsr=ARM_MODE_SYS|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_V|ARM_CPSR_Q;
+            c.r[15]=0x100u;
+            for (unsigned r=0;r<15u;r++) c.r[r]=0x80000001u+r;
+            unsigned rd=role==0u ? reg : 8u, rn=role==1u ? reg : 2u, rm=role==2u ? reg : 10u;
+            m_w16(NULL,0x100u,skip ? 0xbf0cu : 0xbf14u); /* ITE EQ/NE */
+            CHECK(arm_step(&c)==ARM_OK,"variable shift IT setup");
+            uint32_t before[16]; memcpy(before,c.r,sizeof before);
+            uint32_t flags=c.cpsr;
+            bool valid=reg!=13u && reg!=15u, carry=false;
+            uint32_t want=thumb_register_shift_reference(before[rn],type,before[rm]&255u,&carry);
+            if (!skip && valid && set) flags=(flags & ~0xe0000000u)|(want & ARM_CPSR_N)|
+                (!want ? ARM_CPSR_Z : 0u)|(carry ? ARM_CPSR_C : 0u);
+            if (skip || valid) flags=(flags & ~TEST_IT_MASK)|test_it_bits(skip ? 0x18u : 0x08u);
+            put_thumb_register_shift(0x102u,type,set,rd,rn,rm);
+            CHECK(arm_step(&c)==(skip || valid ? ARM_OK : ARM_UNDEFINED) &&
+                  c.cpsr==flags && c.r[15]==(skip || valid ? 0x106u : 0x102u),
+                  "variable shift SP/PC/IT type=%u S=%u role=%u reg=%u skip=%u flags=%08x expected=%08x",
+                  type,set,role,reg,skip,c.cpsr,flags);
+            for (unsigned r=0;r<15u;r++) CHECK(c.r[r]==(!skip && valid && r==rd ? want : before[r]),
+                "variable shift lost operand/alias r=%u type=%u S=%u role=%u reg=%u skip=%u",r,type,set,role,reg,skip);
+        }
+    /* Every source/destination overlap, including Rn=Rm=Rd. */
+    static const unsigned regs[][3]={{8u,8u,2u},{8u,2u,8u},{8u,2u,2u},{8u,8u,8u}};
+    for (unsigned type=0;type<4u;type++)
+     for (unsigned alias=0;alias<4u;alias++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cpsr=ARM_MODE_SVC|ARM_CPSR_T|ARM_CPSR_C;
+        c.r[2]=0x80000021u; c.r[8]=0xdeadbe01u;
+        bool carry=true;
+        uint32_t want=thumb_register_shift_reference(c.r[regs[alias][1]],type,c.r[regs[alias][2]]&255u,&carry);
+        put_thumb_register_shift(0u,type,1u,regs[alias][0],regs[alias][1],regs[alias][2]);
+        CHECK(arm_step(&c)==ARM_OK && c.r[8]==want && ((c.cpsr&ARM_CPSR_C)!=0u)==carry,"variable shift alias source read ordering");
+     }
+    /* Bit7 selects the already supported extend family. Other fixed-field
+     * changes below cannot turn into a variable shift. */
+    static const uint16_t invalid[][2]={{0xfa02u,0xf810u},{0xfa02u,0xf820u},{0xfa02u,0xf840u},
+                                      {0xfa02u,0xe802u},{0xfa02u,0xc802u}};
+    for (unsigned n=0;n<sizeof invalid/sizeof invalid[0];n++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cpsr=ARM_MODE_SYS|ARM_CPSR_T; c.r[2]=2u; c.r[8]=0x12345678u;
+        m_w16(NULL,0u,invalid[n][0]); m_w16(NULL,2u,invalid[n][1]);
+        CHECK(arm_step(&c)==ARM_UNDEFINED && c.r[15]==0u && c.r[8]==0x12345678u,"variable shift swallowed a neighboring encoding");
+    }
+    for (unsigned type=0;type<4u;type++) {
+        arm_cpu_t c;
+        arm_reset(&c,&g_bus);
+        c.cpsr=ARM_MODE_SYS|ARM_CPSR_T|ARM_CPSR_C;
+        c.r[15]=0x100u; c.r[14]=0x200u; c.r[2]=1u; c.r[8]=0x12345678u;
+        uint32_t flags=c.cpsr;
+        put_thumb_register_shift(0x100u,type,1u,8u,2u,10u);
+        uint32_t legacy_target=0x200u+((0xfa12u|(type<<5))&0x7ffu)*2u;
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==legacy_target && c.r[14]==0x103u &&
+              c.r[8]==0x12345678u && c.cpsr==flags,"variable shift changed ARM1176 legacy BL halfword framing");
+    }
+}
+
+static void test_thumb2_register_shift_fetch(void) {
+    for (unsigned host=0;host<2u;host++)
+     for (unsigned fault=0;fault<4u;fault++) {
+        memset(g_ram,0,sizeof g_ram);
+        arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_V|test_it_bits(0x1cu);
+        c.r[15]=0xffeu; c.r[2]=0x80000001u; c.r[10]=0xdeadbe20u; c.r[8]=0x12345678u;
+        uint32_t flags=c.cpsr;
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x8032u);
+        m_w32(NULL,0x6004u,fault==1u ? 0u : fault==2u ? 0xa033u : fault==3u ? 0xa012u : 0xa032u);
+        m_w16(NULL,0x8ffeu,0xfa12u); m_w16(NULL,0xa000u,0xf80au); m_w16(NULL,0x9000u,0xf909u);
+        CHECK(arm_step(&c)==ARM_OK && c.cycles==1u,"variable shift fetch disposition");
+        if (!fault) CHECK(c.r[15]==0x1002u && c.r[8]==0u &&
+            c.cpsr==((flags & ~(0xe0000000u|TEST_IT_MASK))|ARM_CPSR_Z|ARM_CPSR_C|test_it_bits(0x18u)),
+            "variable shift used wrong second half or lost S/IT effects");
+        else CHECK(c.r[15]==ARM_VEC_PREFETCH && c.r[14]==0x1002u && c.cp15.ifar==0x1000u &&
+            c.spsr[ARM_BANK_ABT]==flags && c.r[8]==0x12345678u &&
+            (c.cp15.ifsr&15u)==(fault==1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION),
+            "variable shift effects preceded complete fetch");
+     }
+}
+
 static void write_thumb2_shifted(unsigned op, bool set, unsigned rn, unsigned rd,
                                   unsigned rm, unsigned type, unsigned amount) {
     m_w16(NULL, 0, (uint16_t)(0xea00u | (op << 5) | (set ? 0x10u : 0u) | rn));
@@ -9475,6 +9613,9 @@ int main(void) {
     test_profile_instruction_boundaries();
     test_a32_barrier_profile_boundaries();
     test_a32_barriers_observe_completed_stores();
+    test_thumb2_register_shift_values();
+    test_thumb2_register_shift_operands_and_it();
+    test_thumb2_register_shift_fetch();
     test_thumb2_movw_movt_and_unknown_width();
     test_thumb2_fetch_across_page_boundary();
     test_thumb2_modified_immediate_moves();

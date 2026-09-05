@@ -249,7 +249,7 @@ Thumb additionally forbids SP in the transfer register. Refused accesses leave
 flags and IT state unchanged. IT conditions, privileged
 state changes and permitted User thread-ID/barrier accesses retain their
 normal semantics. CP14 and Swift CP15 transfers remain unsupported in
-Thumb; VFP transfers cover the Cortex-A8 system registers, core VMOV and memory forms above.
+Thumb; supported VFP instructions cover the A8 transfers and raw data operations above.
 CP15 MRC2/MCR2 encodings are undefined and refused. The ARM1176
 instruction path is unchanged.
 See [DDI0406C.b, A8.8.98/107](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
@@ -269,7 +269,8 @@ Other profiles and the legacy CP15 WFI path retain their behavior. This is a
 CPU wait mechanism; S5L8920 device timing and complete sleep/wake remain work.
 
 The N88 tree specifies three PL192 banks at `0xbf200000`, with a `0x10000`
-stride. A separate `pl192` component now implements programmed vector values,
+stride. Its `vic,pl192` compatible string matches the prelinked
+AppleARMPL192VIC personality. A separate `pl192` component implements programmed vector values,
 all 16 priority levels, priority masking, nested acknowledge/end-of-interrupt,
 IRQ/FIQ routing and the documented VIC0 blocking daisy interface. Status
 registers retain pending sources while priority masks suppress IRQ delivery.
@@ -387,6 +388,19 @@ use the shifter carry; ADC/SBC retain the original carry input for arithmetic.
 Non-flag-setting plain MOV permits SP in exactly one operand. ADD/SUB updates
 to SP require an SP base and LSL of 0..3. Tests cover those constraints,
 shift boundaries, sign/carry behavior, aliases, IT and ARM1176 framing.
+
+Thumb LSL/LSR/ASR/ROR with register-supplied shift counts now use the low
+byte of the count register. Zero leaves the value and carry unchanged;
+larger counts follow the architectural shift/rotate rules. The explicit S
+bit controls NZC updates, including inside IT; V and other flags remain
+unchanged. SP and PC operands are refused. See
+[DDI0406C.b, A8.8.17/95/97/150](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Tests compare every count against repeated one-bit operations and cover
+overlapping operands, conditional skips, complete instruction fetch and
+legacy framing. An isolated matching-driver fixture advances past the
+PL192 unmask method's `LSL.W` at `0x807e5d80` to the handler's unsupported
+register-offset `STRB.W` at `0x807e5ca2`. That fixture uses synthetic objects
+and one controller bank; it does not establish interrupt entry or board boot.
 
 Thumb UBFX/SBFX and BFI/BFC implement bitfield extraction, sign extension,
 insertion and clearing. They validate ranges before shifting and preserve
