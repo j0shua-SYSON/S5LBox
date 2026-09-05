@@ -1243,32 +1243,39 @@ static double vm_engine_now_seconds(void) {
  */
 - (void)drainOneTouch_emulatorThread {
     s5l_mt_contact_t c;
+    /* A full-queue producer may displace even the front MOVED. Keep the
+     * queue locked until this exact report has been accepted and removed,
+     * otherwise pop could discard the next edge instead. The device setter
+     * only builds one bounded in-memory frame; tick and UI work stay outside
+     * the critical section. */
     pthread_mutex_lock(&_lock);
     BOOL have = vm_touch_queue_peek(&_touch, &c);
-    pthread_mutex_unlock(&_lock);
-    if (!have) return;
-
-    if (s5l_mtz2_set_contacts(&_machine.mtz2, &c, 1u)) {
-        /* The attention line moved behind the bus. `level_dirty` in soc.h says
-         * why a machine that is not told re-derives the cascade up to 68
-         * instructions later instead of at this chunk boundary. */
-        s5l8900_tick(&_machine, 0);
-        pthread_mutex_lock(&_lock);
-        vm_touch_queue_pop(&_touch);
-        vm_touch_delivery_note_accepted(&_touchDelivery, &c);
-        _touchDelivered++;
+    if (!have) {
         pthread_mutex_unlock(&_lock);
         return;
     }
 
-    if (s5l_mtz2_irq(&_machine.mtz2))
+    if (s5l_mtz2_set_contacts(&_machine.mtz2, &c, 1u)) {
+        vm_touch_queue_pop(&_touch);
+        vm_touch_delivery_note_accepted(&_touchDelivery, &c);
+        _touchDelivered++;
+        pthread_mutex_unlock(&_lock);
+        /* The attention line moved behind the bus. `level_dirty` in soc.h says
+         * why a machine that is not told re-derives the cascade up to 68
+         * instructions later instead of at this chunk boundary. */
+        s5l8900_tick(&_machine, 0);
+        return;
+    }
+
+    if (s5l_mtz2_irq(&_machine.mtz2)) {
+        pthread_mutex_unlock(&_lock);
         return;                 // backpressure: the guest has not read yet
+    }
 
     /* The device is in no state to report and will not become one by waiting
      * on this report in particular. Drop it, count it, and let the next one
      * try — a queue that never empties would turn a transient into a
      * permanent loss of input. */
-    pthread_mutex_lock(&_lock);
     vm_touch_queue_pop(&_touch);
     _touch.dropped++;
     pthread_mutex_unlock(&_lock);
@@ -1471,8 +1478,8 @@ static double vm_engine_now_seconds(void) {
 
     [self appendConsole:[NSString stringWithFormat:
         @"[input] a touch report was not delivered (%llu so far). The guest's "
-        @"touch controller refused it, or the queue was full of edges that "
-        @"must not be coalesced. Printed once.\n",
+        @"touch controller refused it, or the queue had no safe space for "
+        @"the report and its release. Printed once.\n",
         (unsigned long long)dropped]];
 }
 

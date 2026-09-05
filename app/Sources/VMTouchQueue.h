@@ -12,7 +12,8 @@
  * The rule, stated once:
  *
  *     A MOVED may be replaced by a newer MOVED. An EDGE may not be dropped
- *     while there is any alternative.
+ *     while there is any alternative. A new press must leave space for its
+ *     eventual release, either an empty slot or an evictable MOVED.
  *
  * A tap is a MAKE_TOUCH followed by a BREAK_TOUCH. Coalescing either one turns
  * a tap into nothing, or worse, into a finger the guest believes is still down.
@@ -137,10 +138,13 @@ bool vm_touch_delivery_make_break(const vm_touch_delivery_state_t *state,
  * Add a report. Returns whether it is now in the queue.
  *
  * False means it was dropped and `dropped` was incremented: the queue was full
- * and there was no obsolete MOVED that could safely make room. A later edge is
- * more important than an older position, so it may displace the newest queued
- * MOVED while preserving the order of every surviving report. Nothing else can
- * fail — a null argument aside — because validation is
+ * without an obsolete MOVED, or a new press would consume the last space for
+ * its release. A later edge is more important than an older position, so it
+ * may displace the newest queued
+ * MOVED while preserving the order of every surviving report. A consumer must
+ * keep the caller's lock across peek, device acceptance and pop: displacing a
+ * MOVED can change even the head while a producer is making room for an edge.
+ * Nothing else can fail — a null argument aside — because validation is
  * vm_touch_contact_from_ui()'s job.
  */
 bool vm_touch_queue_push(vm_touch_queue_t *q, const s5l_mt_contact_t *c);

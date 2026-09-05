@@ -86,6 +86,23 @@ bool vm_touch_delivery_make_break(const vm_touch_delivery_state_t *state,
 bool vm_touch_queue_push(vm_touch_queue_t *q, const s5l_mt_contact_t *c) {
     if (!q || !c) return false;
 
+    /* An accepted press needs somewhere for its later release to go.
+     * Empty slots and evictable moves both provide that space. Do not use
+     * the last one for a new press: an edge-only backlog cannot otherwise
+     * admit its lift, even though the original press was accepted. */
+    if (c->phase == MTZ2_PHASE_MAKE_TOUCH &&
+        q->count >= VM_TOUCH_QUEUE_CAP - 1u) {
+        unsigned release_space = VM_TOUCH_QUEUE_CAP - q->count;
+        for (unsigned i = 0; i < q->count; i++) {
+            unsigned at = (q->head + i) % VM_TOUCH_QUEUE_CAP;
+            if (q->slot[at].phase == MTZ2_PHASE_TOUCHING) release_space++;
+        }
+        if (release_space <= 1u) {
+            q->dropped++;
+            return false;
+        }
+    }
+
     if (q->count < VM_TOUCH_QUEUE_CAP) {
         q->slot[(q->head + q->count) % VM_TOUCH_QUEUE_CAP] = *c;
         q->count++;

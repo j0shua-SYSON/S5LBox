@@ -370,6 +370,100 @@ static void test_a_full_tap_survives_a_flood(void) {
           "the finger-up edge did not survive at the back");
 }
 
+static void test_release_space_under_edge_pressure(void) {
+    for (unsigned offset = 0; offset < VM_TOUCH_QUEUE_CAP; offset++) {
+        vm_touch_queue_t q;
+        vm_touch_queue_reset(&q);
+        q.head = offset;
+        vm_touch_delivery_state_t delivered;
+        vm_touch_delivery_reset(&delivered);
+        s5l_mt_contact_t c = make(MTZ2_PHASE_MAKE_TOUCH, 1u);
+        vm_touch_delivery_note_accepted(&delivered, &c);
+
+        /* The controller is already holding a press. Four more rapid
+         * release/press pairs would fill the ring with edges ending DOWN.
+         * The last press must be refused before it strands its release. */
+        for (unsigned i = 0; i < VM_TOUCH_QUEUE_CAP; i++) {
+            c = make((i & 1u) ? MTZ2_PHASE_MAKE_TOUCH :
+                                   MTZ2_PHASE_BREAK_TOUCH, (uint16_t)(10u+i));
+            bool accepted = vm_touch_queue_push(&q, &c);
+            CHECK(accepted == (i + 1u < VM_TOUCH_QUEUE_CAP),
+                  "edge pressure at head %u accepted unsafe press %u", offset, i);
+        }
+        c = make(MTZ2_PHASE_BREAK_TOUCH, 30u);
+        CHECK(vm_touch_queue_push(&q, &c),
+              "edge pressure at head %u lost the final release", offset);
+        while (vm_touch_queue_peek(&q, &c)) {
+            vm_touch_delivery_note_accepted(&delivered, &c);
+            vm_touch_queue_pop(&q);
+        }
+        CHECK(!delivered.active, "edge flood at head %u left a held finger", offset);
+        CHECK(q.dropped == 1u && q.coalesced == 0u,
+              "edge flood must report one refused press, not a lost accepted edge");
+    }
+
+    /* A full ring's last evictable move is also release capacity. A new
+     * press must not consume it and leave only non-evictable edges. */
+    vm_touch_queue_t q;
+    vm_touch_queue_reset(&q);
+    s5l_mt_contact_t c = make(MTZ2_PHASE_TOUCHING, 0u);
+    CHECK(vm_touch_queue_push(&q, &c), "reserve move");
+    for (unsigned i = 1; i < VM_TOUCH_QUEUE_CAP; i++) {
+        c = make((i & 1u) ? MTZ2_PHASE_BREAK_TOUCH :
+                               MTZ2_PHASE_MAKE_TOUCH, (uint16_t)i);
+        CHECK(vm_touch_queue_push(&q, &c), "mixed pressure setup %u", i);
+    }
+    c = make(MTZ2_PHASE_MAKE_TOUCH, 40u);
+    CHECK(!vm_touch_queue_push(&q, &c),
+          "new press consumed the last evictable release slot");
+    c = make(MTZ2_PHASE_BREAK_TOUCH, 41u);
+    CHECK(vm_touch_queue_push(&q, &c), "reserved move could not admit release");
+    CHECK(q.count == VM_TOUCH_QUEUE_CAP && q.dropped == 1u && q.coalesced == 1u,
+          "mixed pressure accounting is wrong");
+    for (unsigned i = 1; i < VM_TOUCH_QUEUE_CAP; i++) {
+        CHECK(vm_touch_queue_peek(&q, &c) && c.x == i,
+              "release reservation reordered surviving edge %u", i);
+        vm_touch_queue_pop(&q);
+    }
+    CHECK(vm_touch_queue_peek(&q, &c) && c.x == 41u &&
+          c.phase == MTZ2_PHASE_BREAK_TOUCH, "reserved release is not last");
+}
+
+static void test_tap_bursts_never_finish_held(void) {
+    unsigned stuck = 0u;
+    for (unsigned seed = 1u; seed <= 512u; seed++) {
+        vm_touch_queue_t q;
+        vm_touch_queue_reset(&q);
+        q.head = seed % VM_TOUCH_QUEUE_CAP;
+        vm_touch_delivery_state_t delivered;
+        vm_touch_delivery_reset(&delivered);
+        uint32_t rng = seed;
+        for (unsigned tap = 0; tap < 32u; tap++) {
+            const uint8_t phases[] = {
+                MTZ2_PHASE_MAKE_TOUCH, MTZ2_PHASE_TOUCHING,
+                MTZ2_PHASE_TOUCHING, MTZ2_PHASE_BREAK_TOUCH
+            };
+            for (unsigned p = 0; p < sizeof phases; p++) {
+                s5l_mt_contact_t c = make(phases[p], (uint16_t)tap);
+                (void)vm_touch_queue_push(&q, &c);
+                rng = rng * 1664525u + 1013904223u;
+                unsigned reads = (rng >> 28u) == 0u ? 3u : 0u;
+                while (reads-- && vm_touch_queue_peek(&q, &c)) {
+                    vm_touch_delivery_note_accepted(&delivered, &c);
+                    vm_touch_queue_pop(&q);
+                }
+            }
+        }
+        s5l_mt_contact_t c;
+        while (vm_touch_queue_peek(&q, &c)) {
+            vm_touch_delivery_note_accepted(&delivered, &c);
+            vm_touch_queue_pop(&q);
+        }
+        if (delivered.active) stuck++;
+    }
+    CHECK(stuck == 0u, "%u deterministic burst schedules left a held finger", stuck);
+}
+
 static void test_null_arguments(void) {
     vm_touch_queue_t q;
     vm_touch_queue_reset(&q);
@@ -394,6 +488,8 @@ int main(void) {
     test_moved_coalesces_when_full();
     test_edges_are_never_coalesced();
     test_a_full_tap_survives_a_flood();
+    test_release_space_under_edge_pressure();
+    test_tap_bursts_never_finish_held();
     test_null_arguments();
 
     printf("test_vmtouchqueue: %u checks, %u failed\n", tests, failed);
