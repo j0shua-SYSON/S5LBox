@@ -2756,6 +2756,24 @@ static arm_status_t thumb_step(arm_cpu_t *c, uint32_t pc, uint16_t insn,
 
 #undef TB
 
+static arm_status_t thumb32_step(arm_cpu_t *c, uint16_t first, uint16_t second) {
+    /* MOVW T3 / MOVT T1: imm4:i:imm3:imm8, no flag changes. ARMv7 forbids
+     * SP and PC here (DDI0406C.b A8.8.102/106). Check before any register write. */
+    uint16_t operation = first & 0xfbf0u;
+    if ((operation == 0xf240u || operation == 0xf2c0u) && !(second & 0x8000u)) {
+        unsigned rd = (second >> 8) & 15u;
+        if (rd == 13u || rd == 15u) return ARM_UNDEFINED;
+        uint32_t immediate = ((uint32_t)(first & 15u) << 12) |
+                             ((uint32_t)(first & 0x400u) << 1) |
+                             ((second & 0x7000u) >> 4) | (second & 0xffu);
+        c->r[rd] = operation == 0xf2c0u ?
+                   (c->r[rd] & 0xffffu) | (immediate << 16) : immediate;
+        return ARM_OK;
+    }
+    /* Never reinterpret an unknown wide instruction as legacy BL halves. */
+    return ARM_UNDEFINED;
+}
+
 arm_status_t arm_step(arm_cpu_t *c) {
     if (!arm_arch_is_valid(c->arch)) return ARM_UNDEFINED;
     uint32_t pc   = c->r[15];
@@ -2831,8 +2849,8 @@ arm_status_t arm_step(arm_cpu_t *c) {
             }
         }
     }
-    /* Thumb: 16-bit instructions, PC advances by 2. Dispatch before the ARM
-     * decoder — the two instruction sets share every helper below. */
+    /* Dispatch Thumb before ARM. ARMv7 wide instructions fetch both
+     * halfwords and retire once; ARM1176 retains its legacy framing. */
     if (c->cpsr & ARM_CPSR_T) {
         /* Assembled from bytes rather than memcpy'd, so it does not depend on
          * the host's endianness; the bus contract is little-endian either
@@ -2843,7 +2861,31 @@ arm_status_t arm_step(arm_cpu_t *c) {
             : c->bus->read16(c->bus->ctx, fetch_pa);
         uint32_t tnext = pc + 2;
         c->cycles++;
-        arm_status_t tst = thumb_step(c, pc, tinsn, &tnext);
+        arm_status_t tst;
+        uint32_t prefix = tinsn & 0xf800u;
+        if (arm_arch_uses_thumb2_encoding(c->arch) &&
+            (prefix == 0xe800u || prefix == 0xf000u || prefix == 0xf800u)) {
+            /* The second halfword can be on a different virtual page, with
+             * different physical backing or permissions. Finish both fetches
+             * before decode so a fault cannot leave a partial register write. */
+            uint32_t second_pa;
+            uint32_t second_fsr = arm_mmu_translate(c, pc + 2u, ARM_ACCESS_FETCH,
+                                                   fetch_priv, &second_pa);
+            if (second_fsr) {
+                uint32_t vec;
+                c->cp15.ifsr = second_fsr;
+                c->cp15.ifar = pc + 2u;
+                take_exception(c, ARM_VEC_PREFETCH, ARM_MODE_ABT, pc + 4u,
+                               false, &vec);
+                c->r[15] = vec;
+                return ARM_OK;
+            }
+            uint16_t second = c->bus->read16(c->bus->ctx, second_pa);
+            tnext = pc + 4u;
+            tst = thumb32_step(c, tinsn, second);
+        } else {
+            tst = thumb_step(c, pc, tinsn, &tnext);
+        }
         if (tst == ARM_HALT) return ARM_HALT;
         if (c->abort_pending) {
             take_pending_data_abort(c, pc);

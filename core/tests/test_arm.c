@@ -5993,12 +5993,114 @@ static void test_a32_barriers_observe_completed_stores(void) {
     }
 }
 
+static void test_thumb2_movw_movt_and_unknown_width(void) {
+    static const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    static const uint16_t values[] = {
+        0, 1, 0x80, 0x100, 0x400, 0x800, 0x1000, 0x8000, 0x9e64, 0xffff
+    };
+    for (unsigned p = 0; p < sizeof profiles / sizeof profiles[0]; p++) {
+        for (unsigned top = 0; top < 2; top++) {
+            for (unsigned rd = 0; rd < 16; rd++) {
+                for (unsigned i = 0; i < sizeof values / sizeof values[0]; i++) {
+                    uint32_t imm = values[i];
+                    uint16_t first = (uint16_t)((top ? 0xf2c0u : 0xf240u) |
+                                               (imm >> 12) | ((imm & 0x800u) >> 1));
+                    uint16_t second = (uint16_t)(((imm & 0x700u) << 4) |
+                                                 (rd << 8) | (imm & 0xffu));
+                    arm_cpu_t c;
+                    CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+                    c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_Q;
+                    c.r[rd] = 0x11223344u;
+                    c.r[15] = 0;
+                    uint32_t before[16]; memcpy(before, c.r, sizeof before);
+                    uint32_t cpsr = c.cpsr;
+                    m_w16(NULL, 0, first); m_w16(NULL, 2, second);
+                    bool valid = rd != 13 && rd != 15;
+                    CHECK(arm_step(&c) == (valid ? ARM_OK : ARM_UNDEFINED),
+                          "Thumb MOV%s r%u immediate %04x status", top ? "T" : "W", rd, imm);
+                    if (valid) {
+                        before[rd] = top ? (imm << 16) | 0x3344u : imm;
+                        before[15] = 4;
+                    }
+                    CHECK(memcmp(before, c.r, sizeof before) == 0 &&
+                          c.cpsr == cpsr && c.cycles == 1u,
+                          "Thumb MOVW/MOVT was split or changed other state");
+                }
+            }
+        }
+        const uint16_t unknown[][2] = {
+            {0xf000u, 0x8000u}, /* unsupported wide conditional branch */
+            {0xe800u, 0xffffu}, {0xf800u, 0xffffu},
+            {0xf240u, 0x8000u}  /* not the MOVW second-halfword pattern */
+        };
+        for (unsigned i = 0; i < sizeof unknown / sizeof unknown[0]; i++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+            c.cpsr |= ARM_CPSR_T;
+            c.r[14] = 0x12345679u;
+            m_w16(NULL, 0, unknown[i][0]); m_w16(NULL, 2, unknown[i][1]);
+            CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u &&
+                  c.r[14] == 0x12345679u && (c.cpsr & ARM_CPSR_T),
+                  "unknown wide instruction aliased a legacy branch half");
+        }
+    }
+
+    arm_cpu_t legacy;
+    arm_reset(&legacy, &g_bus);
+    legacy.cpsr |= ARM_CPSR_T;
+    m_w16(NULL, 0, 0xf000u); m_w16(NULL, 2, 0xf802u);
+    CHECK(arm_step(&legacy) == ARM_OK && legacy.r[15] == 2u && legacy.r[14] == 4u,
+          "ARM1176 legacy BL prefix changed");
+    CHECK(arm_step(&legacy) == ARM_OK && legacy.r[15] == 8u && legacy.r[14] == 5u,
+          "ARM1176 legacy BL suffix changed");
+}
+
+static void test_thumb2_fetch_across_page_boundary(void) {
+    for (unsigned host = 0; host < 2; host++) {
+        for (unsigned fault = 0; fault < 4; fault++) {
+            memset(g_ram, 0, sizeof g_ram);
+            arm_bus_t bus = g_bus;
+            if (host) bus.host_ram = m_host_ram;
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+            c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP;
+            c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+            c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N;
+            c.r[15] = 0xffeu; c.r[4] = 0x12345678u; c.r[14] = 0x777u;
+            uint32_t cpsr = c.cpsr;
+            m_w32(NULL, 0x4000u, 0x6001u); /* coarse table */
+            m_w32(NULL, 0x6000u, 0x8032u); /* user executable page 0 -> PA 0x8000 */
+            m_w32(NULL, 0x6004u, fault == 1 ? 0u : fault == 2 ? 0xa033u :
+                                      fault == 3 ? 0xa012u : 0xa032u);
+            m_w16(NULL, 0x8ffeu, 0xf649u);
+            m_w16(NULL, 0xa000u, 0x6464u); /* MOVW r4,#9e64; page 1 is not adjacent */
+            m_w16(NULL, 0x9000u, 0x0400u); /* wrong physical-contiguity assumption */
+            CHECK(arm_step(&c) == ARM_OK, "fetch should retire or vector an abort");
+            if (!fault) {
+                CHECK(c.r[4] == 0x9e64u && c.r[15] == 0x1002u && c.cpsr == cpsr,
+                      "wide fetch did not translate its second halfword");
+            } else {
+                CHECK(c.r[4] == 0x12345678u && c.r[15] == ARM_VEC_PREFETCH &&
+                      c.r[14] == 0x1002u && c.cp15.ifar == 0x1000u &&
+                      (c.cp15.ifsr & 15u) == (fault == 1 ? ARM_FSR_PAGE_TRANSLATION :
+                                                         ARM_FSR_PAGE_PERMISSION),
+                      "second-halfword fault changed result or lost fault address");
+                CHECK(c.bank_r14[arm_bank_of_mode(ARM_MODE_USR)] == 0x777u,
+                      "aborted wide instruction modified User LR");
+            }
+            CHECK(c.cycles == 1u, "wide instruction charged multiple steps");
+        }
+    }
+}
+
 int main(void) {
     test_reset_initializes_the_default_profile();
     test_explicit_profile_reset_and_invalid_configuration();
     test_profile_instruction_boundaries();
     test_a32_barrier_profile_boundaries();
     test_a32_barriers_observe_completed_stores();
+    test_thumb2_movw_movt_and_unknown_width();
+    test_thumb2_fetch_across_page_boundary();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();
     test_add_reg();

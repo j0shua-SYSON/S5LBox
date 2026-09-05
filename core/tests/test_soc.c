@@ -4236,6 +4236,31 @@ static void test_cortex_a8_uses_interpreter_fallback(void) {
               fast_status == ARM_UNDEFINED && reference_status == ARM_UNDEFINED &&
               fast.cpu.r[3] == 0xdeadbeefu && fast.cpu.r[15] == 24u,
               "fallback concealed unsupported integer divide");
+        const uint16_t thumb[] = {
+            0xf649u, 0x6564u, /* MOVW r5,#9e64 */
+            0xf2c0u, 0x0504u, /* MOVT r5,#4 */
+            0x2401u,          /* MOVS r4,#1 */
+            0xf000u, 0x8000u  /* unsupported wide conditional branch */
+        };
+        s5l8900_load(&fast, 0x100u, thumb, sizeof thumb);
+        s5l8900_load(&reference, 0x100u, thumb, sizeof thumb);
+        CHECK(arm_reset_profile(&fast.cpu, &fast.bus, ARM_ARCH_V7_CORTEX_A8) &&
+              arm_reset_profile(&reference.cpu, &reference.bus, ARM_ARCH_V7_CORTEX_A8),
+              "Thumb profile reset");
+        fast.cpu.r[15] = reference.cpu.r[15] = 0x100u;
+        fast.cpu.cpsr |= ARM_CPSR_T;
+        reference.cpu.cpsr |= ARM_CPSR_T;
+        CHECK(s5l8900_run(&fast, 10u, &fast_status) == 3u &&
+              s5l8900_run(&reference, 10u, &reference_status) == 3u &&
+              fast_status == ARM_UNDEFINED && reference_status == ARM_UNDEFINED,
+              "Thumb fallback split wide instructions or accepted an unknown one");
+        CHECK(fast.cpu.r[5] == 0x00049e64u && fast.cpu.r[4] == 1u &&
+              fast.cpu.r[14] == 0u && fast.cpu.r[15] == 0x10au &&
+              memcmp(fast.cpu.r, reference.cpu.r, sizeof fast.cpu.r) == 0 &&
+              fast.cpu.cpsr == reference.cpu.cpsr &&
+              fast.cpu.cycles == reference.cpu.cycles &&
+              s5l8900_static_a64_retired(&fast) == 0u,
+              "Thumb fallback state or instruction accounting disagreed");
         s5l8900_free(&fast);
         s5l8900_free(&reference);
     }

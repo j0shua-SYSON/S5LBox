@@ -33,6 +33,15 @@ They must not be treated as measured hardware values. The peripheral mapping
 also differs from S5L8900: its UART0 maps to `0x82500000` and the PL192 VIC
 window to `0xbf200000`, using the tree's parent ranges.
 
+The matching `iBoot.n88ap.RELEASE.img3` supplies the missing RAM geometry.
+In its decrypted `iBoot-1537.9.55`, code at `0x4ff10b56` constructs physical
+base `0x40000000` and stores it into boot arguments at `0x4ff10b5e`.
+The size routine at `0x4ff13928` returns `0x10000000` (256 MiB); the caller
+initially reserves 16 KiB before further boot allocations. Vector literals
+and the relocation code establish iBoot's own base as `0x4ff00000`.
+The decrypted iBoot SHA-256 is
+`ef527ad3d131cc220c73f9e1dd3ae06acfd4463f3cdb60ac717aadf8f09e031c`.
+
 ## CPU boundary
 
 `arm_arch_t` values are identifiers, not ordered architecture levels.
@@ -51,6 +60,14 @@ bytes on every step, satisfying the full-system barrier requirements.
 also requires reserved options to execute as full-system barriers. Tests
 cover all options in User and SVC modes, ARM1176/unknown-profile refusals,
 exclusive-monitor preservation and a store followed by instruction refetch.
+
+Thumb-2 framing fetches both halfwords and retires once. The second halfword
+is translated independently, including across noncontiguous physical pages.
+A fetch fault there vectors before any instruction result is committed.
+MOVW and MOVT are implemented with the split immediate and ARMv7 register
+restrictions from DDI0406C.b A8.8.102/106. Other wide operations stop as
+unsupported, rather than being misread as legacy BL halves. ARM1176 retains
+its existing two-step BL/BLX behavior.
 
 `arm_reset()` explicitly selects ARM1176 and is safe on uninitialized storage.
 `arm_reset_profile()` resets the implemented state with a validated explicit
@@ -73,8 +90,8 @@ establish that result.
 - The CP15 identification, cache/TLB controls, reset values, exception state,
   and memory translation paths still need a Cortex-A8 audit and implementation.
   The instruction profile is not a complete system-register model.
-- Thumb decode currently handles Thumb-1 and legacy BL/BLX pairs. Thumb-2,
-  IT state, and the required ARMv7 instruction families remain to implement.
+- Thumb-2 currently implements MOVW/MOVT. Its other instruction families,
+  wide branches and IT state remain to implement.
 - VFP stores only d0-d15 and models VFP11/VFPv2. Cortex-A8 VFPv3 and NEON,
   including the wider register file and context-switch semantics, are absent.
 - The SoC, interrupt wiring, storage, graphics, input and power devices are
@@ -108,6 +125,21 @@ patch gate retains its build, segment, loaded-byte and instruction checks;
 both real files pass the host patch test. Existing guest files are not
 replaced. New imports and `unlzss` reject a
 size or checksum mismatch before opening their output file.
+
+## Bounded entry diagnostic
+
+A private RAM-only harness loads the verified kernel at physical base
+`0x40000000`, places partial early-entry arguments at `0x41000000`, and
+starts at physical entry `0x40086084`. It has no device models or patches;
+unmapped accesses and unprepared argument fields stop immediately. CP15
+identity reads also stop before inheriting the ARM1176 identity.
+
+With the existing modeled CP15 state, the guest constructs page tables and
+enables the MMU. The first wide-Thumb stop was MOVW at `0x802b826a`, after
+62,784 steps. Implementing MOVW/MOVT advances this same diagnostic to
+`0x802b827c`, Thumb halfwords `f04f 31ff` (`MOV.W r1,#0xffffffff`), after
+62,790 steps. This partial CPU execution does not establish a bootloader
+handoff, complete S5L8920 realization, kernel initialization or device boot.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim
