@@ -5,8 +5,8 @@
  * registers s0-s31 aliased onto 16 double-precision registers d0-d15. There is
  * no d16-d31 and there is no Advanced SIMD/NEON on this part.
  *
- * Cortex-A8 has a separate checked system-register path. Its full VFPv3/NEON
- * register file and instruction set are not implemented by this interface.
+ * Cortex-A8 adds D16-D31 and checked system/core-register transfers. Its
+ * remaining VFPv3/NEON instruction families are not implemented here.
  *
  * Everything about WHY this exists, and every floating-point semantic this
  * implementation does and does not model, is documented at the top of
@@ -77,10 +77,16 @@ static inline void vfp_set_s(arm_cpu_t *c, unsigned n, uint32_t v) {
     c->vfp_s[n & 31u] = v;
 }
 static inline uint64_t vfp_get_d(const arm_cpu_t *c, unsigned n) {
+    if (c->arch == ARM_ARCH_V7_CORTEX_A8 && n >= 16u && n < 32u)
+        return c->a8_vfp_hi[n - 16u];
     n = (n & 15u) * 2u;
     return (uint64_t)c->vfp_s[n] | ((uint64_t)c->vfp_s[n + 1u] << 32);
 }
 static inline void vfp_set_d(arm_cpu_t *c, unsigned n, uint64_t v) {
+    if (c->arch == ARM_ARCH_V7_CORTEX_A8 && n >= 16u && n < 32u) {
+        c->a8_vfp_hi[n - 16u] = v;
+        return;
+    }
     n = (n & 15u) * 2u;
     c->vfp_s[n]      = (uint32_t)v;
     c->vfp_s[n + 1u] = (uint32_t)(v >> 32);
@@ -116,6 +122,13 @@ static inline bool vfp_is_system_transfer(uint32_t insn) {
     return (insn & 0x0fe00f10u) == 0x0ee00a10u;
 }
 
+/* Core-register transfer spaces, excluding VMRS/VMSR. Unsupported SIMD
+ * scalar widths and reserved fields are checked by the A8 decoder. */
+static inline bool vfp_is_core_transfer(uint32_t insn) {
+    return ((insn & 0x0f000e10u) == 0x0e000a10u && !vfp_is_system_transfer(insn)) ||
+           (insn & 0x0fe00e00u) == 0x0c400a00u;
+}
+
 /*
  * Execute one VFP encoding. `insn` must already have been identified as a
  * cp10/cp11 encoding by the caller and its condition code must already have
@@ -124,7 +137,7 @@ static inline bool vfp_is_system_transfer(uint32_t insn) {
  * architecturally denied access. arm_step recognizes the disabled-unit
  * ARM_UNDEFINED separately and routes it plus ARM_GUEST_UNDEFINED to the
  * guest's handler while keeping capability gaps fail-closed. Cortex-A8
- * system transfers return ARM_GUEST_UNDEFINED for all actual access denials;
+ * system/core transfers return ARM_GUEST_UNDEFINED for all actual access denials;
  * their ARM_UNDEFINED results must never be reclassified as lazy-enable faults.
  *
  * VFP never writes r15, so the caller's `next` is unaffected.

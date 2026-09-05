@@ -7719,7 +7719,7 @@ static void test_cortex_a8_vfp_fetch_and_refusals(void) {
       }
      }
     }
-    const uint32_t neighbors[] = {0xeef14b10u,0xee114a10u,0xeef14a00u,0xfef14a10u};
+    const uint32_t neighbors[] = {0xeef14b10u,0xee514b10u,0xeef14a00u,0xfef14a10u};
     for (unsigned n = 0; n < sizeof neighbors / sizeof neighbors[0]; n++) {
         arm_cpu_t c;
         CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");

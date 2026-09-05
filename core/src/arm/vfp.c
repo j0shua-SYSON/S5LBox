@@ -1,7 +1,7 @@
 /*
  * S5LBox — VFPv2 (the ARM1176JZF-S's VFP11 unit).
  *
- * Cortex-A8 VMRS/VMSR use a separate checked system-register path. The
+ * Cortex-A8 VMRS/VMSR and core VMOV use separate checked paths with D0-D31. The
  * register-file and arithmetic descriptions below concern the legacy VFP11
  * implementation; they do not establish complete Cortex-A8 VFPv3/NEON support.
  *
@@ -833,6 +833,58 @@ static arm_status_t vfp_a8_system_transfer(arm_cpu_t *c, uint32_t pc, uint32_t i
     return ARM_OK;
 }
 
+/* DDI0406C.b A8.8.341-345. These VMOV forms copy raw words; FPSCR rounding,
+ * NaN, vector and exception controls never transform their bit patterns. */
+static arm_status_t vfp_a8_core_transfer(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
+    bool pair = (insn & 0x0fe00e00u) == 0x0c400a00u;
+    bool load = (insn & (1u << 20)) != 0u, dbl = (insn & 0x100u) != 0u;
+    unsigned rt = (insn >> 12) & 15u, rt2 = (insn >> 16) & 15u;
+    unsigned fp, hi = 0u;
+    g_reason = NULL;
+    if (rt == 15u || ((c->cpsr & ARM_CPSR_T) && rt == 13u))
+        return vfp_trap(pc, insn, "unpredictable Cortex-A8 VMOV core register");
+    if (pair) {
+        if ((insn & 0xd0u) != 0x10u || rt2 == 15u ||
+            ((c->cpsr & ARM_CPSR_T) && rt2 == 13u) || (load && rt == rt2))
+            return vfp_trap(pc, insn, "reserved Cortex-A8 VMOV pair encoding or core registers");
+        unsigned vm = insn & 15u, m = (insn >> 5) & 1u;
+        fp = dbl ? vm | (m << 4) : (vm << 1) | m;
+        if (!dbl && fp == 31u)
+            return vfp_trap(pc, insn, "Cortex-A8 VMOV single-register pair runs past s31");
+    } else {
+        unsigned opc1 = (insn >> 21) & 7u, n = (insn >> 7) & 1u;
+        if ((insn & 0x6fu) || (!dbl && opc1 != 0u) || (dbl && opc1 > 1u))
+            return vfp_trap(pc, insn, "unsupported Cortex-A8 SIMD scalar width or reserved VMOV fields");
+        fp = dbl ? rt2 | (n << 4) : (rt2 << 1) | n;
+        hi = opc1;
+    }
+    if (!vfp_cpacr_permits(c) || !vfp_enabled(c))
+        return vfp_guest_undefined("Cortex-A8 core VMOV requires CPACR access and FPEXC.EN");
+
+    if (pair) {
+        if (load) {
+            uint64_t value = dbl ? vfp_get_d(c, fp) :
+                (uint64_t)vfp_get_s(c, fp) | ((uint64_t)vfp_get_s(c, fp + 1u) << 32);
+            c->r[rt] = (uint32_t)value; c->r[rt2] = (uint32_t)(value >> 32);
+        } else if (dbl) {
+            vfp_set_d(c, fp, (uint64_t)c->r[rt] | ((uint64_t)c->r[rt2] << 32));
+        } else {
+            vfp_set_s(c, fp, c->r[rt]); vfp_set_s(c, fp + 1u, c->r[rt2]);
+        }
+    } else if (dbl) {
+        uint64_t value = vfp_get_d(c, fp);
+        if (load) c->r[rt] = (uint32_t)(value >> (hi * 32u));
+        else {
+            uint64_t mask = UINT64_C(0xffffffff) << (hi * 32u);
+            vfp_set_d(c, fp, (value & ~mask) | ((uint64_t)c->r[rt] << (hi * 32u)));
+        }
+    } else {
+        if (load) c->r[rt] = vfp_get_s(c, fp);
+        else vfp_set_s(c, fp, c->r[rt]);
+    }
+    return ARM_OK;
+}
+
 static arm_status_t vfp_xfer32(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
     unsigned opc1 = (insn >> 21) & 7u;
     bool     L    = BIT(20);
@@ -1359,6 +1411,8 @@ arm_status_t vfp_execute(arm_cpu_t *c, uint32_t pc, uint32_t insn,
                          const vfp_bus_t *bus) {
     if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_system_transfer(insn))
         return vfp_a8_system_transfer(c, pc, insn);
+    if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_core_transfer(insn))
+        return vfp_a8_core_transfer(c, pc, insn);
     if (!c || (c->vfp_fpscr & ARM_FPSCR_RMODE) == 0u)
         return vfp_execute_inner(c, pc, insn, bus);
 

@@ -132,6 +132,248 @@ static double   u2d(uint64_t u){ double d;  memcpy(&d,&u,8); return d; }
 
 /* ================================================== the register file ===== */
 
+/* Cortex-A8 VMOV core transfers. Actual register numbers, independently
+ * encoded from DDI0406C.b A8.8.341-345; kind 0=S, 1=D word, 2=S pair, 3=D. */
+static uint32_t a8_core_move(unsigned kind, unsigned load, unsigned fp,
+                              unsigned rt, unsigned rt2, unsigned hi) {
+    if (kind < 2u) return 0xee000a10u | (load << 20) | (rt << 12) |
+        (kind ? 0x100u | ((fp & 15u) << 16) | ((fp >> 4) << 7) | (hi << 21) :
+                ((fp >> 1) << 16) | ((fp & 1u) << 7));
+    return 0xec400a10u | (load << 20) | (rt << 12) | (rt2 << 16) |
+        (kind == 3u ? 0x100u | (fp & 15u) | ((fp >> 4) << 5) :
+                      (fp >> 1) | ((fp & 1u) << 5));
+}
+
+static arm_status_t a8_move_step(arm_cpu_t *c, unsigned thumb, uint32_t insn) {
+    uint32_t pc = c->r[15];
+    if (thumb) { m_w16(NULL, pc, (uint16_t)(insn >> 16)); m_w16(NULL, pc + 2u, (uint16_t)insn); }
+    else m_w32(NULL, pc, insn);
+    return arm_step(c);
+}
+
+static void a8_move_reset(arm_cpu_t *c, unsigned thumb) {
+    CHECK(arm_reset_profile(c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset A8");
+    c->cpsr = ARM_MODE_SYS | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_Q |
+              (5u << 16) | (thumb ? ARM_CPSR_T : 0u);
+    c->cp15.cpacr = 0x00f00000u; c->vfp_fpexc = ARM_FPEXC_EN;
+    /* Nondefault controls cannot change a bitwise transfer. */
+    c->vfp_fpscr = ARM_FPSCR_QC | ARM_FPSCR_RMODE | ARM_FPSCR_DN | ARM_FPSCR_FZ | ARM_FPSCR_IDC;
+    c->r[15] = 0x100u;
+}
+
+static void test_a8_vfp_full_bank_core_moves(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, thumb);
+        uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+        /* Fill every D register through two core registers, then read each
+         * half through a different encoding. D16 must not overwrite D0. */
+        for (unsigned d = 0; d < 32u; d++) {
+            c.r[2] = 0x7f800001u + d; c.r[9] = 0xff800020u - d;
+            CHECK(a8_move_step(&c, thumb, a8_core_move(3u, 0u, d, 2u, 9u, 0u)) == ARM_OK,
+                  "A8 VMOV D%u write T=%u", d, thumb);
+        }
+        for (unsigned d = 0; d < 32u; d++) {
+            for (unsigned hi = 0; hi < 2u; hi++) {
+                CHECK(a8_move_step(&c, thumb, a8_core_move(1u, 1u, d, 4u, 0u, hi)) == ARM_OK &&
+                      c.r[4] == (hi ? 0xff800020u - d : 0x7f800001u + d),
+                      "A8 independent D%u half%u T=%u", d, hi, thumb);
+            }
+            CHECK(vfp_get_d(&c, d) == ((uint64_t)(0xff800020u - d) << 32 | (0x7f800001u + d)),
+                  "A8 public D getter aliases a different register d=%u", d);
+        }
+        /* S0..S31 still alias only the low sixteen D registers. */
+        for (unsigned s = 0; s < 32u; s++) {
+            CHECK(a8_move_step(&c, thumb, a8_core_move(0u, 1u, s, 4u, 0u, 0u)) == ARM_OK &&
+                  c.r[4] == (s & 1u ? 0xff800020u - s / 2u : 0x7f800001u + s / 2u),
+                  "A8 S/D low-bank alias s=%u T=%u", s, thumb);
+            c.r[4] = 0x11223300u + s;
+            CHECK(a8_move_step(&c, thumb, a8_core_move(0u, 0u, s, 4u, 0u, 0u)) == ARM_OK,
+                  "A8 S write s=%u T=%u", s, thumb);
+        }
+        for (unsigned d = 0; d < 32u; d++) {
+            CHECK(a8_move_step(&c, thumb, a8_core_move(3u, 1u, d, 4u, 6u, 0u)) == ARM_OK &&
+                  c.r[4] == (d < 16u ? 0x11223300u + d * 2u : 0x7f800001u + d) &&
+                  c.r[6] == (d < 16u ? 0x11223301u + d * 2u : 0xff800020u - d),
+                  "A8 S write corrupted upper D bank d=%u T=%u", d, thumb);
+            c.r[4] = 0xdead0000u + d;
+            CHECK(a8_move_step(&c, thumb, a8_core_move(1u, 0u, d, 4u, 0u, d & 1u)) == ARM_OK,
+                  "A8 D half write d=%u T=%u", d, thumb);
+            CHECK(a8_move_step(&c, thumb, a8_core_move(3u, 1u, d, 2u, 9u, 0u)) == ARM_OK &&
+                  c.r[d & 1u ? 9u : 2u] == 0xdead0000u + d &&
+                  c.r[d & 1u ? 2u : 9u] == (d < 16u ? 0x11223300u + d * 2u + !(d & 1u) :
+                                                     d & 1u ? 0x7f800001u + d : 0xff800020u - d),
+                  "A8 D half write changed the other half d=%u T=%u", d, thumb);
+        }
+        CHECK(c.cpsr == flags && c.vfp_fpscr == fpscr && c.vfp_fpexc == ARM_FPEXC_EN,
+              "A8 core VMOV altered floating-point controls or ARM flags");
+        /* A reset clears both banks, including after a profile transition. */
+        arm_reset(&c, &g_bus);
+        a8_move_reset(&c, thumb);
+        for (unsigned d = 0; d < 32u; d++) {
+            CHECK(a8_move_step(&c, thumb, a8_core_move(3u, 1u, d, 2u, 9u, 0u)) == ARM_OK &&
+                  c.r[2] == 0u && c.r[9] == 0u, "A8 reset retained D%u T=%u", d, thumb);
+        }
+        /* A pair starting at odd S crosses a D boundary, never into D16. */
+        for (unsigned s = 0; s < 31u; s++) {
+            c.r[2] = 0xaaa00000u + s; c.r[9] = 0xbbb00000u + s;
+            CHECK(a8_move_step(&c, thumb, a8_core_move(2u, 0u, s, 2u, 9u, 0u)) == ARM_OK &&
+                  vfp_get_s(&c, s) == c.r[2] && vfp_get_s(&c, s + 1u) == c.r[9],
+                  "A8 consecutive S pair write s=%u T=%u", s, thumb);
+            CHECK(a8_move_step(&c, thumb, a8_core_move(2u, 1u, s, 4u, 6u, 0u)) == ARM_OK &&
+                  c.r[4] == c.r[2] && c.r[6] == c.r[9], "A8 S pair read s=%u T=%u", s, thumb);
+        }
+    }
+}
+
+static void test_a8_vfp_core_move_permissions_and_registers(void) {
+    static const unsigned permissions[] = {0,1,3};
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned kind = 0; kind < 4u; kind++) {
+      for (unsigned load = 0; load < 2u; load++) {
+       for (unsigned user = 0; user < 2u; user++) {
+        for (unsigned enabled = 0; enabled < 2u; enabled++) {
+         for (unsigned acc = 0; acc < 3u; acc++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            c.cp15.cpacr = permissions[acc] * 0x00500000u;
+            uint32_t flags = c.cpsr, generation = c.tlb_gen;
+            c.r[2] = 0x11223344u; c.r[9] = 0x55667788u;
+            bool allowed = enabled && (permissions[acc] == 3u || (permissions[acc] == 1u && !user));
+            CHECK(a8_move_step(&c, thumb, a8_core_move(kind, load, 30u, 2u, 9u, 1u)) == ARM_OK,
+                  "A8 core VMOV disposition T=%u kind=%u U=%u EN=%u acc=%u", thumb, kind, user, enabled, permissions[acc]);
+            if (allowed) {
+                CHECK(c.r[15] == 0x104u && c.cpsr == flags &&
+                      c.r[2] == (load ? 0u : 0x11223344u) &&
+                      c.r[9] == (load && kind >= 2u ? 0u : 0x55667788u),
+                      "A8 allowed core VMOV effects T=%u kind=%u L=%u", thumb, kind, load);
+            } else {
+                CHECK(c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == (thumb ? 0x102u : 0x104u) &&
+                      c.spsr[ARM_BANK_UND] == flags && (c.cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_UND &&
+                      c.r[2] == 0x11223344u && c.r[9] == 0x55667788u && vfp_get_s(&c, 30u) == 0u &&
+                      vfp_get_d(&c, 30u) == 0u, "A8 denied core VMOV changed operands or exception state");
+            }
+            CHECK(c.tlb_gen == generation && c.cycles == 1u, "core VMOV changed translation/retirement count");
+         }
+        }
+       }
+       for (unsigned rt = 0; rt < 16u; rt++) {
+        for (unsigned rt2 = 0; rt2 < (kind >= 2u ? 16u : 1u); rt2++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            for (unsigned n = 0; n < 15u; n++) c.r[n] = 0x12340000u + n;
+            uint32_t regs[16]; memcpy(regs, c.r, sizeof regs);
+            bool allowed = rt != 15u && !(thumb && rt == 13u) &&
+                (kind < 2u || (rt2 != 15u && !(thumb && rt2 == 13u) && (!load || rt != rt2)));
+            CHECK(a8_move_step(&c, thumb, a8_core_move(kind, load, 30u, rt, rt2, 1u)) ==
+                  (allowed ? ARM_OK : ARM_UNDEFINED),
+                  "A8 core VMOV register legality T=%u kind=%u L=%u Rt=%u Rt2=%u", thumb, kind, load, rt, rt2);
+            if (allowed) { if (load) { regs[rt] = 0u; if (kind >= 2u) regs[rt2] = 0u; } regs[15] += 4u; }
+            CHECK(memcmp(regs, c.r, sizeof regs) == 0,
+                  "A8 core VMOV changed other core registers T=%u kind=%u L=%u Rt=%u Rt2=%u", thumb, kind, load, rt, rt2);
+            if (allowed && !load) {
+                uint32_t lo = c.r[rt], hi = kind >= 2u ? c.r[rt2] : 0u;
+                CHECK(kind == 0u ? vfp_get_s(&c, 30u) == lo : kind == 1u ?
+                      vfp_get_d(&c, 30u) == (uint64_t)lo << 32 : kind == 2u ?
+                      vfp_get_s(&c, 30u) == lo && vfp_get_s(&c, 31u) == hi :
+                      vfp_get_d(&c, 30u) == ((uint64_t)hi << 32 | lo), "A8 core VMOV stored wrong data");
+            }
+        }
+       }
+      }
+     }
+    }
+}
+
+static void test_a8_vfp_core_move_refusals_and_it(void) {
+    const uint32_t invalid[] = {
+        a8_core_move(0u,0u,30u,2u,9u,0u) | 1u,
+        a8_core_move(0u,1u,30u,2u,9u,0u) | 0x20u,
+        a8_core_move(0u,1u,30u,2u,9u,0u) | 0x40u,
+        a8_core_move(1u,0u,30u,2u,9u,0u) | 0x40u,
+        a8_core_move(1u,1u,30u,2u,9u,0u) | 0x400000u, /* SIMD byte */
+        a8_core_move(1u,0u,30u,2u,9u,0u) | 0x20u, /* SIMD halfword */
+        a8_core_move(2u,0u,31u,2u,9u,0u),
+        a8_core_move(2u,1u,31u,2u,9u,0u),
+        a8_core_move(3u,0u,31u,2u,9u,0u) | 0x40u,
+        a8_core_move(3u,1u,31u,2u,9u,0u) | 0x80u,
+        a8_core_move(3u,0u,31u,2u,9u,0u) & ~0x10u,
+        a8_core_move(3u,1u,31u,2u,9u,0u) & ~0x10u
+    };
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned enabled = 0; enabled < 2u; enabled++) {
+      for (unsigned skip = 0; skip < 2u; skip++) {
+       for (unsigned n = 0; n < sizeof invalid / sizeof invalid[0]; n++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, thumb);
+        for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c, d, UINT64_C(0x7ff01234dead0000) + d);
+        c.r[2] = 0xabcdef01u; c.r[9] = 0x12345678u;
+        c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+        if (skip) c.cp15.cpacr = 0u;
+        if (thumb) {
+            m_w16(NULL, 0x100u, skip ? 0xbf08u : 0xbf18u); /* IT EQ/NE */
+            CHECK(arm_step(&c) == ARM_OK, "invalid VMOV IT setup");
+        }
+        uint32_t flags = c.cpsr, pc = c.r[15], insn = invalid[n];
+        if (!thumb && skip) insn &= 0x0fffffffu; /* EQ false */
+        CHECK(a8_move_step(&c, thumb, insn) == (skip ? ARM_OK : ARM_UNDEFINED) &&
+              c.r[15] == (skip ? pc + 4u : pc) && c.r[2] == 0xabcdef01u && c.r[9] == 0x12345678u &&
+              c.cpsr == (thumb && skip ? flags & ~0x0600fc00u : flags),
+              "A8 reserved/conditional VMOV T=%u EN=%u skip=%u n=%u", thumb, enabled, skip, n);
+        for (unsigned d = 0; d < 32u; d++)
+            CHECK(vfp_get_d(&c, d) == UINT64_C(0x7ff01234dead0000) + d,
+                  "refused/skipped VMOV modified D%u", d);
+       }
+      }
+     }
+     for (unsigned kind = 0; kind < 4u; kind++) {
+      for (unsigned load = 0; load < 2u; load++) {
+       for (unsigned skip = 0; skip < 2u; skip++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, thumb);
+        c.r[2] = 0xdeadbeefu; c.r[9] = 0x11223344u;
+        if (skip) { c.cp15.cpacr = 0u; c.vfp_fpexc = 0u; }
+        if (thumb) {
+            m_w16(NULL, 0x100u, skip ? 0xbf0cu : 0xbf1cu); /* first EQ/NE slot */
+            CHECK(arm_step(&c) == ARM_OK, "VMOV IT setup");
+        }
+        uint32_t flags = c.cpsr, pc = c.r[15];
+        uint32_t insn = a8_core_move(kind, load, 30u, 2u, 9u, 1u);
+        if (!thumb && skip) insn &= 0x0fffffffu;
+        CHECK(a8_move_step(&c, thumb, insn) == ARM_OK && c.r[15] == pc + 4u &&
+              c.r[2] == (!skip && load ? 0u : 0xdeadbeefu) &&
+              c.r[9] == (!skip && load && kind >= 2u ? 0u : 0x11223344u) &&
+              c.cpsr == (thumb ? (flags & ~0x0600fc00u) | 0x1800u : flags),
+              "A8 core VMOV lost conditional/IT retirement T=%u kind=%u L=%u skip=%u", thumb, kind, load, skip);
+       }
+      }
+     }
+    }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++) {
+     for (unsigned kind = 1u; kind < 4u; kind += 2u) {
+      for (unsigned load = 0; load < 2u; load++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, legacy[profile]), "reset legacy");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        c.r[2] = 0x12345678u; c.r[9] = 0xabcdef01u;
+        vfp_set_d(&c, 0u, UINT64_C(0x1122334455667788));
+        CHECK(a8_move_step(&c, 0u, a8_core_move(kind, load, 16u, 2u, 9u, 1u)) == ARM_UNDEFINED &&
+              c.r[2] == 0x12345678u && c.r[9] == 0xabcdef01u &&
+              vfp_get_d(&c, 0u) == UINT64_C(0x1122334455667788), "A8 upper bank leaked into legacy VMOV");
+      }
+     }
+    }
+    /* Upper-bank arithmetic and memory transfers are still separate work. */
+    arm_cpu_t c;
+    a8_move_reset(&c, 0u);
+    vfp_set_d(&c, 16u, UINT64_C(0x1122334455667788));
+    CHECK(a8_move_step(&c, 0u, VFP_LS(1,1,1,0,1,4,0,1,0)) == ARM_UNDEFINED &&
+          vfp_get_d(&c, 16u) == UINT64_C(0x1122334455667788), "core VMOV enabled upper-bank VLDR");
+}
+
 /*
  * d0-d15 are not a second bank, they are a second NAME for s0-s31. Writing the
  * two halves of d3 through s6 and s7 and reading it back as a double is the
@@ -1696,6 +1938,9 @@ static void test_condition_codes_apply(void) {
 
 /* --------------------------------------------------------------- main ---- */
 int main(void) {
+    test_a8_vfp_core_move_refusals_and_it();
+    test_a8_vfp_full_bank_core_moves();
+    test_a8_vfp_core_move_permissions_and_registers();
     printf("VFPv2 (VFP11) tests\n");
     test_s_d_aliasing();
     test_vldmia_writeback_the_vfp_switch_form();

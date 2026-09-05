@@ -604,6 +604,10 @@ typedef struct arm_cpu {
      * is not a cycle-accurate cache model. Inactive on other CPU profiles;
      * omitted from ARM1176 snapshots, which reject active Cortex-A8 state. */
     uint32_t a8_l2actlr;
+    /* Cortex-A8's upper VFP bank. D0-D15 continue to alias vfp_s[0..31];
+     * D16-D31 have no S-register aliases. Inactive on legacy profiles and
+     * cleared, not serialized, by the ARM1176-only snapshot format. */
+    uint64_t a8_vfp_hi[16];
 } arm_cpu_t;
 
 /*

@@ -640,10 +640,11 @@ static bool insn_is_vfp_space(uint32_t insn) {
  *
  * True only for the lazy-enable case described above. */
 static bool vfp_lazy_enable_trap(const arm_cpu_t *c, uint32_t insn) {
-    /* A8 system transfers report every actual access denial explicitly as
+    /* A8 system/core transfers report every actual access denial explicitly as
      * ARM_GUEST_UNDEFINED. An unsupported ID or invalid encoding is still
      * a capability stop when EN=0, not a fault the guest can fix by enabling. */
-    if (c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_system_transfer(insn)) return false;
+    if (c->arch == ARM_ARCH_V7_CORTEX_A8 &&
+        (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn))) return false;
     if (!insn_is_vfp_space(insn)) return false;
     return !vfp_cpacr_permits(c) || !vfp_enabled(c);
 }
@@ -1048,6 +1049,7 @@ bool arm_reset_profile(arm_cpu_t *cpu, const arm_bus_t *bus, arm_arch_t arch) {
     cpu->vfp_fpexc = 0;
     cpu->vfp_fpscr = 0;
     for (int i = 0; i < 32; i++) cpu->vfp_s[i] = 0;
+    memset(cpu->a8_vfp_hi, 0, sizeof cpu->a8_vfp_hi);
     /* On reset the ARM1176 enters SVC mode with IRQ, FIQ and imprecise aborts
      * disabled and begins execution from the reset vector (0x0, or 0xffff0000
      * with high vectors). We start at 0x0; the machine layer relocates PC as
@@ -2993,8 +2995,8 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
                                  uint16_t second, uint32_t *next) {
     if (first == 0xf3afu && second == 0x8003u) return exec_a8_wfi(c); /* WFI T2 */
     uint32_t insn = ((uint32_t)first << 16) | second;
-    if (c->arch == ARM_ARCH_V7_CORTEX_A8 && (first & 0xff00u) == 0xee00u &&
-        vfp_is_system_transfer(insn))
+    if (c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn >> 28) == 0xeu &&
+        (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn)))
         return vfp_execute(c, pc, insn, &g_vfp_bus);
     /* MCR/MRC T1 (DDI0406C.b A8.8.98/107): CP15 uses the A32 fields,
      * but Thumb forbids Rt=SP. This route covers Cortex-A8's checked CP15

@@ -142,8 +142,27 @@ then the retried VMRS changes the condition seen by the next slot. Undefined
 entry saves fault PC+2 in Thumb even for a 32-bit instruction, following
 [DDI0406C.b, B1.9.2](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 Unknown identity reads remain capability stops even with EN clear. The
-legacy VFP11 path and CPU/snapshot layouts are unchanged. This adds system
-transfers without expanding the FP data bank or implementing Thumb arithmetic.
+legacy VFP11 transfer rules are preserved. FP arithmetic remains separate
+from these system transfers.
+
+Cortex-A8 now stores all 32 doubleword registers. `d0-d15` retain their
+`s0-s31` aliases; `d16-d31` have independent storage. ARM and Thumb VMOV
+transfer raw words between core registers and any D register, either one
+half or both halves, and between core registers and one or two consecutive
+S registers. NaN payloads and other bit patterns are preserved without
+consulting host rounding. Encoding, SP/PC and duplicate destination
+restrictions follow
+[DDI0406C.b, A8.8.341-345](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Byte/halfword SIMD scalar transfers remain unsupported. CPACR/EN denials
+enter the guest Undefined handler; reserved encodings stop without mutation.
+
+Tests fill and read every D register through different VMOV forms, verify
+lower-bank S aliases and upper-bank independence, preserve untouched halves,
+and cover permissions, register overlaps, reset and conditional execution.
+The extra 128 bytes are inactive on legacy profiles. Snapshot version 32
+still accepts only ARM1176, omits the inactive A8 bank and clears it on
+restore. Its byte stream is unchanged. Upper-bank memory transfers,
+arithmetic and the remaining NEON instruction families are still unfinished.
 
 Cortex-A8 L2 auxiliary control (`p15,1,c9,c0,2`) now stores its defined
 fields separately from ARM1176 CP15 state and resets to `0x00000042`.
@@ -165,7 +184,7 @@ Thumb additionally forbids SP in the transfer register. Refused accesses leave
 flags and IT state unchanged. IT conditions, privileged
 state changes and permitted User thread-ID/barrier accesses retain their
 normal semantics. CP14 and Swift CP15 transfers remain unsupported in
-Thumb; VFP transfers are limited to the Cortex-A8 system registers above.
+Thumb; VFP transfers cover the Cortex-A8 system registers and core VMOV forms above.
 CP15 MRC2/MCR2 encodings are undefined and refused. The ARM1176
 instruction path is unchanged.
 See [DDI0406C.b, A8.8.98/107](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
@@ -376,9 +395,10 @@ establish that result.
   also implemented. Other instruction families remain to implement. IT state
   and conditional execution are implemented for the supported Thumb families.
   Cortex-A8 MRC/MCR transfers cover the currently implemented CP15 registers.
-- VFP data paths store only d0-d15 and derive from VFP11/VFPv2. Cortex-A8
-  has checked system transfers, but the wider VFPv3/NEON register file,
-  instruction families and full context-switch semantics remain to implement.
+- Cortex-A8 stores d0-d31 and supports system/core transfers. Upper-bank
+  memory transfers and arithmetic, the remaining NEON families, and full
+  context-switch semantics remain to implement. Shared lower-bank arithmetic
+  still derives from VFP11 and requires a complete Cortex-A8 semantic audit.
 - The SoC, interrupt wiring, storage, graphics, input and power devices are
   currently S5L8900-specific. Build them from the N88 firmware requirements.
 - Boot arguments, device-tree relocation, importer/storage selection, and
