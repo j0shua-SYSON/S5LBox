@@ -8301,7 +8301,165 @@ static void test_thumb_compare_and_branch(void) {
     }
 }
 
+static void test_cortex_a8_thumb_cp15_transfers(void) {
+    /* MCR/MRC T1 fields match A1, with Thumb's additional SP restriction.
+     * Independent register values and permissions cover real storage, L2's
+     * absent-ECC readback, context-ID/TTBR flushes, NZCV and IT advancement. */
+    static const struct {
+        uint16_t first, second;
+        uint32_t initial, written, readback;
+        bool user_read, user_write, flush;
+    } cases[] = {
+        {0xee0d,0x0f30,0x12345678,0xabcdef80,0xabcdef80,false,false,true},
+        {0xee0d,0x0f50,0x12345678,0xabcdef80,0xabcdef80,true,true,false},
+        {0xee0d,0x0f70,0x12345678,0xabcdef80,0xabcdef80,true,false,false},
+        {0xee0d,0x0f90,0x12345678,0xabcdef80,0xabcdef80,false,false,false},
+        {0xee02,0x0f10,0x12344000,0xabcdef80,0xabcdef80,false,false,true},
+        {0xee29,0x0f50,0x00000042,0x13200042,0x13000042,false,false,false}
+    };
+    const unsigned states[] = {0u,0x18u,0x0cu,0x1cu};
+    const unsigned advanced[] = {0u,0u,0x18u,0x18u};
+    for (unsigned op = 0; op < sizeof cases / sizeof cases[0]; op++) {
+     for (unsigned load = 0; load < 2u; load++) {
+      for (unsigned user = 0; user < 2u; user++) {
+       for (unsigned rd = 0; rd < 16u; rd++) {
+        for (unsigned it = 0; it < sizeof states / sizeof states[0]; it++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+            uint32_t *stored[] = {&c.cp15.context_id,&c.cp15.tpidrurw,&c.cp15.tpidruro,
+                                 &c.cp15.tpidrprw,&c.cp15.ttbr0,&c.a8_l2actlr};
+            *stored[op] = cases[op].initial;
+            c.cpsr = (user ? ARM_MODE_USR : ARM_MODE_SVC) | ARM_CPSR_T | ARM_CPSR_I |
+                     ARM_CPSR_F | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_V | ARM_CPSR_Q |
+                     (5u << 16) | test_it_bits(states[it]);
+            if (rd != 15u) c.r[rd] = cases[op].written;
+            uint32_t before[16]; memcpy(before, c.r, sizeof before);
+            uint32_t flags = c.cpsr;
+            uint64_t flushes = c.tlb_flushes;
+            bool passed = it != 2u; /* EQ fails with Z clear. */
+            bool allowed = rd != 13u && (load || rd != 15u) &&
+                           (!user || (load ? cases[op].user_read : cases[op].user_write));
+            m_w16(NULL, 0, (uint16_t)(cases[op].first | (load << 4)));
+            m_w16(NULL, 2, (uint16_t)(cases[op].second | (rd << 12)));
+            bool ok = !passed || allowed;
+            CHECK(arm_step(&c) == (ok ? ARM_OK : ARM_UNDEFINED) &&
+                  c.r[15] == (ok ? 4u : 0u) && c.cycles == 1u,
+                  "Thumb CP15 framing/permission op=%u load=%u user=%u rd=%u it=%u", op, load, user, rd, it);
+            uint32_t expected = passed && allowed && !load ? cases[op].readback : cases[op].initial;
+            CHECK(*stored[op] == expected, "Thumb CP15 storage changed too early or lost the operand");
+            if (passed && allowed && load && rd == 15u)
+                flags = (flags & 0x0fffffffu) | (cases[op].initial & 0xf0000000u);
+            if (ok) flags = (flags & ~TEST_IT_MASK) | test_it_bits(advanced[it]);
+            CHECK(c.cpsr == flags && c.tlb_flushes == flushes +
+                  (passed && allowed && !load && cases[op].flush ? 1u : 0u),
+                  "Thumb CP15 flags/IT/TLB op=%u load=%u user=%u rd=%u it=%u cpsr=%08x expected=%08x",
+                  op, load, user, rd, it, c.cpsr, flags);
+            for (unsigned r = 0; r < 15u; r++)
+                CHECK(c.r[r] == (passed && allowed && load && r == rd ? cases[op].initial : before[r]),
+                      "Thumb CP15 wrote an unintended core register");
+        }
+       }
+      }
+     }
+    }
+    /* All flag patterns, including a flag change before the last IT slot.
+     * Rt=15 is APSR_nzcv here, so it must never be classified as a branch. */
+    for (unsigned nzcv = 0; nzcv < 16u; nzcv++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_Q | (10u << 16) | test_it_bits(0x1cu);
+        c.cp15.tpidrurw = (nzcv << 28) | 0x07ffffffu;
+        uint32_t flags = c.cpsr;
+        m_w16(NULL, 0, 0xee1du); m_w16(NULL, 2, 0xff50u);
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u &&
+              c.cpsr == ((flags & ~(TEST_IT_MASK | 0xf0000000u)) | (nzcv << 28) | test_it_bits(0x18u)),
+              "Thumb MRC APSR lost NZCV/IT or treated Rt15 as a branch");
+    }
+    /* Other coprocessors and the MRC2/MCR2/CDP/LDC/MRRC spaces remain
+     * independent unsupported instructions, with no legacy VFP/debug leak. */
+    static const uint16_t neighbors[][2] = {
+        {0xfe1d,0x4f50},{0xfe0d,0x4f50},{0xee1d,0x4f40},{0xed9d,0x4f50},
+        {0xec5d,0x4f50},{0xee10,0x4f10}, /* Unknown MIDR is still refused. */
+        {0xee01,0x4f11},{0xee0d,0x4f51},{0xee3d,0x4f50},{0xee1d,0x4ff0}
+    };
+    for (unsigned i = 0; i < sizeof neighbors / sizeof neighbors[0] + 15u; i++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C;
+        c.r[4] = 0xabcdef01u; c.cp15.tpidrurw = 0x12345678u;
+        uint32_t flags = c.cpsr;
+        unsigned n = sizeof neighbors / sizeof neighbors[0];
+        m_w16(NULL, 0, i < n ? neighbors[i][0] : 0xee1du);
+        m_w16(NULL, 2, i < n ? neighbors[i][1] : (uint16_t)(0x4050u | ((i - n) << 8)));
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.r[4] == 0xabcdef01u &&
+              c.cp15.tpidrurw == 0x12345678u && c.cpsr == flags,
+              "Thumb CP15 leaked into unsupported instruction/profile space index=%u", i);
+    }
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_SWIFT), "reset");
+    c.cpsr |= ARM_CPSR_T;
+    m_w16(NULL, 0, 0xee1du); m_w16(NULL, 2, 0x4f50u);
+    CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u, "Cortex-A8 Thumb CP15 enabled Swift's unaudited CP15 path");
+    arm_reset(&c, &g_bus); c.cpsr |= ARM_CPSR_T; c.r[14] = 0x100u;
+    CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0xd38u && c.r[14] == 3u && !(c.cpsr & ARM_CPSR_T),
+          "Cortex-A8 Thumb CP15 changed ARM1176 legacy BLX suffix");
+}
+
+static void test_cortex_a8_thumb_cp15_fetch_and_maintenance(void) {
+    for (unsigned host = 0; host < 2u; host++) {
+     for (unsigned load = 0; load < 2u; load++) {
+      for (unsigned fault = 0; fault < 4u; fault++) {
+        memset(g_ram, 0, sizeof g_ram);
+        arm_bus_t bus = g_bus;
+        if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP;
+        c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u; c.cp15.tpidrurw = 0x11223344u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N;
+        c.r[15] = 0xffeu; c.r[4] = 0xa5a55a5au;
+        m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x8032u);
+        m_w32(NULL, 0x6004u, fault == 1u ? 0u : fault == 2u ? 0xa033u : fault == 3u ? 0xa012u : 0xa032u);
+        m_w16(NULL, 0x8ffeu, (uint16_t)(0xee0du | (load << 4)));
+        m_w16(NULL, 0xa000u, 0x4f50u); m_w16(NULL, 0x9000u, 0x4f70u);
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u, "Thumb CP15 fetch did not retire/vector once");
+        if (!fault) {
+            CHECK(c.r[15] == 0x1002u && c.r[4] == (load ? 0x11223344u : 0xa5a55a5au) &&
+                  c.cp15.tpidrurw == (load ? 0x11223344u : 0xa5a55a5au),
+                  "Thumb CP15 failed noncontiguous second-half fetch");
+        } else {
+            CHECK(c.r[15] == ARM_VEC_PREFETCH && c.cp15.ifar == 0x1000u &&
+                  c.cp15.tpidrurw == 0x11223344u && c.r[4] == 0xa5a55a5au &&
+                  (c.cp15.ifsr & 15u) == (fault == 1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION),
+                  "Thumb CP15 changed state before complete instruction fetch");
+        }
+      }
+     }
+    }
+    static const uint16_t operations[] = {0x0f95u,0x0f9au,0x0fbau,0x0f15u,0x0f90u};
+    for (unsigned op = 0; op < sizeof operations / sizeof operations[0]; op++) {
+     for (unsigned user = 0; user < 2u; user++) {
+        unsigned calls = 0;
+        arm_bus_t bus = g_bus; bus.ctx = &calls; bus.wait_for_interrupt = count_wfi;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = (user ? ARM_MODE_USR : ARM_MODE_SVC) | ARM_CPSR_T;
+        uint32_t flags = c.cpsr, generation = c.tlb_gen;
+        c.r[0] = UINT32_MAX; c.excl_valid = true; c.excl_addr = 0x1234u;
+        m_w16(NULL, 0, op == 3u ? 0xee08u : 0xee07u); m_w16(NULL, 2, operations[op]);
+        bool allowed = !user || op < 3u;
+        CHECK(arm_step(&c) == (allowed ? ARM_OK : ARM_UNDEFINED) && c.r[15] == (allowed ? 4u : 0u) &&
+              c.cpsr == flags && c.r[0] == UINT32_MAX && calls == 0u && c.excl_valid && c.excl_addr == 0x1234u,
+              "Thumb CP15 maintenance lost User/barrier/legacy-WFI-NOP semantics");
+        CHECK(allowed && op == 3u ? c.tlb_gen != generation : c.tlb_gen == generation,
+              "Thumb CP15 maintenance flushed only on an accepted TLB operation");
+     }
+    }
+}
+
 int main(void) {
+    test_cortex_a8_thumb_cp15_transfers();
+    test_cortex_a8_thumb_cp15_fetch_and_maintenance();
     test_reset_initializes_the_default_profile();
     test_explicit_profile_reset_and_invalid_configuration();
     test_profile_instruction_boundaries();

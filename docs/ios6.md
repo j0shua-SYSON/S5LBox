@@ -95,6 +95,16 @@ transitions are refused. Nonsecure execution still requires implementation.
 Legacy snapshot bytes and version stay unchanged, with inactive L2 state
 cleared on ARM1176 restore and Cortex-A8 save/load still refused.
 
+Cortex-A8 Thumb MRC/MCR transfers use the same checked CP15 selector and
+access path. Both halfwords must be fetched before any register changes;
+Thumb additionally forbids SP in the transfer register. MRC to APSR changes
+only NZCV and can execute before the last IT slot. IT conditions, privileged
+state changes and permitted User thread-ID/barrier accesses retain their
+normal semantics. CP14, VFP, MRC2/MCR2 and Swift CP15 transfers remain
+unsupported in Thumb; the ARM1176 instruction path is unchanged.
+See [DDI0406C.b, A8.8.98/107](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+This adds transfer execution without supplying unverified CPU identity.
+
 Thumb-2 framing fetches both halfwords and retires once. The second halfword
 is translated independently, including across noncontiguous physical pages.
 A fetch fault there vectors before any instruction result is committed.
@@ -261,6 +271,7 @@ establish that result.
   multiply/accumulate. Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple transfers are
   also implemented. Other instruction families remain to implement. IT state
   and conditional execution are implemented for the supported Thumb families.
+  Cortex-A8 MRC/MCR transfers cover the currently implemented CP15 registers.
 - VFP stores only d0-d15 and models VFP11/VFPv2. Cortex-A8 VFPv3 and NEON,
   including the wider register file and context-switch semantics, are absent.
 - The SoC, interrupt wiring, storage, graphics, input and power devices are
@@ -387,7 +398,8 @@ execution then reaches 75,223 steps at `0x802b797c`, halfwords `f3c0 0040`
 (`UBFX r0,r0,#1,#1`). Bitfield execution then advances to 75,639 steps at
 `0x8008b968`, halfwords `fba6 0101` (`UMULL r0,r1,r6,r1`). Multiply execution
 then reaches 75,770 steps at `0x80088278`, halfwords `ee10 0f10`
-(`MRC p15,0,r0,c0,c0,0`). This Thumb CP15 form is unsupported. A subsequent
+(`MRC p15,0,r0,c0,c0,0`). Thumb CP15 transfers were unsupported at that point;
+they now execute, while the CPU identity itself remains unimplemented. A subsequent
 CP15 selector audit invalidates that trace as the current execution boundary:
 the old path silently returned zero for an earlier L2 auxiliary-control read.
 With explicit Cortex-A8 refusal, the current probe stops after 61,644 steps

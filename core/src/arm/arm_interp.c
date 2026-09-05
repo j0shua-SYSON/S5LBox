@@ -2928,6 +2928,14 @@ static arm_status_t thumb_load_word(arm_cpu_t *c, uint32_t address, unsigned rt,
 
 static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
                                  uint16_t second, uint32_t *next) {
+    /* MCR/MRC T1 (DDI0406C.b A8.8.98/107): CP15 uses the A32 fields,
+     * but Thumb forbids Rt=SP. Only Cortex-A8's checked CP15 bank is ready;
+     * other coprocessors/profiles and MCR2/MRC2 remain separate work. */
+    if ((first & 0xff00u) == 0xee00u && (second & 0x0f10u) == 0x0f10u) {
+        if (c->arch != ARM_ARCH_V7_CORTEX_A8 || (second >> 12) == 13u)
+            return ARM_UNDEFINED;
+        return exec_coprocessor(c, pc, ((uint32_t)first << 16) | second);
+    }
     /* LDRD/STRD immediate T1 and LDRD literal T1 (A8.8.72/73/210).
      * T32 names two independent data registers; only a load forbids equal
      * destinations. P=W=0 encodes exclusive/table-branch instructions. */
