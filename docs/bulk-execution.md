@@ -58,6 +58,21 @@ differed, so they do not establish a precise percentage or definite regression.
 The enabled run recorded 76,241,464 successful bulk operations representing
 887,929,969 original instructions. High invocation counts did not translate
 into a usability win. About 1.326 MB of host input had arrived long before the
-catalog UI became ready in both runs. The experiment remains off. The next
-investigation is the repeated ordered-list search above these short string
-operations, not further tuning of the per-operation dispatch path.
+catalog UI became ready in both runs. The experiment remains off.
+
+The subsequent ordered-list investigation produced the offline APT candidate
+described in `guest-apt-index.md`, but it remains uninstalled. The current highest
+priority is substantial emulator-wide acceleration across demanding guest work;
+application-specific changes are a fallback or supplement, not the main solution.
+Removing repeated instruction dispatch or reducing counters is insufficient
+without a substantial same-checkpoint physical wall-time improvement.
+
+The existing long-refresh native profile also had an attribution limitation:
+outside-runner PCs stopped being captured after 4096 samples, although the broad
+region counters kept increasing. The opt-in sampler now counts a bounded streaming
+histogram of 4096 distinct 256-byte PC regions throughout the run. Known regions
+keep accepting samples when full; unknown-region overflow is explicitly dropped.
+This fixes diagnostic coverage, not guest performance. The portable regression
+test includes a late hot phase beyond the former cutoff, full-table collisions,
+zero-address regions, saturation, and reset. Fresh physical profiles are required
+before attributing the old profile's full outside-runner share to specific code.

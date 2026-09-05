@@ -206,6 +206,10 @@ target_include_directories(test_arm_bulk PRIVATE ../tools)
 target_link_libraries(test_arm_bulk PRIVATE emucore)
 add_test(NAME arm_bulk COMMAND test_arm_bulk)
 
+add_executable(test_native_pc_histogram tests/test_native_pc_histogram.c)
+target_include_directories(test_native_pc_histogram PRIVATE ../tools)
+add_test(NAME native_pc_histogram COMMAND test_native_pc_histogram)
+
 # Host-only algorithm experiment: no guest binary or host-app integration.
 add_executable(test_guest_apt_index tests/test_guest_apt_index.c
     ../tools/guest_apt_index.c)

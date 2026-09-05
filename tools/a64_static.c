@@ -2,6 +2,7 @@
 #include "a64_static.h"
 #include "arm_bulk.h"
 #include "vfp.h"
+#include "native_pc_histogram.h"
 
 #include <limits.h>
 #include <stddef.h>
@@ -2161,15 +2162,6 @@ static uint64_t g_compact_profile_outside;
 static uint64_t
     g_compact_profile_region[A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT];
 
-#define COMPACT_PROFILE_PC_SAMPLE_CAPACITY 4096u
-#define COMPACT_PROFILE_PC_BUCKET_CAPACITY 4096u
-#define COMPACT_PROFILE_PC_BUCKET_MASK \
-    (COMPACT_PROFILE_PC_BUCKET_CAPACITY - 1u)
-#define COMPACT_PROFILE_PC_BUCKET_BYTES 256u
-
-_Static_assert((COMPACT_PROFILE_PC_BUCKET_CAPACITY &
-                COMPACT_PROFILE_PC_BUCKET_MASK) == 0u,
-               "compact PC-profile bucket capacity must be a power of two");
 _Static_assert(sizeof(uintptr_t) == sizeof(uint64_t),
                "compact PC-profile storage requires 64-bit pointers");
 
@@ -2177,18 +2169,7 @@ _Static_assert(sizeof(uintptr_t) == sizeof(uint64_t),
  * snapshot path reads them under g_compact_profile_lock. No code touches the
  * storage unless the explicit profile marker is enabled, so marker-free runs
  * still pay no initialization, thread, timer, signal, or ranking work. */
-static unsigned g_compact_profile_pc_captured;
-static uint64_t g_compact_profile_pc_dropped;
-static uintptr_t
-    g_compact_profile_pc[COMPACT_PROFILE_PC_SAMPLE_CAPACITY];
-
-static unsigned g_compact_profile_pc_processed;
-static uintptr_t
-    g_compact_profile_bucket_key[COMPACT_PROFILE_PC_BUCKET_CAPACITY];
-static uintptr_t
-    g_compact_profile_bucket_pc[COMPACT_PROFILE_PC_BUCKET_CAPACITY];
-static uint64_t
-    g_compact_profile_bucket_samples[COMPACT_PROFILE_PC_BUCKET_CAPACITY];
+static native_pc_histogram_t g_compact_profile_outside_histogram;
 
 static void compact_profile_increment(uint64_t *value) {
     if (*value != UINT64_MAX) (*value)++;
@@ -2204,65 +2185,11 @@ static void compact_profile_reset_locked(void) {
     for (unsigned i = 0u;
          i < (unsigned)A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT; i++)
         g_compact_profile_region[i] = 0;
-    g_compact_profile_pc_captured = 0;
-    g_compact_profile_pc_dropped = 0;
-    g_compact_profile_pc_processed = 0u;
-    memset(g_compact_profile_bucket_key, 0,
-           sizeof g_compact_profile_bucket_key);
-    memset(g_compact_profile_bucket_pc, 0,
-           sizeof g_compact_profile_bucket_pc);
-    memset(g_compact_profile_bucket_samples, 0,
-           sizeof g_compact_profile_bucket_samples);
+    native_pc_histogram_reset(&g_compact_profile_outside_histogram);
 }
 
 static void compact_profile_capture_outside_pc_locked(uintptr_t pc) {
-    unsigned published = g_compact_profile_pc_captured;
-    if (published >= COMPACT_PROFILE_PC_SAMPLE_CAPACITY) {
-        compact_profile_increment(&g_compact_profile_pc_dropped);
-        return;
-    }
-    g_compact_profile_pc[published] = pc;
-    g_compact_profile_pc_captured = published + 1u;
-}
-
-static unsigned compact_profile_bucket_index(uintptr_t key) {
-    uint64_t mixed = (uint64_t)key >> 8u;
-    mixed ^= mixed >> 33u;
-    mixed *= UINT64_C(0xff51afd7ed558ccd);
-    mixed ^= mixed >> 33u;
-    return (unsigned)mixed & COMPACT_PROFILE_PC_BUCKET_MASK;
-}
-
-static void compact_profile_bucket_pc(uintptr_t pc) {
-    const uintptr_t key =
-        pc & ~((uintptr_t)COMPACT_PROFILE_PC_BUCKET_BYTES - 1u);
-    unsigned index = compact_profile_bucket_index(key);
-    for (unsigned probe = 0u;
-         probe < COMPACT_PROFILE_PC_BUCKET_CAPACITY; probe++) {
-        uintptr_t current = g_compact_profile_bucket_key[index];
-        if (current == key && g_compact_profile_bucket_samples[index] != 0u) {
-            if (g_compact_profile_bucket_samples[index] != UINT64_MAX)
-                g_compact_profile_bucket_samples[index]++;
-            return;
-        }
-        if (g_compact_profile_bucket_samples[index] == 0u) {
-            g_compact_profile_bucket_key[index] = key;
-            g_compact_profile_bucket_pc[index] = pc;
-            g_compact_profile_bucket_samples[index] = 1u;
-            return;
-        }
-        index = (index + 1u) & COMPACT_PROFILE_PC_BUCKET_MASK;
-    }
-}
-
-static void compact_profile_process_outside_pcs(void) {
-    unsigned captured = g_compact_profile_pc_captured;
-    if (captured > COMPACT_PROFILE_PC_SAMPLE_CAPACITY)
-        captured = COMPACT_PROFILE_PC_SAMPLE_CAPACITY;
-    while (g_compact_profile_pc_processed < captured) {
-        unsigned index = g_compact_profile_pc_processed++;
-        compact_profile_bucket_pc(g_compact_profile_pc[index]);
-    }
+    (void)native_pc_histogram_note(&g_compact_profile_outside_histogram, pc);
 }
 
 static bool compact_profile_hot_before(
@@ -2275,10 +2202,11 @@ static bool compact_profile_hot_before(
 
 static void compact_profile_rank_outside(
         a64_compact_raw_pc_profile_t *out) {
-    compact_profile_process_outside_pcs();
-    for (unsigned i = 0u; i < COMPACT_PROFILE_PC_BUCKET_CAPACITY; i++) {
-        uint64_t samples = g_compact_profile_bucket_samples[i];
-        uintptr_t pc = g_compact_profile_bucket_pc[i];
+    for (unsigned i = 0u; i < NATIVE_PC_HISTOGRAM_CAPACITY; i++) {
+        const native_pc_histogram_bucket_t *bucket =
+            &g_compact_profile_outside_histogram.bucket[i];
+        uint64_t samples = bucket->samples;
+        uintptr_t pc = bucket->pc;
         if (!samples) continue;
         for (unsigned rank = 0u;
              rank < A64_COMPACT_RAW_PC_PROFILE_HOT_COUNT; rank++) {
@@ -2507,8 +2435,8 @@ void a64_compact_raw_pc_profile_snapshot(
         out->region[i] = (uint64_t)g_compact_profile_region[i];
     out->reference_pc =
         (uintptr_t)g_compact_profile_boundary[0];
-    out->outside_pc_captured = g_compact_profile_pc_captured;
-    out->outside_pc_dropped = g_compact_profile_pc_dropped;
+    out->outside_pc_captured = g_compact_profile_outside_histogram.captured;
+    out->outside_pc_dropped = g_compact_profile_outside_histogram.dropped;
     compact_profile_rank_outside(out);
     (void)pthread_mutex_unlock(&g_compact_profile_lock);
 }

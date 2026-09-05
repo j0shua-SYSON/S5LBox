@@ -314,9 +314,11 @@ bool a64_compact_raw_run_code_window_resident_bulk(
 /* Opt-in statistical attribution for the build-time-linked compact runner. A
  * marker-created sampler polls only the pthread executing the public SoC run
  * slice, rejects observations while that thread is not running, and assigns
- * the captured PC to one ordered text region. A bounded outside-runner sample
- * retains raw PCs so ordinary code can rank them. The aliases exported by the
- * generator add no hot-path instructions. Unsupported hosts refuse enablement
+ * the captured PC to one ordered text region. A bounded streaming histogram
+ * counts outside-runner PCs for the complete run, not just its first 4096
+ * samples. Distinct-region overflow is explicitly reported as dropped samples.
+ * The aliases exported by the generator add no hot-path instructions.
+ * Unsupported hosts refuse enablement
  * and every snapshot remains zero. This is host diagnostic state only: it is
  * neither guest state nor part of a snapshot. */
 typedef enum {
