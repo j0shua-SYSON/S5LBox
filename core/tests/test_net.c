@@ -1853,13 +1853,61 @@ static void test_a_zero_window_is_probed_and_not_left_to_stall(void) {
           "the persist probe carried %u octets, expected the one RFC 1122 "
           "§4.2.2.17 allows past the window", (unsigned)r.paylen);
 
-    /* The guest reopens and everything flows. */
+    /* A zero-window receiver rejects the probe, so its ACK still names the
+     * first byte. Reopening must send THAT byte immediately, not leave a
+     * one-byte hole until an RTO. Merely counting >=99 hid this regression. */
+    send_tcp(PEER_IP, 50110u, 80u, gseq, ours, TCP_ACK, 0u, NULL, 0, NULL, 0);
+    drain();
     send_tcp(PEER_IP, 50110u, 80u, gseq, ours, TCP_ACK, 8192u, NULL, 0, NULL, 0);
-    net_tick(&g_ns, 10u + 2u * NET_TCP_RTO_MS);
     sent = 0;
-    while (take(&r)) sent += r.paylen;
-    CHECK(sent >= 99u, "reopening the window delivered %u of 100 octets",
-          (unsigned)sent);
+    while (take(&r)) {
+        CHECK(r.seq == ours + sent, "window reopen skipped an unaccepted probe byte");
+        for (size_t i = 0u; i < r.paylen; i++)
+            CHECK(r.pay[i] == (uint8_t)(sent + i), "window reopen changed stream bytes");
+        sent += r.paylen;
+    }
+    CHECK(sent == 100u, "reopening delivered %u/100 before any later tick", (unsigned)sent);
+}
+
+static void test_persist_probe_acknowledgement_and_repetition(void) {
+    for (unsigned accepted = 0u; accepted < 2u; accepted++) {
+        pkt_t r;
+        uint32_t gseq;
+        start(true, false);
+        (void)handshake(50113u, &gseq); drain();
+        net_flow_t *f = &g_ns.flow[0];
+        /* Also cross the sequence-number wrap on a real emitted probe. */
+        uint32_t ours = UINT32_MAX;
+        f->snd_una = f->snd_nxt = f->snd_max = ours;
+        for (unsigned i = 0; i < 100u; i++) g_mock.h[0].give[i] = (uint8_t)i;
+        g_mock.h[0].givelen = 100u;
+        send_tcp(PEER_IP, 50113u, 80u, gseq, ours, TCP_ACK, 0u, NULL, 0u, NULL, 0u);
+        drain();
+        net_tick(&g_ns, NET_TCP_RTO_MS + 10u);
+        CHECK(take(&r) && r.seq == ours && r.paylen == 1u && r.pay[0] == 0u,
+              "first persist probe has the wrong sequence/payload");
+        CHECK(f->snd_nxt == ours && f->snd_max == 0u,
+              "probe advanced normal send cursor or lost transmitted high water");
+        send_tcp(PEER_IP, 50113u, 80u, gseq, ours, TCP_ACK, 0u, NULL, 0u, NULL, 0u);
+        drain();
+        net_tick(&g_ns, 3u * NET_TCP_RTO_MS + 20u);
+        CHECK(take(&r) && r.seq == ours && r.paylen == 1u && r.pay[0] == 0u,
+              "repeated persist probe skipped the still-rejected byte");
+        drain();
+        /* A reopened ACK may reject the probe or actually accept it. Both
+         * must immediately produce the complete remaining ordered stream. */
+        send_tcp(PEER_IP, 50113u, 80u, gseq, ours + accepted, TCP_ACK, 8192u,
+                 NULL, 0u, NULL, 0u);
+        size_t received = accepted;
+        while (take(&r)) {
+            CHECK(r.seq == ours + (uint32_t)received, "persist reopen sequence gap");
+            for (size_t i = 0u; i < r.paylen; i++)
+                CHECK(r.pay[i] == (uint8_t)(received+i), "persist byte mismatch");
+            received += r.paylen;
+        }
+        CHECK(received == 100u && g_ns.stats.tcp_bytes_acked_by_guest == accepted,
+              "persist reopen lost bytes or fabricated ACK receipt");
+    }
 }
 
 static void test_the_flow_table_fills_and_says_so(void) {
@@ -2144,6 +2192,7 @@ int main(void) {
     RUN(test_timestamped_input_does_not_tick_other_flows_first);
     RUN(test_timestamped_input_clamps_stale_time_and_handles_wrap);
     RUN(test_a_zero_window_is_probed_and_not_left_to_stall);
+    RUN(test_persist_probe_acknowledgement_and_repetition);
     RUN(test_the_flow_table_fills_and_says_so);
     RUN(test_the_output_queue_backs_up_rather_than_overwriting);
     RUN(test_a_stack_with_no_egress_still_answers_for_itself);

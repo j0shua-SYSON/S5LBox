@@ -7,8 +7,9 @@ in a powered-off machine's working directory, then boot it normally.
 The runtime samples the guest PC, LR, arguments, address space, retired slice
 size and network counters at existing host service boundaries. Delivery starts
 a capture. Two seconds without another delivered packet ends it and appends
-`network-profile-v1.csv` in the same machine directory. File I/O does not occur
-during the active transfer. Each capture holds at most 16,384 samples; excess
+`network-profile-v1.csv` in the same machine directory. A stalled connection
+or final application processing can overlap this idle interval; diagnostic
+timings are not unprofiled throughput measurements. Each capture holds at most 16,384 samples; excess
 samples are reported as dropped. At most eight captures are written per boot.
 
 This is a boundary profile, not unbiased instruction or wall-time sampling.

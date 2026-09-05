@@ -126,7 +126,9 @@ static void network_profile_sample(vm_network_session_t *s, unsigned retired,
         p->dropped++;
     }
     if ((uint32_t)(now_ms - p->last_packet_ms) < 2000u) return;
-    /* File I/O is deliberately outside the measured transfer. This is a
+    /* File I/O waits for delivery to be idle; a stalled connection or final
+     * application processing may still be active. Diagnostic timings are not
+     * unprofiled throughput measurements. This is a
      * boundary sample, not an unbiased wall-time or per-instruction profile.
      * Retired weights and timestamps let the analyst distinguish idle WFI
      * slices from useful work; dropped samples are never hidden. */

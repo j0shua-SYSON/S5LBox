@@ -500,6 +500,9 @@ void net_tcp_input(net_stack_t *ns, uint32_t src, uint32_t dst,
     f->snd_wnd = net_rd16(seg + 14);
     tcp_consume_ack(ns, f, sack);
     if (!f->used) return;
+    /* A reopened empty flight no longer needs a persist deadline. In
+     * particular a rejected probe did not acknowledge or consume its byte. */
+    if (f->snd_nxt == f->snd_una) tcp_timers(ns, f);
 
     if (f->state == NET_TCP_SYN_RCVD) {
         if (net_seq_lt(f->snd_una, f->snd_nxt)) return;  /* SYN not acked yet */
@@ -661,7 +664,11 @@ void net_tcp_tick(net_stack_t *ns, net_flow_t *f) {
             /* Persist. RFC 1122 §4.2.2.17 explicitly allows the probe to
              * carry one octet beyond the offered window. */
             if (tcp_out(ns, f, TCP_ACK, f->snd_nxt, f->txbuf, 1u)) {
-                f->snd_nxt++;
+                /* The zero-window peer may reject this byte. Keep normal
+                 * output at SND.UNA so reopening cannot leave a one-byte gap
+                 * until retransmission. tcp_out still records SND.MAX: if
+                 * the probe IS accepted its ACK legitimately advances UNA,
+                 * and tcp_consume_ack brings NXT forward with it. */
                 tcp_timers(ns, f);
             }
             return;
