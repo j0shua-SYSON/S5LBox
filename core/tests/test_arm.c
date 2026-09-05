@@ -7564,6 +7564,79 @@ static void test_thumb2_small_load_aborts(void) {
     }
 }
 
+static void test_thumb2_extend(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    /* Source80ff7f01, rotations0/8/16/24. Adding forms use basefffffff0;
+     * paired-byte forms wrap each halfword independently. */
+    static const uint32_t expected[6][2][4] = {
+        {{0x7f01u,0xffffff7fu,0xffff80ffu,0x180u}, {0x7ef1u,0xffffff6fu,0xffff80efu,0x170u}},
+        {{0x7f01u,0xff7fu,0x80ffu,0x180u}, {0x7ef1u,0xff6fu,0x80efu,0x170u}},
+        {{0xffff0001u,0xff80007fu,0x0001ffffu,0x007fff80u}, {0xfffefff1u,0xff7f006fu,0x0000ffefu,0x007eff70u}},
+        {{0x00ff0001u,0x0080007fu,0x000100ffu,0x007f0080u}, {0x00fefff1u,0x007f006fu,0x000000efu,0x007e0070u}},
+        {{1u,0x7fu,0xffffffffu,0xffffff80u}, {0xfffffff1u,0x6fu,0xffffffefu,0xffffff70u}},
+        {{1u,0x7fu,0xffu,0x80u}, {0xfffffff1u,0x6fu,0xefu,0x70u}},
+    };
+    for (unsigned p = 0; p < 2; p++) {
+     for (unsigned op = 0; op < 6; op++) {
+      for (unsigned add = 0; add < 2; add++) {
+       for (unsigned rot = 0; rot < 4; rot++) {
+        for (unsigned alias = 0; alias < 3; alias++) {
+         for (unsigned execute = 0; execute < 2; execute++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+            c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_V | ARM_CPSR_Q |
+                      (0xau << 16) | test_it_bits(execute ? 0x18u : 0x08u);
+            uint32_t flags = c.cpsr & ~TEST_IT_MASK;
+            unsigned rd = alias == 0 ? 12u : alias == 1 ? 8u : 14u;
+            c.r[12] = 0x12345678u; c.r[8] = 0x80ff7f01u; c.r[14] = 0xfffffff0u;
+            uint32_t unchanged = c.r[rd];
+            m_w16(NULL, 0, (uint16_t)(0xfa00u | (op << 4) | (add ? 14u : 15u)));
+            m_w16(NULL, 2, (uint16_t)(0xf080u | (rd << 8) | (rot << 4) | 8u));
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u && c.cpsr == flags &&
+                  c.r[rd] == (execute ? expected[op][add][rot] : unchanged),
+                  "wide extend op=%u add=%u rot=%u alias=%u lost result, lane isolation or flags/IT", op, add, rot, alias);
+         }
+        }
+       }
+      }
+      static const unsigned bad_regs[][3] = {{13,0,1},{15,0,1},{0,13,1},{0,14,13},{0,15,15}};
+      for (unsigned b = 0; b < sizeof bad_regs / sizeof bad_regs[0]; b++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_Q; c.r[0] = 0x87654321u; c.r[13] = 0x300u;
+        m_w16(NULL, 0, (uint16_t)(0xfa00u | (op << 4) | bad_regs[b][1]));
+        m_w16(NULL, 2, (uint16_t)(0xf080u | (bad_regs[b][0] << 8) | bad_regs[b][2]));
+        uint32_t flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.r[0] == 0x87654321u &&
+              c.r[13] == 0x300u && c.cpsr == flags, "wide extend accepted forbidden SP/PC register");
+      }
+     }
+    }
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.cpsr |= ARM_CPSR_T; c.r[8] = 0xabcdef20u;
+    m_w16(NULL, 0, 0xfa5fu); m_w16(NULL, 2, 0xf088u);
+    CHECK(arm_step(&c) == ARM_OK && c.r[0] == 0x20u && c.r[8] == 0xabcdef20u && c.r[15] == 4u,
+          "real kernel UXTB.W blocker failed");
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.cpsr |= ARM_CPSR_T; c.r[9] = 0x80ff7f01u;
+    m_w16(NULL, 0, 0xfa29u); m_w16(NULL, 2, 0xf989u);
+    CHECK(arm_step(&c) == ARM_OK && c.r[9] == 0x80fe7f02u,
+          "SXTAB16 with all registers aliased used a partially updated source");
+    const uint16_t reserved[][2] = {{0xfa6fu,0xf088u},{0xfa7fu,0xf088u},{0xfa5fu,0xf0c8u},{0xfa5fu,0xe088u}};
+    for (unsigned i = 0; i < sizeof reserved / sizeof reserved[0]; i++) {
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T; c.r[0] = 0x12345678u;
+        m_w16(NULL, 0, reserved[i][0]); m_w16(NULL, 2, reserved[i][1]);
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.r[0] == 0x12345678u,
+              "wide extend overmatched reserved bits or neighboring operation");
+    }
+    arm_reset(&c, &g_bus); c.cpsr |= ARM_CPSR_T; c.r[14] = 0x1000u; c.r[0] = 0x12345678u;
+    m_w16(NULL, 0, 0xfa5fu); m_w16(NULL, 2, 0xf088u);
+    CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x14beu && c.r[14] == 3u && c.r[0] == 0x12345678u,
+          "ARM1176 no longer uses its legacy 16-bit BL suffix framing");
+}
+
 static void test_thumb_compare_and_branch(void) {
     const arm_arch_t profiles[] = {ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
     const uint32_t offsets[] = {0u, 62u, 64u, 126u};
@@ -7639,6 +7712,7 @@ int main(void) {
     test_thumb2_doubleword_aborts();
     test_thumb2_small_loads();
     test_thumb2_small_load_aborts();
+    test_thumb2_extend();
     test_thumb_compare_and_branch();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();

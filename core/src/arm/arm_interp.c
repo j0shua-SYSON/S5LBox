@@ -3096,6 +3096,19 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
                    (c->r[rd] & 0xffffu) | (immediate << 16) : immediate;
         return ARM_OK;
     }
+    /* Thumb extend/extend-and-add (A8.8.230..235/271..276). The A32
+     * operation has identical rotation, extension and lane arithmetic,
+     * but Thumb additionally forbids SP in every operand position. */
+    if ((first & 0xff80u) == 0xfa00u && (second & 0xf0c0u) == 0xf080u) {
+        static const unsigned a32_ops[] = {0xbu,0xfu,0x8u,0xcu,0xau,0xeu};
+        unsigned op = (first >> 4) & 7u, rn = first & 15u;
+        unsigned rd = (second >> 8) & 15u, rm = second & 15u;
+        unsigned rotate = (second >> 4) & 3u;
+        if (op >= 6u || rn == 13u || rd == 13u || rd == 15u || rm == 13u || rm == 15u)
+            return ARM_UNDEFINED;
+        return exec_media(c, pc, 0xe6800070u | (a32_ops[op] << 20) |
+                          (rn << 16) | (rd << 12) | (rotate << 10) | rm);
+    }
     /* Never reinterpret an unknown wide instruction as legacy BL halves. */
     return ARM_UNDEFINED;
 }

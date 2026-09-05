@@ -150,6 +150,13 @@ PLD/PLDW/PLI or unallocated hints and perform no data access, including when
 the hinted address is unmapped. Register-offset and unprivileged forms
 remain unsupported.
 
+Wide signed/unsigned extend and extend-and-add instructions support bytes,
+halfwords and independent paired-byte lanes, with rotations of 0/8/16/24
+bits. They reuse the A32 arithmetic after enforcing Thumb's SP/PC constraints.
+Tests cover sign boundaries, wrapped additions, lane isolation, overlapping
+operands, IT conditions and preservation of NZCV/Q/GE. ARM1176 keeps its
+legacy 16-bit framing for these first-halfword bit patterns.
+
 The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates
 C only as prescribed by the immediate form, preserving V. Invalid zero
@@ -312,6 +319,23 @@ steps at `0x80089784`, reading guarded physical `0x411026a0`: the zero-valued
 `/device-tree/chosen/debug-enabled` property. Every other unprepared
 zero-valued property remains guarded, and the original device-tree file is unchanged.
 No board registers are fabricated to advance this trace.
+
+The matching iBoot updater at `0x4ff0ffbe..ffe2` leaves `debug-enabled` zero
+unless its security policy enables debugging. The private harness selects
+the disabled-debug handoff policy; it does not supply or claim measured fuse
+state. That advances to 74,832 steps at `0x800897dc`, reading the guarded
+`chosen/firmware-version` property. iBoot copies its literal
+`iBoot-1537.9.55` into that 256-byte property at `0x4ff101de..1fc`.
+Preparing it advances to 74,907 steps at `0x8027a8a4`, reading the command
+line at boot-argument offset `0x38`.
+
+iBoot constructs a 256-byte command line at `0x4ff10c44..82`. The normal
+non-ramdisk, non-tethered configuration supplies no kernel options. Using
+that configuration reaches 74,914 steps at `0x8027a8c0`, halfwords
+`fa5f f088` (`UXTB.W r0,r8`). Extend execution then advances to 75,175 steps
+at `0x80089d5e`, halfwords `eb08 0004` (`ADD.W r0,r8,r4`), an unsupported
+shifted-register operation. All unprepared tree properties and remaining
+argument fields retain their guards.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim
