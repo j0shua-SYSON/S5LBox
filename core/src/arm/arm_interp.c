@@ -3157,6 +3157,15 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         else mem_w8(c, address, (uint8_t)c->r[rt]);
         return ARM_OK;
     }
+    /* LDR register T2 (A8.8.65). Rn=PC was already decoded as a literal.
+     * SP is a valid base/destination; PC destinations use checked interworking
+     * and the dispatcher's final-IT-slot rule. No register writeback. */
+    if (indexed == 0xf850u && (second & 0x0fc0u) == 0u) {
+        unsigned rn = first & 15u, rt = second >> 12, rm = second & 15u;
+        if (rm == 13u || rm == 15u || (c->cpsr & ARM_CPSR_E)) return ARM_UNDEFINED;
+        uint32_t address = c->r[rn] + (c->r[rm] << ((second >> 4) & 3u));
+        return thumb_load_word(c, address, rt, next);
+    }
     /* Signed imm8, pre/post-indexed LDR/STR and STRB/STRH, including
      * single-register PUSH/POP aliases. P=U=1,W=0 belongs to the separate
      * unprivileged family, and P=W=0 is unallocated. Validate before access. */

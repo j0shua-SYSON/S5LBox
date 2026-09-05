@@ -9339,6 +9339,208 @@ static void test_thumb2_register_store_fetch(void) {
        }
 }
 
+static void put_thumb_register_load(uint32_t pc, unsigned rn, unsigned rt, unsigned rm, unsigned shift) {
+    m_w16(NULL, pc, (uint16_t)(0xf850u | rn));
+    m_w16(NULL, pc + 2u, (uint16_t)((rt << 12) | (shift << 4) | rm));
+}
+
+static void test_thumb2_register_word_load_values(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    const uint32_t offsets[] = {0u,1u,0x100u,0x80000001u,0xffffffffu,0x40000003u};
+    for (unsigned profile = 0; profile < 2u; profile++)
+     for (unsigned host = 0; host < 2u; host++)
+      for (unsigned shift = 0; shift < 4u; shift++)
+       for (unsigned off = 0; off < sizeof offsets / sizeof offsets[0]; off++)
+        for (unsigned align = 0; align < 4u; align++) {
+            arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &bus, profiles[profile]), "reset");
+            c.cpsr = ARM_MODE_SYS | ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_V | ARM_CPSR_Q;
+            c.cp15.sctlr = 0u;
+            uint32_t address = 0x11000u + align;
+            c.r[4] = address - (uint32_t)((uint64_t)offsets[off] * (1u << shift));
+            c.r[10] = offsets[off]; c.r[8] = 0x12345678u;
+            uint32_t before[15], flags = c.cpsr;
+            memcpy(before, c.r, sizeof before);
+            put_thumb_register_load(0u, 4u, 8u, 10u, shift);
+            for (unsigned warm = 0; warm < 2u; warm++) {
+                uint32_t value = warm ? 0x10203040u : 0x89abcdefu;
+                m_w32(NULL, address, value); c.r[15] = 0u;
+                CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == warm + 1u && c.cpsr == flags,
+                      "register word load shift=%u offset=%08x alignment=%u failed", shift, offsets[off], align);
+                before[8] = value;
+                CHECK(memcmp(before, c.r, sizeof before) == 0 && (!host || !warm || c.dread_hits != 0u),
+                      "register word load lost full offset, operands or fresh bytes through a populated cache");
+            }
+        }
+}
+
+static void test_thumb2_register_word_load_operands(void) {
+    for (unsigned role = 0; role < 3u; role++)
+     for (unsigned reg = 0; reg < 16u; reg++)
+      for (unsigned execute = 0; execute < 2u; execute++) {
+        if (role == 0u && reg == 15u) continue; /* LDR literal alias, tested below. */
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_SYS | ARM_CPSR_T | ARM_CPSR_Z | ARM_CPSR_V |
+                 test_it_bits(execute ? 0x08u : 0x18u);
+        c.cp15.sctlr = 0u;
+        for (unsigned r = 0; r < 15u; r++) c.r[r] = 0x1000u + r * 4u;
+        unsigned rn = role == 0u ? reg : 4u, rt = role == 1u ? reg : 8u, rm = role == 2u ? reg : 10u;
+        bool valid = rm != 13u && rm != 15u, retired = !execute || valid;
+        uint32_t address = c.r[rn] + c.r[rm] * 8u, before[15], flags = c.cpsr;
+        memcpy(before, c.r, sizeof before);
+        m_w32(NULL, address, 0x12345679u);
+        put_thumb_register_load(0u, rn, rt, rm, 3u);
+        if (execute && valid && rt < 15u) before[rt] = 0x12345679u;
+        CHECK(arm_step(&c) == (retired ? ARM_OK : ARM_UNDEFINED) &&
+              c.r[15] == (!retired ? 0u : execute && rt == 15u ? 0x12345678u : 4u) &&
+              c.cpsr == (retired ? flags & ~TEST_IT_MASK : flags) && memcmp(before, c.r, sizeof before) == 0,
+              "register word load role=%u reg=%u ignored operands, aliases or IT", role, reg);
+      }
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.cpsr = ARM_MODE_SYS | ARM_CPSR_T; c.r[4] = 0x1004u;
+    m_w32(NULL, 0x9024u, 0x13579bdfu); put_thumb_register_load(0u, 4u, 4u, 4u, 3u);
+    CHECK(arm_step(&c) == ARM_OK && c.r[4] == 0x13579bdfu, "register word load triple alias ordering");
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.cpsr = ARM_MODE_SYS | ARM_CPSR_T; c.cp15.sctlr = 0u; c.r[15] = 0x2002u;
+    m_w32(NULL, 0x1ff5u, 0x87654321u);
+    put_thumb_register_load(0x2002u, 15u, 13u, 15u, 0u); /* LDR sp,[pc,#-15], not Rm=PC */
+    CHECK(arm_step(&c) == ARM_OK && c.r[13] == 0x87654321u && c.r[15] == 0x2006u,
+          "register load decoder captured the PC-base literal alias");
+    for (unsigned bad = 0; bad < 6u; bad++) {
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_SYS | ARM_CPSR_T | (bad == 5u ? ARM_CPSR_E : 0u);
+        c.r[1] = 0x100u; c.r[8] = 0x12345678u;
+        uint32_t flags = c.cpsr;
+        put_thumb_register_load(0u, 1u, 8u, 5u, 0u);
+        if (bad < 5u) m_w16(NULL, 2u, (uint16_t)(0x8005u | (1u << (bad + 6u))));
+        g_watch_addr = 0x100u; g_watch_reads32 = 0u;
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.r[8] == 0x12345678u &&
+              c.cpsr == flags && !g_watch_reads32, "register word load accepted reserved fields or unsupported byte order");
+        g_watch_addr = 0xffffffffu;
+    }
+    arm_reset(&c, &g_bus);
+    c.cpsr = ARM_MODE_SYS | ARM_CPSR_T; c.r[15] = 0x100u; c.r[14] = 0x200u; c.r[8] = 0x12345678u;
+    put_thumb_register_load(0x100u, 4u, 8u, 10u, 3u);
+    CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x2a8u && c.r[14] == 0x103u && c.r[8] == 0x12345678u,
+          "register word load changed ARM1176 legacy BL suffix framing");
+}
+
+static void test_thumb2_register_word_load_pc(void) {
+    for (unsigned target = 0; target < 4u; target++)
+     for (unsigned it = 0; it < 2u; it++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_SYS | ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_Z | test_it_bits(it ? 0x08u : 0u);
+        c.r[15] = 0x100u; c.r[1] = 0x100u; c.r[5] = 4u;
+        uint32_t flags = c.cpsr, expected_flags = flags;
+        if (target != 2u) expected_flags &= ~TEST_IT_MASK;
+        if (target == 0u) expected_flags &= ~ARM_CPSR_T;
+        m_w32(NULL, 0x110u, 0x200u | target); put_thumb_register_load(0x100u, 1u, 15u, 5u, 2u);
+        CHECK(arm_step(&c) == (target == 2u ? ARM_UNDEFINED : ARM_OK) &&
+              c.r[15] == (target == 2u ? 0x100u : (0x200u | target) & ~1u) && c.cpsr == expected_flags &&
+              c.r[1] == 0x100u && c.r[5] == 4u, "register LDR PC lost interworking or final IT state");
+     }
+    for (unsigned align = 1u; align < 4u; align++)
+     for (unsigned check = 0; check < 2u; check++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_SYS | ARM_CPSR_T; c.cp15.sctlr = check ? ARM_SCTLR_A : 0u;
+        c.r[15] = 0x100u; c.r[1] = 0x110u; c.r[5] = align;
+        put_thumb_register_load(0x100u, 1u, 15u, 5u, 0u);
+        g_watch_addr = 0x110u + align; g_watch_reads32 = 0u;
+        CHECK(arm_step(&c) == (check ? ARM_OK : ARM_UNDEFINED) && !g_watch_reads32 &&
+              c.r[15] == (check ? ARM_VEC_DATA_ABORT : 0x100u) && (!check ||
+              (c.cp15.dfar == 0x110u + align && c.cp15.dfsr == ARM_FSR_ALIGNMENT && c.r[14] == 0x108u)),
+              "register LDR PC accepted an unaligned address or lost its alignment fault");
+        g_watch_addr = 0xffffffffu;
+     }
+    for (unsigned zero = 0; zero < 2u; zero++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_SYS | ARM_CPSR_T | test_it_bits(0x1cu) | (zero ? ARM_CPSR_Z : 0u);
+        c.r[1] = 0x110u;
+        uint32_t flags = c.cpsr;
+        put_thumb_register_load(0u, 1u, 15u, 5u, 0u);
+        g_watch_addr = 0x110u; g_watch_reads32 = 0u;
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.cpsr == flags && !g_watch_reads32,
+              "register LDR PC ignored non-final IT placement even on a failed condition");
+        g_watch_addr = 0xffffffffu;
+    }
+}
+
+static void test_thumb2_register_word_load_aborts(void) {
+    const unsigned destinations[] = {4u,10u,8u};
+    for (unsigned host = 0; host < 2u; host++)
+     for (unsigned dest = 0; dest < 3u; dest++)
+      for (unsigned fault = 0; fault < 6u; fault++) {
+        arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c;
+        memset(g_ram, 0, sizeof g_ram);
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP | (fault == 4u ? ARM_SCTLR_A : 0u);
+        c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N | test_it_bits(0x1cu);
+        c.r[4] = 0x1ffbu; c.r[10] = 1u; c.r[8] = 0x10203040u;
+        uint32_t flags = c.cpsr;
+        m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x803eu);
+        m_w32(NULL, 0x6004u, fault == 1u ? 0u : fault == 5u ? 0xa01eu : 0xa03eu);
+        m_w32(NULL, 0x6008u, fault == 2u ? 0u : fault == 3u ? 0xc01eu : 0xc03eu);
+        put_thumb_register_load(0x8000u, 4u, destinations[dest], 10u, 2u);
+        g_ram[0xafffu] = 0x11u; m_w16(NULL, 0xc000u, 0x3322u); g_ram[0xc002u] = 0x44u;
+        m_w32(NULL, 0xb000u, 0xdeadbeefu);
+        g_watch_addr = 0xafffu; g_watch_reads8 = 0u;
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u &&
+              c.r[4] == (!fault && dest == 0u ? 0x44332211u : 0x1ffbu) &&
+              c.r[10] == (!fault && dest == 1u ? 0x44332211u : 1u) &&
+              c.r[8] == (!fault && dest == 2u ? 0x44332211u : 0x10203040u),
+              "register word load fault partially committed an aliased destination");
+        CHECK(g_watch_reads8 == (!fault || fault == 2u || fault == 3u ? 1u : 0u),
+              "register word load accessed data before alignment/permission checks");
+        g_watch_addr = 0xffffffffu;
+        if (!fault) CHECK(c.r[15] == 4u && c.cpsr == ((flags & ~TEST_IT_MASK) | test_it_bits(0x18u)),
+                          "register word load used contiguous physical pages or lost IT");
+        else {
+            uint32_t fsr = fault == 4u ? ARM_FSR_ALIGNMENT : fault == 3u || fault == 5u ?
+                           ARM_FSR_PAGE_PERMISSION : ARM_FSR_PAGE_TRANSLATION;
+            CHECK(c.r[15] == ARM_VEC_DATA_ABORT && c.r[14] == 8u && c.spsr[ARM_BANK_ABT] == flags &&
+                  c.cp15.dfar == (fault == 2u || fault == 3u ? 0x2000u : 0x1fffu) && c.cp15.dfsr == fsr,
+                  "register word load lost fault address, WnR, LR or retry IT state");
+        }
+      }
+}
+
+static void test_thumb2_register_word_load_fetch(void) {
+    for (unsigned host = 0; host < 2u; host++)
+     for (unsigned fault = 0; fault < 4u; fault++)
+      for (unsigned execute = 0; execute < 2u; execute++) {
+        arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c;
+        memset(g_ram, 0, sizeof g_ram);
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP; c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_Z | test_it_bits(execute ? 0x08u : 0x18u);
+        c.r[15] = 0xffeu; c.r[1] = 0x2000u; c.r[5] = 1u; c.r[0] = 0x12345678u;
+        uint32_t flags = c.cpsr;
+        m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x803eu);
+        m_w32(NULL, 0x6004u, fault == 1u ? 0u : fault == 2u ? 0xa03fu : fault == 3u ? 0xa01eu : 0xa03eu);
+        m_w32(NULL, 0x6008u, 0xc03eu);
+        m_w16(NULL, 0x8ffeu, 0xf851u); m_w16(NULL, 0xa000u, 0x0025u); m_w16(NULL, 0x9000u, 0xffffu);
+        m_w32(NULL, 0xc004u, 0x87654321u);
+        g_watch_addr = 0xc004u; g_watch_reads32 = 0u;
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u && c.r[1] == 0x2000u && c.r[5] == 1u &&
+              c.r[0] == (!fault && execute ? 0x87654321u : 0x12345678u) &&
+              g_watch_reads32 == (!fault && execute ? 1u : 0u), "register word load accessed data before complete fetch or ignored IT");
+        g_watch_addr = 0xffffffffu;
+        if (!fault) CHECK(c.r[15] == 0x1002u && c.cpsr == (flags & ~TEST_IT_MASK), "register word load fetch retirement");
+        else CHECK(c.r[15] == ARM_VEC_PREFETCH && c.r[14] == 0x1002u && c.cp15.ifar == 0x1000u &&
+                   c.spsr[ARM_BANK_ABT] == flags && (c.cp15.ifsr & 15u) ==
+                   (fault == 1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION), "register word load lost second-half fetch fault");
+      }
+}
+
 static void write_thumb2_shifted(unsigned op, bool set, unsigned rn, unsigned rd,
                                   unsigned rm, unsigned type, unsigned amount) {
     m_w16(NULL, 0, (uint16_t)(0xea00u | (op << 5) | (set ? 0x10u : 0u) | rn));
@@ -9950,6 +10152,11 @@ int main(void) {
     test_thumb2_register_store_operands();
     test_thumb2_register_store_aborts();
     test_thumb2_register_store_fetch();
+    test_thumb2_register_word_load_values();
+    test_thumb2_register_word_load_operands();
+    test_thumb2_register_word_load_pc();
+    test_thumb2_register_word_load_aborts();
+    test_thumb2_register_word_load_fetch();
     test_thumb2_movw_movt_and_unknown_width();
     test_thumb2_fetch_across_page_boundary();
     test_thumb2_modified_immediate_moves();

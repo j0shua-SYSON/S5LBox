@@ -428,6 +428,24 @@ cleared service records. The fixture uses synthetic objects, unregistered
 records and one controller bank; it does not establish CPU interrupt entry,
 registered callbacks, daisy-chain wiring or board boot.
 
+Thumb register-offset word LDR now uses the full offset register shifted
+left by 0..3 and permits aliased base, offset and destination registers.
+SP can be the base or destination. Loads to PC enforce word-aligned data
+addresses, ARM/Thumb interworking and final-slot IT placement; Rn=PC still
+selects the earlier literal decoder. Reserved fields, SP/PC offsets and
+big-endian data accesses remain refused. See
+[DDI0406C.b, A8.8.65](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Tests cover address wrap, populated read caches, operand restrictions,
+complete fetch, and data faults before destination commit, including
+aliased destinations and nonadjacent physical pages.
+
+A separate registered-path fixture retains guards on every missing callback
+argument and function pointer. It now passes the unchanged driver's
+`LDR.W r0,[r1,r5,LSL #2]` at `0x807e5cca`, reads the matching IPI mask and
+clears the injected software interrupt. It stops before the first guarded
+callback argument read at `0x807e5ce0`. This is partial execution of a
+synthetic registered record, with no callback or CPU IRQ-entry evidence.
+
 Thumb UBFX/SBFX and BFI/BFC implement bitfield extraction, sign extension,
 insertion and clearing. They validate ranges before shifting and preserve
 flags and unrelated destination bits. Tests compare every encoded field
