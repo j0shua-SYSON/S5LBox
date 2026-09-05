@@ -366,12 +366,12 @@ static void test_a8_vfp_core_move_refusals_and_it(void) {
       }
      }
     }
-    /* Upper-bank arithmetic and multiple transfers are still separate work. */
+    /* Upper-bank arithmetic is still separate work. */
     arm_cpu_t c;
     a8_move_reset(&c, 0u);
     vfp_set_d(&c, 16u, UINT64_C(0x1122334455667788));
-    CHECK(a8_move_step(&c, 0u, VFP_LS(0,1,1,0,1,4,0,1,2)) == ARM_UNDEFINED &&
-          vfp_get_d(&c, 16u) == UINT64_C(0x1122334455667788), "core VMOV enabled upper-bank VLDM");
+    CHECK(a8_move_step(&c, 0u, VFP_DP(0,1,1,1,0,0,1,0,0,0,0)) == ARM_UNDEFINED &&
+          vfp_get_d(&c, 16u) == UINT64_C(0x1122334455667788), "core VMOV enabled upper-bank arithmetic");
 }
 
 /* VLDR/VSTR use D:Vd for doublewords and Vd:D for singlewords. */
@@ -525,7 +525,7 @@ static void test_a8_vfp_single_memory_decode_boundaries(void) {
         0xfdc4fb00u, 0xfdd4fb00u, /* LDC2/STC2 are not Thumb VFP forms. */
         0xedc4f900u, 0xedd4fc00u, /* Other coprocessors. */
         0xedf4fb02u, 0xede4fb02u, /* P=U=W=1 is undefined. */
-        0xecf4fb02u, 0xed64fb02u  /* Upper-bank VLDMIA/VPUSH still unsupported. */
+        0xecf4fb04u, 0xed64fb04u  /* Multiple lists extending past D31. */
     };
     for (unsigned n = 0; n < sizeof neighbors / sizeof neighbors[0]; n++) {
         arm_cpu_t c;
@@ -546,6 +546,169 @@ static void test_a8_vfp_single_memory_decode_boundaries(void) {
         c.r[4] = 0x2004u;
         CHECK(a8_move_step(&c, 0u, a8_single_memory(load,1u,31u,4u,1u,0u)) == ARM_UNDEFINED &&
               c.r[15] == 0u && c.r[4] == 0x2004u, "upper single FP transfer enabled on legacy profile");
+     }
+    }
+}
+
+/* PUW: 010 = IA, 011 = IA!, 101 = DB!. The latter two also encode VPOP/VPUSH. */
+static uint32_t a8_multiple_memory(unsigned form, unsigned load, unsigned dbl,
+                                    unsigned first, unsigned rn, unsigned words) {
+    return VFP_LS(form >> 2,(form >> 1) & 1u,dbl ? first >> 4 : first & 1u,form & 1u,
+                  load,rn,dbl ? first & 15u : first >> 1,dbl,words);
+}
+
+static void test_a8_vfp_multiple_memory_register_lists(void) {
+    const unsigned forms[] = {2u,3u,5u}, counts[] = {1u,2u,4u,16u,32u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned dbl = 0; dbl < 2u; dbl++) {
+      for (unsigned f = 0; f < 3u; f++) {
+       for (unsigned first = 0; first < 32u; first++) {
+        for (unsigned k = 0; k < sizeof counts / sizeof counts[0]; k++) {
+            unsigned count = counts[k], words = count * (dbl ? 2u : 1u), rn = f ? 13u : 4u;
+            if (first + count > 32u || (dbl && count > 16u)) continue;
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.r[rn] = 0x4004u;
+            uint32_t address = forms[f] == 5u ? 0x4004u - words * 4u : 0x4004u;
+            uint32_t final_base = forms[f] == 2u ? 0x4004u : forms[f] == 3u ? 0x4004u + words * 4u : address;
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            for (unsigned r = 0; r < 32u; r++) {
+                if (dbl) vfp_set_d(&c, r, ((uint64_t)(0xff800000u + r) << 32) | (0x7f800001u + r));
+                else vfp_set_s(&c, r, 0x7f800001u + r);
+            }
+            m_w32(NULL, address - 4u, 0xdeadbeefu); m_w32(NULL, address + words * 4u, 0xaabbccddu);
+            CHECK(a8_move_step(&c, thumb, a8_multiple_memory(forms[f],0u,dbl,first,rn,words)) == ARM_OK &&
+                  c.r[rn] == final_base, "A8 VSTM list T=%u D=%u form=%u first=%u count=%u",
+                  thumb, dbl, forms[f], first, count);
+            for (unsigned r = 0; r < count; r++) {
+                uint32_t at = address + r * (dbl ? 8u : 4u);
+                CHECK(m_r32(NULL, at) == 0x7f800001u + first + r &&
+                      (!dbl || m_r32(NULL, at + 4u) == 0xff800000u + first + r), "VSTM stored wrong register order");
+                m_w32(NULL, at, 0x12340000u + first + r);
+                if (dbl) m_w32(NULL, at + 4u, 0x56780000u + first + r);
+            }
+            c.r[rn] = 0x4004u;
+            CHECK(a8_move_step(&c, thumb, a8_multiple_memory(forms[f],1u,dbl,first,rn,words)) == ARM_OK &&
+                  c.r[rn] == final_base && c.r[15] == 0x108u && c.cycles == 2u && c.cpsr == flags &&
+                  c.vfp_fpscr == fpscr && c.vfp_fpexc == ARM_FPEXC_EN, "VLDM lost base/controls/retirement");
+            for (unsigned r = 0; r < 32u; r++) {
+                bool changed = r >= first && r < first + count;
+                uint32_t lo = (changed ? 0x12340000u : 0x7f800001u) + r;
+                uint32_t hi = (changed ? 0x56780000u : 0xff800000u) + r;
+                CHECK(dbl ? vfp_get_d(&c, r) == ((uint64_t)hi << 32 | lo) : vfp_get_s(&c, r) == lo,
+                      "VLDM changed wrong register T=%u D=%u first=%u count=%u r=%u", thumb, dbl, first, count, r);
+            }
+            CHECK(m_r32(NULL, address - 4u) == 0xdeadbeefu && m_r32(NULL, address + words * 4u) == 0xaabbccddu,
+                  "multiple transfer extended outside its memory list");
+        }
+       }
+      }
+     }
+    }
+}
+
+static void test_a8_vfp_multiple_memory_rejections_and_pc(void) {
+    const unsigned forms[] = {0u,1u,2u,3u,5u,7u};
+    static const struct { unsigned dbl, first, words; } lists[] = {
+        {0u,0u,0u}, {0u,31u,2u}, {0u,0u,33u}, {1u,0u,0u}, {1u,0u,1u},
+        {1u,0u,34u}, {1u,31u,4u}, {1u,16u,3u}, {1u,15u,5u}, /* Invalid lists. */
+        {0u,31u,1u}, {1u,31u,2u}, {1u,0u,33u}, {1u,15u,3u} /* Valid boundary lists. */
+    };
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned load = 0; load < 2u; load++) {
+      for (unsigned f = 0; f < sizeof forms / sizeof forms[0]; f++) {
+       for (unsigned n = 0; n < sizeof lists / sizeof lists[0]; n++) {
+        for (unsigned use_pc = 0; use_pc < 2u; use_pc++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.r[4] = 0x2004u;
+            uint32_t flags = c.cpsr;
+            bool valid = n >= 9u && (forms[f] == 2u || forms[f] == 3u || forms[f] == 5u) &&
+                         (!use_pc || (!thumb && forms[f] == 2u));
+            uint32_t insn = a8_multiple_memory(forms[f],load,lists[n].dbl,lists[n].first,use_pc ? 15u : 4u,lists[n].words);
+            /* PUW=000 with D=1 is the core-pair space; test its existing
+             * checked decoder separately instead of assigning it a list. */
+            if (forms[f] == 0u && (insn & (1u << 22))) continue;
+            CHECK(a8_move_step(&c, thumb, insn) == (valid ? ARM_OK : ARM_UNDEFINED) &&
+                  c.r[15] == (valid ? 0x104u : 0x100u) && c.cpsr == flags,
+                  "A8 multiple legality T=%u L=%u form=%u list=%u PC=%u", thumb, load, forms[f], n, use_pc);
+            if (!valid) CHECK(c.r[4] == 0x2004u && vfp_get_d(&c, 31u) == 0u && vfp_get_s(&c, 31u) == 0u,
+                              "invalid multiple transfer changed registers");
+        }
+       }
+      }
+     }
+    }
+}
+
+static void test_a8_vfp_multiple_access_and_skip(void) {
+    /* Allowed FP reaches a misalignment fault. CPACR/EN denial must take
+     * Undefined first, while a false condition suppresses either fault. */
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned load = 0; load < 2u; load++) {
+      for (unsigned dbl = 0; dbl < 2u; dbl++) {
+       for (unsigned test = 0; test < 6u; test++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, thumb);
+        if (test == 1u || test == 5u) c.cp15.cpacr = 0u;
+        if (test == 2u || test == 5u) c.vfp_fpexc = 0u;
+        if (test == 3u) { c.cp15.cpacr = 0x00500000u; c.cpsr = (c.cpsr & ~31u) | ARM_MODE_USR; }
+        if (test >= 4u) c.cpsr |= ARM_CPSR_E;
+        c.r[4] = 0x2005u;
+        if (thumb) {
+            m_w16(NULL, 0x100u, test == 5u ? 0xbf0cu : 0xbf1cu);
+            CHECK(arm_step(&c) == ARM_OK, "multiple FP IT setup");
+        }
+        uint32_t pc = c.r[15], flags = c.cpsr;
+        uint32_t insn = a8_multiple_memory(3u,load,dbl,31u,4u,dbl ? 2u : 1u);
+        if (!thumb && test == 5u) insn &= 0x0fffffffu;
+        CHECK(a8_move_step(&c, thumb, insn) == (test == 4u ? ARM_UNDEFINED : ARM_OK) &&
+              c.r[4] == 0x2005u && vfp_get_d(&c, 31u) == 0u && vfp_get_s(&c, 31u) == 0u,
+              "multiple FP access/refusal disposition T=%u L=%u D=%u case=%u", thumb, load, dbl, test);
+        if (test < 4u) CHECK(c.r[15] == (test ? ARM_VEC_UNDEFINED : ARM_VEC_DATA_ABORT) &&
+                            c.r[14] == pc + (test ? thumb ? 2u : 4u : 8u) &&
+                            c.spsr[test ? ARM_BANK_UND : ARM_BANK_ABT] == flags,
+                            "multiple FP access priority/link/IT");
+        else CHECK(c.r[15] == pc + (test == 5u ? 4u : 0u) &&
+                   c.cpsr == (test == 5u && thumb ? (flags & ~0x0600fc00u) | 0x1800u : flags),
+                   "multiple FP skip/BE refusal lost PC or IT");
+       }
+      }
+     }
+     arm_cpu_t c;
+     a8_move_reset(&c, thumb);
+     c.vfp_fpexc = 0u; c.cp15.cpacr = 0u;
+     CHECK(a8_move_step(&c, thumb, a8_multiple_memory(3u,1u,1u,31u,4u,4u)) == ARM_UNDEFINED &&
+           c.r[15] == 0x100u, "invalid multiple list was reclassified as an enable fault");
+    }
+}
+
+/* The odd-word legacy format reserves address space but A8's VLDM/VSTM
+ * pseudocode transfers only complete D registers. The gap is not memory IO. */
+static void test_a8_vfp_multiple_odd_word_gap(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned load = 0; load < 2u; load++) {
+      for (unsigned db = 0; db < 2u; db++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, thumb);
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP;
+        c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        m_w32(NULL, 0x4000u, 0x6001u);
+        m_w32(NULL, 0x6000u, 0x803eu); m_w32(NULL, 0x6004u, 0xa03eu); m_w32(NULL, 0x6008u, 0u);
+        c.r[4] = db ? 0x2004u : 0x1ff8u;
+        uint32_t insn = a8_multiple_memory(db ? 5u : 3u,load,1u,15u,4u,3u);
+        if (thumb) { m_w16(NULL, 0x8100u, (uint16_t)(insn >> 16)); m_w16(NULL, 0x8102u, (uint16_t)insn); }
+        else m_w32(NULL, 0x8100u, insn);
+        m_w32(NULL, 0xaff8u, 0x12345678u); m_w32(NULL, 0xaffcu, 0x9abcdef0u);
+        vfp_set_d(&c, 15u, UINT64_C(0xaabbccdd11223344));
+        uint32_t flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x104u && c.r[4] == (db ? 0x1ff8u : 0x2004u) &&
+              c.cpsr == flags && vfp_get_d(&c, 15u) == (load ? UINT64_C(0x9abcdef012345678) :
+                                                                             UINT64_C(0xaabbccdd11223344)) &&
+              m_r32(NULL, 0xaff8u) == (load ? 0x12345678u : 0x11223344u) &&
+              m_r32(NULL, 0xaffcu) == (load ? 0x9abcdef0u : 0xaabbccddu),
+              "A8 odd-imm8 transfer touched unmapped trailing word or lost writeback T=%u L=%u DB=%u", thumb, load, db);
+      }
      }
     }
 }
@@ -2114,6 +2277,10 @@ static void test_condition_codes_apply(void) {
 
 /* --------------------------------------------------------------- main ---- */
 int main(void) {
+    test_a8_vfp_multiple_memory_register_lists();
+    test_a8_vfp_multiple_memory_rejections_and_pc();
+    test_a8_vfp_multiple_odd_word_gap();
+    test_a8_vfp_multiple_access_and_skip();
     test_a8_vfp_single_memory_bank_and_offsets();
     test_a8_vfp_single_memory_bases_and_conditions();
     test_a8_vfp_single_memory_permissions();

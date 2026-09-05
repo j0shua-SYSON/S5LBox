@@ -645,7 +645,7 @@ static bool vfp_lazy_enable_trap(const arm_cpu_t *c, uint32_t insn) {
      * a capability stop when EN=0, not a fault the guest can fix by enabling. */
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 &&
         (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn) ||
-         vfp_is_single_memory_transfer(insn))) return false;
+         vfp_is_memory_transfer(insn))) return false;
     if (!insn_is_vfp_space(insn)) return false;
     return !vfp_cpacr_permits(c) || !vfp_enabled(c);
 }
@@ -2998,7 +2998,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
     uint32_t insn = ((uint32_t)first << 16) | second;
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn >> 28) == 0xeu &&
         (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn) ||
-         vfp_is_single_memory_transfer(insn)))
+         vfp_is_memory_transfer(insn)))
         return vfp_execute(c, pc, insn, &g_vfp_bus);
     /* MCR/MRC T1 (DDI0406C.b A8.8.98/107): CP15 uses the A32 fields,
      * but Thumb forbids Rt=SP. This route covers Cortex-A8's checked CP15

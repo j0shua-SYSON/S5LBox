@@ -5,7 +5,7 @@
  * registers s0-s31 aliased onto 16 double-precision registers d0-d15. There is
  * no d16-d31 and there is no Advanced SIMD/NEON on this part.
  *
- * Cortex-A8 adds D16-D31 and checked system/core/single-memory transfers. Its
+ * Cortex-A8 adds D16-D31 and checked system, core and memory transfers. Its
  * remaining VFPv3/NEON instruction families are not implemented here.
  *
  * Everything about WHY this exists, and every floating-point semantic this
@@ -129,9 +129,10 @@ static inline bool vfp_is_core_transfer(uint32_t insn) {
            (insn & 0x0fe00e00u) == 0x0c400a00u;
 }
 
-/* VLDR/VSTR (P=1, W=0); multiple-register transfers remain separate. */
-static inline bool vfp_is_single_memory_transfer(uint32_t insn) {
-    return (insn & 0x0f200e00u) == 0x0d000a00u;
+/* Extension load/store space. Core-pair transfers take precedence over this
+ * overlapping space; the memory decoder checks the addressing mode/list. */
+static inline bool vfp_is_memory_transfer(uint32_t insn) {
+    return (insn & 0x0e000e00u) == 0x0c000a00u;
 }
 
 /*
@@ -142,7 +143,7 @@ static inline bool vfp_is_single_memory_transfer(uint32_t insn) {
  * architecturally denied access. arm_step recognizes the disabled-unit
  * ARM_UNDEFINED separately and routes it plus ARM_GUEST_UNDEFINED to the
  * guest's handler while keeping capability gaps fail-closed. Cortex-A8
- * system/core/single-memory transfers return ARM_GUEST_UNDEFINED for access denials;
+ * system/core/memory transfers return ARM_GUEST_UNDEFINED for access denials;
  * their ARM_UNDEFINED results must never be reclassified as lazy-enable faults.
  *
  * VFP never writes r15, so the caller's `next` is unaffected.

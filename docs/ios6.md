@@ -180,8 +180,33 @@ partial effects left UNKNOWN by
 this implementation preserves a failed load's destination and retains any
 completed first store word. Alignment, translation and
 permission faults preserve the base and report the faulting address, access
-direction and exception state. Upper-bank multiple-register transfers,
+direction and exception state.
+
+VLDM/VSTM now cover the full bank in ARM and Thumb, including VPUSH/VPOP.
+They support increment-after with optional writeback and decrement-before
+with writeback, with at most 16 consecutive D or 32 S registers. PC bases
+are permitted only in ARM without writeback. The deprecated odd-length
+doubleword form is restricted to D0-D15: its trailing word reserves address
+space without a memory access, while writeback includes that word. See
+[DDI0406C.b, A8.8.332/367/368/412 and A8.8.50](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+On a synchronous data abort, multiple transfers restore the original base,
+as required by
+[DDI0406C.b, B1.9.8](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Completed register loads or stores remain; the failed D-register load keeps
+both original halves. Tests cover complete register lists, both stack
+aliases, invalid modes/ranges, access/conditional behavior and faults after
+partial progress, including with host memory shortcuts enabled. A separate
+test places the odd-length trailing gap on an unmapped page. Upper-bank
 arithmetic and the remaining NEON instruction families are still unfinished.
+
+An isolated host fixture executed the matching kernel's
+`_enable_kernel_vfp_context` routine with unchanged instructions and synthetic
+context objects. All eight owner/enable/interrupt-mask cases passed. The
+save path preserved all 32 D registers and saved their exact words; the
+previous core library stopped on its first D16-D19 store at `0x80088d4c`.
+This verifies the routine in that fixture, without establishing a scheduler,
+full context switch or board boot.
 
 Cortex-A8 L2 auxiliary control (`p15,1,c9,c0,2`) now stores its defined
 fields separately from ARM1176 CP15 state and resets to `0x00000042`.
@@ -203,7 +228,7 @@ Thumb additionally forbids SP in the transfer register. Refused accesses leave
 flags and IT state unchanged. IT conditions, privileged
 state changes and permitted User thread-ID/barrier accesses retain their
 normal semantics. CP14 and Swift CP15 transfers remain unsupported in
-Thumb; VFP transfers cover the Cortex-A8 system registers, core VMOV and single-register memory forms above.
+Thumb; VFP transfers cover the Cortex-A8 system registers, core VMOV and memory forms above.
 CP15 MRC2/MCR2 encodings are undefined and refused. The ARM1176
 instruction path is unchanged.
 See [DDI0406C.b, A8.8.98/107](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
@@ -414,8 +439,8 @@ establish that result.
   also implemented. Other instruction families remain to implement. IT state
   and conditional execution are implemented for the supported Thumb families.
   Cortex-A8 MRC/MCR transfers cover the currently implemented CP15 registers.
-- Cortex-A8 stores d0-d31 and supports system/core transfers and VLDR/VSTR.
-  Upper-bank multiple transfers and arithmetic, the remaining NEON families, and full
+- Cortex-A8 stores d0-d31 and supports system/core/memory transfers.
+  Upper-bank arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Shared lower-bank arithmetic
   still derives from VFP11 and requires a complete Cortex-A8 semantic audit.
 - The SoC, interrupt wiring, storage, graphics, input and power devices are
