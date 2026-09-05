@@ -1429,3 +1429,32 @@ PreferenceLoader, WinterBoard, theme, and respring transaction remains
 unverified. Exact-SHA hosted CI, installation of that artifact, full retained-
 catalog audit, transactional migration, and post-migration Cydia testing are
 still required.
+
+## 2026-09-05: Cydia package-name encoding compatibility
+
+Physical search testing on app revision `72ab05d` isolated an application
+crash, not a CPU exit or dropped touch: all 18 search touch reports reached
+the guest. The retained Cydia 1.0.3044-66 executable called
+`CFStringGetLength(NULL)` from `-[Package index]`. Two names in the retained
+BigBoss package list are not valid UTF-8. The executable and list matched the
+independently retained publisher package and repository bytes respectively.
+
+Fresh provisioning now pins the publisher's ARMv6 `cydia_1.0.3172-68`
+archive, 634106 bytes, SHA-256
+`6d3688421873a976b37ebe0af1c467da2add4dee6876b1aba50fa78ae7ab3ecb`,
+from [the original archive](https://apt.saurik.com/cydia-3.7/debs/).
+Its name conversion contains the upstream UTF-8-to-Latin-1 fallback
+(`01d93940f58b871f8a4899e4bd2b7c7752976886`). Binary inspection confirms
+both encoding constants and the retry on a null conversion result. It retains
+the same library load paths and APT ABI; all four added imports exist in the
+actual OS 3 shared cache, and its package dependencies fit the pinned set.
+
+Metadata maintenance recognizes only the exact current 330896-byte executable
+or the historical 320704-byte executable by SHA-256. It preserves the existing
+root:root 0755-to-06755 contract and does not upgrade old installations.
+Repository signatures and package/index hash verification are unchanged.
+
+The warnings-as-errors host suite passes 73/73. This is not yet proof of the
+corrected Cydia search, an actual tweak install, or usable Cydia download speed
+on a physical device. The native bulk-transport throughput milestone does not
+close those end-user acceptance tests.

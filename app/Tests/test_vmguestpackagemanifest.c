@@ -25,8 +25,8 @@ static void test_shipping_manifest(void) {
           "shipping manifest refused: %s", why);
     CHECK(vm_guest_package_count() == 30u, "package count is %zu, expected 30",
           vm_guest_package_count());
-    CHECK(vm_guest_package_total_download_bytes() == UINT64_C(10240408),
-          "download total is %llu, expected 10240408",
+    CHECK(vm_guest_package_total_download_bytes() == UINT64_C(10245014),
+          "download total is %llu, expected 10245014",
           (unsigned long long)vm_guest_package_total_download_bytes());
     CHECK(vm_guest_package_at(vm_guest_package_count()) == NULL,
           "out-of-range package lookup succeeded");
@@ -68,10 +68,11 @@ static void test_shipping_manifest(void) {
           strcmp(apt_tool->sha256_hex,
                  "3864ac7542ff2c28bc0e4915c0781d8a680ae557c6150563831f476e701aa1a8") == 0,
           "the ABI-matched APT cache-tool identity drifted");
-    CHECK(cydia && cydia->size == UINT64_C(629500) &&
+    CHECK(cydia && strcmp(cydia->version, "1.0.3172-68") == 0 &&
+          cydia->size == UINT64_C(634106) &&
           strcmp(cydia->sha256_hex,
-                 "94769b67e88198012cd1e45163f2f8bd949b4aa927dab1503a03d62a8ee3dba9") == 0,
-          "Cydia identity drifted");
+                 "6d3688421873a976b37ebe0af1c467da2add4dee6876b1aba50fa78ae7ab3ecb") == 0,
+          "Cydia package-name encoding fix identity drifted");
     CHECK(gnupg && strcmp(gnupg->version, "1.4.8-4") == 0 &&
           gnupg->size == UINT64_C(470686) &&
           strcmp(gnupg->sha256_hex,
@@ -88,13 +89,13 @@ static void test_entry_refusals(void) {
     vm_guest_package_t changed = *shipping;
     char why[256];
 
-    changed.filename = "../cydia_1.0.3044-66_iphoneos-arm.deb";
+    changed.filename = "../cydia_1.0.3172-68_iphoneos-arm.deb";
     CHECK(!vm_guest_package_validate_entry(&changed, why, sizeof why),
           "path-bearing filename was accepted");
 
     changed = *shipping;
     changed.source_url =
-        "http://apt.saurik.com/cydia-3.7/debs/cydia_1.0.3044-66_iphoneos-arm.deb";
+        "http://apt.saurik.com/cydia-3.7/debs/cydia_1.0.3172-68_iphoneos-arm.deb";
     CHECK(!vm_guest_package_validate_entry(&changed, why, sizeof why),
           "non-HTTPS source was accepted");
 
@@ -149,10 +150,10 @@ static void test_digest_and_download_match(void) {
     CHECK(vm_guest_package_manifest_sha256(manifest),
           "manifest digest failed");
     static const uint8_t EXPECTED[VM_GUEST_PACKAGE_SHA256_SIZE] = {
-        0xafu, 0x7cu, 0x33u, 0x0du, 0xe7u, 0xcfu, 0x78u, 0x3bu,
-        0x61u, 0xddu, 0xf0u, 0x2au, 0xfcu, 0x7bu, 0xe3u, 0x9cu,
-        0xa1u, 0x6au, 0x3fu, 0x7fu, 0xf0u, 0xd8u, 0xbdu, 0x14u,
-        0x3eu, 0x94u, 0x9fu, 0x78u, 0x7bu, 0x91u, 0x3cu, 0x81u
+        0x32u, 0xa4u, 0xd5u, 0x1fu, 0xc5u, 0xedu, 0xe2u, 0xa6u,
+        0xcfu, 0xbdu, 0x0fu, 0x98u, 0xaau, 0x9eu, 0xe3u, 0x26u,
+        0x23u, 0xa3u, 0x69u, 0x1du, 0x0au, 0xf9u, 0xa2u, 0x19u,
+        0xcdu, 0x6fu, 0x5au, 0x4cu, 0x19u, 0x13u, 0xd4u, 0xa8u
     };
     CHECK(memcmp(manifest, EXPECTED, sizeof manifest) == 0,
           "manifest identity changed");

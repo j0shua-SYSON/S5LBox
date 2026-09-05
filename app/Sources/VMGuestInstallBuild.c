@@ -26,15 +26,26 @@ typedef struct {
     void *context;
 } build_progress_adapter_t;
 
-/* Extracted from the exact pinned cydia_1.0.3044-66 package, then matched on
+/* Extracted from the previously pinned cydia_1.0.3044-66 package, then matched on
  * the retained physical guest that exposed the historical 0755 install. This
  * is the executable data-fork identity, not the .deb archive identity. */
-static const uint8_t VM_CYDIA_EXECUTABLE_SHA256[
+static const uint8_t VM_CYDIA_LEGACY_EXECUTABLE_SHA256[
     IOS3_SHA256_DIGEST_SIZE] = {
     0x4cu, 0xa3u, 0xf7u, 0x0fu, 0xe5u, 0xcbu, 0x67u, 0x73u,
     0x76u, 0x88u, 0xabu, 0x06u, 0x14u, 0xc6u, 0x86u, 0xfeu,
     0x18u, 0xb1u, 0x24u, 0x84u, 0x43u, 0x69u, 0x84u, 0x8bu,
     0x76u, 0x84u, 0x6fu, 0x80u, 0xa5u, 0x2fu, 0x63u, 0x24u
+};
+
+/* Cydia 1.0.3172-68 has the upstream package-name encoding fallback. Keep
+ * both publisher identities exact; recognizing the current executable must
+ * not break maintenance of retained installations or trust arbitrary bytes. */
+static const uint8_t VM_CYDIA_EXECUTABLE_SHA256[
+    IOS3_SHA256_DIGEST_SIZE] = {
+    0x20u, 0x15u, 0x58u, 0x33u, 0x51u, 0xeeu, 0x73u, 0xe0u,
+    0xc9u, 0x74u, 0x60u, 0xb8u, 0x90u, 0x37u, 0xf1u, 0x19u,
+    0x26u, 0xfeu, 0xaau, 0xccu, 0x42u, 0xbdu, 0xc4u, 0x72u,
+    0x5fu, 0x3eu, 0x2au, 0x78u, 0xa1u, 0x91u, 0x6cu, 0x64u
 };
 
 /* /usr/bin/gpgv from the exact gnupg_1.4.8-4 archive. The archive remains a
@@ -64,11 +75,13 @@ static void build_apt_verifier_probe(
 }
 
 static void build_cydia_privilege_repair(
-    rootfs_work_file_repair_t *repair) {
+    rootfs_work_file_repair_t *repair, bool legacy) {
     memset(repair, 0, sizeof *repair);
     repair->path = "/Applications/Cydia.app/Cydia_";
-    repair->expected_size = UINT64_C(320704);
-    memcpy(repair->expected_sha256, VM_CYDIA_EXECUTABLE_SHA256,
+    repair->expected_size = legacy ? UINT64_C(320704) : UINT64_C(330896);
+    memcpy(repair->expected_sha256,
+           legacy ? VM_CYDIA_LEGACY_EXECUTABLE_SHA256
+                  : VM_CYDIA_EXECUTABLE_SHA256,
            sizeof repair->expected_sha256);
     repair->expected_owner_id = 0u;
     repair->expected_group_id = 0u;
@@ -911,6 +924,12 @@ static size_t build_cydia_cache_entries(
 }
 
 #if defined(S5LBOX_GUEST_INSTALL_TESTING)
+void vm_guest_install_build_test_cydia_privilege_repair(
+    rootfs_work_file_repair_t *repair, bool legacy) {
+    if (!repair) return;
+    build_cydia_privilege_repair(repair, legacy);
+}
+
 size_t vm_guest_install_build_test_bigboss_source_entries(
     rootfs_work_entry_t *entries, size_t capacity, bool create_source) {
     return build_bigboss_source_entries(entries, capacity, create_source);
@@ -1551,7 +1570,7 @@ static vm_guest_install_build_status_t build_maintain_install(
     }
 
     rootfs_work_file_repair_t repair;
-    build_cydia_privilege_repair(&repair);
+    build_cydia_privilege_repair(&repair, false);
     rootfs_work_file_repair_state_t repair_state =
         ROOTFS_WORK_FILE_REPAIR_MISSING;
     bool repair_needed = false;
@@ -1578,6 +1597,13 @@ static vm_guest_install_build_status_t build_maintain_install(
         rootfs_work_status_t probe_status = build_probe_file_repair(
             work_directory, live, live_size, &repair, &repair_state,
             &allow_unclean_source, result, &probe);
+        if (probe_status == ROOTFS_WORK_FILE_REPAIR_MISMATCH) {
+            build_cydia_privilege_repair(&repair, true);
+            repair_state = ROOTFS_WORK_FILE_REPAIR_MISSING;
+            probe_status = build_probe_file_repair(
+                work_directory, live, live_size, &repair, &repair_state,
+                &allow_unclean_source, result, &probe);
+        }
         if (result) result->rootfs = probe;
         if (probe_status != ROOTFS_WORK_OK)
             return build_rootfs_refusal(probe_status, &probe,

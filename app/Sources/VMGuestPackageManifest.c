@@ -22,6 +22,9 @@
  * Foundation entries use data.tar.gz so the host's bounded DEFLATE path can
  * seed dpkg and its tools. Guest dpkg then installs every original package,
  * runs its maintainer scripts, and owns the package database.
+ * Cydia 1.0.3172-68 retains this ARMv6/APT ABI and includes the upstream
+ * Latin-1 fallback for repository names that are not valid UTF-8. The older
+ * 1.0.3044-66 can return nil for those names and crash while indexing search.
  */
 static const vm_guest_package_t PACKAGES[] = {
     PACKAGE("apr-lib", "1.3.3-1",
@@ -56,9 +59,9 @@ static const vm_guest_package_t PACKAGES[] = {
             "coreutils-bin_7.2-1_iphoneos-arm.deb", 1582692,
             "57b888b424828d799315f91e958f24b4c316f71c75f8f42d30f03c91de747f78",
             FOUNDATION),
-    PACKAGE("cydia", "1.0.3044-66",
-            "cydia_1.0.3044-66_iphoneos-arm.deb", 629500,
-            "94769b67e88198012cd1e45163f2f8bd949b4aa927dab1503a03d62a8ee3dba9",
+    PACKAGE("cydia", "1.0.3172-68",
+            "cydia_1.0.3172-68_iphoneos-arm.deb", 634106,
+            "6d3688421873a976b37ebe0af1c467da2add4dee6876b1aba50fa78ae7ab3ecb",
             INSTALL),
     PACKAGE("darwintools", "1-4", "darwintools_1-4_iphoneos-arm.deb", 5004,
             "a944bb1236935e4df3a6cb6e3fbe1ad179336fbe4ffa1c05684a851f45fe7fd3",

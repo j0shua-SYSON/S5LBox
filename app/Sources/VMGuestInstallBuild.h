@@ -113,8 +113,9 @@ typedef struct {
  * at the minimum is idempotent success with no disk rewrite.
  *
  * A committed older install may also carry Cydia_'s historical root:root 0755
- * metadata. The builder probes the exact 320704-byte pinned executable by
- * SHA-256 and accepts only that legacy tuple or root:root 06755. A needed
+ * metadata. The builder probes the exact current 330896-byte or historical
+ * 320704-byte executable by SHA-256 and accepts only that legacy metadata
+ * tuple or root:root 06755. It does not upgrade the executable. A needed
  * repair is applied to an unpublished clone under its own versioned recovery
  * journal (or folded into the same clone when storage also needs growth).
  * Different bytes or a third metadata tuple are refused, never normalized.
@@ -158,6 +159,10 @@ vm_guest_install_build_from_directory(
     char *detail, size_t detail_capacity);
 
 #if defined(S5LBOX_GUEST_INSTALL_TESTING)
+/* Exact executable identities and the only permitted metadata transition. */
+void vm_guest_install_build_test_cydia_privilege_repair(
+    rootfs_work_file_repair_t *repair, bool legacy);
+
 /* Pure policy seam: production reaches the same predicate only after the
  * unpublished clone's complete repair and strict raw re-audit. */
 bool vm_guest_install_build_test_allocation_repair_proven(
