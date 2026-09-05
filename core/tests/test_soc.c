@@ -4182,6 +4182,64 @@ static void test_timer_interrupt_reaches_handler(void) {
     s5l8900_free(&m);
 }
 
+static void test_cortex_a8_uses_interpreter_fallback(void) {
+    /* This is an instruction fixture on the existing test bus, not an
+     * S5L8920 board. Every ARM1176 signed path must decline the new CPU. */
+    const uint32_t program[] = {
+        0xe30b3eefu, 0xe34d3eadu, 0xe2844001u, 0xeafffffdu
+    }; /* MOVW/MOVT r3; ADD r4,#1; B to ADD */
+    for (unsigned mode = 0; mode < 4u; mode++) {
+        s5l8900_t fast = {0}, reference = {0};
+        bool fast_ok = s5l8900_init(&fast, 0u, 1u << 20);
+        bool reference_ok = s5l8900_init(&reference, 0u, 1u << 20);
+        CHECK(fast_ok && reference_ok, "profile fixture init failed");
+        if (!fast_ok || !reference_ok) {
+            if (fast_ok) s5l8900_free(&fast);
+            if (reference_ok) s5l8900_free(&reference);
+            return;
+        }
+        s5l8900_load(&fast, 0u, program, sizeof program);
+        s5l8900_load(&reference, 0u, program, sizeof program);
+        CHECK(arm_reset_profile(&fast.cpu, &fast.bus, ARM_ARCH_V7_CORTEX_A8) &&
+              arm_reset_profile(&reference.cpu, &reference.bus,
+                                ARM_ARCH_V7_CORTEX_A8), "profile reset");
+        bool available = s5l8900_static_a64_available();
+        CHECK(s5l8900_static_a64_set_enabled(&fast, true) == available,
+              "static availability contract");
+        if (available) {
+            CHECK(s5l8900_static_a64_set_persistent(&fast, mode == 1u) &&
+                  s5l8900_static_a64_set_graph(&fast, mode == 2u) &&
+                  s5l8900_static_a64_set_compact_raw(&fast, mode == 3u),
+                  "static path configuration failed");
+        }
+        arm_status_t fast_status = ARM_OK, reference_status = ARM_OK;
+        uint64_t fast_count = s5l8900_run(&fast, 100u, &fast_status);
+        uint64_t reference_count = s5l8900_run(&reference, 100u, &reference_status);
+        CHECK(fast_count == 100u && reference_count == 100u &&
+              fast_status == ARM_OK && reference_status == ARM_OK,
+              "Cortex-A8 fallback stopped");
+        CHECK(fast.cpu.arch == ARM_ARCH_V7_CORTEX_A8 &&
+              fast.cpu.r[3] == 0xdeadbeefu && fast.cpu.r[4] == 49u &&
+              fast.cpu.r[15] == 8u && fast.cpu.cycles == reference.cpu.cycles &&
+              fast.cpu.cpsr == reference.cpu.cpsr &&
+              memcmp(fast.cpu.r, reference.cpu.r, sizeof fast.cpu.r) == 0 &&
+              memcmp(fast.ram, reference.ram, fast.ram_size) == 0,
+              "fallback disagreed with the interpreter");
+        CHECK(s5l8900_static_a64_retired(&fast) == 0u,
+              "ARM1176 signed handlers ran on Cortex-A8");
+        const uint32_t divide = 0xe713f011u;
+        s5l8900_load(&fast, 8u, &divide, sizeof divide);
+        s5l8900_load(&reference, 8u, &divide, sizeof divide);
+        CHECK(s5l8900_run(&fast, 1u, &fast_status) == 0u &&
+              s5l8900_run(&reference, 1u, &reference_status) == 0u &&
+              fast_status == ARM_UNDEFINED && reference_status == ARM_UNDEFINED &&
+              fast.cpu.r[3] == 0xdeadbeefu && fast.cpu.r[15] == 8u,
+              "fallback concealed unsupported integer divide");
+        s5l8900_free(&fast);
+        s5l8900_free(&reference);
+    }
+}
+
 /*
  * The first real-machine contract for the signed-static engine. Both machines
  * execute the same SoC run loop, clock ratio and device refreshes; only one is
@@ -6424,6 +6482,7 @@ int main(void) {
     test_watchdog_window_distinguishes_reboot_from_setup();
     test_watchdog_reboot_is_a_bounded_host_boundary();
     test_bare_metal_uart_hello();
+    test_cortex_a8_uses_interpreter_fallback();
     test_signed_static_a64_soc_oracle();
     test_signed_static_a64_store_oracle();
     test_signed_static_a64_stm_oracle();

@@ -350,8 +350,26 @@ typedef struct arm_cp15 {
  */
 typedef enum {
     ARM_ARCH_V6_ARM1176 = 0,  /* S5L8900 / iPhone OS 3 -- the current target */
-    ARM_ARCH_V7_SWIFT   = 1   /* S5L8950X / iPhone 5, ARMv7s -- roadmap P2   */
+    ARM_ARCH_V7_SWIFT   = 1,  /* S5L8950X / iPhone 5, ARMv7s -- roadmap P2   */
+    ARM_ARCH_V7_CORTEX_A8 = 2 /* S5L8920 / iPhone 3GS; no integer divide   */
 } arm_arch_t;
+
+/* Profile identifiers are stable names, not an ordered ISA version. In
+ * particular Cortex-A8 implements MOVW/MOVT but neither form of integer
+ * division (Cortex-A8 TRM DDI0344K, section 3.2.15). Unknown identifiers
+ * must not inherit the capabilities of the last known profile. */
+static inline bool arm_arch_is_valid(arm_arch_t arch) {
+    return arch == ARM_ARCH_V6_ARM1176 || arch == ARM_ARCH_V7_SWIFT ||
+           arch == ARM_ARCH_V7_CORTEX_A8;
+}
+
+static inline bool arm_arch_has_movw_movt(arm_arch_t arch) {
+    return arch == ARM_ARCH_V7_SWIFT || arch == ARM_ARCH_V7_CORTEX_A8;
+}
+
+static inline bool arm_arch_has_a32_divide(arm_arch_t arch) {
+    return arch == ARM_ARCH_V7_SWIFT;
+}
 
 /*
  * Direct-mapped, power of two so the index is a mask rather than a modulo.
@@ -634,8 +652,14 @@ bool arm_mode_is_valid(uint32_t mode);
 /* Switch processor mode, swapping the banked registers in and out. */
 void arm_set_mode(arm_cpu_t *cpu, uint32_t mode);
 
-/* Put the core into a defined post-reset state (SVC mode, IRQ/FIQ masked). */
+/* Reset to the default ARM1176 profile (SVC mode, IRQ/FIQ masked). Safe on
+ * uninitialized storage; never reads the previous profile. */
 void arm_reset(arm_cpu_t *cpu, const arm_bus_t *bus);
+
+/* Reset implemented CPU state with an explicit instruction profile. This
+ * does not realize a board or imply complete ARMv7 system/VFP support.
+ * Reject a null CPU or unknown profile without modifying the CPU. */
+bool arm_reset_profile(arm_cpu_t *cpu, const arm_bus_t *bus, arm_arch_t arch);
 
 /* Install or clear the optional privileged-SVC host-service callback. */
 void arm_bus_set_privileged_svc_handler(arm_bus_t *bus,

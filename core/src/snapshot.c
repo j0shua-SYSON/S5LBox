@@ -1355,7 +1355,11 @@ static snapshot_status_t snap_write(const s5l8900_t *cm, FILE *f,
 }
 
 static bool snap_machine_valid(const s5l8900_t *m) {
-    if (!m || !m->ram || !m->ram_size || !m->nor.data || !m->nor.size ||
+    /* The legacy format has no CPU-profile field and describes S5L8900.
+     * Keep its bytes compatible, but never drop another profile on save or
+     * apply an ARM1176 snapshot to a differently configured CPU on load. */
+    if (!m || m->cpu.arch != ARM_ARCH_V6_ARM1176) return false;
+    if (!m->ram || !m->ram_size || !m->nor.data || !m->nor.size ||
         m->stub_count > S5L_STUB_MAX ||
         m->uart0.tx_len >= UART_TX_BUFFER ||
         m->uart4.tx_len >= UART_TX_BUFFER ||

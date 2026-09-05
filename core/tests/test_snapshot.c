@@ -1210,7 +1210,49 @@ static void test_restore_is_idempotent(void) {
     s5l8900_free(&cont); s5l8900_free(&b);
 }
 
+static void test_legacy_snapshot_requires_arm1176(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0u, RAMSZ), "init");
+    if (!m.ram) return;
+    uint8_t *legacy = NULL;
+    size_t legacy_len = 0;
+    CHECK(snapshot_save_mem(&m, &legacy, &legacy_len) == SNAP_OK,
+          "ARM1176 snapshot failed");
+    static const arm_arch_t other_profiles[] = {
+        ARM_ARCH_V7_SWIFT, ARM_ARCH_V7_CORTEX_A8, (arm_arch_t)99
+    };
+    for (size_t i = 0; i < sizeof other_profiles / sizeof other_profiles[0]; i++) {
+        uint8_t *out = NULL;
+        size_t out_len = 0;
+        m.cpu.arch = other_profiles[i];
+        m.cpu.r[0] = 0x12345678u;
+        m.ram[42] = 0xa5;
+        CHECK(snapshot_save_mem(&m, &out, &out_len) == SNAP_ERR_CORRUPT,
+              "legacy format silently saved another CPU profile");
+        CHECK(out == NULL && out_len == 0,
+              "rejected snapshot returned data");
+        free(out);
+        if (legacy) {
+            CHECK(snapshot_load_mem(&m, legacy, legacy_len) == SNAP_ERR_GEOMETRY,
+                  "ARM1176 state restored into another CPU profile");
+            CHECK(m.cpu.arch == other_profiles[i] &&
+                  m.cpu.r[0] == 0x12345678u && m.ram[42] == 0xa5,
+                  "rejected restore mutated the target");
+        }
+    }
+    m.cpu.arch = ARM_ARCH_V6_ARM1176;
+    if (legacy) {
+        CHECK(snapshot_load_mem(&m, legacy, legacy_len) == SNAP_OK,
+              "legacy ARM1176 restore regressed");
+        CHECK(m.cpu.arch == ARM_ARCH_V6_ARM1176,
+              "legacy restore lost the default profile");
+    }
+    free(legacy);
+    s5l8900_free(&m);
+}
+
 int main(void) {
+    test_legacy_snapshot_requires_arm1176();
     printf("S5LBox snapshot tests\n");
     test_mbx_ta_fifo_midstream_round_trip();
     test_cpu_state_round_trips();

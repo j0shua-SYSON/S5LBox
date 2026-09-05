@@ -878,6 +878,12 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
 }
 
 void arm_reset(arm_cpu_t *cpu, const arm_bus_t *bus) {
+    (void)arm_reset_profile(cpu, bus, ARM_ARCH_V6_ARM1176);
+}
+
+bool arm_reset_profile(arm_cpu_t *cpu, const arm_bus_t *bus, arm_arch_t arch) {
+    if (!cpu || !arm_arch_is_valid(arch)) return false;
+    cpu->arch = arch;
     for (int i = 0; i < 16; i++) cpu->r[i] = 0;
     for (int i = 0; i < ARM_BANK_COUNT; i++) {
         cpu->spsr[i] = 0; cpu->bank_r13[i] = 0; cpu->bank_r14[i] = 0;
@@ -922,6 +928,7 @@ void arm_reset(arm_cpu_t *cpu, const arm_bus_t *bus) {
     cpu->cpsr   = ARM_MODE_SVC | ARM_CPSR_I | ARM_CPSR_F | ARM_CPSR_A;
     cpu->cycles = 0;
     cpu->bus    = bus;
+    return true;
 }
 
 void arm_bus_set_privileged_svc_handler(arm_bus_t *bus,
@@ -1114,7 +1121,7 @@ static arm_status_t exec_data_processing(arm_cpu_t *c, uint32_t pc, uint32_t ins
      * MOVW zero-extends the 16-bit immediate; MOVT replaces only the top half
      * and must leave the bottom half of Rd untouched. Neither sets flags.
      */
-    if (c->arch >= ARM_ARCH_V7_SWIFT &&
+    if (arm_arch_has_movw_movt(c->arch) &&
         ((insn & 0x0fb00000u) == 0x03000000u)) {
         uint32_t imm16 = ((insn >> 4) & 0xf000u) | (insn & 0x0fffu);
         bool top = (insn >> 22) & 1u;
@@ -1910,7 +1917,7 @@ static arm_status_t exec_media(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
     }
 
     /*
-     * SDIV / UDIV -- ARMv7 only, and genuinely absent on the ARM1176.
+     * SDIV / UDIV -- optional in ARMv7-A; absent on ARM1176 and Cortex-A8.
      *
      *   SDIV: cond 0111 0001 Rd 1111 Rm 0001 Rn   (0x0710f010)
      *   UDIV: cond 0111 0011 Rd 1111 Rm 0001 Rn   (0x0730f010)
@@ -1933,7 +1940,7 @@ static arm_status_t exec_media(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
         bool is_unsigned = (insn >> 21) & 1u;
         uint32_t n, m;
 
-        if (c->arch < ARM_ARCH_V7_SWIFT) return ARM_UNDEFINED;
+        if (!arm_arch_has_a32_divide(c->arch)) return ARM_UNDEFINED;
         /* ARM ARM DDI0406C A8-352/A8-868: any of Rd, Rn, Rm == PC is
          * UNPREDICTABLE. Refuse rather than read the pipelined PC. */
         if (rd == 15u || rn == 15u || rm == 15u) return ARM_UNDEFINED;
@@ -1941,8 +1948,8 @@ static arm_status_t exec_media(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
         n = c->r[rn];
         m = c->r[rm];
         if (m == 0u) {
-            /* Division by zero yields zero when SCTLR.DZ is clear, which is
-             * how iOS runs. It is not a trap and not UNPREDICTABLE. */
+            /* ARMv7-A division by zero yields zero. SCTLR.DZ is an ARMv7-R
+             * control, not a switch on this application-profile core. */
             c->r[rd] = 0u;
         } else if (is_unsigned) {
             c->r[rd] = n / m;
@@ -2750,6 +2757,7 @@ static arm_status_t thumb_step(arm_cpu_t *c, uint32_t pc, uint16_t insn,
 #undef TB
 
 arm_status_t arm_step(arm_cpu_t *c) {
+    if (!arm_arch_is_valid(c->arch)) return ARM_UNDEFINED;
     uint32_t pc   = c->r[15];
 
     /* A corrupted snapshot or malformed exception frame must not turn an

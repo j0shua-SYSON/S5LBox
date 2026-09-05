@@ -5328,7 +5328,7 @@ static void test_signed_dual_multiply_family(void) {
     }
 }
 
-static void test_integer_divide_is_armv7_only(void) {
+static void test_integer_divide_requires_swift(void) {
     /* SDIV/UDIV do not exist on the ARM1176. The first half of this test is the
      * important half: it pins the CURRENT target's behaviour, so adding a second
      * machine profile cannot quietly start executing an instruction that the
@@ -5363,9 +5363,7 @@ static void test_integer_divide_is_armv7_only(void) {
         memset(g_ram, 0, sizeof g_ram);
         m_w32(NULL, 0, CASES[i].insn);
         arm_reset(&c, &g_bus);
-        /* arch is core configuration, not runtime state, so arm_reset leaves it
-         * alone -- a reset does not change which CPU you are. Set it here
-         * rather than relying on the previous iteration. */
+        /* Legacy reset selects ARM1176; keep the intended profile explicit. */
         c.arch = ARM_ARCH_V6_ARM1176;
         c.cpsr = (c.cpsr & ~0x1fu) | ARM_MODE_SYS;
         c.r[1] = CASES[i].n;
@@ -5844,7 +5842,96 @@ static void test_direct_write_cache_requires_explicit_consent(void) {
     g_watch_addr = UINT32_MAX;
 }
 
+static void test_reset_initializes_the_default_profile(void) {
+    arm_cpu_t c;
+    memset(&c, 0xa5, sizeof c);
+    arm_reset(&c, &g_bus);
+    CHECK(c.arch == ARM_ARCH_V6_ARM1176,
+          "reset left the CPU profile uninitialized");
+    CHECK(c.r[15] == 0u && c.bus == &g_bus,
+          "default reset lost its PC or bus");
+}
+
+static void test_explicit_profile_reset_and_invalid_configuration(void) {
+    static const arm_arch_t profiles[] = {
+        ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_SWIFT, ARM_ARCH_V7_CORTEX_A8
+    };
+    arm_cpu_t c, before;
+    for (size_t i = 0; i < sizeof profiles / sizeof profiles[0]; i++) {
+        memset(&c, 0xa5, sizeof c);
+        CHECK(arm_reset_profile(&c, &g_bus, profiles[i]), "valid reset refused");
+        CHECK(c.arch == profiles[i] && c.bus == &g_bus && c.r[15] == 0u &&
+              c.cp15.sctlr == 0u && c.tlb_gen == 1u && !c.excl_valid &&
+              c.vfp_fpexc == 0u && c.cycles == 0u,
+              "explicit profile reset left stale state");
+        c.r[3] = 0xabcdef01u;
+        CHECK(arm_reset_profile(&c, &g_bus, profiles[i]) &&
+              c.arch == profiles[i] && c.r[3] == 0u,
+              "repeated explicit reset lost profile or register reset");
+    }
+    memcpy(&before, &c, sizeof c);
+    CHECK(!arm_reset_profile(&c, &g_bus, (arm_arch_t)99),
+          "unknown CPU profile accepted");
+    CHECK(memcmp(&before, &c, sizeof c) == 0,
+          "invalid reset modified the CPU");
+    CHECK(!arm_reset_profile(NULL, &g_bus, ARM_ARCH_V7_CORTEX_A8),
+          "null CPU accepted");
+
+    /* An invalid configuration must stop before fetch or IRQ entry, even
+     * when the pending instruction would be common to every valid core. */
+    c.arch = (arm_arch_t)99;
+    c.irq_line = true;
+    c.cpsr &= ~ARM_CPSR_I;
+    memcpy(&before, &c, sizeof c);
+    m_w32(NULL, 0, 0xe3a0002au); /* MOV r0,#42 */
+    g_watch_addr = 0u; g_watch_reads32 = 0;
+    CHECK(arm_step(&c) == ARM_UNDEFINED && g_watch_reads32 == 0u &&
+          memcmp(&before, &c, sizeof c) == 0,
+          "invalid profile fetched or changed CPU state");
+    g_watch_addr = 0xffffffffu;
+    arm_reset(&c, &g_bus);
+    CHECK(c.arch == ARM_ARCH_V6_ARM1176,
+          "legacy reset inherited a previous profile");
+}
+
+static void test_profile_instruction_boundaries(void) {
+    static const arm_arch_t profiles[] = {
+        ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_SWIFT, ARM_ARCH_V7_CORTEX_A8,
+        (arm_arch_t)-1, (arm_arch_t)3, (arm_arch_t)0x7fffffff
+    };
+    static const uint32_t encodings[] = {
+        0xe30b3eefu, 0xe34d3eadu, 0xe713f011u, 0xe733f011u
+    }; /* MOVW r3,#beef; MOVT r3,#dead; SDIV/UDIV r3,r1,r0 */
+    for (size_t p = 0; p < sizeof profiles / sizeof profiles[0]; p++) {
+        for (size_t i = 0; i < sizeof encodings / sizeof encodings[0]; i++) {
+            arm_cpu_t c;
+            arm_reset(&c, &g_bus);
+            c.arch = profiles[p];
+            c.r[0] = 2u; c.r[1] = 7u; c.r[3] = 0x11223344u;
+            c.cpsr |= ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_Q;
+            uint32_t cpsr = c.cpsr;
+            m_w32(NULL, 0, encodings[i]);
+            bool supported = profiles[p] == ARM_ARCH_V7_SWIFT ||
+                (i < 2 && profiles[p] == ARM_ARCH_V7_CORTEX_A8);
+            arm_status_t status = arm_step(&c);
+            CHECK(status == (supported ? ARM_OK : ARM_UNDEFINED),
+                  "profile %d instruction %08x returned %d",
+                  (int)profiles[p], encodings[i], status);
+            uint32_t result = i == 0 ? 0x0000beefu :
+                              i == 1 ? 0xdead3344u : 3u;
+            CHECK(c.r[3] == (supported ? result : 0x11223344u),
+                  "profile %d instruction %08x wrote the wrong result",
+                  (int)profiles[p], encodings[i]);
+            CHECK(c.cpsr == cpsr && c.r[15] == (supported ? 4u : 0u),
+                  "profile boundary changed flags or advanced a rejected PC");
+        }
+    }
+}
+
 int main(void) {
+    test_reset_initializes_the_default_profile();
+    test_explicit_profile_reset_and_invalid_configuration();
+    test_profile_instruction_boundaries();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();
     test_add_reg();
@@ -6011,7 +6098,7 @@ int main(void) {
     test_parallel_add_sub_family();
     test_pack_halfword_and_select();
     test_signed_dual_multiply_family();
-    test_integer_divide_is_armv7_only();
+    test_integer_divide_requires_swift();
     test_movw_movt_are_armv7_only();
     test_srs_and_rfe_stop_after_the_first_fault();
     test_ldrd_strd_stop_after_the_first_faulting_word();
