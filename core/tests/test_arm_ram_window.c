@@ -5,6 +5,7 @@
 #include <string.h>
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 #include "a64_static.h"
+#include "soc.h"
 #endif
 
 #define BASE UINT32_C(0x10000000)
@@ -16,7 +17,7 @@
 static uint8_t ram[SIZE], saved_ram[SIZE];
 static arm_cpu_t cpu, before, reference;
 static arm_bus_t bus;
-static unsigned checks, failures, reads, writes, grants;
+static unsigned checks, failures, reads, writes, grants, observed_writes;
 static bool refuse_range;
 #define CHECK(c, ...) do { checks++; if (!(c)) { \
     if (failures++ < 30u) { printf("%s:%d: ", __func__, __LINE__); \
@@ -60,6 +61,7 @@ static void write8(void *ctx, uint32_t pa, uint8_t value) {
     if (pa >= BASE && pa - BASE < SIZE) ram[pa - BASE] = value;
 }
 static void observed_write(void *ctx, uint32_t pa, uint32_t value) {
+    observed_writes++;
     write32(ctx, pa, value);
 }
 static void insn(uint32_t va, uint32_t value) {
@@ -195,13 +197,14 @@ static void test_exact_lookup(void) {
 typedef struct {
     unsigned calls, mutate;
     bool retire;
+    a64_compact_raw_data_miss_t miss;
 } fallback_t;
 static a64_compact_raw_fallback_result_t fallback(
         void *opaque, a64_compact_raw_code_window_t *next,
         const a64_compact_raw_data_miss_t *miss) {
     fallback_t *f = opaque;
     f->calls++;
-    (void)miss;
+    if (miss) f->miss = *miss;
     if (!f->mutate) return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
     if (f->retire) { cpu.r[15] += 4u; cpu.cycles++; }
     switch (f->mutate) {
@@ -285,11 +288,26 @@ static void test_native(void) {
             a64_compact_raw_options_t options = {
                 .ram_window = &w, .owner_fetch_block = &owner_block,
             };
+            CHECK(arm_ram_window_tlb_lookup(&w, &cpu, CODE,
+                      ARM_ACCESS_FETCH, false) == ram + 0x8000u,
+                  "native entry FETCH proof thumb=%u budget=%u", thumb, budget);
+            CHECK(arm_ram_window_tlb_lookup(&w, &cpu, DATA,
+                      ARM_ACCESS_READ, false) == ram + 0xc000u,
+                  "native entry data proof thumb=%u budget=%u", thumb, budget);
             reads = writes = 0;
             CHECK(a64_compact_raw_run_code_window_resident_options(&cpu,
                       ram + 0x8000u, CODE, 1024u, budget, fallback, &f,
                       &options, NULL, NULL, &stats, &total, &native, &slow),
                   "native execution");
+            if (budget == 1u || budget == 18u)
+                printf("TLB-LOOP thumb=%u budget=%u total=%u native=%u slow=%u "
+                       "calls=%u pc=%08x r1=%08x miss=%u/%08x/%u gen=%u "
+                       "refills=%llu/%llu/%llu\n", thumb, budget, total,
+                       native, slow, f.calls, cpu.r[15], cpu.r[1], f.miss.valid,
+                       f.miss.va, f.miss.access, f.miss.tlb_gen,
+                       (unsigned long long)stats.fetch,
+                       (unsigned long long)stats.read,
+                       (unsigned long long)stats.write);
             CHECK(total == budget && native == budget && slow == 0u &&
                       f.calls == 0u, "exact budget with no C fallbacks");
             CHECK(!memcmp(cpu.r, reference.r, sizeof cpu.r) &&
@@ -455,6 +473,96 @@ static void test_native_memory_families(void) {
         }
     }
 }
+
+static void test_native_live_code(void) {
+    if (!a64_static_host_available()) return;
+    for (unsigned different = 0; different < 2u; different++) {
+        setup();
+        uint32_t target = different ? NEXT : CODE + 8u;
+        insn(CODE, 0xe5810000u); /* str r0, [r1] */
+        insn(CODE + 4u, 0xe12fff13u); /* bx r3 */
+        insn(target, 0xe3a02003u); /* mov r2, #3, overwritten before fetch */
+        cpu.r[0] = 0xe3a02009u; /* mov r2, #9 */
+        cpu.r[1] = cpu.r[3] = target;
+        prime(target, ARM_ACCESS_WRITE, false,
+              BASE + ((target - VA) & ~1023u));
+        if (different)
+            prime(target, ARM_ACCESS_FETCH, false, BASE + 0x8400u);
+        arm_ram_window_t w;
+        CHECK(arm_ram_window_capture(&w, &cpu, BASE, SIZE), "live-code capture");
+        a64_compact_raw_options_t options = { .ram_window = &w };
+        a64_compact_tlb_stats_t stats;
+        fallback_t f = {0};
+        unsigned total, native, slow;
+        CHECK(a64_compact_raw_run_code_window_resident_options(&cpu,
+                  ram + 0x8000u, CODE, 1024u, 3u, fallback, &f, &options,
+                  NULL, NULL, &stats, &total, &native, &slow), "live-code run");
+        CHECK(total == 3u && native == 3u && slow == 0u && !f.calls &&
+                  cpu.r[2] == 9u && stats.write == 1u &&
+                  stats.fetch == different,
+              "live guest store visible in %s window", different ? "new" : "same");
+    }
+}
+
+static void test_native_machine(void) {
+    static s5l8900_t fast, literal;
+    CHECK(!s5l8900_static_a64_set_compact_tlb_refill(NULL, true), "null machine");
+    CHECK(!s5l8900_static_a64_set_compact_tlb_refill(&fast, true), "uninitialized machine");
+    bool a = s5l8900_init(&fast, BASE, 1u << 20);
+    bool b = s5l8900_init(&literal, BASE, 1u << 20);
+    CHECK(a && b, "machine init");
+    if (!a || !b) {
+        if (a) s5l8900_free(&fast);
+        if (b) s5l8900_free(&literal);
+        return;
+    }
+    CHECK(s5l8900_static_a64_compact_tlb_fetch(&fast) == 0u &&
+              s5l8900_static_a64_compact_tlb_read(&fast) == 0u &&
+              s5l8900_static_a64_compact_tlb_write(&fast) == 0u,
+          "native refill default counters are zero");
+    if (!a64_static_host_available()) {
+        CHECK(!s5l8900_static_a64_set_compact_tlb_refill(&fast, true),
+              "unavailable engine refused");
+    } else {
+        setup();
+        native_program(false);
+        s5l8900_load(&fast, BASE, ram, SIZE);
+        s5l8900_load(&literal, BASE, ram, SIZE);
+        fast.cpu = literal.cpu = cpu;
+        fast.cpu.bus = &fast.bus;
+        literal.cpu.bus = &literal.bus;
+        fast.cpu.fetch_host = fast.ram + 0x8000u;
+        literal.cpu.fetch_host = literal.ram + 0x8000u;
+        s5l8900_tick(&fast, 0u);
+        s5l8900_tick(&literal, 0u);
+        CHECK(s5l8900_static_a64_set_enabled(&fast, true) &&
+                  s5l8900_static_a64_set_compact_raw(&fast, true) &&
+                  s5l8900_static_a64_set_compact_tlb_refill(&fast, true),
+              "enable native machine refill");
+        CHECK(s5l8900_static_a64_set_enabled(&literal, false), "literal engine");
+        arm_status_t fast_status = ARM_OK, literal_status = ARM_OK;
+        CHECK(s5l8900_run(&fast, 8192u, &fast_status) == 8192u &&
+                  s5l8900_run(&literal, 8192u, &literal_status) == 8192u &&
+                  fast_status == ARM_OK && literal_status == ARM_OK,
+              "exact machine retirement budget");
+        CHECK(!memcmp(fast.cpu.r, literal.cpu.r, sizeof fast.cpu.r) &&
+                  fast.cpu.cpsr == literal.cpu.cpsr &&
+                  fast.cpu.cycles == literal.cpu.cycles &&
+                  !memcmp(fast.ram, literal.ram, fast.ram_size),
+              "machine/native memory continuation equals interpreter");
+        CHECK(s5l8900_static_a64_compact_tlb_fetch(&fast) > 0u &&
+                  s5l8900_static_a64_compact_tlb_read(&fast) == 1u &&
+                  s5l8900_static_a64_compact_tlb_write(&fast) == 1u,
+              "machine integration really used all three native refills");
+        uint64_t fetches = s5l8900_static_a64_compact_tlb_fetch(&fast);
+        CHECK(s5l8900_static_a64_set_compact_tlb_refill(&fast, false), "disable");
+        CHECK(s5l8900_run(&fast, 8192u, &fast_status) == 8192u &&
+                  s5l8900_static_a64_compact_tlb_fetch(&fast) == fetches,
+              "same-machine OFF stops new native refills");
+    }
+    s5l8900_free(&fast);
+    s5l8900_free(&literal);
+}
 #endif
 
 int main(void) {
@@ -464,6 +572,8 @@ int main(void) {
     test_native();
     test_native_refusals();
     test_native_memory_families();
+    test_native_live_code();
+    test_native_machine();
 #else
     (void)saved_ram; (void)reference; (void)insn; (void)half;
 #endif
