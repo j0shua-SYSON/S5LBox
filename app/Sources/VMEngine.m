@@ -2244,7 +2244,7 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     }
     if (haveNetwork && networkStatus.packet_offload) {
         networkText = [networkText stringByAppendingFormat:
-            @"  | bulk tx/rx %llu/%llu pkt %llu/%llu B stale/fail %llu/%llu batch/extra %llu/%llu",
+            @"  | bulk tx/rx %llu/%llu pkt %llu/%llu B stale/fail %llu/%llu batch/extra %llu/%llu merged %llu",
             (unsigned long long)networkStatus.bulk_tx_packets,
             (unsigned long long)networkStatus.bulk_rx_packets,
             (unsigned long long)networkStatus.bulk_tx_bytes,
@@ -2252,7 +2252,8 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
             (unsigned long long)networkStatus.bulk_stale_tokens,
             (unsigned long long)networkStatus.bulk_failures,
             (unsigned long long)networkStatus.bulk_batches,
-            (unsigned long long)networkStatus.bulk_batched_packets];
+            (unsigned long long)networkStatus.bulk_batched_packets,
+            (unsigned long long)networkStatus.bulk_merged_packets];
     }
     /* The mode leads, because "3.2 M insn/s" means something different
      * depending on what is retiring them, and a user who cannot see which

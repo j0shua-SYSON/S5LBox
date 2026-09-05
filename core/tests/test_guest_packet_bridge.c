@@ -7,6 +7,8 @@
 static s5l8900_t machine;
 static guest_packet_bridge_t bridge;
 static uint8_t payload[1500], captured[1500], expected_token[16];
+static uint8_t large_payload[GUEST_PACKET_RX_MAX];
+static size_t large_length, peek_capacity;
 static unsigned sent, consumed, finished, passed, failed;
 static bool accept_send, have_rx;
 #define CHECK(x) do { if (x) passed++; else { failed++; \
@@ -38,6 +40,13 @@ static size_t peek_packet(void *ctx, const uint8_t *token, const uint8_t **p) {
 }
 static void consume_packet(void *ctx) { (void)ctx; consumed++; have_rx = false; }
 static void finish_packets(void *ctx) { (void)ctx; finished++; }
+static size_t peek_large_packet(void *ctx, const uint8_t *token, size_t capacity,
+                                 const uint8_t **p) {
+    (void)ctx; (void)token;
+    peek_capacity = capacity;
+    *p = large_payload;
+    return large_length < capacity ? large_length : capacity;
+}
 static arm_svc_result_t handler(void *ctx, arm_cpu_t *c, uint32_t pc, uint32_t op) {
     return guest_packet_bridge_svc(ctx, c, pc, op);
 }
@@ -202,9 +211,63 @@ static void test_user_svc_stays_in_guest(void) {
     CHECK(guest_packet_bridge_svc(&bridge, &machine.cpu, RX+4u,
                                   GUEST_PACKET_RX_SVC) == ARM_SVC_UNHANDLED);
 }
+static void setup_large_receive(unsigned extra) {
+    reset(); setup_rx();
+    bridge.peek_large = peek_large_packet;
+    bridge.finish = finish_packets;
+    large_length = sizeof large_payload;
+    for (unsigned i = 0u; i < sizeof large_payload; i++)
+        large_payload[i] = (uint8_t)((i * 31u) ^ (i >> 9u));
+    large_payload[0] = 0x45u;
+    put(0x208cu, 1500u);
+    for (unsigned i = 1u; i <= extra; i++) {
+        uint32_t off = 0x1000u + i * 0x100u;
+        mbuf(off, 0x5000u + (i - 1u) * 0x800u, 0u);
+        put(off, i < extra ? VA + off + 0x100u : 0u);
+    }
+    put(0x20f8u, extra ? VA+0x1100u : 0u);
+}
+static void test_large_receive(void) {
+    setup_large_receive(9u);
+    CHECK(arm_step(&machine.cpu) == ARM_OK && consumed == 1u);
+    CHECK(peek_capacity == GUEST_PACKET_RX_MAX && bridge.rx_bytes == large_length);
+    CHECK(machine.cpu.r[1] == large_length+4u && get(0x208cu) == GUEST_PACKET_RX_MAX);
+    CHECK(get(0x1000u) == VA+0x1100u && get(0x1008u) == 2048u);
+    CHECK(get(0x1808u) == 4u && get(0x1800u) == 0u && get(0x20f8u) == VA+0x1900u);
+    CHECK(get(0x1908u) == 0u && get(0x1014u) == 20u);
+    CHECK(!memcmp(machine.ram+0x2f04u, large_payload, 2044u));
+    bool exact = true;
+    for (unsigned i = 1u; i < 9u; i++) {
+        size_t offset = 2044u + (i-1u)*2048u;
+        size_t n = large_length-offset < 2048u ? large_length-offset : 2048u;
+        if (memcmp(machine.ram+0x5000u+(i-1u)*2048u, large_payload+offset, n)) exact=false;
+    }
+    CHECK(exact);
+    setup_large_receive(1u); /* getm allocated only part of its requested reserve */
+    CHECK(arm_step(&machine.cpu) == ARM_OK && peek_capacity == 4092u);
+    CHECK(get(0x1108u) == 2048u && get(0x20f8u) == 0u);
+    setup_large_receive(9u); large_length = 1500u;
+    CHECK(arm_step(&machine.cpu) == ARM_OK && get(0x1000u) == 0u);
+    CHECK(get(0x20f8u) == VA+0x1100u && get(0x1108u) == 0u);
+    setup_large_receive(9u); put(0x1800u, VA+0x1000u);
+    CHECK(arm_step(&machine.cpu) == ARM_HALT && consumed == 0u);
+    CHECK(get(0x1008u) == 20u && get(0x20f8u) == VA+0x1100u);
+    setup_large_receive(9u); put(0x1844u, VA+0x2f00u);
+    CHECK(arm_step(&machine.cpu) == ARM_HALT && consumed == 0u);
+    setup_large_receive(9u); put(0x1844u, VA+0xffff0u);
+    CHECK(arm_step(&machine.cpu) == ARM_HALT && consumed == 0u);
+    CHECK(get(0x208cu) == 1500u && get(0x1008u) == 20u);
+    setup_batch(); bridge.peek_large = peek_large_packet;
+    large_length = 3000u;
+    mbuf(0x1200u, 0x5000u, 0u); put(0x1100u, VA+0x1200u);
+    CHECK(arm_step(&machine.cpu) == ARM_OK && consumed == 2u);
+    CHECK(get(0x1108u) == 2048u && get(0x1208u) == 956u && get(0x20f8u) == 0u);
+    CHECK(machine.cpu.r[6] == 3006u && get(0x1200u) == 0u);
+}
 int main(void) {
     if (!s5l8900_init(&machine, 0u, 1u<<20)) return 1;
     test_receive(); test_transmit(); test_batch(); test_user_svc_stays_in_guest();
+    test_large_receive();
     s5l8900_free(&machine);
     printf("guest packet bridge: %u passed, %u failed\n", passed, failed);
     return failed ? 1 : 0;

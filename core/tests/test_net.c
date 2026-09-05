@@ -2017,6 +2017,72 @@ static void test_output_peek_and_short_buffers(void) {
 }
 
 
+static void receive_checksums(uint8_t *p, size_t n) {
+    w16(p + 10u, 0u); w16(p + 10u, net_checksum(p, 20u));
+    w16(p + 36u, 0u);
+    w16(p + 36u, net_l4_checksum(r32(p + 12u), r32(p + 16u),
+                                  NET_PROTO_TCP, p + 20u, n - 20u));
+}
+static void receive_data(uint8_t *p, size_t n, uint32_t seq, uint8_t marker) {
+    memset(p, 0, n);
+    (void)net_build_ipv4(p, n, PEER_IP, GUEST_IP, NET_PROTO_TCP, 12u, n - 20u);
+    w16(p + 20u, 8000u); w16(p + 22u, 49152u);
+    w32(p + 24u, seq); w32(p + 28u, 456u);
+    p[32] = 0x50u; p[33] = TCP_ACK | TCP_PSH; w16(p + 34u, 65535u);
+    for (size_t i = 40u; i < n; i++) p[i] = (uint8_t)(marker + i);
+    receive_checksums(p, n);
+}
+static void test_receive_coalescing_preserves_stream_and_boundaries(void) {
+    uint8_t a[1500], b[1500], dst[16384], before[16384];
+    receive_data(a, sizeof a, 0xfffffff0u, 11u);
+    receive_data(b, 1291u, 0xfffffff0u + 1460u, 23u); /* wrap + odd data length */
+    memset(dst, 0xa5, sizeof dst); memcpy(dst, a, sizeof a);
+    size_t n = net_tcp_receive_coalesce(dst, sizeof a, sizeof dst, b, 1291u);
+    CHECK(n == 2751u && r16(dst+2u) == n && r32(dst+24u) == 0xfffffff0u,
+          "coalesced length or sequence incorrect");
+    CHECK(!memcmp(dst+40u, a+40u, 1460u) && !memcmp(dst+1500u, b+40u, 1251u) &&
+          dst[2751u] == 0xa5u, "coalesced stream bytes or boundary changed");
+    CHECK(net_checksum(dst, 20u) == 0u &&
+          net_l4_checksum(PEER_IP, GUEST_IP, NET_PROTO_TCP, dst+20u, n-20u) == 0u,
+          "coalesced checksums invalid");
+    CHECK(dst[33] == (TCP_ACK|TCP_PSH) && r16(dst+34u) == 65535u &&
+          r32(dst+28u) == 456u, "coalescing altered TCP control state");
+    receive_data(b, sizeof b, 0xfffffff0u + 1460u, 23u);
+    static const unsigned fields[] = {1u, 8u, 12u, 16u, 20u, 22u, 24u, 28u, 34u,
+                                     6u, 32u, 33u, 38u};
+    for (unsigned i = 0u; i < sizeof fields/sizeof fields[0]; i++) {
+        uint8_t bad[1500]; memcpy(bad, b, sizeof bad);
+        bad[fields[i]] ^= 1u;
+        receive_checksums(bad, sizeof bad);
+        memset(dst, 0xa5, sizeof dst); memcpy(dst, a, sizeof a);
+        memcpy(before, dst, sizeof dst);
+        CHECK(net_tcp_receive_coalesce(dst, sizeof a, sizeof dst, bad, sizeof bad) == 0u &&
+              !memcmp(dst, before, sizeof dst), "crossed boundary at header byte %u", fields[i]);
+    }
+    for (unsigned i = 0u; i < 2u; i++) {
+        uint8_t bad[1500]; memcpy(bad, b, sizeof bad);
+        bad[i ? 36u : 10u] ^= 1u;
+        CHECK(net_tcp_receive_coalesce(dst, sizeof a, sizeof dst, bad, sizeof bad) == 0u &&
+              !memcmp(dst, before, sizeof dst), "accepted corrupt checksum %u", i);
+    }
+    CHECK(net_tcp_receive_coalesce(dst, sizeof a, 1500u, b, sizeof b) == 0u &&
+          !memcmp(dst, before, sizeof dst), "capacity refusal changed bytes");
+    CHECK(net_tcp_receive_coalesce(dst, sizeof dst+1u, sizeof dst, b, sizeof b) == 0u,
+          "oversized destination length accepted");
+    CHECK(net_tcp_receive_coalesce(NULL, 1500u, sizeof dst, b, sizeof b) == 0u &&
+          net_tcp_receive_coalesce(dst, 1500u, sizeof dst, NULL, 1500u) == 0u,
+          "NULL coalescing arguments accepted");
+    memcpy(dst, a, sizeof a); n = sizeof a;
+    for (unsigned i = 1u; i < 11u; i++) {
+        receive_data(b, sizeof b, 0xfffffff0u + i * 1460u, (uint8_t)i);
+        n = net_tcp_receive_coalesce(dst, n, sizeof dst, b, sizeof b);
+    }
+    CHECK(n == 16100u && r16(dst+2u) == n, "large aggregate failed at %zu", n);
+    receive_data(b, sizeof b, 0xfffffff0u + 11u * 1460u, 12u);
+    CHECK(net_tcp_receive_coalesce(dst, n, sizeof dst, b, sizeof b) == 0u,
+          "aggregate exceeded native receive capacity");
+}
+
 /*
  * Cases run in order and each announces itself first. This suite drives a
  * state machine that can fault, and a fault with buffered output loses the one
@@ -2075,6 +2141,7 @@ int main(void) {
     RUN(test_time_only_moves_forward);
     RUN(test_the_null_arguments_do_not_crash);
     RUN(test_output_peek_and_short_buffers);
+    RUN(test_receive_coalescing_preserves_stream_and_boundaries);
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

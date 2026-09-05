@@ -553,6 +553,7 @@ static void test_bulk_packets_use_tokens_and_recover_lost_notifications(bool bat
     if (batch) machine.bus.write32(machine.bus.ctx, 0x808u, GUEST_PACKET_BATCH_SVC);
     CHECK(vm_network_session_attach_packet_bridge(session, &bridge), "bulk attach failed");
     CHECK((bridge.finish != NULL) == batch, "old checkpoint enabled batch delivery");
+    CHECK((bridge.peek_large != NULL) == batch, "old checkpoint enabled coalescing");
     CHECK(!vm_network_session_attach_packet_bridge(session, &bridge), "double attach accepted");
     ppp_peer_t guest;
     CHECK(open_test_ppp_link(&machine, session, &guest), "bulk setup lost stock IPCP");
@@ -582,6 +583,10 @@ static void test_bulk_packets_use_tokens_and_recover_lost_notifications(bool bat
           (unsigned long long)guest.stats.fcs_errors, machine.uart4.rx_count);
     const uint8_t *reply = NULL;
     size_t n = bridge.peek(bridge.ctx, sink.last, &reply);
+    if (batch) {
+        CHECK(bridge.peek_large(bridge.ctx, sink.last, GUEST_PACKET_RX_MAX, &reply) == n,
+              "coalesced non-TCP control datagrams");
+    }
     CHECK(n == 32u && reply && reply[20] == 0u && net_checksum(reply, 20u) == 0u,
           "guest packet queue did not retain the actual ICMP reply");
     bridge.consume(bridge.ctx);
@@ -633,7 +638,8 @@ static void test_bulk_packets_use_tokens_and_recover_lost_notifications(bool bat
               "lost whole-batch notification wedged the link");
     }
     vm_network_session_destroy(&session);
-    CHECK(!bridge.ctx && !bridge.send && !bridge.peek && !bridge.consume && !bridge.finish,
+    CHECK(!bridge.ctx && !bridge.send && !bridge.peek && !bridge.consume && !bridge.finish &&
+          !bridge.peek_large,
           "destroy left dangling host packet callbacks");
     s5l8900_free(&machine);
 }

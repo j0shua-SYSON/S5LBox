@@ -48,6 +48,7 @@ typedef struct {
     uint64_t bulk_tx_packets, bulk_tx_bytes, bulk_rx_packets, bulk_rx_bytes;
     uint64_t bulk_stale_tokens, bulk_failures;
     uint64_t bulk_batches, bulk_batched_packets;
+    uint64_t bulk_merged_packets;
     bool     peer_opened;
     bool     lcp_open;
     bool     ipcp_open;

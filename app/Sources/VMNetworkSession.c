@@ -54,7 +54,9 @@ struct vm_network_session {
     uint8_t bulk_token[NET_OUT_SLOTS][GUEST_PACKET_TOKEN_SIZE];
     uint32_t bulk_queued_ms[NET_OUT_SLOTS];
     unsigned bulk_head, bulk_tail;
-    unsigned bulk_peek;
+    unsigned bulk_first, bulk_peek;
+    uint8_t bulk_coalesced[GUEST_PACKET_RX_MAX];
+    uint64_t bulk_merged_packets;
     uint64_t bulk_id;
     bool bulk_batch_enabled, bulk_notified;
     unsigned bulk_notified_slot;
@@ -119,20 +121,45 @@ static size_t bulk_guest_peek(void *ctx, const uint8_t token[16],
     for (unsigned i = s->bulk_head; i != s->bulk_tail; i = inbound_next(i)) {
         if (token && memcmp(token, s->bulk_token[i], 16u)) continue;
         s->bulk_peek = i;
+        s->bulk_first = i;
         *packet = s->bulk_rx[i].bytes;
         return s->bulk_rx[i].len;
     }
     return 0u;
 }
 
+static size_t bulk_guest_peek_large(void *ctx, const uint8_t *token,
+                                     size_t capacity, const uint8_t **packet) {
+    vm_network_session_t *s = (vm_network_session_t *)ctx;
+    size_t n = bulk_guest_peek(ctx, token, packet);
+    if (!n || n > capacity) return 0u;
+    if (capacity > sizeof s->bulk_coalesced) capacity = sizeof s->bulk_coalesced;
+    memcpy(s->bulk_coalesced, *packet, n);
+    for (unsigned i = inbound_next(s->bulk_first); i != s->bulk_tail;
+         i = inbound_next(i)) {
+        size_t combined = net_tcp_receive_coalesce(s->bulk_coalesced, n,
+                capacity, s->bulk_rx[i].bytes, s->bulk_rx[i].len);
+        if (!combined) break; /* never skip another flow or a sequence gap */
+        n = combined;
+        s->bulk_peek = i;
+    }
+    *packet = s->bulk_coalesced;
+    return n;
+}
+
 static void bulk_guest_consume(void *ctx) {
     vm_network_session_t *s = (vm_network_session_t *)ctx;
     /* UART is ordered. A later token means earlier notifications were lost;
      * account for loss and let guest TCP recover, never wedge the whole link. */
-    while (s->bulk_head != s->bulk_peek) {
+    while (s->bulk_head != s->bulk_first) {
         s->bulk_rx[s->bulk_head].len = 0u;
         s->bulk_head = inbound_next(s->bulk_head);
         s->net_to_guest_lost++;
+    }
+    while (s->bulk_head != s->bulk_peek) {
+        s->bulk_rx[s->bulk_head].len = 0u;
+        s->bulk_head = inbound_next(s->bulk_head);
+        s->bulk_merged_packets++;
     }
     s->bulk_rx[s->bulk_head].len = 0u;
     s->bulk_head = inbound_next(s->bulk_head);
@@ -177,6 +204,7 @@ bool vm_network_session_attach_packet_bridge(vm_network_session_t *s,
         if (word == GUEST_PACKET_BATCH_SVC) {
             s->bulk_batch_enabled = true;
             b->finish = bulk_guest_finish;
+            b->peek_large = bulk_guest_peek_large;
         }
     }
     s->net->cfg.tcp_cwnd_segments = NET_OUT_SLOTS;
@@ -493,6 +521,7 @@ void vm_network_session_status(const vm_network_session_t *session,
         out->bulk_failures = b->failures;
         out->bulk_batches = b->rx_batches;
         out->bulk_batched_packets = b->rx_batched;
+        out->bulk_merged_packets = session->bulk_merged_packets;
     }
     out->peer_opened = session->peer_opened;
     out->host_clock_enabled = session->host_now != NULL;
@@ -637,6 +666,7 @@ void vm_network_session_destroy(vm_network_session_t **slot) {
     if (session->packet_bridge && session->packet_bridge->ctx == session) {
         session->packet_bridge->send = NULL;
         session->packet_bridge->peek = NULL;
+        session->packet_bridge->peek_large = NULL;
         session->packet_bridge->consume = NULL;
         session->packet_bridge->finish = NULL;
         session->packet_bridge->ctx = NULL;

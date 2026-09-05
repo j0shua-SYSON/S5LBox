@@ -10,6 +10,7 @@
 #include <stdbool.h>
 
 #define GUEST_PACKET_MTU 1500u
+#define GUEST_PACKET_RX_MAX 16384u
 #define GUEST_PACKET_TOKEN_SIZE 16u
 #define GUEST_PACKET_RX_SVC UINT32_C(0xef0000f0)
 #define GUEST_PACKET_TX_SVC UINT32_C(0xef0000f1)
@@ -36,6 +37,9 @@ typedef struct {
     bool (*send)(void *ctx, const uint8_t *packet, size_t length);
     size_t (*peek)(void *ctx, const uint8_t token[GUEST_PACKET_TOKEN_SIZE],
                    const uint8_t **packet);
+    /* Optional receive coalescing, bounded by preflighted native clusters. */
+    size_t (*peek_large)(void *ctx, const uint8_t *token, size_t capacity,
+                         const uint8_t **packet);
     void (*consume)(void *ctx);
     /* Optional batch owner: peek(NULL) returns the next queued packet. The
      * native allocator/enqueue loop runs at most BATCH_MAX packets under the

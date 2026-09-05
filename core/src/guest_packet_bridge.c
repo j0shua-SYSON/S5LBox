@@ -80,6 +80,114 @@ static arm_svc_result_t fail(guest_packet_bridge_t *b) {
     return ARM_SVC_ERROR;
 }
 
+#define RX_CLUSTERS (GUEST_PACKET_RX_MAX / 2048u + 1u)
+typedef struct {
+    uint32_t m, next, data_va, room;
+    map_t meta, data, fields, next_field;
+} rx_cluster_t;
+typedef struct {
+    rx_cluster_t node[RX_CLUSTERS];
+    map_t link, reserve;
+    unsigned count;
+    uint32_t capacity, mru;
+    bool large;
+} rx_chain_t;
+
+/* Borrow only native-allocated, private clusters under the driver's lock.
+ * For a notification the first mbuf is already detached; unused clusters
+ * still belong to ld->inm. A batch starts with the whole chain at ld->inm. */
+static int prepare_rx(guest_packet_bridge_t *b, arm_cpu_t *c, uint32_t first,
+                       bool detached, rx_chain_t *out) {
+    memset(out, 0, sizeof *out);
+    out->large = b->peek_large != NULL;
+    uint8_t word[4], header[MBUF_HEADER];
+    if (!map(b, c, c->r[5] + 0xf8u, 4u, true, &out->link)) return -1;
+    copy_from(&out->link, word);
+    uint32_t unused = ld32(word), m = first;
+    if (out->large) {
+        if (!map(b, c, c->r[5] + 0x8cu, 4u, true, &out->reserve)) return -1;
+        copy_from(&out->reserve, word);
+        out->mru = ld32(word);
+    }
+    while (m && out->count < (out->large ? RX_CLUSTERS : 1u)) {
+        for (unsigned i = 0u; i < out->count; i++)
+            if (out->node[i].m == m) return -1;
+        rx_cluster_t *v = &out->node[out->count];
+        v->m = m;
+        if ((m & 3u) || !map(b, c, m, MBUF_HEADER, false, &v->meta)) return -1;
+        copy_from(&v->meta, header);
+        uint32_t base = ld32(header + 68u);
+        bool used_head = detached && out->count == 0u;
+        v->data_va = used_head ? ld32(header + 12u) : base;
+        v->next = used_head ? unused : ld32(header);
+        if ((header[18] & 3u) != 3u || ld32(header + 76u) != 2048u ||
+            v->data_va < base || (uint64_t)v->data_va - base >= 2048u ||
+            (used_head && ld32(header)) || (!out->large && ld32(header))) return 0;
+        v->room = 2048u - (v->data_va - base);
+        if (!map(b, c, v->data_va, v->room, true, &v->data) ||
+            !map(b, c, m + 8u, 8u, true, &v->fields) ||
+            !map(b, c, m, 4u, true, &v->next_field)) return -1;
+        out->capacity += v->room;
+        out->count++;
+        m = v->next;
+    }
+    for (unsigned i = 0u; m && i < out->count; i++)
+        if (out->node[i].m == m) return -1;
+    if (!out->count || out->capacity < 24u) return 0;
+    /* Preflight physical aliasing, including distinct virtual aliases. No
+     * payload may overwrite allocator metadata, links or another cluster. */
+    for (unsigned i = 0u; i < out->count; i++) {
+        const rx_cluster_t *a = &out->node[i];
+        if (overlap(&a->meta, &out->link) || overlap(&a->data, &out->link) ||
+            (out->large && (overlap(&a->meta, &out->reserve) ||
+                           overlap(&a->data, &out->reserve)))) return -1;
+        for (unsigned j = 0u; j < out->count; j++) {
+            const rx_cluster_t *d = &out->node[j];
+            if (overlap(&a->data, &d->meta) ||
+                (i != j && (overlap(&a->data, &d->data) ||
+                             overlap(&a->meta, &d->meta)))) return -1;
+        }
+    }
+    out->capacity -= 4u;
+    uint32_t limit = out->large ? GUEST_PACKET_RX_MAX : GUEST_PACKET_MTU;
+    if (out->capacity > limit) out->capacity = limit;
+    return 1;
+}
+
+static void commit_rx(const rx_chain_t *chain, const uint8_t *packet, size_t n) {
+    uint8_t framed[GUEST_PACKET_RX_MAX + 4u], fields[8];
+    memcpy(framed, "\xff\x03\x00\x21", 4u);
+    memcpy(framed + 4u, packet, n);
+    uint32_t left = (uint32_t)n + 4u, offset = 0u;
+    for (unsigned i = 0u; left; i++) {
+        const rx_cluster_t *v = &chain->node[i];
+        uint32_t size = left < v->room ? left : v->room, copied = 0u;
+        for (unsigned s = 0u; copied < size; s++) {
+            uint32_t part = v->data.span[s].length;
+            if (part > size - copied) part = size - copied;
+            memcpy(v->data.span[s].data, framed + offset + copied, part);
+            copied += part;
+        }
+        st32(fields, size); st32(fields + 4u, v->data_va);
+        copy_to(&v->fields, fields);
+        left -= size;
+        offset += size;
+        st32(fields, left ? v->next : 0u);
+        copy_to(&v->next_field, fields);
+        if (!left) {
+            st32(fields, v->next);
+            copy_to(&chain->link, fields);
+        }
+    }
+    /* This is the private serial driver's allocation reserve, not ifnet MTU
+     * or the negotiated wire MRU. Native getm owns replenishment, including
+     * partial allocation failure; peek_large never exceeds actual capacity. */
+    if (chain->large && chain->mru < GUEST_PACKET_RX_MAX) {
+        st32(fields, GUEST_PACKET_RX_MAX);
+        copy_to(&chain->reserve, fields);
+    }
+}
+
 static arm_svc_result_t transmit(guest_packet_bridge_t *b, arm_cpu_t *c,
                                   uint32_t pc) {
     if (!b->send) return call(c, c->r[6], pc + 4u);
@@ -129,7 +237,7 @@ static arm_svc_result_t receive(guest_packet_bridge_t *b, arm_cpu_t *c) {
     c->r[1] = c->r[6] - 2u;
     if (c->r[1] != 4u + GUEST_PACKET_TOKEN_SIZE) return ARM_SVC_HANDLED;
     uint8_t header[MBUF_HEADER], token[4u + GUEST_PACKET_TOKEN_SIZE], magic[16];
-    map_t meta, data, length;
+    map_t meta, data;
     uint32_t m = c->r[4];
     if ((m & 3u) || !map(b, c, m, MBUF_HEADER, false, &meta)) return fail(b);
     copy_from(&meta, header);
@@ -149,19 +257,11 @@ static arm_svc_result_t receive(guest_packet_bridge_t *b, arm_cpu_t *c) {
         c->r[0] = m;
         return call(c, b->sites.free_thumb_pc | 1u, b->sites.rx_drop_pc);
     }
-    uint32_t data_va = ld32(header + 12u), base = ld32(header + 68u);
-    uint32_t capacity = ld32(header + 76u);
-    if (!packet || n < 20u || n > GUEST_PACKET_MTU || ld32(header) != 0u ||
-        (header[18] & 3u) != 3u || data_va < base ||
-        (uint64_t)data_va - base + n + 4u > capacity || capacity != 2048u ||
-        !map(b, c, data_va + 4u, (uint32_t)n, true, &data) ||
-        !map(b, c, m + 8u, 4u, true, &length) || overlap(&data, &meta))
-        return fail(b);
-    /* Preflight every destination before the first write or queue consume. */
-    copy_to(&data, packet);
-    uint8_t size[4];
-    st32(size, (uint32_t)n + 4u);
-    copy_to(&length, size);
+    rx_chain_t chain;
+    if (prepare_rx(b, c, m, true, &chain) != 1) return fail(b);
+    if (b->peek_large) n = b->peek_large(b->ctx, token + 4u, chain.capacity, &packet);
+    if (!packet || n < 20u || n > chain.capacity) return fail(b);
+    commit_rx(&chain, packet, n);
     c->r[1] = (uint32_t)n + 4u; /* native mbuf_pkthdr_setlen follows the SVC */
     b->consume(b->ctx);
     b->rx_packets++;
@@ -197,36 +297,21 @@ static arm_svc_result_t receive_batch(guest_packet_bridge_t *b, arm_cpu_t *c) {
     size_t n = b->peek(b->ctx, NULL, &packet);
     if (!n) return finish_batch(b, c);
 
-    map_t link, meta, data, length;
-    uint8_t word[4], header[MBUF_HEADER];
+    map_t link;
+    uint8_t word[4];
     if (!map(b, c, b->batch_link + 0xf8u, 4u, true, &link)) return fail(b);
     copy_from(&link, word);
     uint32_t m = ld32(word);
     /* MBUF_DONTWAIT allocation failure is normal backpressure. Leave the
      * queued packet owned by the host and request a later notification. */
     if (!m) return finish_batch(b, c);
-    if ((m & 3u) || !map(b, c, m, MBUF_HEADER, false, &meta)) return fail(b);
-    copy_from(&meta, header);
-    uint32_t data_va = ld32(header + 12u), base = ld32(header + 68u);
-    if (!packet || n < 20u || n > GUEST_PACKET_MTU) return fail(b);
-    if (ld32(header) || (header[18] & 3u) != 3u ||
-        ld32(header + 76u) != 2048u || data_va < base ||
-        (uint64_t)data_va - base + n + 4u > 2048u)
-        return finish_batch(b, c); /* unsupported native layout: single RX */
-    if (!map(b, c, data_va, (uint32_t)n + 4u, true, &data) ||
-        !map(b, c, m + 8u, 4u, true, &length) ||
-        overlap(&data, &meta) || overlap(&data, &link) || overlap(&meta, &link))
-        return fail(b);
-    uint8_t framed[GUEST_PACKET_MTU + 4u];
-    memcpy(framed, "\xff\x03\x00\x21", 4u);
-    memcpy(framed + 4u, packet, n);
-    /* All destinations are preflighted. Detach exactly this native buffer;
-     * native pkthdr_setlen/enqueue/schedule/getm do all ownership transitions. */
-    copy_to(&data, framed);
-    st32(word, (uint32_t)n + 4u);
-    copy_to(&length, word);
-    st32(word, 0u);
-    copy_to(&link, word);
+    rx_chain_t chain;
+    int ready = prepare_rx(b, c, m, false, &chain);
+    if (ready < 0) return fail(b);
+    if (!ready) return finish_batch(b, c);
+    if (b->peek_large) n = b->peek_large(b->ctx, NULL, chain.capacity, &packet);
+    if (!packet || n < 20u || n > chain.capacity) return fail(b);
+    commit_rx(&chain, packet, n);
     b->consume(b->ctx);
     b->batch_left--;
     b->rx_packets++;

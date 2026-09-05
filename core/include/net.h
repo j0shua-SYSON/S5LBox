@@ -491,6 +491,13 @@ bool        net_get_tcp_live_status(const net_stack_t *ns,
  */
 uint16_t net_checksum(const uint8_t *data, size_t n);
 
+/* Receive-only coalescing after wire validation, never a larger wire MTU.
+ * Append contiguous ordinary IPv4/TCP data from the same flow, preserving
+ * sequence/window/control semantics and recomputing both checksums. Zero
+ * leaves dst unchanged. Options, fragments and control packets are refused. */
+size_t net_tcp_receive_coalesce(uint8_t *dst, size_t length, size_t capacity,
+                                 const uint8_t *next, size_t next_length);
+
 /*
  * The same sum over a TCP/UDP pseudo-header (RFC 793 §3.1) followed by the
  * segment. Exposed for the same reason, and because a harness that builds

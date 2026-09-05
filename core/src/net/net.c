@@ -59,6 +59,40 @@ uint16_t net_l4_checksum(uint32_t src, uint32_t dst, unsigned proto,
 
 /* ============================================================== output === */
 
+static bool plain_tcp_data(const uint8_t *p, size_t n) {
+    return p && n > 40u && n <= UINT16_MAX && p[0] == 0x45u &&
+        net_rd16(p + 2u) == n && net_rd16(p + 6u) == 0x4000u &&
+        p[9] == NET_PROTO_TCP && p[32] == 0x50u &&
+        (p[33] == 0x10u || p[33] == 0x18u) && net_rd16(p + 38u) == 0u &&
+        net_checksum(p, 20u) == 0u &&
+        net_l4_checksum(net_rd32(p + 12u), net_rd32(p + 16u),
+                         NET_PROTO_TCP, p + 20u, n - 20u) == 0u;
+}
+
+size_t net_tcp_receive_coalesce(uint8_t *dst, size_t n, size_t capacity,
+                                 const uint8_t *next, size_t nn) {
+    if (n > capacity || !plain_tcp_data(dst, n) || !plain_tcp_data(next, nn) ||
+        nn - 40u > capacity - n || n + nn - 40u > UINT16_MAX ||
+        dst[1] != next[1] || dst[8] != next[8] ||
+        memcmp(dst + 12u, next + 12u, 12u) || /* addresses and ports */
+        memcmp(dst + 28u, next + 28u, 4u) || /* ACK */
+        memcmp(dst + 34u, next + 34u, 2u) || /* window */
+        net_rd32(next + 24u) != net_rd32(dst + 24u) + (uint32_t)(n - 40u))
+        return 0u;
+    /* PSH asks the receiver to deliver available stream bytes; preserve it
+     * across the aggregate. No SYN/FIN/RST/URG/ECN state is coalesced. */
+    memmove(dst + n, next + 40u, nn - 40u);
+    n += nn - 40u;
+    dst[33] |= next[33];
+    net_wr16(dst + 2u, (uint16_t)n);
+    net_wr16(dst + 10u, 0u);
+    net_wr16(dst + 10u, net_checksum(dst, 20u));
+    net_wr16(dst + 36u, 0u);
+    net_wr16(dst + 36u, net_l4_checksum(net_rd32(dst + 12u),
+               net_rd32(dst + 16u), NET_PROTO_TCP, dst + 20u, n - 20u));
+    return n;
+}
+
 size_t net_build_ipv4(uint8_t *out, size_t cap, uint32_t src, uint32_t dst,
                       unsigned proto, uint16_t ident, size_t payload_len) {
     if (!out || cap < IPV4_HDR_LEN) return 0;
