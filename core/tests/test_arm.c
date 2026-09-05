@@ -1787,6 +1787,102 @@ static void test_cortex_a8_auxiliary_control_register(void) {
     }
 }
 
+static void test_cortex_a8_coprocessor_access_control(void) {
+    /* DDI0344K 3.2.27 and DDI0406C.b B4.1.40: only CP10/CP11 are
+     * implemented. Absent fields/optional disables are RAZ/WI. Refuse
+     * reserved bit29/permission2 and mismatched floating-point permissions. */
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned user = 0; user < 2u; user++) {
+      for (unsigned field = 0; field < 18u; field++) {
+       for (unsigned permission = 0; permission < 4u; permission++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        CHECK(c.cp15.cpacr == 0u, "A8 CPACR reset allowed a coprocessor");
+        uint32_t source = 0x00f00000u;
+        if (field < 14u) {
+            if (field == 10u || field == 11u) source = permission * 0x00500000u;
+            else source |= permission << (2u * field);
+        } else source |= (permission & 1u) << (field + 14u); /* bits28..31 */
+        bool allowed = !user && !(field == 15u && (permission & 1u)) &&
+                       !((field == 10u || field == 11u) && permission == 2u);
+        c.cpsr = (user ? ARM_MODE_USR : ARM_MODE_SVC) | ARM_CPSR_I | ARM_CPSR_F |
+                 ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_Q | (thumb ? ARM_CPSR_T : 0u);
+        c.cp15.cpacr = 0x00500000u;
+        c.r[4] = source; c.r[2] = 0xabcdef01u;
+        c.excl_valid = true; c.excl_addr = 0x1234u;
+        arm_cp15_t expected = c.cp15;
+        if (allowed) expected.cpacr = source & 0x00f00000u;
+        uint32_t flags = c.cpsr, generation = c.tlb_gen;
+        uint64_t flushes = c.tlb_flushes;
+        if (thumb) { m_w16(NULL, 0, 0xee01u); m_w16(NULL, 2, 0x4f50u); }
+        else m_w32(NULL, 0, 0xee014f50u);
+        CHECK(arm_step(&c) == (allowed ? ARM_OK : ARM_UNDEFINED) &&
+              c.r[15] == (allowed ? 4u : 0u) && c.r[4] == source && c.cpsr == flags &&
+              memcmp(&c.cp15, &expected, sizeof expected) == 0,
+              "A8 CPACR field/privilege policy thumb=%u user=%u field=%u permission=%u", thumb, user, field, permission);
+        CHECK(c.tlb_gen == generation && c.tlb_flushes == flushes && c.excl_valid && c.excl_addr == 0x1234u,
+              "A8 CPACR write changed translation or exclusive state");
+        c.r[15] = 0;
+        if (thumb) { m_w16(NULL, 0, 0xee11u); m_w16(NULL, 2, 0x2f50u); }
+        else m_w32(NULL, 0, 0xee112f50u);
+        CHECK(arm_step(&c) == (user ? ARM_UNDEFINED : ARM_OK) && c.r[15] == (user ? 0u : 4u) &&
+              c.r[2] == (user ? 0xabcdef01u : expected.cpacr) && c.cpsr == flags,
+              "A8 CPACR readback exposed absent coprocessors or User access");
+       }
+      }
+      for (unsigned cp10 = 0; cp10 < 4u; cp10++) {
+       for (unsigned cp11 = 0; cp11 < 4u; cp11++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = (user ? ARM_MODE_USR : ARM_MODE_SVC) | ARM_CPSR_I | ARM_CPSR_F | (thumb ? ARM_CPSR_T : 0u);
+        c.cp15.cpacr = 0x00500000u; c.r[4] = (cp10 << 20) | (cp11 << 22);
+        bool allowed = !user && cp10 == cp11 && cp10 != 2u;
+        if (thumb) { m_w16(NULL, 0, 0xee01u); m_w16(NULL, 2, 0x4f50u); }
+        else m_w32(NULL, 0, 0xee014f50u);
+        CHECK(arm_step(&c) == (allowed ? ARM_OK : ARM_UNDEFINED) &&
+              c.cp15.cpacr == (allowed ? c.r[4] : 0x00500000u),
+              "A8 CPACR accepted an invalid floating-point permission pair");
+       }
+      }
+     }
+    }
+    /* Use a guest MCR to configure permissions, then execute a real VFP
+     * access. Denied accesses must enter the guest Undefined handler. */
+    static const unsigned permissions[] = {0,1,3};
+    for (unsigned i = 0; i < sizeof permissions / sizeof permissions[0]; i++) {
+     for (unsigned user = 0; user < 2u; user++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.r[4] = permissions[i] * 0x00500000u;
+        m_w32(NULL, 0, 0xee014f50u);
+        CHECK(arm_step(&c) == ARM_OK, "CPACR guest setup");
+        c.cpsr = (user ? ARM_MODE_USR : ARM_MODE_SVC) | ARM_CPSR_I | ARM_CPSR_F | ARM_CPSR_N;
+        c.vfp_fpexc = ARM_FPEXC_EN; c.vfp_fpscr = 0x40000080u; /* FPSCR.Z/IDC */
+        c.r[2] = 0xabcdef01u; c.r[15] = 0x100u;
+        uint32_t flags = c.cpsr;
+        bool allowed = permissions[i] == 3u || (permissions[i] == 1u && !user);
+        m_w32(NULL, 0x100u, 0xeef12a10u); /* VMRS r2,FPSCR */
+        CHECK(arm_step(&c) == ARM_OK, "CPACR-controlled VFP instruction halted");
+        if (allowed) {
+            CHECK(c.r[15] == 0x104u && c.r[2] == c.vfp_fpscr && c.cpsr == flags,
+                  "CPACR did not grant the intended VFP access");
+        } else {
+            CHECK(c.r[15] == ARM_VEC_UNDEFINED && (c.cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_UND &&
+                  c.r[14] == 0x104u && c.spsr[ARM_BANK_UND] == flags && c.r[2] == 0xabcdef01u,
+                  "CPACR denial did not preserve operands and enter guest Undefined");
+        }
+     }
+    }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned i = 0; i < sizeof legacy / sizeof legacy[0]; i++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, legacy[i]), "reset");
+        c.r[4] = UINT32_MAX; m_w32(NULL, 0, 0xee014f50u);
+        CHECK(arm_step(&c) == ARM_OK && c.cp15.cpacr == UINT32_MAX,
+              "A8 CPACR field rules changed a legacy profile");
+    }
+}
+
 static void test_cortex_a8_l2_auxiliary_control(void) {
     /* DDI0344K 3.2.55, table3-3: reset 0x42, privileged Secure writes.
      * This CPU configuration has no parity/ECC RAM, so bit21 cannot set.
@@ -8970,6 +9066,7 @@ int main(void) {
     test_cortex_a8_l2_auxiliary_control();
     test_cortex_a8_system_control_register();
     test_cortex_a8_auxiliary_control_register();
+    test_cortex_a8_coprocessor_access_control();
     test_high_vectors();
     test_mmu_disabled_is_identity();
     test_mmu_section_translation();

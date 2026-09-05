@@ -941,7 +941,21 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
                         }
                         p->actlr = v;
                     }
-                    else if (opc2 == 2) p->cpacr = v;
+                    else if (opc2 == 2) {
+                        if (c->arch == ARM_ARCH_V7_CORTEX_A8) {
+                            /* DDI0344K 3.2.27 and DDI0406C.b B4.1.40:
+                             * absent coprocessor fields and unsupported
+                             * ASEDIS/D32DIS/TRCDIS controls are RAZ/WI.
+                             * Bit29 is reserved. Refuse unpredictable FP
+                             * permission pairs before changing availability. */
+                            unsigned cp10 = (v >> 20) & 3u;
+                            unsigned cp11 = (v >> 22) & 3u;
+                            if ((v & (1u << 29)) || cp10 == 2u || cp10 != cp11)
+                                return ARM_UNDEFINED;
+                            v &= 0x00f00000u;
+                        }
+                        p->cpacr = v;
+                    }
                 }
                 break;
             case 2:

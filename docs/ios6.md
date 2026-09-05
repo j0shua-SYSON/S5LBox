@@ -109,6 +109,19 @@ readback, reserved-write refusal and real guest writes that disable and
 restore WFI waiting. These selected reset inputs do not establish the N88
 hardware configuration. Legacy ACTLR behavior is unchanged.
 
+Cortex-A8 CPACR keeps the CP10/CP11 access fields. Fields for absent
+coprocessors and the unsupported optional ASEDIS/D32DIS/TRCDIS controls
+read zero and ignore writes. Reserved bit 29, permission value `2`, and
+mismatched CP10/CP11 permissions are refused before changing availability.
+The reset state denies access. This follows the implemented fields in
+[DDI0344K, section 3.2.27](https://documentation-service.arm.com/static/5e8e1ac688295d1e18d35fde)
+and the absent-field rules in
+[DDI0406C.b, B4.1.40](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Regressions program CPACR through guest MCR instructions and verify permitted
+VFP access and denied access entering the guest Undefined handler. Legacy
+CPACR behavior is unchanged. This establishes access control; the full
+Cortex-A8 VFP/NEON register and instruction model remains separate work.
+
 Cortex-A8 L2 auxiliary control (`p15,1,c9,c0,2`) now stores its defined
 fields separately from ARM1176 CP15 state and resets to `0x00000042`.
 The implemented configuration has no L2 parity/ECC RAM, so bit 21 stays clear
