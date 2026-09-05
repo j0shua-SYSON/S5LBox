@@ -262,9 +262,9 @@ typedef struct arm_bus {
     uint8_t *(*host_ram_write)(void *ctx, uint32_t pa, uint32_t len);
 
     /*
-     * Optional platform hook for the ARM1176 CP15 Wait For Interrupt
-     * operation.  A system model can synchronously advance its autonomous
-     * devices to the first interrupt edge and return true.  Returning false
+     * Optional platform hook for ARM1176 CP15 Wait For Interrupt and the
+     * Cortex-A8 WFI instruction. A system model can synchronously advance
+     * its autonomous devices to the first interrupt edge and return true. Returning false
      * means that no modeled wake source can currently make progress; the core
      * then retains the historical no-op fallback instead of hanging its host.
      *

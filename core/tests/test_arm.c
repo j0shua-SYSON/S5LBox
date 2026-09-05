@@ -7286,6 +7286,172 @@ static uint32_t test_it_bits(unsigned state) {
     return ((state & 0xfcu) << 8) | ((state & 3u) << 25);
 }
 
+typedef struct wfi_probe {
+    arm_cpu_t *cpu;
+    unsigned calls;
+    bool irq, fiq, result;
+    uint32_t seen_pc, seen_cpsr;
+} wfi_probe_t;
+
+static bool wake_wfi(void *ctx) {
+    wfi_probe_t *p = ctx;
+    p->calls++;
+    p->seen_pc = p->cpu->r[15]; p->seen_cpsr = p->cpu->cpsr;
+    if (p->irq) p->cpu->irq_line = true;
+    if (p->fiq) p->cpu->fiq_line = true;
+    m_w32(NULL, 0x100u, 0x12345678u);
+    return p->result;
+}
+
+static unsigned put_wfi(unsigned encoding, uint32_t pc) {
+    if (!encoding) m_w32(NULL, pc, 0xe320f003u); /* A1 */
+    else if (encoding == 1u) m_w16(NULL, pc, 0xbf30u); /* T1 */
+    else { m_w16(NULL, pc, 0xf3afu); m_w16(NULL, pc + 2u, 0x8003u); } /* T2 */
+    return encoding == 1u ? 2u : 4u;
+}
+
+static void test_cortex_a8_wfi(void) {
+    /* DDI0406C.b A8.8.425/B1.8.14: all three encodings permit User mode;
+     * pending IRQ/FIQ wakes regardless of CPSR masks. DDI0344K3.2.26
+     * ACTLR.WFINOP bypasses the wait. A missing/nonprogressing hook returns. */
+    for (unsigned encoding = 0; encoding < 3u; encoding++) {
+     for (unsigned user = 0; user < 2u; user++) {
+      for (unsigned pending = 0; pending < 4u; pending++) {
+       for (unsigned nop = 0; nop < 2u; nop++) {
+        for (unsigned hook = 0; hook < 3u; hook++) {
+            memset(g_ram, 0, sizeof g_ram);
+            arm_cpu_t c;
+            wfi_probe_t p = {.cpu = &c, .result = hook == 2u};
+            arm_bus_t bus = g_bus; bus.ctx = &p;
+            bus.wait_for_interrupt = hook ? wake_wfi : NULL;
+            CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+            c.cpsr = (user ? ARM_MODE_USR : ARM_MODE_SVC) | ARM_CPSR_I | ARM_CPSR_F |
+                     ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_Q | (encoding ? ARM_CPSR_T : 0u);
+            c.cp15.actlr |= nop << 8;
+            c.irq_line = (pending & 1u) != 0u; c.fiq_line = (pending & 2u) != 0u;
+            c.r[0] = 0xabcdef01u; c.r[14] = 0xaabbccddu; c.excl_valid = true; c.excl_addr = 0x200u;
+            uint32_t flags = c.cpsr;
+            unsigned width = put_wfi(encoding, 0), calls = hook && !nop && !pending ? 1u : 0u;
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == width && c.cycles == 1u && p.calls == calls,
+                  "WFI did not wait/retire correctly encoding=%u user=%u pending=%u nop=%u hook=%u calls=%u",
+                  encoding, user, pending, nop, hook, p.calls);
+            CHECK(c.cpsr == flags && c.r[0] == 0xabcdef01u && c.r[14] == 0xaabbccddu &&
+                  c.excl_valid && c.excl_addr == 0x200u && m_r32(NULL, 0x100u) == (calls ? 0x12345678u : 0u),
+                  "WFI changed CPU state or lost synchronous platform work");
+            CHECK(!calls || (p.seen_pc == 0u && p.seen_cpsr == flags), "WFI callback observed premature retirement");
+        }
+       }
+      }
+     }
+     for (unsigned pass = 0; pass < 2u; pass++) {
+        arm_cpu_t c;
+        wfi_probe_t p = {.cpu = &c};
+        arm_bus_t bus = g_bus; bus.ctx = &p; bus.wait_for_interrupt = wake_wfi;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_N | (pass ? ARM_CPSR_Z : 0u) | (encoding ? ARM_CPSR_T : 0u);
+        uint32_t flags = c.cpsr;
+        unsigned width = put_wfi(encoding, encoding ? 2u : 0u);
+        if (encoding) {
+            m_w16(NULL, 0, 0xbf0cu); /* ITE EQ; WFI may precede the last slot. */
+            CHECK(arm_step(&c) == ARM_OK && (c.cpsr & TEST_IT_MASK) == test_it_bits(0x0cu), "ITE setup");
+        } else m_w32(NULL, 0, 0x0320f003u); /* WFIEQ */
+        CHECK(arm_step(&c) == ARM_OK && p.calls == pass && c.r[15] == width + (encoding ? 2u : 0u) &&
+              c.cpsr == (flags | (encoding ? test_it_bits(0x18u) : 0u)),
+              "conditional WFI lost condition/IT progression encoding=%u pass=%u", encoding, pass);
+     }
+     for (unsigned fiq = 0; fiq < 2u; fiq++) {
+      for (unsigned masked = 0; masked < 2u; masked++) {
+        arm_cpu_t c;
+        wfi_probe_t p = {.cpu = &c, .irq = !fiq, .fiq = fiq != 0u, .result = true};
+        arm_bus_t bus = g_bus; bus.ctx = &p; bus.wait_for_interrupt = wake_wfi;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_N | ARM_CPSR_C | (encoding ? ARM_CPSR_T | test_it_bits(0x1cu) : 0u) |
+                 (masked ? ARM_CPSR_I | ARM_CPSR_F : 0u);
+        uint32_t flags = c.cpsr;
+        uint32_t retired_flags = encoding ? (flags & ~TEST_IT_MASK) | test_it_bits(0x18u) : flags;
+        unsigned width = put_wfi(encoding, 0);
+        if (encoding) m_w16(NULL, width, 0x235au); else m_w32(NULL, width, 0xe3a0305au);
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == width && c.cpsr == retired_flags && p.calls == 1u &&
+              p.seen_cpsr == flags && m_r32(NULL, 0x100u) == 0x12345678u,
+              "WFI lost wake event/IT progression or vectored before retirement");
+        CHECK(arm_step(&c) == ARM_OK, "first step after WFI failed");
+        if (masked) {
+            CHECK(c.r[3] == 0x5au && c.r[15] == width + (encoding ? 2u : 4u) &&
+                  (c.cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_USR, "masked WFI wake did not resume the next instruction");
+        } else {
+            CHECK(c.r[15] == (fiq ? ARM_VEC_FIQ : ARM_VEC_IRQ) && c.r[14] == width + 4u &&
+                  c.spsr[fiq ? ARM_BANK_FIQ : ARM_BANK_IRQ] == retired_flags && !(c.cpsr & (ARM_CPSR_T | TEST_IT_MASK)),
+                  "WFI wake lost interrupt vector/return link/Thumb state");
+        }
+      }
+     }
+    }
+    /* Existing profile paths remain separate: A32 used a no-op and Swift
+     * Thumb WFI remains unsupported. ARM1176 keeps its CP15 wait tests. */
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++) {
+        unsigned calls = 0;
+        arm_bus_t bus = g_bus; bus.ctx = &calls; bus.wait_for_interrupt = count_wfi;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, legacy[profile]), "reset");
+        put_wfi(0, 0);
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && !calls, "A8 WFI changed legacy A32 behavior");
+        for (unsigned encoding = 1; encoding < 3u; encoding++) {
+            CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_SWIFT), "reset"); c.cpsr |= ARM_CPSR_T;
+            put_wfi(encoding, 0);
+            CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && !calls, "A8 WFI leaked into Swift Thumb");
+        }
+    }
+    /* Nearby hints/reserved bits must not acquire a WFI platform side effect. */
+    const uint32_t a32_neighbors[] = {0xe320f000u,0xe320f001u,0xe320f002u,0xe320f004u,0xe320f013u,0xe320f103u};
+    const uint32_t t32_neighbors[] = {0xf3af8000u,0xf3af8001u,0xf3af8002u,0xf3af8004u,0xf3af8013u,0xf3af8103u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned i = 0; i < sizeof a32_neighbors / sizeof a32_neighbors[0]; i++) {
+        unsigned calls = 0;
+        arm_bus_t bus = g_bus; bus.ctx = &calls; bus.wait_for_interrupt = count_wfi;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        if (thumb) {
+            c.cpsr |= ARM_CPSR_T;
+            m_w16(NULL, 0, (uint16_t)(t32_neighbors[i] >> 16)); m_w16(NULL, 2, (uint16_t)t32_neighbors[i]);
+        } else m_w32(NULL, 0, a32_neighbors[i]);
+        (void)arm_step(&c);
+        CHECK(!calls, "neighbor instruction unexpectedly invoked WFI hook thumb=%u index=%u", thumb, i);
+     }
+    }
+}
+
+static void test_cortex_a8_wfi_fetch_boundary(void) {
+    for (unsigned host = 0; host < 2u; host++) {
+     for (unsigned fault = 0; fault < 4u; fault++) {
+        memset(g_ram, 0, sizeof g_ram);
+        unsigned calls = 0;
+        arm_bus_t bus = g_bus; bus.ctx = &calls; bus.wait_for_interrupt = count_wfi;
+        if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cp15.sctlr |= ARM_SCTLR_M; c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N | test_it_bits(0x1cu); /* NE passes */
+        c.r[15] = 0xffeu;
+        uint32_t flags = c.cpsr;
+        m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x8032u);
+        m_w32(NULL, 0x6004u, fault == 1u ? 0u : fault == 2u ? 0xa033u : fault == 3u ? 0xa012u : 0xa032u);
+        m_w16(NULL, 0x8ffeu, 0xf3afu); m_w16(NULL, 0xa000u, 0x8003u); m_w16(NULL, 0x9000u, 0x8000u);
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u && calls == (fault ? 0u : 1u),
+              "WFI hook ran before complete instruction fetch or missed nonadjacent backing");
+        if (!fault) {
+            CHECK(c.r[15] == 0x1002u && c.cpsr == ((flags & ~TEST_IT_MASK) | test_it_bits(0x18u)),
+                  "wide WFI lost cross-page PC/IT progression");
+        } else {
+            CHECK(c.r[15] == ARM_VEC_PREFETCH && c.r[14] == 0x1002u && c.cp15.ifar == 0x1000u &&
+                  c.spsr[ARM_BANK_ABT] == flags && !(c.cpsr & TEST_IT_MASK) &&
+                  (c.cp15.ifsr & 15u) == (fault == 1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION),
+                  "wide WFI fetch failure lost precise abort/IT state");
+        }
+     }
+    }
+}
+
 static void test_thumb_it_encodings_and_sequences(void) {
     const arm_arch_t profiles[] = {ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
     for (unsigned profile = 0; profile < 3; profile++) {
@@ -7295,7 +7461,7 @@ static void test_thumb_it_encodings_and_sequences(void) {
       hint.cpsr |= ARM_CPSR_T | ARM_CPSR_N;
       uint32_t before_hint = hint.cpsr;
       m_w16(NULL, 0, (uint16_t)(0xbf00u | (cond << 4)));
-      bool nop = profile != 0u && cond == 0u;
+      bool nop = (profile != 0u && cond == 0u) || (profile == 1u && cond == 3u);
       CHECK(arm_step(&hint) == (nop ? ARM_OK : ARM_UNDEFINED) && hint.cpsr == before_hint &&
             hint.r[15] == (nop ? 2u : 0u), "zero IT mask did not select the separate hint space");
       for (unsigned mask = 1; mask < 16; mask++) {
@@ -8600,6 +8766,8 @@ int main(void) {
     test_thumb2_indexed_transfers();
     test_thumb2_indexed_transfer_aborts();
     test_thumb_it_encodings_and_sequences();
+    test_cortex_a8_wfi();
+    test_cortex_a8_wfi_fetch_boundary();
     test_thumb_it_narrow_flags();
     test_thumb_it_exceptions();
     test_thumb_it_placement_and_skips();

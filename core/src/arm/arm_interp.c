@@ -675,6 +675,19 @@ static arm_status_t undefined_instruction(arm_cpu_t *c, uint32_t pc,
     return take_undefined_instruction(c, pc);
 }
 
+static arm_status_t exec_a8_wfi(arm_cpu_t *c) {
+    if (c->arch != ARM_ARCH_V7_CORTEX_A8) return ARM_UNDEFINED;
+    /* DDI0406C.b B1.8.14: User may wait, and pending physical interrupts
+     * wake regardless of CPSR masks. DDI0344K 3.2.26 makes ACTLR.WFINOP
+     * bypass the wait. The synchronous hook leaves retirement/interrupt
+     * entry to the caller and the next step; no hidden suspended CPU state.
+     * Without a progressing platform hook, early completion is permitted. */
+    if (!(c->cp15.actlr & (1u << 8)) && !c->irq_line && !c->fiq_line &&
+        c->bus && c->bus->wait_for_interrupt)
+        (void)c->bus->wait_for_interrupt(c->bus->ctx);
+    return ARM_OK;
+}
+
 /*
  * CP15 access via MCR (write) / MRC (read).
  *
@@ -1300,6 +1313,11 @@ static arm_status_t exec_data_processing(arm_cpu_t *c, uint32_t pc, uint32_t ins
                 c->r[rd] = spsr ? c->spsr[bank] : c->cpsr;
                 return ARM_OK;
             }
+
+            /* A1 WFI occupies the zero-field immediate MSR hint space.
+             * Preserve other profiles' historical no-op path below. */
+            if (c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn & 0x0fffffffu) == 0x0320f003u)
+                return exec_a8_wfi(c);
 
             /* MSR <psr>_fields, Rm | #imm:
              *   register:  cccc 00010 R 10 mask 1111 00000000 mmmm
@@ -2667,7 +2685,10 @@ static arm_status_t thumb_step(arm_cpu_t *c, uint32_t pc, uint16_t insn,
     case 0xb: {
         if ((insn & 0xff00u) == 0xbf00u && arm_arch_uses_thumb2_encoding(c->arch)) {
             unsigned mask = insn & 15u, condition = (insn >> 4) & 15u;
-            if (!mask) return condition == 0u ? ARM_OK : ARM_UNDEFINED; /* NOP, other hints separate */
+            if (!mask) {
+                if (condition == 3u) return exec_a8_wfi(c); /* WFI T1 */
+                return condition == 0u ? ARM_OK : ARM_UNDEFINED; /* NOP, other hints separate */
+            }
             if ((thumb_it_state(c) & 15u) || condition == 15u ||
                 (condition == 14u && (mask & (mask - 1u))))
                 return ARM_UNDEFINED;
@@ -2945,6 +2966,7 @@ static arm_status_t thumb_load_word(arm_cpu_t *c, uint32_t address, unsigned rt,
 
 static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
                                  uint16_t second, uint32_t *next) {
+    if (first == 0xf3afu && second == 0x8003u) return exec_a8_wfi(c); /* WFI T2 */
     /* MCR/MRC T1 (DDI0406C.b A8.8.98/107): CP15 uses the A32 fields,
      * but Thumb forbids Rt=SP. Only Cortex-A8's checked CP15 bank is ready;
      * other coprocessors/profiles remain separate work. MCR2/MRC2 to CP15

@@ -121,6 +121,19 @@ instruction path is unchanged.
 See [DDI0406C.b, A8.8.98/107](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 This adds transfer execution without supplying unverified CPU identity.
 
+Cortex-A8 WFI now executes in ARM and both Thumb encodings, including User
+mode and conditional IT slots. It calls the existing synchronous platform
+wait hook unless IRQ/FIQ is already pending or ACTLR.WFINOP is set. Interrupt
+masks affect subsequent exception delivery, not whether WFI wakes. Retirement
+and IT progression finish before the next step takes an interrupt, preserving
+the correct return address and saved state. A missing or nonprogressing hook
+permits early completion, as allowed by
+[DDI0406C.b, A8.8.425/B1.8.14](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Tests cover synchronous platform work, pending and newly asserted IRQ/FIQ,
+masked continuation, conditional skips and second-halfword fetch faults.
+Other profiles and the legacy CP15 WFI path retain their behavior. This is a
+CPU wait mechanism; S5L8920 device timing and complete sleep/wake remain work.
+
 Cortex-A8 access-flag faults are not cached. After an AF-clear descriptor
 faults, software can set its flag and retry without a TLB invalidation, as
 required by [DDI0406C.b, B3.7.4](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
