@@ -6707,6 +6707,95 @@ static void test_thumb2_word_load_aborts(void) {
     }
 }
 
+static void test_thumb2_small_stores(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    const uint16_t offsets[] = {0u, 0x64u, 0xfffu};
+    for (unsigned p = 0; p < 2; p++) {
+     for (unsigned host = 0; host < 2; host++) {
+      for (unsigned half = 0; half < 2; half++) {
+       for (unsigned i = 0; i < 3; i++) {
+        arm_bus_t bus = g_bus;
+        if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, profiles[p]), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_V | ARM_CPSR_Q;
+        c.cp15.sctlr = 0u; /* ARMv7 unaligned support even when raw U=0. */
+        c.r[13] = 0x10001u; c.r[14] = 0x44332211u;
+        uint32_t cpsr = c.cpsr, address = c.r[13] + offsets[i];
+        memset(g_ram + 0x10000u, 0xee, 0x1008u);
+        m_w16(NULL, 0, (uint16_t)(half ? 0xf8adu : 0xf88du)); /* Rt=LR, Rn=SP */
+        m_w16(NULL, 2, (uint16_t)(0xe000u | offsets[i]));
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u &&
+              c.r[13] == 0x10001u && c.r[14] == 0x44332211u && c.cpsr == cpsr,
+              "STRB/H.W changed operands, flags or retirement");
+        CHECK(g_ram[address - 1u] == 0xeeu && g_ram[address] == 0x11u &&
+              g_ram[address + 1u] == (half ? 0x22u : 0xeeu) && g_ram[address + 2u] == 0xeeu,
+              "STRB/H.W offset/size wrong or adjacent byte overwritten");
+       }
+      }
+     }
+    }
+    for (unsigned half = 0; half < 2; half++) {
+     for (unsigned bad = 0; bad < 3; bad++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T;
+        c.r[4] = 0x100u; c.r[2] = 0x12345678u;
+        m_w16(NULL, 0, (uint16_t)((half ? 0xf8a0u : 0xf880u) | (bad == 2 ? 15u : 4u)));
+        m_w16(NULL, 2, (uint16_t)((bad == 0 ? 13u : bad == 1 ? 15u : 2u) << 12));
+        m_w32(NULL, 0x100u, 0xeeeeeeeeu);
+        uint32_t instruction = m_r32(NULL, 0), cpsr = c.cpsr;
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.cpsr == cpsr &&
+              m_r32(NULL, 0) == instruction && m_r32(NULL, 0x100u) == 0xeeeeeeeeu,
+              "STRB/H.W accepted SP/PC source or PC base");
+     }
+    }
+}
+
+static void test_thumb2_small_store_aborts(void) {
+    for (unsigned host = 0; host < 2; host++) {
+     for (unsigned half = 0; half < 2; half++) {
+      for (unsigned fault = 0; fault < 5; fault++) {
+        arm_bus_t bus = g_bus;
+        if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
+        arm_cpu_t c;
+        memset(g_ram, 0xee, sizeof g_ram);
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP | (fault == 4 ? ARM_SCTLR_A : 0u);
+        c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N;
+        c.r[4] = 0x1ffeu; c.r[2] = 0x44332211u;
+        uint32_t cpsr = c.cpsr;
+        m_w32(NULL, 0x4000u, 0x6001u);
+        m_w32(NULL, 0x6000u, 0x803eu);
+        m_w32(NULL, 0x6004u, fault == 1 ? 0u : 0xa03eu);
+        m_w32(NULL, 0x6008u, fault == 2 ? 0u : fault == 3 ? 0xc01eu : 0xc03eu);
+        m_w16(NULL, 0x8000u, (uint16_t)(half ? 0xf8a4u : 0xf884u));
+        m_w16(NULL, 0x8002u, 0x2001u); /* address 0x1fff; halfword crosses pages */
+        bool abort = fault == 1u || (half && fault != 0u);
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u && c.r[4] == 0x1ffeu &&
+              c.r[2] == 0x44332211u, "STRB/H.W failed to retire with operands intact");
+        if (abort) {
+            uint32_t fsr = fault == 4 ? ARM_FSR_ALIGNMENT : fault == 3 ?
+                           ARM_FSR_PAGE_PERMISSION : ARM_FSR_PAGE_TRANSLATION;
+            CHECK(c.r[15] == ARM_VEC_DATA_ABORT && c.r[14] == 8u &&
+                  c.cp15.dfar == (fault == 1 || fault == 4 ? 0x1fffu : 0x2000u) &&
+                  c.cp15.dfsr == (fsr | (1u << 11)) && c.spsr[ARM_BANK_ABT] == cpsr,
+                  "STRB/H.W abort lost byte address, WnR, LR or saved flags");
+        } else {
+            CHECK(c.r[15] == 4u && c.cpsr == cpsr,
+                  "byte access incorrectly used halfword alignment or next-page permission");
+        }
+        bool first_written = !abort || (half && (fault == 2 || fault == 3));
+        CHECK(g_ram[0xafffu] == (first_written ? 0x11u : 0xeeu) &&
+              g_ram[0xc000u] == (half && !abort ? 0x22u : 0xeeu) &&
+              g_ram[0xaffeu] == 0xeeu && g_ram[0xb000u] == 0xeeu && g_ram[0xc001u] == 0xeeu,
+              "STRB/H.W committed wrong bytes across an abort or physical page boundary");
+      }
+     }
+    }
+}
+
 static void test_thumb_compare_and_branch(void) {
     const arm_arch_t profiles[] = {ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
     const uint32_t offsets[] = {0u, 62u, 64u, 126u};
@@ -6767,6 +6856,8 @@ int main(void) {
     test_thumb2_multiple_transfer_aborts();
     test_thumb2_word_loads();
     test_thumb2_word_load_aborts();
+    test_thumb2_small_stores();
+    test_thumb2_small_store_aborts();
     test_thumb_compare_and_branch();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();

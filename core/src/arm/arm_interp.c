@@ -2827,6 +2827,16 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         }
         return ARM_OK;
     }
+    /* STRB/STRH immediate T2 (DDI0406C.b A8.8.206/216). Unlike STR,
+     * these forms forbid SP as the source; SP remains a valid base. */
+    if ((first & 0xffd0u) == 0xf880u) {
+        unsigned rn = first & 15u, rt = second >> 12;
+        if (rn == 15u || rt == 13u || rt == 15u) return ARM_UNDEFINED;
+        uint32_t address = c->r[rn] + (second & 0xfffu);
+        if (first & 0x20u) mem_w16(c, address, (uint16_t)c->r[rt]);
+        else mem_w8(c, address, (uint8_t)c->r[rt]);
+        return ARM_OK;
+    }
     /* LDR/STR immediate T3 and LDR literal T2 (DDI0406C.b A8.8.62/64/203).
      * Ordinary imm12 offsets add to Rn; a literal uses Align(PC+4,4) and U.
      * No writeback. SP is permitted, and a PC load interworks. */

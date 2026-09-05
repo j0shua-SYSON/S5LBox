@@ -42,6 +42,15 @@ and the relocation code establish iBoot's own base as `0x4ff00000`.
 The decrypted iBoot SHA-256 is
 `ef527ad3d131cc220c73f9e1dd3ae06acfd4463f3cdb60ac717aadf8f09e031c`.
 
+The target kernel checks boot-argument version **5** at `0x8027acec`.
+iBoot constructs revision 1 and copies a `0x138`-byte structure. Its N88
+display timing table at `0x4ff2b244` specifies 320 × 480; the RGB888 surface
+mode uses depth 32 and stride 1280. The allocator reserves three page-rounded
+buffers below RAM top minus 16 KiB, placing the first at `0x4fe3a000` and
+reducing the boot-argument memory size accordingly. This establishes a
+firmware configuration, not a working display model. The device-tree pointer
+at argument offset `0x30` is virtual; its byte length is at `0x34`.
+
 ## CPU boundary
 
 `arm_arch_t` values are identifiers, not ordered architecture levels.
@@ -77,6 +86,13 @@ and a call straddling an unmapped or denied page. IT blocks remain unsupported.
 The narrow CBZ/CBNZ extension is gated to Cortex-A8/Swift and refuses active
 IT state. It tests the register directly, preserves flags, and uses its
 unsigned forward displacement. ARM1176 continues to reject it.
+
+Wide STRB/STRH with unsigned imm12 offsets use the common byte/halfword memory
+paths. They accept SP as a base, reject SP/PC sources and PC bases, and leave
+flags and base registers unchanged. Tests cover adjacent-byte preservation,
+unaligned accesses, page crossings, translation/permission faults and abort
+state with host RAM access enabled and disabled. On a second-page store fault,
+the completed first byte remains visible.
 
 Wide LDM/STM implement increment-after and decrement-before addressing,
 including PUSH/POP aliases. Thumb register-list restrictions are checked
@@ -134,7 +150,7 @@ establish that result.
   and memory translation paths still need a Cortex-A8 audit and implementation.
   The instruction profile is not a complete system-register model.
 - Thumb-2 currently implements MOVW/MOVT, modified-immediate MOV/MOVS and
-  arithmetic, LDR/STR with unsigned immediate offsets and LDR literals.
+  arithmetic, LDR/STR and STRB/STRH with unsigned immediate offsets and LDR literals.
   Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple transfers are also implemented. Other
   instruction families and IT state remain to implement.
 - VFP stores only d0-d15 and models VFP11/VFPv2. Cortex-A8 VFPv3 and NEON,
@@ -202,6 +218,18 @@ CBZ/CBNZ advances to a deliberate diagnostic stop after 63,186 steps:
 the instruction at `0x8027b970` reads physical `0x41000030`, a boot-argument
 field outside the prepared early-entry fields. Device-tree and complete
 boot-argument preparation are required before this trace can continue.
+
+An extended diagnostic now supplies the verified version and N88 video
+fields, places the matching device tree at physical `0x41100000`, and reserves
+through `0x41110000`. It rejects reads of every unprepared all-zero tree
+property and remaining argument fields. Changing these allocations and the
+video RAM reservation changes the early loop count, so its step counts are
+not directly comparable to the earlier harness. It first stops after 62,224
+steps at `0x8027b98e`, `f886 0064` (`STRB.W r0,[r6,#0x64]`). With byte stores
+implemented, it reaches `0x80089d80`, `f84d 8d04`
+(`STR.W r8,[sp,#-4]!`), after 62,237 steps. Indexed wide memory transfers
+remain unsupported. No device-tree placeholders or board registers are
+fabricated to advance this trace.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim
