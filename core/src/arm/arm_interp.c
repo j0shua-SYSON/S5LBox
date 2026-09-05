@@ -487,6 +487,18 @@ static void reg_write_user(arm_cpu_t *c, unsigned i, uint32_t v) {
     c->r[i] = v;
 }
 
+/* ARMv7 ITSTATE is split across CPSR[15:10] and CPSR[26:25]. */
+#define ARM_IT_MASK 0x0600fc00u
+static unsigned thumb_it_state(const arm_cpu_t *c) {
+    return ((c->cpsr >> 8) & 0xfcu) | ((c->cpsr >> 25) & 3u);
+}
+static void thumb_set_it_state(arm_cpu_t *c, unsigned state) {
+    c->cpsr = (c->cpsr & ~ARM_IT_MASK) | ((state & 0xfcu) << 8) | ((state & 3u) << 25);
+}
+static void thumb_advance_it(arm_cpu_t *c, unsigned state) {
+    thumb_set_it_state(c, (state & 7u) ? (state & 0xe0u) | ((state << 1) & 0x1fu) : 0u);
+}
+
 /* Enter an exception: bank in the handler mode, stash the return address in its
  * LR and the old CPSR in its SPSR, mask interrupts, and vector the PC.
  * CP15 SCTLR.V relocates the vector table to 0xFFFF0000. */
@@ -510,6 +522,8 @@ static void take_exception(arm_cpu_t *c, uint32_t vector, uint32_t mode,
         vector == ARM_VEC_IRQ      || vector == ARM_VEC_FIQ)
         c->cpsr |= ARM_CPSR_A;
     c->cpsr &= ~ARM_CPSR_T;                /* exceptions enter in ARM state */
+    if (arm_arch_uses_thumb2_encoding(c->arch))
+        thumb_set_it_state(c, 0u);         /* SPSR retains the return IT state */
     /*
      * CPSR.E <- SCTLR.EE (ARM ARM, ARMv6, B4.1.1 and the exception-entry
      * pseudocode in A2.6). Not "leave E alone": the handler must start in the
@@ -2394,16 +2408,18 @@ static arm_status_t exec_dsp_multiply(arm_cpu_t *c, uint32_t insn) {
 #define TB(n)  ((insn >> (n)) & 7u)          /* 3-bit register field at bit n */
 
 static arm_status_t thumb_step(arm_cpu_t *c, uint32_t pc, uint16_t insn,
-                               uint32_t *next) {
+                               uint32_t *next, bool *exception_taken) {
     const uint32_t pc4 = pc + 4;             /* r15 as read by the instruction */
+    const bool setflags = !arm_arch_uses_thumb2_encoding(c->arch) ||
+                          !(thumb_it_state(c) & 15u);
 
     switch (insn >> 12) {
     case 0x0: case 0x1: {
         if ((insn & 0xf800u) == 0x1800u) {   /* ADD/SUB register or 3-bit imm */
             unsigned rd = TB(0), rs = TB(3);
             uint32_t op2 = (insn & (1u << 10)) ? (uint32_t)TB(6) : c->r[TB(6)];
-            c->r[rd] = (insn & (1u << 9)) ? alu_sub(c, c->r[rs], op2, 1, true)
-                                          : alu_add(c, c->r[rs], op2, 0, true);
+            c->r[rd] = (insn & (1u << 9)) ? alu_sub(c, c->r[rs], op2, 1, setflags)
+                                          : alu_add(c, c->r[rs], op2, 0, setflags);
             return ARM_OK;
         }
         /* LSL/LSR/ASR by immediate */
@@ -2412,17 +2428,17 @@ static arm_status_t thumb_step(arm_cpu_t *c, uint32_t pc, uint16_t insn,
         bool carry = get_flag(c, ARM_CPSR_C);
         uint32_t res = barrel_shift(c->r[rs], type, amount, false, &carry);
         c->r[rd] = res;
-        alu_logic_flags(c, res, carry, true);
+        alu_logic_flags(c, res, carry, setflags);
         return ARM_OK;
     }
     case 0x2: case 0x3: {                    /* MOV/CMP/ADD/SUB 8-bit immediate */
         unsigned rd = (insn >> 8) & 7u;
         uint32_t imm = insn & 0xffu;
         switch ((insn >> 11) & 3u) {
-            case 0: c->r[rd] = imm; alu_logic_flags(c, imm, get_flag(c, ARM_CPSR_C), true); break;
+            case 0: c->r[rd] = imm; alu_logic_flags(c, imm, get_flag(c, ARM_CPSR_C), setflags); break;
             case 1: alu_sub(c, c->r[rd], imm, 1, true); break;              /* CMP */
-            case 2: c->r[rd] = alu_add(c, c->r[rd], imm, 0, true); break;
-            default: c->r[rd] = alu_sub(c, c->r[rd], imm, 1, true); break;
+            case 2: c->r[rd] = alu_add(c, c->r[rd], imm, 0, setflags); break;
+            default: c->r[rd] = alu_sub(c, c->r[rd], imm, 1, setflags); break;
         }
         return ARM_OK;
     }
@@ -2432,28 +2448,27 @@ static arm_status_t thumb_step(arm_cpu_t *c, uint32_t pc, uint16_t insn,
             uint32_t a = c->r[rd], b = c->r[rs];
             bool carry = get_flag(c, ARM_CPSR_C);
             switch ((insn >> 6) & 0xfu) {
-                case 0x0: c->r[rd] = a & b; alu_logic_flags(c, c->r[rd], carry, true); break; /* AND */
-                case 0x1: c->r[rd] = a ^ b; alu_logic_flags(c, c->r[rd], carry, true); break; /* EOR */
+                case 0x0: c->r[rd] = a & b; alu_logic_flags(c, c->r[rd], carry, setflags); break; /* AND */
+                case 0x1: c->r[rd] = a ^ b; alu_logic_flags(c, c->r[rd], carry, setflags); break; /* EOR */
                 case 0x2: c->r[rd] = barrel_shift(a, 0, b & 0xffu, true, &carry);
-                          alu_logic_flags(c, c->r[rd], carry, true); break;                   /* LSL */
+                          alu_logic_flags(c, c->r[rd], carry, setflags); break;               /* LSL */
                 case 0x3: c->r[rd] = barrel_shift(a, 1, b & 0xffu, true, &carry);
-                          alu_logic_flags(c, c->r[rd], carry, true); break;                   /* LSR */
+                          alu_logic_flags(c, c->r[rd], carry, setflags); break;               /* LSR */
                 case 0x4: c->r[rd] = barrel_shift(a, 2, b & 0xffu, true, &carry);
-                          alu_logic_flags(c, c->r[rd], carry, true); break;                   /* ASR */
-                case 0x5: c->r[rd] = alu_add(c, a, b, get_flag(c, ARM_CPSR_C), true); break;  /* ADC */
-                case 0x6: c->r[rd] = alu_sub(c, a, b, get_flag(c, ARM_CPSR_C), true); break;  /* SBC */
+                          alu_logic_flags(c, c->r[rd], carry, setflags); break;               /* ASR */
+                case 0x5: c->r[rd] = alu_add(c, a, b, get_flag(c, ARM_CPSR_C), setflags); break; /* ADC */
+                case 0x6: c->r[rd] = alu_sub(c, a, b, get_flag(c, ARM_CPSR_C), setflags); break; /* SBC */
                 case 0x7: c->r[rd] = barrel_shift(a, 3, b & 0xffu, true, &carry);
-                          alu_logic_flags(c, c->r[rd], carry, true); break;                   /* ROR */
+                          alu_logic_flags(c, c->r[rd], carry, setflags); break;               /* ROR */
                 case 0x8: alu_logic_flags(c, a & b, carry, true); break;                      /* TST */
-                case 0x9: c->r[rd] = alu_sub(c, 0, b, 1, true); break;                        /* NEG */
+                case 0x9: c->r[rd] = alu_sub(c, 0, b, 1, setflags); break;                    /* NEG */
                 case 0xa: alu_sub(c, a, b, 1, true); break;                                   /* CMP */
                 case 0xb: alu_add(c, a, b, 0, true); break;                                   /* CMN */
-                case 0xc: c->r[rd] = a | b; alu_logic_flags(c, c->r[rd], carry, true); break; /* ORR */
+                case 0xc: c->r[rd] = a | b; alu_logic_flags(c, c->r[rd], carry, setflags); break; /* ORR */
                 case 0xd: c->r[rd] = a * b;
-                          set_flag(c, ARM_CPSR_N, (c->r[rd] >> 31) & 1u);
-                          set_flag(c, ARM_CPSR_Z, c->r[rd] == 0); break;                      /* MUL */
-                case 0xe: c->r[rd] = a & ~b; alu_logic_flags(c, c->r[rd], carry, true); break;/* BIC */
-                default:  c->r[rd] = ~b; alu_logic_flags(c, c->r[rd], carry, true); break;    /* MVN */
+                          alu_logic_flags(c, c->r[rd], carry, setflags); break;               /* MUL */
+                case 0xe: c->r[rd] = a & ~b; alu_logic_flags(c, c->r[rd], carry, setflags); break; /* BIC */
+                default:  c->r[rd] = ~b; alu_logic_flags(c, c->r[rd], carry, setflags); break; /* MVN */
             }
             return ARM_OK;
         }
@@ -2578,6 +2593,15 @@ static arm_status_t thumb_step(arm_cpu_t *c, uint32_t pc, uint16_t insn,
         return ARM_OK;
     }
     case 0xb: {
+        if ((insn & 0xff00u) == 0xbf00u && arm_arch_uses_thumb2_encoding(c->arch)) {
+            unsigned mask = insn & 15u, condition = (insn >> 4) & 15u;
+            if (!mask) return condition == 0u ? ARM_OK : ARM_UNDEFINED; /* NOP, other hints separate */
+            if ((thumb_it_state(c) & 15u) || condition == 15u ||
+                (condition == 14u && (mask & (mask - 1u))))
+                return ARM_UNDEFINED;
+            thumb_set_it_state(c, insn & 0xffu);
+            return ARM_OK;
+        }
         /* CBZ/CBNZ, ARMv6T2 and later (DDI0406C.b A8.8.29). The split
          * immediate is unsigned and the comparison neither reads nor
          * changes flags. ITSTATE[3:0] must be zero for these instructions. */
@@ -2732,8 +2756,14 @@ static arm_status_t thumb_step(arm_cpu_t *c, uint32_t pc, uint16_t insn,
             if (result == ARM_SVC_ERROR) return ARM_HALT;
             if (result == ARM_SVC_REDIRECTED)
                 *next = c->r[15];
-            else if (result != ARM_SVC_HANDLED)
+            else if (result != ARM_SVC_HANDLED) {
+                /* SVC returns to the next instruction, unlike a retrying
+                 * fault. Save the advanced IT state before handler entry. */
+                if (arm_arch_uses_thumb2_encoding(c->arch))
+                    thumb_advance_it(c, thumb_it_state(c));
                 take_exception(c, ARM_VEC_SWI, ARM_MODE_SVC, pc + 2, false, next);
+                *exception_taken = true;
+            }
             return ARM_OK;
         }
         if (cond == 0xe) return ARM_UNDEFINED;   /* permanently undefined */
@@ -2774,6 +2804,43 @@ static arm_status_t thumb_step(arm_cpu_t *c, uint32_t pc, uint16_t insn,
 }
 
 #undef TB
+
+/* Instructions whose placement in IT is constrained independently of the
+ * condition result. Unsupported BKPT remains unconditional in the dispatcher.
+ * Add future PC-writing decoder families here when their execution is added. */
+static bool thumb_it_placement(unsigned state, uint16_t first, uint16_t second,
+                                bool wide) {
+    if (!(state & 15u)) return state == 0u;
+    if ((state >> 4) == 15u || ((state >> 4) == 14u && (state & (state - 1u) & 15u)))
+        return false;
+    bool last = (state & 7u) == 0u;
+    if (!wide) {
+        if (((first & 0xff00u) == 0xbf00u && (first & 15u)) ||
+            (first & 0xf500u) == 0xb100u || (first & 0xffe0u) == 0xb660u ||
+            (first & 0xfff7u) == 0xb650u ||
+            ((first & 0xf000u) == 0xd000u && (first & 0x0f00u) < 0x0e00u))
+            return false;
+        if ((first & 0xf800u) == 0xe000u || (first & 0xff00u) == 0xbd00u)
+            return last;
+        if ((first & 0xfc00u) == 0x4400u) {
+            unsigned op = (first >> 8) & 3u;
+            unsigned rd = (first & 7u) | ((first >> 4) & 8u);
+            if (op == 3u || (op != 1u && rd == 15u)) return last;
+        }
+    } else {
+        if ((first & 0xf800u) == 0xf000u && (second & 0x8000u)) {
+            if ((second & 0xd000u) != 0x8000u) return last; /* B/BL/BLX */
+            if (((first >> 6) & 15u) < 14u) return false;  /* conditional B */
+        }
+        if (((first & 0xfff0u) == 0xf8d0u || (first & 0xfff0u) == 0xf850u) &&
+            (second >> 12) == 15u)
+            return last;
+        if (((first & 0xffc0u) == 0xe880u || (first & 0xffc0u) == 0xe900u) &&
+            (first & 0x10u) && (second & 0x8000u))
+            return last;
+    }
+    return true;
+}
 
 static arm_status_t thumb_load_word(arm_cpu_t *c, uint32_t address, unsigned rt,
                                     uint32_t *next) {
@@ -3049,10 +3116,14 @@ arm_status_t arm_step(arm_cpu_t *c) {
             : c->bus->read16(c->bus->ctx, fetch_pa);
         uint32_t tnext = pc + 2;
         c->cycles++;
-        arm_status_t tst;
+        arm_status_t tst = ARM_OK;
+        bool exception_taken = false;
+        bool v7 = arm_arch_uses_thumb2_encoding(c->arch);
+        unsigned it = v7 ? thumb_it_state(c) : 0u;
         uint32_t prefix = tinsn & 0xf800u;
-        if (arm_arch_uses_thumb2_encoding(c->arch) &&
-            (prefix == 0xe800u || prefix == 0xf000u || prefix == 0xf800u)) {
+        bool wide = v7 && (prefix == 0xe800u || prefix == 0xf000u || prefix == 0xf800u);
+        uint16_t second = 0;
+        if (wide) {
             /* The second halfword can be on a different virtual page, with
              * different physical backing or permissions. Finish both fetches
              * before decode so a fault cannot leave a partial register write. */
@@ -3068,18 +3139,26 @@ arm_status_t arm_step(arm_cpu_t *c) {
                 c->r[15] = vec;
                 return ARM_OK;
             }
-            uint16_t second = c->bus->read16(c->bus->ctx, second_pa);
+            second = c->bus->read16(c->bus->ctx, second_pa);
             tnext = pc + 4u;
-            tst = thumb32_step(c, pc, tinsn, second, &tnext);
-        } else {
-            tst = thumb_step(c, pc, tinsn, &tnext);
+        }
+        if (!thumb_it_placement(it, tinsn, second, wide)) return ARM_UNDEFINED;
+        /* A failed condition suppresses data effects, never instruction
+         * fetches. Consistently skip undefined encodings in this case as
+         * permitted for ARMv7-A (DDI0406C.b B1.9.2). BKPT is unconditional. */
+        if (!it || arm_cond_passed(c, it >> 4) || (!wide && (tinsn & 0xff00u) == 0xbe00u)) {
+            if (wide) tst = thumb32_step(c, pc, tinsn, second, &tnext);
+            else tst = thumb_step(c, pc, tinsn, &tnext, &exception_taken);
         }
         if (tst == ARM_HALT) return ARM_HALT;
         if (c->abort_pending) {
             take_pending_data_abort(c, pc);
             return ARM_OK;
         }
-        if (tst == ARM_OK) c->r[15] = tnext;
+        if (tst == ARM_OK) {
+            if (it && !exception_taken) thumb_advance_it(c, it);
+            c->r[15] = tnext;
+        }
         return tst;
     }
 

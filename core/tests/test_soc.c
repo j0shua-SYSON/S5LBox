@@ -4264,6 +4264,28 @@ static void test_cortex_a8_uses_interpreter_fallback(void) {
               fast.cpu.cycles == reference.cpu.cycles &&
               s5l8900_static_a64_retired(&fast) == 0u,
               "Thumb fallback state or instruction accounting disagreed");
+        const uint16_t conditional_thumb[] = {
+            0x2800u, 0xbf0cu,        /* CMP r0,#0; ITE EQ */
+            0xf04fu, 0x0309u,        /* MOV.W r3,#9: taken */
+            0x2305u,                 /* MOV r3,#5: skipped */
+            0xf380u, 0x8000u,        /* unsupported after IT finishes */
+        };
+        s5l8900_load(&fast, 0x100u, conditional_thumb, sizeof conditional_thumb);
+        s5l8900_load(&reference, 0x100u, conditional_thumb, sizeof conditional_thumb);
+        CHECK(arm_reset_profile(&fast.cpu, &fast.bus, ARM_ARCH_V7_CORTEX_A8) &&
+              arm_reset_profile(&reference.cpu, &reference.bus, ARM_ARCH_V7_CORTEX_A8), "IT reset");
+        fast.cpu.r[15] = reference.cpu.r[15] = 0x100u;
+        fast.cpu.cpsr |= ARM_CPSR_T;
+        reference.cpu.cpsr |= ARM_CPSR_T;
+        CHECK(s5l8900_run(&fast, 10u, &fast_status) == 4u &&
+              s5l8900_run(&reference, 10u, &reference_status) == 4u &&
+              fast_status == ARM_UNDEFINED && reference_status == ARM_UNDEFINED &&
+              fast.cpu.r[3] == 9u && fast.cpu.r[15] == 0x10au &&
+              (fast.cpu.cpsr & ARM_CPSR_Z) && !(fast.cpu.cpsr & 0x0600fc00u) &&
+              memcmp(fast.cpu.r, reference.cpu.r, sizeof fast.cpu.r) == 0 &&
+              fast.cpu.cpsr == reference.cpu.cpsr && fast.cpu.cycles == reference.cpu.cycles &&
+              s5l8900_static_a64_retired(&fast) == 0u,
+              "Thumb IT fallback changed conditions, flags, width or retirement");
         s5l8900_free(&fast);
         s5l8900_free(&reference);
     }

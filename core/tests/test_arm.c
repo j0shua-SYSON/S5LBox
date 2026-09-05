@@ -6929,6 +6929,275 @@ static void test_thumb2_indexed_transfer_aborts(void) {
     }
 }
 
+#define TEST_IT_MASK 0x0600fc00u
+static uint32_t test_it_bits(unsigned state) {
+    return ((state & 0xfcu) << 8) | ((state & 3u) << 25);
+}
+
+static void test_thumb_it_encodings_and_sequences(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 3; profile++) {
+     for (unsigned cond = 0; cond < 16; cond++) {
+      arm_cpu_t hint;
+      CHECK(arm_reset_profile(&hint, &g_bus, profiles[profile]), "reset");
+      hint.cpsr |= ARM_CPSR_T | ARM_CPSR_N;
+      uint32_t before_hint = hint.cpsr;
+      m_w16(NULL, 0, (uint16_t)(0xbf00u | (cond << 4)));
+      bool nop = profile != 0u && cond == 0u;
+      CHECK(arm_step(&hint) == (nop ? ARM_OK : ARM_UNDEFINED) && hint.cpsr == before_hint &&
+            hint.r[15] == (nop ? 2u : 0u), "zero IT mask did not select the separate hint space");
+      for (unsigned mask = 1; mask < 16; mask++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, profiles[profile]), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_V;
+        uint32_t cpsr = c.cpsr;
+        bool valid = profile != 0u && cond != 15u && (cond != 14u || (mask & (mask - 1u)) == 0u);
+        m_w16(NULL, 0, (uint16_t)(0xbf00u | (cond << 4) | mask));
+        CHECK(arm_step(&c) == (valid ? ARM_OK : ARM_UNDEFINED) && c.cycles == 1u &&
+              c.r[15] == (valid ? 2u : 0u) &&
+              c.cpsr == (cpsr | (valid ? test_it_bits((cond << 4) | mask) : 0u)),
+              "IT encoding cond=%u mask=%u profile=%u changed flags or wrong state", cond, mask, profile);
+      }
+     }
+    }
+    const uint8_t invalid_states[] = {0x10u, 0xf8u, 0xe3u, 0x60u};
+    for (unsigned i = 0; i < sizeof invalid_states; i++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | test_it_bits(invalid_states[i]);
+        uint32_t before = c.cpsr;
+        m_w16(NULL, 0, 0x2001u);
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.r[0] == 0u && c.cpsr == before,
+              "reserved restored IT state executed an instruction");
+    }
+    /* Explicit state sequences from the IT encoding table, not the core's
+     * shift helper. Executed MOVs must not disturb the condition flags. */
+    static const struct { uint16_t insn; unsigned count; uint8_t state[5], execute; uint32_t flags; } cases[] = {
+        {0xbf0cu, 2u, {0x0cu,0x18u,0}, 1u, ARM_CPSR_Z}, /* ITE EQ: T,F */
+        {0xbf0cu, 2u, {0x0cu,0x18u,0}, 2u, 0u},         /* ITE EQ: F,T */
+        {0xbf04u, 2u, {0x04u,0x08u,0}, 3u, ARM_CPSR_Z}, /* ITT EQ */
+        {0xbf1au, 3u, {0x1au,0x14u,0x08u,0}, 3u, 0u},  /* ITTE NE */
+        {0xbfa7u, 4u, {0xa7u,0xaeu,0xbcu,0xb8u,0}, 3u, 0u}, /* ITTEE GE */
+        {0xbfe1u, 4u, {0xe1u,0xe2u,0xe4u,0xe8u,0}, 15u, ARM_CPSR_N | ARM_CPSR_Z},
+    };
+    for (unsigned p = 1; p < 3; p++) {
+     for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+        c.cpsr = ARM_MODE_SVC | ARM_CPSR_T | ARM_CPSR_C | cases[i].flags;
+        uint32_t cpsr = c.cpsr;
+        m_w16(NULL, 0, cases[i].insn);
+        CHECK(arm_step(&c) == ARM_OK && c.cpsr == (cpsr | test_it_bits(cases[i].state[0])), "IT start");
+        for (unsigned slot = 0; slot < cases[i].count; slot++) {
+            c.r[slot] = 0xdeadbeefu;
+            m_w16(NULL, 2u + slot * 2u, (uint16_t)(0x2001u | (slot << 8)));
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u + slot * 2u && c.cycles == slot + 2u &&
+                  c.r[slot] == ((cases[i].execute & (1u << slot)) ? 1u : 0xdeadbeefu) &&
+                  c.cpsr == (cpsr | test_it_bits(cases[i].state[slot + 1u])),
+                  "IT sequence %u slot %u has wrong execution, flags or next state", i, slot);
+        }
+     }
+    }
+}
+
+static void test_thumb_it_narrow_flags(void) {
+    const uint16_t implicit[] = {
+        0x0048u, 0x0848u, 0x1048u, 0x1888u, 0x1a88u, 0x2000u, 0x3001u, 0x3801u,
+        0x4008u, 0x4048u, 0x4088u, 0x40c8u, 0x4108u, 0x4148u, 0x4188u, 0x41c8u,
+        0x4248u, 0x4308u, 0x4348u, 0x4388u, 0x43c8u,
+    };
+    const uint16_t explicit_flags[] = {0x2800u, 0x4208u, 0x4288u, 0x42c8u}; /* CMP/TST/CMN */
+    for (unsigned kind = 0; kind < 2; kind++) {
+     unsigned count = kind ? sizeof explicit_flags / sizeof explicit_flags[0] : sizeof implicit / sizeof implicit[0];
+     for (unsigned i = 0; i < count; i++) {
+        arm_cpu_t ordinary, inside;
+        CHECK(arm_reset_profile(&ordinary, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        ordinary.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_Z | ARM_CPSR_C | ARM_CPSR_V;
+        ordinary.r[0] = 0x80000000u; ordinary.r[1] = 1u; ordinary.r[2] = 0x7fffffffu;
+        inside = ordinary;
+        inside.cpsr |= test_it_bits(0xe8u); /* one AL slot */
+        uint32_t flags = ordinary.cpsr;
+        m_w16(NULL, 0, kind ? explicit_flags[i] : implicit[i]);
+        CHECK(arm_step(&ordinary) == ARM_OK && arm_step(&inside) == ARM_OK &&
+              memcmp(ordinary.r, inside.r, sizeof ordinary.r) == 0 &&
+              inside.cpsr == (kind ? ordinary.cpsr : flags),
+              "IT narrow opcode %04x changed implicit flags or suppressed explicit flags",
+              kind ? explicit_flags[i] : implicit[i]);
+     }
+    }
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.cpsr |= ARM_CPSR_T | ARM_CPSR_Z;
+    m_w16(NULL, 0, 0xbf06u); /* ITTE EQ */
+    m_w16(NULL, 2, 0xf05fu); m_w16(NULL, 4, 0x0001u); /* MOVS.W r0,#1 changes Z */
+    m_w16(NULL, 6, 0x2102u); m_w16(NULL, 8, 0x2203u);
+    CHECK(arm_step(&c) == ARM_OK && arm_step(&c) == ARM_OK && !(c.cpsr & ARM_CPSR_Z) &&
+          arm_step(&c) == ARM_OK && arm_step(&c) == ARM_OK && c.r[0] == 1u &&
+          c.r[1] == 0u && c.r[2] == 3u && !(c.cpsr & TEST_IT_MASK) && c.r[15] == 10u,
+          "wide explicit flags did not affect later conditions in the same IT block");
+}
+
+static void test_thumb_it_exceptions(void) {
+    /* Retry state is saved for IRQ/FIQ and data abort; SVC saves the next
+     * slot. Existing A32 exception returns must restore the complete state. */
+    for (unsigned exception = 0; exception < 4; exception++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_Z | test_it_bits(0x04u);
+        c.r[15] = 0x100u; c.r[0] = 0x301u;
+        uint32_t old = c.cpsr;
+        unsigned bank = exception == 0 ? ARM_BANK_IRQ : exception == 1 ? ARM_BANK_FIQ :
+                        exception == 2 ? ARM_BANK_ABT : ARM_BANK_SVC;
+        uint32_t vector = exception == 0 ? ARM_VEC_IRQ : exception == 1 ? ARM_VEC_FIQ :
+                          exception == 2 ? ARM_VEC_DATA_ABORT : ARM_VEC_SWI;
+        c.irq_line = exception == 0; c.fiq_line = exception == 1;
+        if (exception == 2) c.cp15.sctlr = ARM_SCTLR_A;
+        m_w16(NULL, 0x100u, exception == 3 ? 0xdf00u : exception == 2 ? 0x6801u : 0x2201u);
+        uint32_t saved = exception == 3 ? (old & ~TEST_IT_MASK) | test_it_bits(0x08u) : old;
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == vector && c.spsr[bank] == saved &&
+              !(c.cpsr & TEST_IT_MASK) && !(c.cpsr & ARM_CPSR_T),
+              "IT exception %u saved or cleared the wrong state", exception);
+        c.irq_line = false; c.fiq_line = false;
+        m_w32(NULL, vector, exception == 3 ? 0xe1b0f00eu : exception == 2 ? 0xe25ef008u : 0xe25ef004u);
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == (exception == 3 ? 0x102u : 0x100u) && c.cpsr == saved,
+              "IT exception %u return did not restore retry/resume state", exception);
+    }
+}
+
+static void test_thumb_it_placement_and_skips(void) {
+    static const struct { uint16_t first, second; bool wide, never; } restricted[] = {
+        {0xbf08u,0,false,true}, {0xb100u,0,false,true}, {0xb672u,0,false,true},
+        {0xb650u,0,false,true}, {0xd000u,0,false,true}, {0xf000u,0x8000u,true,true},
+        {0xe000u,0,false,false}, {0x4700u,0,false,false}, {0x4780u,0,false,false},
+        {0x4487u,0,false,false}, {0x4687u,0,false,false}, {0xbd00u,0,false,false},
+        {0xf000u,0xb800u,true,false}, {0xf000u,0xf800u,true,false}, {0xf000u,0xe800u,true,false},
+        {0xf8d4u,0xf000u,true,false}, {0xf854u,0xfb04u,true,false}, {0xe8b4u,0x8001u,true,false},
+    };
+    for (unsigned last = 0; last < 2; last++) {
+     for (unsigned i = 0; i < sizeof restricted / sizeof restricted[0]; i++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | test_it_bits(last ? 0x08u : 0x04u); /* EQ false */
+        c.r[4] = 0x300u; c.r[13] = 0x300u; c.r[14] = 0x777u;
+        uint32_t before = c.cpsr;
+        m_w16(NULL, 0, restricted[i].first); m_w16(NULL, 2, restricted[i].second);
+        bool valid = last && !restricted[i].never;
+        g_watch_addr = 0x300u; g_watch_reads32 = g_watch_writes32 = 0u;
+        CHECK(arm_step(&c) == (valid ? ARM_OK : ARM_UNDEFINED) &&
+              c.r[15] == (valid ? (restricted[i].wide ? 4u : 2u) : 0u) &&
+              c.cpsr == (valid ? before & ~TEST_IT_MASK : before) &&
+              c.r[4] == 0x300u && c.r[13] == 0x300u && c.r[14] == 0x777u &&
+              !g_watch_reads32 && !g_watch_writes32,
+              "IT placement %u last=%u was accepted illegally or touched data", i, last);
+        g_watch_addr = 0xffffffffu;
+     }
+    }
+    static const struct { uint16_t first, second; bool wide; uint32_t target; } branches[] = {
+        {0xe001u,0,false,6u}, {0xf000u,0xf801u,true,6u}, {0xf8d4u,0xf000u,true,0x200u},
+    };
+    for (unsigned i = 0; i < sizeof branches / sizeof branches[0]; i++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_Z | test_it_bits(0x08u);
+        c.r[4] = 0x300u;
+        m_w32(NULL, 0x300u, 0x200u); /* aligned ARM target */
+        m_w16(NULL, 0, branches[i].first); m_w16(NULL, 2, branches[i].second);
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == branches[i].target && !(c.cpsr & TEST_IT_MASK) &&
+              ((c.cpsr & ARM_CPSR_T) != 0u) == (i != 2u),
+              "last IT instruction did not branch/interwork with cleared IT");
+    }
+    for (unsigned taken = 0; taken < 2; taken++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | test_it_bits(0x08u) | (taken ? ARM_CPSR_Z : 0u);
+        uint32_t before = c.cpsr;
+        m_w16(NULL, 0, 0xf380u); m_w16(NULL, 2, 0x8000u); /* unsupported system operation */
+        CHECK(arm_step(&c) == (taken ? ARM_UNDEFINED : ARM_OK) &&
+              c.r[15] == (taken ? 0u : 4u) && c.cpsr == (taken ? before : before & ~TEST_IT_MASK),
+              "condition-failed undefined instruction policy is inconsistent");
+    }
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.cpsr |= ARM_CPSR_T | test_it_bits(0x08u); /* EQ false still cannot suppress BKPT. */
+    m_w16(NULL, 0, 0xbe00u);
+    CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && (c.cpsr & TEST_IT_MASK),
+          "false IT condition hid unsupported unconditional BKPT");
+}
+
+static void test_thumb_it_fetch_faults(void) {
+    for (unsigned host = 0; host < 2; host++) {
+     for (unsigned fault = 0; fault < 3; fault++) {
+        arm_cpu_t c;
+        arm_bus_t bus = g_bus;
+        if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
+        memset(g_ram, 0, sizeof g_ram);
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | test_it_bits(0x08u); /* EQ false */
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP;
+        c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.cp15.dfar = 0x777u;
+        c.r[15] = 0xffeu; c.r[4] = 0x3000u; /* unmapped data: must not be touched */
+        uint32_t before = c.cpsr;
+        m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x803eu);
+        m_w32(NULL, 0x6004u, fault == 1u ? 0u : fault == 2u ? 0xc03fu : 0xc03eu);
+        m_w16(NULL, 0x8ffeu, 0xf8c4u); m_w16(NULL, 0xc000u, 0x2000u);
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u && c.cp15.dfar == 0x777u && c.r[4] == 0x3000u,
+              "condition-failed store touched data or retired more than once");
+        if (!fault) {
+            CHECK(c.r[15] == 0x1002u && c.cpsr == (before & ~TEST_IT_MASK),
+                  "condition-failed wide instruction did not consume both halfwords and advance IT");
+        } else {
+            CHECK(c.r[15] == ARM_VEC_PREFETCH && c.r[14] == 0x1002u &&
+                  c.cp15.ifar == 0x1000u && c.spsr[ARM_BANK_ABT] == before &&
+                  c.cp15.ifsr == (fault == 1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION) &&
+                  !(c.cpsr & TEST_IT_MASK),
+                  "false condition hid a second-half fetch fault or lost retry IT state");
+        }
+     }
+    }
+}
+
+static void test_thumb_it_svc_hooks(void) {
+    const arm_svc_result_t results[] = {ARM_SVC_HANDLED, ARM_SVC_REDIRECTED, ARM_SVC_UNHANDLED, ARM_SVC_ERROR};
+    for (unsigned i = 0; i < 4; i++) {
+     for (unsigned taken = 0; taken < 2; taken++) {
+        svc_probe_t probe = {0};
+        probe.result = results[i]; probe.mutate = true;
+        probe.redirect = i == 1u; probe.redirect_pc = 0x200u;
+        arm_bus_t bus = g_bus;
+        bus.privileged_svc_handler = probe_privileged_svc;
+        bus.privileged_svc_ctx = &probe;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        probe.expected_cpu = &c;
+        c.cpsr |= ARM_CPSR_T | (taken ? ARM_CPSR_Z : 0u) | test_it_bits(i == 1u ? 0x08u : 0x04u);
+        uint32_t before = c.cpsr;
+        uint32_t after_it = i == 1u ? 0u : test_it_bits(0x08u);
+        m_w16(NULL, 0, 0xdf00u);
+        arm_status_t status = arm_step(&c);
+        CHECK(probe.calls == taken && (!taken || probe.seen_cpsr == before),
+              "conditional SVC called host hook when skipped or exposed advanced IT too soon");
+        if (!taken) {
+            CHECK(status == ARM_OK && c.r[15] == 2u && c.cycles == 1u && c.r[0] == 0u &&
+                  c.cpsr == ((before & ~TEST_IT_MASK) | after_it), "skipped host SVC did not retire normally");
+        } else if (i == 3u) {
+            CHECK(status == ARM_HALT && c.r[15] == 0u && c.cycles == 0u && c.r[0] == 0u &&
+                  c.cpsr == before, "failed host SVC changed IT/CPU state or retired");
+        } else if (i == 2u) {
+            CHECK(status == ARM_OK && c.r[15] == ARM_VEC_SWI && c.r[0] == 0u &&
+                  c.spsr[ARM_BANK_SVC] == ((before & ~TEST_IT_MASK) | after_it) &&
+                  !(c.cpsr & TEST_IT_MASK), "unhandled host SVC did not roll back before IT exception entry");
+        } else {
+            uint32_t expected = ((before ^ ARM_CPSR_N) & ~TEST_IT_MASK) | after_it;
+            if (i == 1u) expected &= ~ARM_CPSR_T;
+            CHECK(status == ARM_OK && c.r[0] == 0xfeed0001u && c.cycles == 1u &&
+                  c.r[15] == (i == 1u ? 0x200u : 2u) && c.cpsr == expected,
+                  "consumed host SVC lost changes or advanced IT incorrectly");
+        }
+     }
+    }
+}
+
 static void test_thumb_compare_and_branch(void) {
     const arm_arch_t profiles[] = {ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
     const uint32_t offsets[] = {0u, 62u, 64u, 126u};
@@ -6993,6 +7262,12 @@ int main(void) {
     test_thumb2_small_store_aborts();
     test_thumb2_indexed_transfers();
     test_thumb2_indexed_transfer_aborts();
+    test_thumb_it_encodings_and_sequences();
+    test_thumb_it_narrow_flags();
+    test_thumb_it_exceptions();
+    test_thumb_it_placement_and_skips();
+    test_thumb_it_fetch_faults();
+    test_thumb_it_svc_hooks();
     test_thumb_compare_and_branch();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();

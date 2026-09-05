@@ -289,6 +289,9 @@ typedef struct arm_bus {
      * ARM_SVC_REDIRECTED commits the same CPU state, but the callback's r15
      * and CPSR.T select the next fetch address and instruction set instead of
      * the sequential address.
+     * A consumed Thumb SVC advances its current IT block on retirement. A
+     * redirected target must be consistent with that resulting IT state;
+     * switching to ARM therefore requires the final slot or no active block.
      * ARM_SVC_UNHANDLED and unknown values roll the CPU back and follow the
      * normal guest exception path. ARM_SVC_ERROR rolls back and makes
      * arm_step return ARM_HALT without entering the guest exception handler

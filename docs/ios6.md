@@ -82,10 +82,25 @@ Wide B/BL/BLX implement their signed offsets and distinct J-bit rules,
 including conditional B and ARM/Thumb interworking. BL/BLX update LR only
 after the complete instruction fetch. Tests cover displacement limits,
 all conditions, halfword-aligned BLX, an ARM callee returning to Thumb,
-and a call straddling an unmapped or denied page. IT blocks remain unsupported.
+and a call straddling an unmapped or denied page.
 The narrow CBZ/CBNZ extension is gated to Cortex-A8/Swift and refuses active
 IT state. It tests the register directly, preserves flags, and uses its
 unsigned forward displacement. ARM1176 continues to reject it.
+
+IT executes one to four conditional instructions using the split CPSR state.
+Narrow implicit flag updates are suppressed inside a block; CMP/CMN/TST and
+explicit wide flag updates retain their normal effects. Skipped instructions
+still fetch their full width and retire once, without data accesses. Invalid
+IT encodings, nested blocks, forbidden instructions and early PC writes are
+refused. Condition-failed unsupported encodings consistently act as NOPs under
+the permitted ARMv7-A policy; BKPT remains unconditional and unsupported.
+
+IT state is saved in SPSR and cleared on entry to the existing ARM-state
+exception path. Faults and interrupts preserve retry state; SVC saves the
+advanced state for the following instruction. Tests cover exception returns,
+failed second-half fetches, SVC hook rollback/retirement, and signed-static
+fallback with mixed instruction widths. This does not complete the separate
+Cortex-A8 CP15/exception-control audit, including SCTLR.TE.
 
 Wide STRB/STRH with unsigned imm12 offsets use the common byte/halfword memory
 paths. They accept SP as a base, reject SP/PC sources and PC bases, and leave
@@ -161,7 +176,8 @@ establish that result.
   arithmetic, immediate LDR/STR and STRB/STRH (including pre/post indexing),
   and LDR literals.
   Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple transfers are also implemented. Other
-  instruction families and IT state remain to implement.
+  instruction families remain to implement. IT state and conditional execution
+  are implemented for the supported Thumb decoder families.
 - VFP stores only d0-d15 and models VFP11/VFPv2. Cortex-A8 VFPv3 and NEON,
   including the wider register file and context-switch semantics, are absent.
 - The SoC, interrupt wiring, storage, graphics, input and power devices are
@@ -238,8 +254,10 @@ steps at `0x8027b98e`, `f886 0064` (`STRB.W r0,[r6,#0x64]`). With byte stores
 implemented, it reaches `0x80089d80`, `f84d 8d04`
 (`STR.W r8,[sp,#-4]!`), after 62,237 steps. Indexed transfers then advance
 this same harness to `0x8027a3fe`, halfword `bf18` (`IT NE`), after 62,385
-steps. IT execution remains unsupported. No device-tree placeholders or
-board registers are fabricated to advance this trace.
+steps. IT execution advances the same trace to `0x8027a47e`, halfwords
+`f020 0003` (`BIC.W r0,r0,#3`), after 62,446 steps. Modified-immediate logical
+operations other than MOV remain unsupported. No device-tree placeholders
+or board registers are fabricated to advance this trace.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim
