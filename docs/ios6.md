@@ -75,6 +75,12 @@ after the complete instruction fetch. Tests cover displacement limits,
 all conditions, halfword-aligned BLX, an ARM callee returning to Thumb,
 and a call straddling an unmapped or denied page. IT blocks remain unsupported.
 
+Wide LDM/STM implement increment-after and decrement-before addressing,
+including PUSH/POP aliases. Thumb register-list restrictions are checked
+before using the common multiple-transfer path. Tests check register order,
+writeback, loaded-PC interworking and transactional register restoration
+on a data abort; previously completed stores remain visible.
+
 The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates
 C only as prescribed by the immediate form, preserving V. Invalid zero
@@ -120,8 +126,8 @@ establish that result.
   The instruction profile is not a complete system-register model.
 - Thumb-2 currently implements MOVW/MOVT, modified-immediate MOV/MOVS and
   arithmetic, and STR with an unsigned immediate offset.
-  Wide B/BL/BLX are also implemented. Other instruction families and IT
-  state remain to implement.
+  Wide B/BL/BLX and IA/DB multiple transfers are also implemented. Other
+  instruction families and IT state remain to implement.
 - VFP stores only d0-d15 and models VFP11/VFPv2. Cortex-A8 VFPv3 and NEON,
   including the wider register file and context-switch semantics, are absent.
 - The SoC, interrupt wiring, storage, graphics, input and power devices are
@@ -179,6 +185,8 @@ Modified-immediate arithmetic advances the trace to `0x802b832c`, halfwords
 `f578 fb04` (`BL 0x80030938`), after 62,846 steps.
 Wide branches carry the trace through calls and ARM/Thumb returns to
 `0x802b840c`, halfwords `e8bd 40f0` (`POP.W {r4-r7,lr}`), after 63,130 steps.
+Multiple transfers advance to `0x802bd23c`, halfwords `f8df c004`
+(`LDR.W ip,[pc,#4]`), after 63,132 steps.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim

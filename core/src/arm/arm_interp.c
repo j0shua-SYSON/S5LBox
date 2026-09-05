@@ -2766,6 +2766,23 @@ static arm_status_t thumb_step(arm_cpu_t *c, uint32_t pc, uint16_t insn,
 
 static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
                                  uint16_t second, uint32_t *next) {
+    /* Thumb LDM/STM IA/DB, including PUSH/POP (DDI0406C.b A6.3.5).
+     * Thumb forbids SP in a list, PC in a store, LR+PC in a load, single
+     * register lists, and every writeback/base-list overlap. Once those
+     * restrictions hold, the existing multiple-transfer semantics apply. */
+    uint16_t multiple = first & 0xffc0u;
+    if (multiple == 0xe880u || multiple == 0xe900u) {
+        unsigned rn = first & 15u;
+        bool load = (first & 0x10u) != 0u, wb = (first & 0x20u) != 0u;
+        uint32_t list = second;
+        if (rn == 15u || (list & (list - 1u)) == 0u || (list & 0x2000u) ||
+            (!load && (list & 0x8000u)) || (load && (list & 0xc000u) == 0xc000u) ||
+            (wb && (list & (1u << rn))))
+            return ARM_UNDEFINED;
+        uint32_t a32 = 0xe8000000u | (multiple == 0xe900u ? (1u << 24) : (1u << 23)) |
+                       ((uint32_t)(first & 0x30u) << 16) | (rn << 16) | list;
+        return exec_block_transfer(c, pc, a32, next);
+    }
     /* Wide B/BL/BLX (DDI0406C.b A8.8.18/25). Both halfwords have already
      * been fetched, so a page fault cannot expose an intermediate LR. */
     if ((first & 0xf800u) == 0xf000u && (second & 0x8000u)) {

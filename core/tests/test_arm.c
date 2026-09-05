@@ -6473,6 +6473,136 @@ static void test_thumb2_wide_branches(void) {
           "interworking lost an instruction or returned into the second half");
 }
 
+static void test_thumb2_multiple_transfers(void) {
+    const unsigned regs[] = {0u, 3u, 8u, 12u, 14u};
+    for (unsigned host = 0; host < 2; host++) {
+      for (unsigned db = 0; db < 2; db++) {
+       for (unsigned load = 0; load < 2; load++) {
+        for (unsigned wb = 0; wb < 2; wb++) {
+            arm_bus_t bus = g_bus;
+            if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+            c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_V;
+            uint32_t before = c.cpsr, address = db ? 0x1006cu : 0x10080u;
+            c.r[5] = 0x10080u;
+            memset(g_ram + 0x10068u, 0xee, 0x30u);
+            for (unsigned i = 0; i < 5; i++) {
+                c.r[regs[i]] = 0x10000000u + regs[i];
+                if (load) m_w32(NULL, address + 4u * i, 0xa5000000u + i);
+            }
+            m_w16(NULL, 0, (uint16_t)((db ? 0xe900u : 0xe880u) | (wb << 5) | (load << 4) | 5u));
+            m_w16(NULL, 2, 0x5109u); /* r0,r3,r8,r12,lr */
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u &&
+                  c.cpsr == before && c.r[5] == (wb ? (db ? 0x1006cu : 0x10094u) : 0x10080u),
+                  "multiple transfer direction or writeback mismatch");
+            for (unsigned i = 0; i < 5; i++) {
+                CHECK(c.r[regs[i]] == (load ? 0xa5000000u + i : 0x10000000u + regs[i]) &&
+                      m_r32(NULL, address + 4u * i) == (load ? 0xa5000000u + i : 0x10000000u + regs[i]),
+                      "multiple transfer register ordering mismatch at %u", i);
+            }
+            CHECK(m_r32(NULL, address - 4u) == 0xeeeeeeeeu &&
+                  m_r32(NULL, address + 20u) == 0xeeeeeeeeu, "multiple transfer wrote outside its list");
+        }
+       }
+      }
+    }
+    /* The real POP restores LR without branching; PUSH uses decrement-before. */
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.cpsr |= ARM_CPSR_T; c.r[13] = 0x200u;
+    for (unsigned i = 4; i < 8; i++) c.r[i] = 0x100u + i;
+    c.r[14] = 0x777u;
+    m_w16(NULL, 0, 0xe92du); m_w16(NULL, 2, 0x40f0u); /* PUSH.W {r4-r7,lr} */
+    m_w16(NULL, 4, 0xe8bdu); m_w16(NULL, 6, 0x40f0u); /* POP.W {r4-r7,lr} */
+    CHECK(arm_step(&c) == ARM_OK && c.r[13] == 0x1ecu &&
+          m_r32(NULL, 0x1ecu) == 0x104u && m_r32(NULL, 0x1fcu) == 0x777u,
+          "PUSH alias did not use SP and decrement-before ordering");
+    c.r[4] = c.r[7] = c.r[14] = 0u;
+    CHECK(arm_step(&c) == ARM_OK && c.r[13] == 0x200u && c.r[4] == 0x104u &&
+          c.r[7] == 0x107u && c.r[14] == 0x777u && c.r[15] == 8u,
+          "POP with LR incorrectly branched or failed to restore the stack");
+    for (unsigned target = 0; target < 3; target++) {
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T; c.r[13] = 0x100u; c.r[4] = 0x1234u;
+        m_w16(NULL, 0, 0xe8bdu); m_w16(NULL, 2, 0x8010u); /* POP.W {r4,pc} */
+        m_w32(NULL, 0x100u, 0x5678u); m_w32(NULL, 0x104u, 0x20u + target);
+        CHECK(arm_step(&c) == (target == 2 ? ARM_UNDEFINED : ARM_OK) &&
+              c.r[15] == (target == 2 ? 0u : 0x20u) &&
+              c.r[4] == (target == 2 ? 0x1234u : 0x5678u) &&
+              c.r[13] == (target == 2 ? 0x100u : 0x108u) &&
+              !!(c.cpsr & ARM_CPSR_T) == (target != 0u),
+              "POP PC did not interwork or reject a misaligned ARM target transactionally");
+    }
+    /* No-writeback base-in-list loads are defined; the loaded base wins. */
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.cpsr |= ARM_CPSR_T; c.r[0] = 0x100u;
+    m_w16(NULL, 0, 0xe890u); m_w16(NULL, 2, 0x0003u);
+    m_w32(NULL, 0x100u, 0x1234u); m_w32(NULL, 0x104u, 0x5678u);
+    CHECK(arm_step(&c) == ARM_OK && c.r[0] == 0x1234u && c.r[1] == 0x5678u,
+          "LDM without writeback lost its loaded base register");
+    static const uint16_t invalid[][2] = {
+        {0xe8b0u, 0u}, {0xe8b0u, 2u}, {0xe8afu, 3u}, /* count/base */
+        {0xe8b0u, 0x2002u}, {0xe8b0u, 0xc000u}, /* SP / PC+LR */
+        {0xe8a0u, 3u}, {0xe8b0u, 3u}, /* Thumb forbids either writeback alias */
+        {0xe920u, 3u}, {0xe930u, 3u},
+        {0xe8a0u, 0x8002u}, {0xe920u, 0x8002u}, /* STM PC */
+        {0xe8a0u, 0x2002u}, {0xe920u, 0x2002u}, /* STM SP */
+    };
+    for (unsigned i = 0; i < sizeof invalid / sizeof invalid[0]; i++) {
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T; c.r[0] = 0x100u; c.r[1] = 0x1234u;
+        m_w16(NULL, 0, invalid[i][0]); m_w16(NULL, 2, invalid[i][1]);
+        m_w32(NULL, 0x100u, 0xeeeeeeeeu); m_w32(NULL, 0xf8u, 0xeeeeeeeeu);
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.r[0] == 0x100u &&
+              c.r[1] == 0x1234u && m_r32(NULL, 0x100u) == 0xeeeeeeeeu &&
+              m_r32(NULL, 0xf8u) == 0xeeeeeeeeu, "invalid multiple-transfer list %u changed state", i);
+    }
+}
+
+static void test_thumb2_multiple_transfer_aborts(void) {
+    for (unsigned load = 0; load < 2; load++) {
+      for (unsigned db = 0; db < 2; db++) {
+       for (unsigned fault = 0; fault < 3; fault++) {
+        memset(g_ram, 0, sizeof g_ram);
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP; /* raw U=A=0 still requires alignment */
+        c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N;
+        c.r[5] = (db ? 0x2004u : 0x1ffcu) + (fault == 2 ? 1u : 0u);
+        c.r[0] = 0x11111111u; c.r[1] = 0x22222222u;
+        uint32_t base = c.r[5], cpsr = c.cpsr;
+        m_w32(NULL, 0x4000u, 0x6001u);
+        m_w32(NULL, 0x6000u, 0x803eu); m_w32(NULL, 0x6004u, 0xa03eu);
+        m_w32(NULL, 0x6008u, fault == 1 ? 0u : 0xc03eu);
+        m_w16(NULL, 0x8000u, (uint16_t)((db ? 0xe920u : 0xe8a0u) | (load << 4) | 5u));
+        m_w16(NULL, 0x8002u, 3u);
+        m_w32(NULL, 0xaffcu, 0x33333333u); m_w32(NULL, 0xc000u, 0x44444444u);
+        CHECK(arm_step(&c) == ARM_OK, "multiple transfer failed instead of retiring/vectoring");
+        if (!fault) {
+            CHECK(c.r[5] == (db ? 0x1ffcu : 0x2004u) && c.r[15] == 4u &&
+                  c.r[0] == (load ? 0x33333333u : 0x11111111u) &&
+                  c.r[1] == (load ? 0x44444444u : 0x22222222u) &&
+                  m_r32(NULL, 0xaffcu) == (load ? 0x33333333u : 0x11111111u) &&
+                  m_r32(NULL, 0xc000u) == (load ? 0x44444444u : 0x22222222u),
+                  "multiple transfer assumed contiguous physical pages");
+        } else {
+            CHECK(c.r[15] == ARM_VEC_DATA_ABORT && c.r[14] == 8u && c.r[5] == base &&
+                  c.r[0] == 0x11111111u && c.r[1] == 0x22222222u &&
+                  c.spsr[ARM_BANK_ABT] == cpsr && c.cp15.dfar == (fault == 2 ? 0x1ffdu : 0x2000u) &&
+                  c.cp15.dfsr == ((fault == 2 ? ARM_FSR_ALIGNMENT : ARM_FSR_PAGE_TRANSLATION) |
+                                  (load ? 0u : (1u << 11))),
+                  "multiple-transfer abort committed a load/writeback or lost exception state");
+            CHECK(m_r32(NULL, 0xaffcu) == (!load && fault == 1 ? 0x11111111u : 0x33333333u) &&
+                  m_r32(NULL, 0xc000u) == 0x44444444u,
+                  "multiple-transfer abort committed the wrong memory words");
+        }
+       }
+      }
+    }
+}
+
 int main(void) {
     test_reset_initializes_the_default_profile();
     test_explicit_profile_reset_and_invalid_configuration();
@@ -6488,6 +6618,8 @@ int main(void) {
     test_armv7_multiword_and_sync_alignment();
     test_thumb2_modified_immediate_arithmetic();
     test_thumb2_wide_branches();
+    test_thumb2_multiple_transfers();
+    test_thumb2_multiple_transfer_aborts();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();
     test_add_reg();
