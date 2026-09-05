@@ -7198,6 +7198,72 @@ static void test_thumb_it_svc_hooks(void) {
     }
 }
 
+static void test_thumb2_logical_immediates(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    const unsigned ops[] = {0u,1u,2u,3u,4u,3u,0u,4u}; /* AND,BIC,ORR,ORN,EOR,MVN,TST,TEQ */
+    static const struct { uint16_t imm; uint32_t input, result[8]; int carry; } cases[] = {
+        {0x000u,0x01234567u,{0u,0x01234567u,0x01234567u,0xffffffffu,0x01234567u,0xffffffffu,0u,0x01234567u},-1},
+        {0x1ffu,0xa5a55a5au,{0x00a5005au,0xa5005a00u,0xa5ff5affu,0xffa5ff5au,0xa55a5aa5u,0xff00ff00u,0x00a5005au,0xa55a5aa5u},-1},
+        {0x400u,0x80000000u,{0x80000000u,0u,0x80000000u,0xffffffffu,0u,0x7fffffffu,0x80000000u,0u},1},
+        {0x480u,0x80000000u,{0u,0x80000000u,0xc0000000u,0xbfffffffu,0xc0000000u,0xbfffffffu,0u,0xc0000000u},0},
+    };
+    for (unsigned p = 0; p < 2; p++) {
+     for (unsigned op = 0; op < 8; op++) {
+      for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+       for (unsigned flags = 0; flags < 4; flags++) {
+        bool set = op >= 6u || (flags & 1u), carry = (flags & 2u) != 0u;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+        /* One AL slot also verifies that a TST/TEQ alias does not branch,
+         * and that explicit wide S behavior survives conditional dispatch. */
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_Z | ARM_CPSR_V | ARM_CPSR_Q |
+                  (carry ? ARM_CPSR_C : 0u) | test_it_bits(0xe8u);
+        c.r[4] = cases[i].input; c.r[3] = 0xdeadbeefu;
+        uint32_t expected_flags = c.cpsr & ~TEST_IT_MASK;
+        uint32_t expected = cases[i].result[op];
+        if (set) {
+            expected_flags &= ~(ARM_CPSR_N | ARM_CPSR_Z | ARM_CPSR_C);
+            if (expected & 0x80000000u) expected_flags |= ARM_CPSR_N;
+            if (!expected) expected_flags |= ARM_CPSR_Z;
+            if (cases[i].carry < 0 ? carry : cases[i].carry != 0) expected_flags |= ARM_CPSR_C;
+        }
+        unsigned rn = op == 5u ? 15u : 4u, rd = op >= 6u ? 15u : 3u;
+        uint16_t first = (uint16_t)(0xf000u | (ops[op] << 5) | (set ? 0x10u : 0u) |
+                                   rn | ((cases[i].imm & 0x800u) >> 1));
+        uint16_t second = (uint16_t)((rd << 8) | ((cases[i].imm & 0x700u) << 4) | (cases[i].imm & 0xffu));
+        m_w16(NULL, 0, first); m_w16(NULL, 2, second);
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u && c.r[4] == cases[i].input &&
+              c.r[3] == (op >= 6u ? 0xdeadbeefu : expected) && c.cpsr == expected_flags,
+              "logical immediate op=%u case=%u flags=%u has wrong result, NZC or alias", op, i, flags);
+       }
+      }
+     }
+    }
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.cpsr |= ARM_CPSR_T; c.r[0] = 0x43u;
+    m_w16(NULL, 0, 0xf020u); m_w16(NULL, 2, 0x0003u); /* exact kernel BIC.W */
+    CHECK(arm_step(&c) == ARM_OK && c.r[0] == 0x40u && c.r[15] == 4u, "BIC.W base/destination alias");
+
+    static const uint16_t bad[][2] = {
+        {0xf004u,0x0d01u}, {0xf004u,0x0f01u}, {0xf00du,0x0301u}, {0xf00fu,0x0301u},
+        {0xf034u,0x0f01u}, {0xf02fu,0x0301u}, {0xf02du,0x0301u},
+        {0xf04du,0x0301u}, {0xf054u,0x0f01u}, {0xf064u,0x0d01u}, {0xf06du,0x0301u},
+        {0xf07fu,0x0f01u}, {0xf084u,0x0f01u}, {0xf09du,0x0f01u}, {0xf09fu,0x0f01u},
+        {0xf034u,0x1300u}, {0xf06fu,0x2300u}, {0xf094u,0x3f00u}, /* zero replication */
+    };
+    for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_C;
+        c.r[3] = 0x12345678u; c.r[4] = 0x87654321u; c.r[13] = 0x100u;
+        uint32_t before = c.cpsr;
+        m_w16(NULL, 0, bad[i][0]); m_w16(NULL, 2, bad[i][1]);
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.cpsr == before &&
+              c.r[3] == 0x12345678u && c.r[4] == 0x87654321u && c.r[13] == 0x100u,
+              "invalid logical immediate %u changed state", i);
+    }
+}
+
 static void test_thumb_compare_and_branch(void) {
     const arm_arch_t profiles[] = {ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
     const uint32_t offsets[] = {0u, 62u, 64u, 126u};
@@ -7268,6 +7334,7 @@ int main(void) {
     test_thumb_it_placement_and_skips();
     test_thumb_it_fetch_faults();
     test_thumb_it_svc_hooks();
+    test_thumb2_logical_immediates();
     test_thumb_compare_and_branch();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();

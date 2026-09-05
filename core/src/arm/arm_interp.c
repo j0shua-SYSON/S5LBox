@@ -2962,16 +2962,18 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         if (wb && !c->abort_pending) c->r[rn] = adjusted;
         return ARM_OK;
     }
-    /* Modified immediate data processing (DDI0406C.b A6.3.1/2). MOV and
-     * arithmetic share ThumbExpandImm; arithmetic uses its ALU carry, not
-     * the expansion's shifter carry. Validate aliases before touching flags. */
+    /* Modified immediate data processing (DDI0406C.b A6.3.1/2). Logical
+     * operations use ThumbExpandImm's carry; arithmetic uses its ALU carry.
+     * Validate MOV/MVN and flag-only aliases before touching registers/flags. */
     if ((first & 0xfa00u) == 0xf000u && !(second & 0x8000u)) {
         unsigned op = (first >> 5) & 15u, rn = first & 15u;
         unsigned rd = (second >> 8) & 15u;
         bool set = (first & 0x10u) != 0u;
-        bool move = op == 2u && rn == 15u;
-        if (move) {
-            if (rd == 13u || rd == 15u) return ARM_UNDEFINED;
+        bool move = (op == 2u || op == 3u) && rn == 15u;
+        if (op <= 4u) {
+            bool test = (op == 0u || op == 4u) && rd == 15u && set; /* TST/TEQ */
+            if (rd == 13u || (rd == 15u && !test) || (!move && (rn == 13u || rn == 15u)))
+                return ARM_UNDEFINED;
         } else if (op == 8u || op == 13u) {
             /* ADD/SUB allow SP as a source, and as destination only in
              * that form. Rd=PC,S=1 means CMN/CMP, never a PC write. */
@@ -3000,8 +3002,13 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
             carry = (value >> 31) != 0;
         }
         uint32_t result;
+        uint32_t source = move ? 0u : c->r[rn];
         switch (op) {
-        case 2u:  result = value; alu_logic_flags(c, result, carry, set); break;
+        case 0u:  result = source & value; break;
+        case 1u:  result = source & ~value; break;
+        case 2u:  result = source | value; break;
+        case 3u:  result = source | ~value; break;
+        case 4u:  result = source ^ value; break;
         case 8u:  result = alu_add(c, c->r[rn], value, 0u, set); break;
         case 10u: result = alu_add(c, c->r[rn], value, get_flag(c, ARM_CPSR_C), set); break;
         case 11u: result = alu_sub(c, c->r[rn], value, get_flag(c, ARM_CPSR_C), set); break;
@@ -3009,6 +3016,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         case 14u: result = alu_sub(c, value, c->r[rn], 1u, set); break;
         default: return ARM_UNDEFINED;
         }
+        if (op <= 4u) alu_logic_flags(c, result, carry, set);
         if (rd != 15u) c->r[rd] = result;
         return ARM_OK;
     }

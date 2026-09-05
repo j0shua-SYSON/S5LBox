@@ -123,6 +123,12 @@ same alignment and interworking checks as unsigned-offset loads. Tests cover
 all P/U/W combinations, offset limits, stack aliases, invalid loaded targets
 and preserved base/result state after first/second-page faults.
 
+Modified-immediate AND/BIC/ORR/ORN/EOR implement logical results and optional
+NZC updates with V/Q preserved. MOV/MVN use the PC-base alias encodings;
+TST/TEQ use the flag-only destination encodings. Tests exercise replicated
+and rotated constants, carry preservation/replacement, aliases inside IT,
+and rejected registers and reserved immediate forms.
+
 The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates
 C only as prescribed by the immediate form, preserving V. Invalid zero
@@ -172,8 +178,8 @@ establish that result.
 - The CP15 identification, cache/TLB controls, reset values, exception state,
   and memory translation paths still need a Cortex-A8 audit and implementation.
   The instruction profile is not a complete system-register model.
-- Thumb-2 currently implements MOVW/MOVT, modified-immediate MOV/MOVS and
-  arithmetic, immediate LDR/STR and STRB/STRH (including pre/post indexing),
+- Thumb-2 currently implements MOVW/MOVT, modified-immediate logical operations
+  and arithmetic, immediate LDR/STR and STRB/STRH (including pre/post indexing),
   and LDR literals.
   Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple transfers are also implemented. Other
   instruction families remain to implement. IT state and conditional execution
@@ -255,9 +261,11 @@ implemented, it reaches `0x80089d80`, `f84d 8d04`
 (`STR.W r8,[sp,#-4]!`), after 62,237 steps. Indexed transfers then advance
 this same harness to `0x8027a3fe`, halfword `bf18` (`IT NE`), after 62,385
 steps. IT execution advances the same trace to `0x8027a47e`, halfwords
-`f020 0003` (`BIC.W r0,r0,#3`), after 62,446 steps. Modified-immediate logical
-operations other than MOV remain unsupported. No device-tree placeholders
-or board registers are fabricated to advance this trace.
+`f020 0003` (`BIC.W r0,r0,#3`), after 62,446 steps. Logical operations then
+advance to 70,735 steps, when the instruction at `0x8027aee8` reads physical
+`0x41103204`, the guarded zero-valued `timebase-frequency` property of
+`/device-tree/cpus/cpu0`. It must be prepared from firmware evidence before continuing. No device-tree
+placeholders or board registers are fabricated to advance this trace.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim
