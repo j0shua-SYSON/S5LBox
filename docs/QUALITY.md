@@ -1454,7 +1454,40 @@ or the historical 320704-byte executable by SHA-256. It preserves the existing
 root:root 0755-to-06755 contract and does not upgrade old installations.
 Repository signatures and package/index hash verification are unchanged.
 
-The warnings-as-errors host suite passes 73/73. This is not yet proof of the
-corrected Cydia search, an actual tweak install, or usable Cydia download speed
-on a physical device. The native bulk-transport throughput milestone does not
-close those end-user acceptance tests.
+The warnings-as-errors host suite passes 73/73. Exact revision `956bf08`
+passed [all eight core jobs](https://github.com/j0shua-SYSON/S5LBox/actions/runs/33948613098)
+and the [iOS build](https://github.com/j0shua-SYSON/S5LBox/actions/runs/33948613113).
+The real-image fresh-installer replay passed 744 checks with zero failures.
+
+That exact app was then installed on one physical iPhone 6s Plus. Normal fresh
+provisioning, guest bootstrap, first-launch reorganization, and repository
+refresh completed. The refreshed 8245183-byte BigBoss list has SHA-256
+`d2d25a4e08826b39d2bb9aa583eb8624f9e247eb9040213673ac477081527ac7`:
+the whole file differs from the earlier retained list, but both malformed
+UTF-8 Name fields are still present byte-for-byte. Searching for `five` and
+`ios` now returned results without the earlier Cydia crash. No repository
+metadata was sanitized to make the search pass.
+
+Through Cydia's ordinary Install/Confirm flow, the guest downloaded and
+installed `com.darlo770.wallpaper` 1.0.2, `mobilesubstrate` 0.9.6301,
+`com.saurik.substrate.safemode` 0.9.6001, and `uikittools` 1.1.12. All four
+actual guest archives, totaling 204858 bytes, matched independently downloaded
+HTTPS originals by SHA-256. Guest dpkg status reports all four as installed;
+Cydia remains 1.0.3172-68. No blanket essential upgrade was applied.
+
+Cydia reached Complete and Restart SpringBoard. After respring, SpringBoard
+returned with the tweak's reflective dock. Its new Set Home Screen action in
+Wallpaper settings successfully displayed the selected lotus wallpaper behind
+the icons. A full disk/snapshot/sidecar/restore-marker checkpoint was cloned
+and byte-compared before installation and again after this visual pass.
+
+This is bounded end-to-end evidence for one tweak and dependency set, not broad
+package compatibility or usable Cydia speed. The archives completed by a
+22.857-second observation after Confirm; that interval includes preparation
+and four requests and is not an exact download duration. The production bulk
+path received 207353 host bytes without retransmissions, resets, or drops.
+Initial catalog loading and post-refresh reload each still took roughly
+four to five wall-clock minutes; post-install reload took about one minute.
+Separating those waits from transfer time remains the next usability task.
+Native bulk throughput above 2 MB/s does not establish sustained Cydia or
+Internet-server throughput.
