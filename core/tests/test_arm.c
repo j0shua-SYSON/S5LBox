@@ -9012,6 +9012,203 @@ static void test_thumb2_register_shift_fetch(void) {
      }
 }
 
+static void put_thumb_register_store(uint32_t pc, unsigned width, unsigned rn,
+                                      unsigned rt, unsigned rm, unsigned shift) {
+    m_w16(NULL, pc, (uint16_t)(0xf800u | (width << 5) | rn));
+    m_w16(NULL, pc + 2u, (uint16_t)((rt << 12) | (shift << 4) | rm));
+}
+
+static void test_thumb2_register_store_values(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    const uint32_t offsets[] = {0u, 1u, 0x100u, 0x80000001u, 0xffffffffu, 0x40000003u};
+    for (unsigned profile = 0; profile < 2u; profile++)
+     for (unsigned host = 0; host < 2u; host++)
+      for (unsigned width = 0; width < 3u; width++)
+       for (unsigned shift = 0; shift < 4u; shift++)
+        for (unsigned off = 0; off < sizeof offsets / sizeof offsets[0]; off++)
+         for (unsigned align = 0; align < 4u; align++) {
+            arm_bus_t bus = g_bus;
+            if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &bus, profiles[profile]), "reset");
+            c.cpsr = ARM_MODE_SYS | ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C |
+                     ARM_CPSR_V | ARM_CPSR_Q | (9u << 16);
+            c.cp15.sctlr = 0u;
+            uint32_t address = 0x11000u + align;
+            c.r[4] = address - (uint32_t)((uint64_t)offsets[off] * (1u << shift));
+            c.r[10] = offsets[off]; c.r[8] = 0x87654321u;
+            uint32_t before[15], flags = c.cpsr;
+            memcpy(before, c.r, sizeof before);
+            memset(g_ram + 0x10fffu, 0xee, 10u);
+            put_thumb_register_store(0u, width, 4u, 8u, 10u, shift);
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u &&
+                  c.cpsr == flags && memcmp(before, c.r, sizeof before) == 0,
+                  "register store lost operands, flags or retirement");
+            unsigned size = 1u << width;
+            for (unsigned byte = 0; byte < 4u; byte++)
+                CHECK(g_ram[address + byte] == (byte < size ? (uint8_t)(0x87654321u >> (8u * byte)) : 0xeeu),
+                      "register store width=%u shift=%u offset=%08x alignment=%u wrong byte=%u",
+                      size, shift, offsets[off], align, byte);
+            CHECK(g_ram[address - 1u] == 0xeeu && g_ram[address + 4u] == 0xeeu,
+                  "register store touched an adjacent byte");
+         }
+}
+
+static void test_thumb2_register_store_operands(void) {
+    /* Sweep every register in each role, including all pairwise aliases.
+     * No writeback means otherwise legal source/base/offset aliases work. */
+    for (unsigned width = 0; width < 3u; width++)
+     for (unsigned role = 0; role < 3u; role++)
+      for (unsigned reg = 0; reg < 16u; reg++)
+       for (unsigned execute = 0; execute < 2u; execute++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+            c.cpsr = ARM_MODE_SYS | ARM_CPSR_T | ARM_CPSR_Z | ARM_CPSR_V |
+                     test_it_bits(execute ? 0x08u : 0x18u);
+            c.cp15.sctlr = 0u;
+            for (unsigned r = 0; r < 15u; r++) c.r[r] = 0x1000u + r * 16u;
+            unsigned rn = role == 0u ? reg : 4u, rt = role == 1u ? reg : 8u;
+            unsigned rm = role == 2u ? reg : 10u;
+            bool valid = rn != 15u && rt != 15u && rm != 13u && rm != 15u &&
+                         (width == 2u || rt != 13u);
+            uint32_t address = c.r[rn] + c.r[rm] * 8u, value = c.r[rt];
+            uint32_t before[15], flags = c.cpsr;
+            memcpy(before, c.r, sizeof before);
+            memset(g_ram + 0x100u, 0xee, 0xa000u);
+            put_thumb_register_store(0u, width, rn, rt, rm, 3u);
+            bool retired = !execute || valid;
+            CHECK(arm_step(&c) == (retired ? ARM_OK : ARM_UNDEFINED) &&
+                  c.r[15] == (retired ? 4u : 0u) && c.cycles == 1u &&
+                  c.cpsr == (retired ? flags & ~TEST_IT_MASK : flags) &&
+                  memcmp(before, c.r, sizeof before) == 0,
+                  "register store width=%u role=%u reg=%u ignored restrictions, IT or aliases", width, role, reg);
+            for (unsigned byte = 0; byte < 4u; byte++)
+                CHECK(g_ram[address + byte] == (execute && valid && byte < (1u << width) ?
+                      (uint8_t)(value >> (8u * byte)) : 0xeeu), "invalid/skipped register store wrote memory");
+       }
+    for (unsigned width = 0; width < 3u; width++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_SYS | ARM_CPSR_T; c.cp15.sctlr = 0u; c.r[4] = 0x1021u;
+        memset(g_ram + 0x9000u, 0xee, 0x200u);
+        put_thumb_register_store(0u, width, 4u, 4u, 4u, 3u);
+        uint32_t want = width == 0u ? 0xeeeeee21u : width == 1u ? 0xeeee1021u : 0x1021u;
+        CHECK(arm_step(&c) == ARM_OK && c.r[4] == 0x1021u && m_r32(NULL, 0x9129u) == want,
+              "register store failed when all three operands alias");
+        arm_reset(&c, &g_bus);
+        c.cpsr = ARM_MODE_SYS | ARM_CPSR_T; c.r[15] = 0x100u; c.r[14] = 0x200u;
+        put_thumb_register_store(0x100u, width, 4u, 8u, 10u, 3u);
+        uint32_t target = 0x200u + (((width << 5) | 4u) * 2u);
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == target && c.r[14] == 0x103u,
+              "register store changed ARM1176 legacy BL suffix framing");
+    }
+    /* Bits10:6 are fixed zero. Bit11 instead selects the existing imm8
+     * indexed family and must not be treated as a reserved-field mutation. */
+    for (unsigned width = 0; width < 3u; width++)
+     for (unsigned bit = 6u; bit <= 10u; bit++)
+      for (unsigned execute = 0; execute < 2u; execute++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_SYS | ARM_CPSR_T | ARM_CPSR_Z | test_it_bits(execute ? 0x08u : 0x18u);
+        c.r[4] = 0x100u; c.r[8] = 0x12345678u; c.r[10] = 0u;
+        uint32_t flags = c.cpsr;
+        m_w32(NULL, 0x100u, 0xeeeeeeeeu);
+        put_thumb_register_store(0u, width, 4u, 8u, 10u, 0u);
+        m_w16(NULL, 2u, (uint16_t)(0x800au | (1u << bit)));
+        CHECK(arm_step(&c) == (execute ? ARM_UNDEFINED : ARM_OK) &&
+              c.r[15] == (execute ? 0u : 4u) && c.cpsr == (execute ? flags : flags & ~TEST_IT_MASK) &&
+              m_r32(NULL, 0x100u) == 0xeeeeeeeeu, "register store accepted a reserved offset encoding");
+      }
+    for (unsigned width = 0; width < 3u; width++)
+     for (unsigned execute = 0; execute < 2u; execute++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr = ARM_MODE_SYS | ARM_CPSR_T | ARM_CPSR_E | ARM_CPSR_Z | test_it_bits(execute ? 0x08u : 0x18u);
+        c.r[4] = 0x100u; c.r[8] = 0x12345678u; c.r[10] = 0u;
+        uint32_t flags = c.cpsr;
+        m_w32(NULL, 0x100u, 0xeeeeeeeeu);
+        put_thumb_register_store(0u, width, 4u, 8u, 10u, 0u);
+        bool retired = !execute || width == 0u;
+        CHECK(arm_step(&c) == (retired ? ARM_OK : ARM_UNDEFINED) &&
+              c.r[15] == (retired ? 4u : 0u) && c.cpsr == (retired ? flags & ~TEST_IT_MASK : flags) &&
+              m_r32(NULL, 0x100u) == (execute && width == 0u ? 0xeeeeee78u : 0xeeeeeeeeu),
+              "register store silently used little endian for a big endian multibyte access");
+     }
+}
+
+static void test_thumb2_register_store_aborts(void) {
+    for (unsigned host = 0; host < 2u; host++)
+     for (unsigned width = 0; width < 3u; width++)
+      for (unsigned fault = 0; fault < 6u; fault++) {
+        arm_bus_t bus = g_bus;
+        if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
+        arm_cpu_t c;
+        memset(g_ram, 0xee, sizeof g_ram);
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP | (fault == 4u ? ARM_SCTLR_A : 0u);
+        c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N | test_it_bits(0x1cu);
+        c.r[4] = 0x1ffbu; c.r[10] = 1u; c.r[2] = 0x44332211u;
+        uint32_t flags = c.cpsr;
+        m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x803eu);
+        m_w32(NULL, 0x6004u, fault == 1u ? 0u : fault == 5u ? 0xa01eu : 0xa03eu);
+        m_w32(NULL, 0x6008u, fault == 2u ? 0u : fault == 3u ? 0xc01eu : 0xc03eu);
+        put_thumb_register_store(0x8000u, width, 4u, 2u, 10u, 2u); /* VA 0x1fff */
+        bool abort = fault == 1u || fault == 5u || (width && fault != 0u);
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u && c.r[4] == 0x1ffbu &&
+              c.r[10] == 1u && c.r[2] == 0x44332211u, "register store abort changed operands");
+        if (abort) {
+            uint32_t fsr = fault == 4u ? ARM_FSR_ALIGNMENT : fault == 3u || fault == 5u ?
+                           ARM_FSR_PAGE_PERMISSION : ARM_FSR_PAGE_TRANSLATION;
+            CHECK(c.r[15] == ARM_VEC_DATA_ABORT && c.r[14] == 8u && c.spsr[ARM_BANK_ABT] == flags &&
+                  c.cp15.dfar == (fault == 2u || fault == 3u ? 0x2000u : 0x1fffu) &&
+                  c.cp15.dfsr == (fsr | (1u << 11)), "register store lost fault address, WnR, LR or retry IT state");
+        } else CHECK(c.r[15] == 4u && c.cpsr == ((flags & ~TEST_IT_MASK) | test_it_bits(0x18u)),
+                     "byte register store incorrectly accessed/aligned the next page");
+        for (unsigned byte = 0; byte < 4u; byte++) {
+            bool written = byte < (1u << width) && (!abort || (!byte && (fault == 2u || fault == 3u)));
+            uint32_t pa = byte ? 0xc000u + byte - 1u : 0xafffu;
+            CHECK(g_ram[pa] == (written ? (uint8_t)(0x44332211u >> (byte * 8u)) : 0xeeu),
+                  "register store crossed wrong physical pages or changed faulted bytes");
+        }
+        CHECK(g_ram[0xaffeu] == 0xeeu && g_ram[0xb000u] == 0xeeu && g_ram[0xc003u] == 0xeeu,
+              "register store changed neighboring bytes");
+      }
+}
+
+static void test_thumb2_register_store_fetch(void) {
+    for (unsigned host = 0; host < 2u; host++)
+     for (unsigned width = 0; width < 3u; width++)
+      for (unsigned fault = 0; fault < 4u; fault++)
+       for (unsigned execute = 0; execute < 2u; execute++) {
+        arm_bus_t bus = g_bus;
+        if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
+        arm_cpu_t c;
+        memset(g_ram, 0, sizeof g_ram);
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP; c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_Z | test_it_bits(execute ? 0x08u : 0x18u);
+        c.r[15] = 0xffeu; c.r[0] = 0x2000u; c.r[1] = 3u; c.r[10] = 0x44332211u;
+        uint32_t flags = c.cpsr;
+        m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x803eu);
+        m_w32(NULL, 0x6004u, fault == 1u ? 0u : fault == 2u ? 0xa03fu : fault == 3u ? 0xa01eu : 0xa03eu);
+        m_w32(NULL, 0x6008u, 0xc03eu);
+        m_w16(NULL, 0x8ffeu, (uint16_t)(0xf800u | (width << 5)));
+        m_w16(NULL, 0xa000u, 0xa001u); m_w16(NULL, 0x9000u, 0x8001u);
+        memset(g_ram + 0xc000u, 0xee, 8u);
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u && c.r[0] == 0x2000u &&
+              c.r[1] == 3u && c.r[10] == 0x44332211u, "register store fetch changed operands");
+        if (!fault) CHECK(c.r[15] == 0x1002u && c.cpsr == (flags & ~TEST_IT_MASK), "register store complete fetch/IT retirement");
+        else CHECK(c.r[15] == ARM_VEC_PREFETCH && c.r[14] == 0x1002u && c.cp15.ifar == 0x1000u &&
+            c.spsr[ARM_BANK_ABT] == flags && (c.cp15.ifsr & 15u) ==
+            (fault == 1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION), "register store lost second-half fetch fault");
+        for (unsigned byte = 0; byte < 4u; byte++)
+            CHECK(g_ram[0xc003u + byte] == (!fault && execute && byte < (1u << width) ?
+                  (uint8_t)(0x44332211u >> (byte * 8u)) : 0xeeu), "register store wrote before complete fetch or ignored condition");
+        CHECK(g_ram[0xc002u] == 0xeeu && g_ram[0xc007u] == 0xeeu, "register store fetch corrupted adjacent data");
+       }
+}
+
 static void write_thumb2_shifted(unsigned op, bool set, unsigned rn, unsigned rd,
                                   unsigned rm, unsigned type, unsigned amount) {
     m_w16(NULL, 0, (uint16_t)(0xea00u | (op << 5) | (set ? 0x10u : 0u) | rn));
@@ -9616,6 +9813,10 @@ int main(void) {
     test_thumb2_register_shift_values();
     test_thumb2_register_shift_operands_and_it();
     test_thumb2_register_shift_fetch();
+    test_thumb2_register_store_values();
+    test_thumb2_register_store_operands();
+    test_thumb2_register_store_aborts();
+    test_thumb2_register_store_fetch();
     test_thumb2_movw_movt_and_unknown_width();
     test_thumb2_fetch_across_page_boundary();
     test_thumb2_modified_immediate_moves();

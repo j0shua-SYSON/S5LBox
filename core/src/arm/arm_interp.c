@@ -3131,10 +3131,28 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         mem_w32(c, address, c->r[rt]);
         return ARM_OK;
     }
+    /* STR/STRB/STRH register T2 (DDI0406C.b A8.8.205/208/218).
+     * The complete offset register is shifted LSL #0..3. These forms add
+     * without writeback, so otherwise legal operands may freely alias. */
+    uint16_t indexed = first & 0xfff0u;
+    if ((indexed == 0xf800u || indexed == 0xf820u || indexed == 0xf840u) &&
+        (second & 0x0fc0u) == 0u) {
+        unsigned rn = first & 15u, rt = second >> 12, rm = second & 15u;
+        bool word = indexed == 0xf840u, half = indexed == 0xf820u;
+        if (rn == 15u || rt == 15u || rm == 13u || rm == 15u || (!word && rt == 13u))
+            return ARM_UNDEFINED;
+        /* The shared data path is little-endian; byte stores are independent
+         * of CPSR.E. Refuse unsupported multibyte order before any access. */
+        if ((word || half) && (c->cpsr & ARM_CPSR_E)) return ARM_UNDEFINED;
+        uint32_t address = c->r[rn] + (c->r[rm] << ((second >> 4) & 3u));
+        if (word) mem_w32(c, address, c->r[rt]);
+        else if (half) mem_w16(c, address, (uint16_t)c->r[rt]);
+        else mem_w8(c, address, (uint8_t)c->r[rt]);
+        return ARM_OK;
+    }
     /* Signed imm8, pre/post-indexed LDR/STR and STRB/STRH, including
      * single-register PUSH/POP aliases. P=U=1,W=0 belongs to the separate
      * unprivileged family, and P=W=0 is unallocated. Validate before access. */
-    uint16_t indexed = first & 0xfff0u;
     if ((indexed == 0xf800u || indexed == 0xf820u ||
          indexed == 0xf840u || indexed == 0xf850u) && (second & 0x800u)) {
         unsigned rn = first & 15u, rt = second >> 12;

@@ -397,10 +397,23 @@ unchanged. SP and PC operands are refused. See
 [DDI0406C.b, A8.8.17/95/97/150](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 Tests compare every count against repeated one-bit operations and cover
 overlapping operands, conditional skips, complete instruction fetch and
-legacy framing. An isolated matching-driver fixture advances past the
-PL192 unmask method's `LSL.W` at `0x807e5d80` to the handler's unsupported
-register-offset `STRB.W` at `0x807e5ca2`. That fixture uses synthetic objects
-and one controller bank; it does not establish interrupt entry or board boot.
+legacy framing.
+
+Thumb register-offset STRB/STRH/STR add the full offset register shifted
+left by 0..3, with no writeback or flag changes. Valid operands can alias;
+SP is allowed as the base and as a word-store source, but never as the
+offset register. PC operands and reserved offset fields are refused. The
+common memory path handles alignment and translation faults, including
+separately mapped pages and completed bytes before a later fault. Multibyte
+big-endian accesses remain explicit capability stops. See
+[DDI0406C.b, A8.8.205/208/218](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Tests cover full-width offsets and address wrap, aliases, IT, data faults,
+complete instruction fetch and legacy framing with host RAM access enabled
+and disabled. An unchanged matching-driver fixture now passes the PL192
+unmask method's `LSL.W` at `0x807e5d80` and handler's register-offset
+`STRB.W` at `0x807e5ca2`, then stops at the unsupported `DMB ISH` at
+`0x807e5caa`. That fixture uses synthetic objects and one controller bank;
+it does not establish interrupt entry, callback execution or board boot.
 
 Thumb UBFX/SBFX and BFI/BFC implement bitfield extraction, sign extension,
 insertion and clearing. They validate ranges before shifting and preserve
