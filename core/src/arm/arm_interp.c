@@ -2764,7 +2764,41 @@ static arm_status_t thumb_step(arm_cpu_t *c, uint32_t pc, uint16_t insn,
 
 #undef TB
 
-static arm_status_t thumb32_step(arm_cpu_t *c, uint16_t first, uint16_t second) {
+static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
+                                 uint16_t second, uint32_t *next) {
+    /* Wide B/BL/BLX (DDI0406C.b A8.8.18/25). Both halfwords have already
+     * been fetched, so a page fault cannot expose an intermediate LR. */
+    if ((first & 0xf800u) == 0xf000u && (second & 0x8000u)) {
+        uint32_t kind = second & 0xd000u;
+        uint32_t sign = (first >> 10) & 1u;
+        uint32_t j1 = (second >> 13) & 1u, j2 = (second >> 11) & 1u;
+        uint32_t offset;
+        if (kind == 0x8000u) {
+            unsigned cond = (first >> 6) & 15u;
+            /* Conditions 14/15 encode system operations, not branches. */
+            if (cond >= 14u) return ARM_UNDEFINED;
+            offset = (sign << 20) | (j2 << 19) | (j1 << 18) |
+                     ((uint32_t)(first & 0x3fu) << 12) | ((second & 0x7ffu) << 1);
+            if (sign) offset |= 0xffe00000u;
+            if (arm_cond_passed(c, cond)) *next = pc + 4u + offset;
+        } else {
+            bool call = (kind & 0x4000u) != 0u;
+            bool exchange = kind == 0xc000u;
+            if (exchange && (second & 1u)) return ARM_UNDEFINED;
+            uint32_t i1 = 1u ^ j1 ^ sign, i2 = 1u ^ j2 ^ sign;
+            offset = (sign << 24) | (i1 << 23) | (i2 << 22) |
+                     ((uint32_t)(first & 0x3ffu) << 12) | ((second & 0x7ffu) << 1);
+            if (sign) offset |= 0xfe000000u;
+            uint32_t base = pc + 4u;
+            if (call) c->r[14] = base | 1u;
+            if (exchange) {
+                base &= ~3u;
+                c->cpsr &= ~ARM_CPSR_T;
+            }
+            *next = base + offset;
+        }
+        return ARM_OK;
+    }
     /* STR immediate T3: positive unscaled imm12, no writeback. SP is valid
      * for either register; PC is not (DDI0406C.b A8.8.203). Use the common
      * data path for translation, alignment, page crossings and aborts. */
@@ -2949,7 +2983,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
             }
             uint16_t second = c->bus->read16(c->bus->ctx, second_pa);
             tnext = pc + 4u;
-            tst = thumb32_step(c, tinsn, second);
+            tst = thumb32_step(c, pc, tinsn, second, &tnext);
         } else {
             tst = thumb_step(c, pc, tinsn, &tnext);
         }

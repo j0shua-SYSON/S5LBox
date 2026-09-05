@@ -6029,9 +6029,9 @@ static void test_thumb2_movw_movt_and_unknown_width(void) {
             }
         }
         const uint16_t unknown[][2] = {
-            {0xf000u, 0x8000u}, /* unsupported wide conditional branch */
+            {0xf380u, 0x8000u}, /* unsupported wide system register operation */
             {0xe800u, 0xffffu}, {0xf800u, 0xffffu},
-            {0xf240u, 0x8000u}  /* not the MOVW second-halfword pattern */
+            {0xf000u, 0xc001u}  /* BLX with reserved H bit */
         };
         for (unsigned i = 0; i < sizeof unknown / sizeof unknown[0]; i++) {
             arm_cpu_t c;
@@ -6057,6 +6057,7 @@ static void test_thumb2_movw_movt_and_unknown_width(void) {
 
 static void test_thumb2_fetch_across_page_boundary(void) {
     for (unsigned host = 0; host < 2; host++) {
+      for (unsigned call = 0; call < 2; call++) {
         for (unsigned fault = 0; fault < 4; fault++) {
             memset(g_ram, 0, sizeof g_ram);
             arm_bus_t bus = g_bus;
@@ -6072,12 +6073,14 @@ static void test_thumb2_fetch_across_page_boundary(void) {
             m_w32(NULL, 0x6000u, 0x8032u); /* user executable page 0 -> PA 0x8000 */
             m_w32(NULL, 0x6004u, fault == 1 ? 0u : fault == 2 ? 0xa033u :
                                       fault == 3 ? 0xa012u : 0xa032u);
-            m_w16(NULL, 0x8ffeu, 0xf649u);
-            m_w16(NULL, 0xa000u, 0x6464u); /* MOVW r4,#9e64; page 1 is not adjacent */
+            m_w16(NULL, 0x8ffeu, call ? 0xf000u : 0xf649u);
+            m_w16(NULL, 0xa000u, call ? 0xf802u : 0x6464u); /* BL +4 or MOVW r4,#9e64 */
             m_w16(NULL, 0x9000u, 0x0400u); /* wrong physical-contiguity assumption */
             CHECK(arm_step(&c) == ARM_OK, "fetch should retire or vector an abort");
             if (!fault) {
-                CHECK(c.r[4] == 0x9e64u && c.r[15] == 0x1002u && c.cpsr == cpsr,
+                CHECK(c.r[4] == (call ? 0x12345678u : 0x9e64u) &&
+                      c.r[15] == (call ? 0x1006u : 0x1002u) &&
+                      c.r[14] == (call ? 0x1003u : 0x777u) && c.cpsr == cpsr,
                       "wide fetch did not translate its second halfword");
             } else {
                 CHECK(c.r[4] == 0x12345678u && c.r[15] == ARM_VEC_PREFETCH &&
@@ -6090,6 +6093,7 @@ static void test_thumb2_fetch_across_page_boundary(void) {
             }
             CHECK(c.cycles == 1u, "wide instruction charged multiple steps");
         }
+      }
     }
 }
 
@@ -6386,6 +6390,89 @@ static void test_thumb2_modified_immediate_arithmetic(void) {
     }
 }
 
+static void test_thumb2_wide_branches(void) {
+    static const struct { uint16_t first, second; uint32_t offset; } cases[] = {
+        {0xf000u, 0xb800u, 0u}, {0xf000u, 0x9000u, 0x00c00000u},
+        {0xf000u, 0x9800u, 0x00800000u}, {0xf000u, 0xb000u, 0x00400000u},
+        {0xf400u, 0x9000u, 0xff000000u}, {0xf400u, 0x9800u, 0xff400000u},
+        {0xf400u, 0xb000u, 0xff800000u}, {0xf400u, 0xb800u, 0xffc00000u},
+        {0xf3ffu, 0x97ffu, 0x00fffffeu}, {0xf7ffu, 0xbfffu, 0xfffffffeu},
+        {0xf000u, 0xf802u, 4u}, {0xf578u, 0xfb04u, 0xffd78608u}, /* actual kernel BL */
+        {0xf400u, 0xd000u, 0xff000000u}, {0xf3ffu, 0xd7ffu, 0x00fffffeu},
+        {0xf7ffu, 0xffffu, 0xfffffffeu},
+        {0xf000u, 0xe800u, 0u}, {0xf400u, 0xc000u, 0xff000000u},
+        {0xf3ffu, 0xc7feu, 0x00fffffcu}, {0xf7ffu, 0xeffeu, 0xfffffffcu},
+    };
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    for (unsigned p = 0; p < 2; p++) {
+        for (unsigned aligned = 0; aligned < 2; aligned++) {
+            for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+                arm_cpu_t c;
+                CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+                c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_V | ARM_CPSR_Q;
+                uint32_t cpsr = c.cpsr, pc = aligned ? 0x104u : 0x102u;
+                c.r[15] = pc; c.r[14] = 0x777u;
+                m_w16(NULL, pc, cases[i].first); m_w16(NULL, pc + 2u, cases[i].second);
+                bool call = (cases[i].second & 0x4000u) != 0u;
+                bool exchange = call && !(cases[i].second & 0x1000u);
+                uint32_t base = exchange ? ((pc + 4u) & ~3u) : pc + 4u;
+                CHECK(arm_step(&c) == ARM_OK && c.r[15] == base + cases[i].offset &&
+                      c.r[14] == (call ? ((pc + 4u) | 1u) : 0x777u) && c.cycles == 1u &&
+                      c.cpsr == (exchange ? (cpsr & ~ARM_CPSR_T) : cpsr),
+                      "wide branch %u mishandled offset, LR, alignment or instruction state", i);
+            }
+        }
+    }
+    static const struct { uint32_t yes, no; } conditions[] = {
+        {ARM_CPSR_Z, 0u}, {0u, ARM_CPSR_Z}, {ARM_CPSR_C, 0u}, {0u, ARM_CPSR_C},
+        {ARM_CPSR_N, 0u}, {0u, ARM_CPSR_N}, {ARM_CPSR_V, 0u}, {0u, ARM_CPSR_V},
+        {ARM_CPSR_C, ARM_CPSR_C | ARM_CPSR_Z}, {ARM_CPSR_Z, ARM_CPSR_C},
+        {ARM_CPSR_N | ARM_CPSR_V, ARM_CPSR_N}, {ARM_CPSR_N, ARM_CPSR_N | ARM_CPSR_V},
+        {0u, ARM_CPSR_Z}, {ARM_CPSR_Z, 0u},
+    };
+    for (unsigned cond = 0; cond < 14; cond++) {
+        for (unsigned taken = 0; taken < 2; taken++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+            c.cpsr = ARM_MODE_SVC | ARM_CPSR_T | (taken ? conditions[cond].yes : conditions[cond].no);
+            uint32_t before = c.cpsr;
+            c.r[14] = 0x777u;
+            m_w16(NULL, 0, (uint16_t)(0xf000u | (cond << 6))); m_w16(NULL, 2, 0x8002u);
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == (taken ? 8u : 4u) &&
+                  c.r[14] == 0x777u && c.cpsr == before,
+                  "wide conditional branch condition %u taken=%u", cond, taken);
+        }
+    }
+    static const struct { uint16_t first, second; uint32_t target; } conditional[] = {
+        {0xf000u, 0x8000u, 4u}, {0xf000u, 0x8800u, 0x80004u},
+        {0xf000u, 0xa000u, 0x40004u}, {0xf03fu, 0xafffu, 0x100002u},
+        {0xf400u, 0x8000u, 0xfff00004u}, {0xf400u, 0x8800u, 0xfff80004u},
+        {0xf400u, 0xa000u, 0xfff40004u}, {0xf43fu, 0xafffu, 2u},
+    };
+    for (unsigned i = 0; i < sizeof conditional / sizeof conditional[0]; i++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | ARM_CPSR_Z;
+        m_w16(NULL, 0, conditional[i].first); m_w16(NULL, 2, conditional[i].second);
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == conditional[i].target,
+              "conditional branch %u used BL's inverted J bits or sign width", i);
+    }
+    /* Halfword-aligned BLX enters ARM and BX LR returns after both halves. */
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.r[15] = 2u; c.cpsr |= ARM_CPSR_T;
+    m_w16(NULL, 2, 0xf000u); m_w16(NULL, 4, 0xe806u);
+    m_w16(NULL, 6, 0x2307u); /* MOVS r3,#7 after return */
+    m_w32(NULL, 0x10u, 0xe3a0202au); m_w32(NULL, 0x14u, 0xe12fff1eu);
+    CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x10u && c.r[14] == 7u &&
+          !(c.cpsr & ARM_CPSR_T), "BLX did not enter ARM");
+    CHECK(arm_step(&c) == ARM_OK && arm_step(&c) == ARM_OK &&
+          c.r[15] == 6u && (c.cpsr & ARM_CPSR_T) && c.r[2] == 42u,
+          "ARM callee did not return to Thumb");
+    CHECK(arm_step(&c) == ARM_OK && c.r[3] == 7u && c.cycles == 4u,
+          "interworking lost an instruction or returned into the second half");
+}
+
 int main(void) {
     test_reset_initializes_the_default_profile();
     test_explicit_profile_reset_and_invalid_configuration();
@@ -6400,6 +6487,7 @@ int main(void) {
     test_thumb2_str_page_crossing_and_aborts();
     test_armv7_multiword_and_sync_alignment();
     test_thumb2_modified_immediate_arithmetic();
+    test_thumb2_wide_branches();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();
     test_add_reg();

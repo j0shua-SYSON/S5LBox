@@ -69,6 +69,12 @@ restrictions from DDI0406C.b A8.8.102/106. Other wide operations stop as
 unsupported, rather than being misread as legacy BL halves. ARM1176 retains
 its existing two-step BL/BLX behavior.
 
+Wide B/BL/BLX implement their signed offsets and distinct J-bit rules,
+including conditional B and ARM/Thumb interworking. BL/BLX update LR only
+after the complete instruction fetch. Tests cover displacement limits,
+all conditions, halfword-aligned BLX, an ARM callee returning to Thumb,
+and a call straddling an unmapped or denied page. IT blocks remain unsupported.
+
 The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates
 C only as prescribed by the immediate form, preserving V. Invalid zero
@@ -114,7 +120,8 @@ establish that result.
   The instruction profile is not a complete system-register model.
 - Thumb-2 currently implements MOVW/MOVT, modified-immediate MOV/MOVS and
   arithmetic, and STR with an unsigned immediate offset.
-  Its other instruction families, wide branches and IT state remain to implement.
+  Wide B/BL/BLX are also implemented. Other instruction families and IT
+  state remain to implement.
 - VFP stores only d0-d15 and models VFP11/VFPv2. Cortex-A8 VFPv3 and NEON,
   including the wider register file and context-switch semantics, are absent.
 - The SoC, interrupt wiring, storage, graphics, input and power devices are
@@ -170,6 +177,8 @@ With STR implemented, execution reaches `0x802b8328`, halfwords `f504 7090`
 the next unsupported operation; none represents a complete kernel boot.
 Modified-immediate arithmetic advances the trace to `0x802b832c`, halfwords
 `f578 fb04` (`BL 0x80030938`), after 62,846 steps.
+Wide branches carry the trace through calls and ARM/Thumb returns to
+`0x802b840c`, halfwords `e8bd 40f0` (`POP.W {r4-r7,lr}`), after 63,130 steps.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim
