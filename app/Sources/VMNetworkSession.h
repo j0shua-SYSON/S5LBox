@@ -174,6 +174,13 @@ bool vm_network_session_set_host_clock(vm_network_session_t *session,
                                        s5l_active_host_now_fn now,
                                        void *ctx);
 
+/* Opt-in, bounded guest-PC trace at existing host service boundaries. No
+ * guest state is changed. At most eight captures are appended to path, only
+ * after two seconds without a delivered packet. Call before starting the
+ * peer; NULL/empty disables it. No trace allocation or file I/O by default. */
+bool vm_network_session_set_profile(vm_network_session_t *session,
+                                     const char *path);
+
 /*
  * A machine checkpoint preserves the guest's UART and PPP state, but host
  * sockets and this peer are process-local and cannot cross the restore. Start

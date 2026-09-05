@@ -644,6 +644,75 @@ static void test_bulk_packets_use_tokens_and_recover_lost_notifications(bool bat
     s5l8900_free(&machine);
 }
 
+static void test_optional_network_profile_is_bounded_and_observational(void) {
+    const char *path = "test-vm-network-profile.csv";
+    s5l8900_t m;
+    char detail[192];
+    CHECK(s5l8900_init(&m, 0u, 1u << 20), "machine init failed");
+    vm_network_session_t *s = vm_network_session_create(&m, true, detail, sizeof detail);
+    if (!s) { CHECK(false, "create failed"); s5l8900_free(&m); return; }
+    fake_host_clock_t clock = {UINT64_C(1000000000), true};
+    CHECK(vm_network_session_set_host_clock(s, fake_host_now, &clock), "clock failed");
+    CHECK(!vm_network_session_set_profile(NULL, path), "accepted missing owner");
+    char long_path[1025];
+    memset(long_path, 'a', sizeof long_path); long_path[1024] = '\0';
+    CHECK(!vm_network_session_set_profile(s, long_path), "accepted truncated path");
+    CHECK(vm_network_session_set_profile(s, path), "trace allocation failed");
+    CHECK(vm_network_session_set_profile(s, NULL), "trace disable failed");
+    CHECK(vm_network_session_set_profile(s, path), "trace re-enable failed");
+    guest_packet_bridge_t bridge = {
+        .sites = {0xc0000800u, 0xc0000804u, 0u, 0u, 0u, 0u, 0u, 0u},
+        .ram = m.ram, .ram_base = 0u, .ram_size = m.ram_size
+    };
+    m.bus.write32(m.bus.ctx, 0x800u, GUEST_PACKET_RX_SVC);
+    m.bus.write32(m.bus.ctx, 0x804u, GUEST_PACKET_TX_SVC);
+    CHECK(vm_network_session_attach_packet_bridge(s, &bridge), "attach failed");
+    ppp_peer_t guest;
+    CHECK(open_test_ppp_link(&m, s, &guest), "IPCP failed");
+    CHECK(!vm_network_session_set_profile(s, NULL), "changed running trace owner");
+    FILE *existing = fopen(path, "r");
+    CHECK(!existing, "test output already exists; refusing to reuse it");
+    if (existing) { fclose(existing); vm_network_session_destroy(&s); s5l8900_free(&m); return; }
+    m.cpu.r[15] = 0x30123456u;
+    m.cpu.r[14] = 0x30567890u;
+    m.cpu.cp15.ttbr0 = 0x00080000u;
+    uint32_t original_cpsr = m.cpu.cpsr;
+    for (unsigned capture = 0u; capture < 9u; capture++) {
+        bridge.rx_bytes += 4096u; /* observed delivery counter, not guest memory */
+        CHECK(run_service_boundary(&m), "trace service failed");
+        if (!capture) {
+            existing = fopen(path, "r");
+            CHECK(!existing, "trace wrote during the transfer");
+            if (existing) fclose(existing);
+            for (unsigned i = 0; i < 17000u; i++) (void)run_service_boundary(&m);
+        }
+        clock.now_ns += UINT64_C(2100000000);
+        CHECK(run_service_boundary(&m), "trace completion failed");
+    }
+    CHECK(m.cpu.r[15] == 0x30123456u && m.cpu.r[14] == 0x30567890u &&
+          m.cpu.cpsr == original_cpsr && m.cpu.cp15.ttbr0 == 0x00080000u,
+          "trace changed CPU state");
+    FILE *f = fopen(path, "r");
+    CHECK(f != NULL, "trace missing after idle interval");
+    if (f) {
+        char line[256]; unsigned starts = 0, ends = 0; bool bounded = false, pc = false;
+        while (fgets(line, sizeof line, f)) {
+            if (!strncmp(line, "BEGIN ", 6u)) {
+                starts++;
+                if (strstr(line, "count=16384 dropped=618")) bounded = true;
+            }
+            if (!strcmp(line, "END\n")) ends++;
+            if (strstr(line, ",30123456,30567890,00080000,")) pc = true;
+        }
+        fclose(f);
+        CHECK(starts == 8u && ends == 8u && bounded && pc,
+              "trace capture limits/PC wrong: %u/%u bounded=%d pc=%d", starts, ends, bounded, pc);
+        CHECK(remove(path) == 0, "could not remove owned test trace");
+    }
+    vm_network_session_destroy(&s);
+    s5l8900_free(&m);
+}
+
 int main(void) {
     printf("S5LBox iOS PPP/NAT attachment tests\n");
     test_ppp_attachment_closes_the_uart_loop();
@@ -654,6 +723,7 @@ int main(void) {
     test_invalid_create_fails_closed();
     test_bulk_packets_use_tokens_and_recover_lost_notifications(false);
     test_bulk_packets_use_tokens_and_recover_lost_notifications(true);
+    test_optional_network_profile_is_bounded_and_observational();
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

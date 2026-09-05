@@ -327,6 +327,7 @@ typedef struct {
     uint64_t tcp_retransmits;
     uint64_t tcp_out_of_order;  /* dropped and re-ACKed, never reassembled   */
     uint64_t tcp_bytes_to_host, tcp_bytes_to_guest;
+    uint64_t tcp_bytes_acked_by_guest; /* unique payload, not SYN/FIN or resends */
 
     /* tcp_resets_out alone cannot tell a rejected stray segment from a live
      * flow that we destroyed. Keep every local abort cause separate and retain

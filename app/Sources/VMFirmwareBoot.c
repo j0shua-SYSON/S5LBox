@@ -1668,6 +1668,19 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                 boot->network, &boot->bridges->packet))
             (void)fprintf(stderr, "[network] current kernel has no bulk packet "
                                  "sites; retaining serial PPP fallback\n");
+        char profile_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
+        if (join_path(profile_path, sizeof profile_path, paths->work,
+                      VM_FW_BOOT_NETWORK_PROFILE_FILE) &&
+            file_size(profile_path) > 0u) {
+            if (!join_path(profile_path, sizeof profile_path, paths->work,
+                           VM_FW_BOOT_NETWORK_PROFILE_OUTPUT) ||
+                !vm_network_session_set_profile(boot->network, profile_path)) {
+                (void)file_block_close(boot->media);
+                set_detail(report->detail, sizeof report->detail,
+                           "The requested guest network profile could not start.");
+                return false;
+            }
+        }
         if (restored &&
             !vm_network_session_reopen_after_restore(boot->network)) {
             (void)file_block_close(boot->media);

@@ -56,6 +56,8 @@ extern "C" {
  * job. Runtime networking follows this record, not a setting changed after the
  * filesystem was made. The marker contains no credential or network state. */
 #define VM_FW_BOOT_PPP_FILE         "network.ppp-v1"
+#define VM_FW_BOOT_NETWORK_PROFILE_FILE "network.profile-v1"
+#define VM_FW_BOOT_NETWORK_PROFILE_OUTPUT "network-profile-v1.csv"
 #define VM_FW_BOOT_PPP_TMP          "network.ppp-v1.partial"
 /* Compatibility names for callers that derive all boot-sidecar paths here.
  * Unlike the PPP record, this is a strict manifest record parsed by

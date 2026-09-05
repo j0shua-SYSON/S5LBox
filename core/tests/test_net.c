@@ -1243,12 +1243,16 @@ static void test_ack_of_original_flight_survives_retransmit_rewind(void) {
     start(true, false);
     uint32_t ours = handshake(50112u, &gseq);
     drain();
+    CHECK(g_ns.stats.tcp_bytes_acked_by_guest == 0u,
+          "SYN was counted as acknowledged payload");
     g_mock.h[0].stream_left = 6u * NET_TCP_MSS_MAX;
     net_tick(&g_ns, 10u);
     CHECK(drain() == 3u, "initial flight was not three segments");
     net_tick(&g_ns, 10u + NET_TCP_RTO_MS);
     CHECK(take(&r) && r.seq == ours && r.paylen == NET_TCP_MSS_MAX &&
           !take(&r), "timeout did not rewind to one retransmitted segment");
+    CHECK(g_ns.stats.tcp_bytes_acked_by_guest == 0u,
+          "emitting/retransmitting data was counted as guest receipt");
 
     uint32_t original_end = ours + 3u * NET_TCP_MSS_MAX;
     send_tcp(PEER_IP, 50112u, 80u, gseq, original_end, TCP_ACK, 0u,
@@ -1257,11 +1261,17 @@ static void test_ack_of_original_flight_survives_retransmit_rewind(void) {
     CHECK(f->snd_una == original_end && f->snd_nxt == original_end &&
           f->txlen == 3u * NET_TCP_MSS_MAX && f->rtx == 0u,
           "a real ACK beyond the rewind point was incorrectly refused");
+    CHECK(g_ns.stats.tcp_bytes_acked_by_guest == 3u * NET_TCP_MSS_MAX,
+          "cumulative payload ACK was not counted exactly once");
     drain();
     send_tcp(PEER_IP, 50112u, 80u, gseq, original_end + 1u, TCP_ACK, 0u,
              NULL, 0u, NULL, 0u);
     CHECK(f->snd_una == original_end && f->txlen == 3u * NET_TCP_MSS_MAX,
           "the rewind exception admitted a byte never in the original flight");
+    send_tcp(PEER_IP, 50112u, 80u, gseq, original_end, TCP_ACK, 0u,
+             NULL, 0u, NULL, 0u);
+    CHECK(g_ns.stats.tcp_bytes_acked_by_guest == 3u * NET_TCP_MSS_MAX,
+          "invalid or duplicate ACK inflated guest receipt");
 }
 
 /* A full bounded queue is backpressure, not evidence that bytes reached the

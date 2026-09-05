@@ -22,6 +22,22 @@ typedef struct {
     uint8_t  bytes[NET_MTU];
 } vm_network_dgram_t;
 
+#define VM_NETWORK_PROFILE_SAMPLES 16384u
+typedef struct {
+    uint32_t ms, retired, pc, lr, ttbr0, cpsr, r0, r1, r2;
+    uint32_t window, inflight, buffered;
+    uint64_t delivered, emitted, acknowledged;
+} vm_network_profile_sample_t;
+
+typedef struct {
+    char path[1024];
+    unsigned count, dropped, captures;
+    uint32_t last_packet_ms;
+    uint64_t last_delivered;
+    bool active;
+    vm_network_profile_sample_t sample[VM_NETWORK_PROFILE_SAMPLES];
+} vm_network_profile_t;
+
 struct vm_network_session {
     s5l8900_t    *machine;          /* borrowed for the attachment lifetime */
     ppp_peer_t   *peer;
@@ -60,7 +76,81 @@ struct vm_network_session {
     uint64_t bulk_id;
     bool bulk_batch_enabled, bulk_notified;
     unsigned bulk_notified_slot;
+    vm_network_profile_t *profile;
 };
+
+bool vm_network_session_set_profile(vm_network_session_t *s, const char *path) {
+    if (!s || s->peer_opened) return false;
+    if (path && strlen(path) >= sizeof ((vm_network_profile_t *)0)->path)
+        return false;
+    if (!path || !path[0]) {
+        free(s->profile);
+        s->profile = NULL;
+        return true;
+    }
+    vm_network_profile_t *p = calloc(1u, sizeof *p);
+    if (!p) return false;
+    memcpy(p->path, path, strlen(path) + 1u);
+    free(s->profile);
+    s->profile = p;
+    return true;
+}
+
+static void network_profile_sample(vm_network_session_t *s, unsigned retired,
+                                   uint32_t now_ms) {
+    vm_network_profile_t *p = s->profile;
+    if (!p || !s->packet_bridge || p->captures >= 8u) return;
+    uint64_t delivered = s->packet_bridge->rx_bytes;
+    if (delivered != p->last_delivered) {
+        p->last_delivered = delivered;
+        p->last_packet_ms = now_ms;
+        p->active = true;
+    }
+    if (!p->active) return;
+    if (p->count < VM_NETWORK_PROFILE_SAMPLES) {
+        vm_network_profile_sample_t *v = &p->sample[p->count++];
+        const arm_cpu_t *c = &s->machine->cpu;
+        v->ms = now_ms; v->retired = retired;
+        v->pc = c->r[15]; v->lr = c->r[14];
+        v->ttbr0 = c->cp15.ttbr0; v->cpsr = c->cpsr;
+        v->r0 = c->r[0]; v->r1 = c->r[1]; v->r2 = c->r[2];
+        v->delivered = delivered;
+        v->emitted = s->net ? s->net->stats.tcp_bytes_to_guest : 0u;
+        v->acknowledged = s->net ? s->net->stats.tcp_bytes_acked_by_guest : 0u;
+        net_tcp_live_status_t live;
+        memset(&live, 0, sizeof live);
+        if (s->net) (void)net_get_tcp_live_status(s->net, &live);
+        v->window = live.window; v->inflight = live.inflight;
+        v->buffered = live.tx_buffered;
+    } else {
+        p->dropped++;
+    }
+    if ((uint32_t)(now_ms - p->last_packet_ms) < 2000u) return;
+    /* File I/O is deliberately outside the measured transfer. This is a
+     * boundary sample, not an unbiased wall-time or per-instruction profile.
+     * Retired weights and timestamps let the analyst distinguish idle WFI
+     * slices from useful work; dropped samples are never hidden. */
+    FILE *f = fopen(p->path, "a");
+    if (f) {
+        (void)fprintf(f, "BEGIN %u count=%u dropped=%u\n", p->captures,
+                      p->count, p->dropped);
+        (void)fputs("ms,retired,pc,lr,ttbr0,cpsr,r0,r1,r2,delivered,emitted,acknowledged,window,inflight,buffered\n", f);
+        for (unsigned i = 0u; i < p->count; i++) {
+            const vm_network_profile_sample_t *v = &p->sample[i];
+            (void)fprintf(f, "%u,%u,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%llu,%llu,%llu,%u,%u,%u\n",
+                v->ms, v->retired, v->pc, v->lr, v->ttbr0, v->cpsr,
+                v->r0, v->r1, v->r2, (unsigned long long)v->delivered,
+                (unsigned long long)v->emitted,
+                (unsigned long long)v->acknowledged,
+                v->window, v->inflight, v->buffered);
+        }
+        (void)fputs("END\n", f);
+        (void)fclose(f);
+    }
+    p->captures++;
+    p->count = p->dropped = 0u;
+    p->active = false;
+}
 
 static void anchor_host_clock(vm_network_session_t *session) {
     if (!session) return;
@@ -420,6 +510,7 @@ static void uart4_host_service(void *ctx, unsigned retired) {
     refill_uart4(session);
     if (session->guest_rx_bytes != before)
         s5l8900_tick(session->machine, 0u);
+    network_profile_sample(session, retired, now_ms);
 }
 
 vm_network_session_t *vm_network_session_create(
@@ -681,6 +772,7 @@ void vm_network_session_destroy(vm_network_session_t **slot) {
     net_host_close(session->host);
     free(session->net);
     free(session->peer);
+    free(session->profile);
     free(session);
     *slot = NULL;
 }

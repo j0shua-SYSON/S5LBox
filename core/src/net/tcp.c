@@ -336,6 +336,7 @@ static void tcp_consume_ack(net_stack_t *ns, net_flow_t *f, uint32_t ack) {
     bool fin_acked = f->fin_sent && dat > f->txlen;
     if (dat > f->txlen) dat = f->txlen;
     if (dat) {
+        ns->stats.tcp_bytes_acked_by_guest += dat;
         tcp_cwnd_ack(f, dat);
         memmove(f->txbuf, f->txbuf + dat, f->txlen - dat);
         f->txlen -= dat;
