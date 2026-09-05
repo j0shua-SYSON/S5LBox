@@ -20,8 +20,10 @@ guest_apt_index_stats_t guest_apt_index_stats;
 #define COUNT(field) ((void)0)
 #endif
 
-/* Old APT's range comparator orders bytes as signed chars, not memcmp's
- * unsigned bytes. Only its sign and equality are observable by this method. */
+/* Old APT orders mismatching bytes as signed chars. At a common-prefix end,
+ * however, the SHORTER range compares HIGHER (image 0x305c..0x3070 in the
+ * pinned library). This is not ordinary strcmp ordering. Only sign/equality
+ * are observable by the interning method. */
 static int compare(const char *a, uint32_t an, const char *b, uint32_t bn) {
     uint32_t n = an < bn ? an : bn;
     COUNT(comparisons);
@@ -32,7 +34,7 @@ static int compare(const char *a, uint32_t an, const char *b, uint32_t bn) {
         COUNT(bytes);
         if (x != y) return x < y ? -1 : 1;
     }
-    return an == bn ? 0 : an < bn ? -1 : 1;
+    return an == bn ? 0 : an < bn ? 1 : -1;
 }
 
 static uint32_t length(const char *s) {

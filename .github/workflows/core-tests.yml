@@ -387,6 +387,56 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
         run: ctest --test-dir build-san --output-on-failure
 
+  apt-index-arm:
+    name: exact APT ARMv6 adapter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch exact public library input without installing it
+        run: |
+          mkdir -p build-apt-input
+          curl --fail --location --retry 2 --max-time 60 \
+            https://apt.saurik.com/cydia-3.7/debs/apt7-lib_0.7.20.2-1_iphoneos-arm.deb \
+            --output build-apt-input/library.deb
+          printf '%s  %s\n' \
+            b8fb485c786e5a83abf4710778fb5c89bd9f6dcd9ced56fc50f363169f9132b7 \
+            build-apt-input/library.deb | sha256sum --check -
+          ar p build-apt-input/library.deb data.tar.lzma \
+            | xz --format=lzma --decompress \
+            | tar -x -C build-apt-input ./usr/lib/libapt-pkg.dylib.4.6.0
+
+      - name: Compile actual Apple ARMv6 calling convention
+        run: |
+          clang --version
+          for source in guest_apt_index guest_apt_pinned; do
+            clang --target=armv6-apple-ios3.0 -marm -mfloat-abi=soft \
+              -ffreestanding -fno-builtin -fno-unwind-tables -fno-stack-protector \
+              -std=c11 -Wall -Wextra -Werror -O2 \
+              -c tools/$source.c -o build-apt-input/$source.o
+          done
+
+      - name: Build and verify private offline library artifact
+        run: |
+          python3 -B tools/build_guest_apt_index.py \
+            --input build-apt-input/usr/lib/libapt-pkg.dylib.4.6.0 \
+            --index-object build-apt-input/guest_apt_index.o \
+            --adapter-object build-apt-input/guest_apt_pinned.o \
+            --output build-apt-input/library-indexed.dylib \
+            --manifest build-apt-input/library-indexed.json
+          python3 -B tools/verify_guest_apt_index.py \
+            build-apt-input/usr/lib/libapt-pkg.dylib.4.6.0 \
+            build-apt-input/library-indexed.dylib
+
+      - name: Execute original and replacement ARM code
+        run: |
+          cmake -S . -B build-apt-probe -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-Wall -Wextra -Werror"
+          cmake --build build-apt-probe --target guest_apt_arm_probe --parallel 4
+          ./build-apt-probe/core/guest_apt_arm_probe \
+            build-apt-input/usr/lib/libapt-pkg.dylib.4.6.0 \
+            build-apt-input/library-indexed.dylib
+
   strict:
     # Every C target, including host tools and the app's portable bridge, must
     # remain warning-free.  Keep this hosted: the user's development machine is

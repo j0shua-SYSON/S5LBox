@@ -1,7 +1,8 @@
 # Ordered APT catalog index experiment
 
-Status: host-tested algorithm prototype; not linked into the host app and not
-installed in a guest. No physical Cydia improvement is claimed.
+Status: offline guest-library candidate with host and ARM execution tests;
+not linked into the host app and not installed in a guest. No physical Cydia
+improvement is claimed.
 
 The exact pinned `apt7-lib` 0.7.20.2-1 library implements `WriteUniqString` with
 a 26-entry recent-value cache followed by a descending sorted linked-list
@@ -17,7 +18,9 @@ same linked list, not merely a few architecture and section labels.
 `tools/guest_apt_index.c` replaces repeated list traversal with an AVL ordered
 index. Equality and predecessor/successor lookup are logarithmic. It retains
 the original pool allocation and link-writing sequence, serialized item layout,
-string offsets, and recent-cache behavior. The auxiliary index is private to
+string offsets, and recent-cache behavior. Its comparison is deliberately not
+ordinary `strcmp`: bytes are signed, but a shorter common prefix sorts higher.
+The auxiliary index is private to
 one generator lifetime; it must be released on every destructor path. No
 process-global address cache or host-side instruction skipping is involved.
 
@@ -30,30 +33,58 @@ matching this pinned version, not an arbitrary newer APT ABI.
 
 ## Current evidence
 
-- Strict Windows build: 75/75 CTests passed. The algorithm suite passed 44,542
+- Strict Windows build: 75/75 CTests passed before the ARM prefix correction.
+  The corrected algorithm suite passed 44,550
   checks covering insertion orders, duplicates, byte ordering, existing lists,
   allocation failures, retained-cache view relocation, and cleanup.
 - A representative `NewVersion` field replay of the retained 8,245,183-byte
   BigBoss Packages file covered 9,971 records and 10,041 unique strings. The
-  original-list model made 32,332,661 comparisons; the indexed model made
-  307,856. Serialized handles, items, links, and strings matched; 50,055 checks
+  corrected original-list model made 32,330,295 comparisons; the indexed model
+  made 309,882. Serialized handles, items, links, and strings matched; 50,055 checks
   passed. This is not a complete APT parser, actual call trace, emulated CPU
   benchmark, or physical wall-clock result.
 - An ascending synthetic input already favorable to head insertion took fewer
   comparisons with the original list. The index removes the repeated-search
   worst case; do not claim every input becomes faster.
-- Portable LLVM 18.1.8 compiled the source for both ARMv6 ELF and the actual
-  `armv6-apple-ios3.0` Mach-O target. Compilation is not execution or ABI proof.
+- The actual Apple ARMv6 candidate passed 60,718 checks while executing the
+  original and replacement ARM code. These include both stack alignments,
+  volatile-register clobbering, both destructor entries, allocation refusal,
+  object reuse, all first-byte values, embedded NULs and pool-write failure.
+  In the normal synthetic case, lookup code retired 5,253,911 instructions
+  versus 41,463,137 for the original. Pool and system-call boundaries are host
+  fixtures, so this is not full OS work or a physical timing. Forced index
+  allocation failure was slower than the original but preserved results.
+- The first ARM edge test caught a wrong common-prefix ordering shared by the
+  initial implementation and host reference. The exact binary at `0x305c`
+  established the shorter-first rule, now independently tested. Earlier v1/v2
+  offline artifacts are rejected and must not be installed.
+- The probe initially treated R9 as preserved. Apple's documented iOS 3 ABI
+  makes it volatile and uses four-byte stack alignment. The corrected probe
+  poisons R9 across fixture calls. See [Apple's ARMv6 ABI](https://developer.apple.com/documentation/xcode/writing-armv6-code-for-ios).
+
+`guest_apt_pinned.c` uses the existing pool methods and anonymous non-executable
+memory mappings, with a per-generator sentinel and both destructor detours.
+`build_guest_apt_index.py` accepts only the exact publisher library and bounded
+Apple ARMv6 Mach-O objects. It inserts read/execute pages before LINKEDIT,
+preserves virtual/file segment ordering and original TEXT/DATA addresses,
+updates linker-table file offsets, and replaces the ad-hoc page signature.
+`verify_guest_apt_index.py` independently checks segment extents, the three
+entry edits, unchanged original code/data/linker contents, and all code hashes.
+No loader or physical execution is established by that verifier.
+
+The corrected local v3 candidate SHA256 is
+`de78e2b761479eeabab8a4abd066b3cf4eb0976b82f40f65747ad08375da6b0c`.
+Its generated code is 4,592 bytes in an 8 KiB executable segment; the signed
+library is 1,034,523 bytes. Compiler versions can produce different artifacts;
+CI rebuilds and executes its own exact candidate instead of trusting this hash.
 
 The earlier compact bulk-string experiment did not pass its physical usability
 gate and remains disabled; see [bulk execution](bulk-execution.md).
 
 ## Next gates
 
-1. Exact-identity guest adapter and offline linking, using the Apple ARMv6 ABI,
-   existing pool methods, and non-executable private memory for the index.
-2. Differential execution of the original and replacement ARM code, including
-   both generator destructor variants, fallback, and object reuse.
+1. Exact-commit CI, including the rebuilt library's ARM execution probe.
+2. Real guest loader validation and safe installation with preserved backups.
 3. Same-build physical Cydia refresh from preserved paired checkpoints, with
    catalog/package equivalence, repeated reloads, and lifecycle checks.
 

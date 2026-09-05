@@ -213,6 +213,11 @@ target_include_directories(test_guest_apt_index PRIVATE ../tools)
 target_compile_definitions(test_guest_apt_index PRIVATE S5LBOX_APT_INDEX_TESTING=1)
 add_test(NAME guest_apt_index COMMAND test_guest_apt_index)
 
+# Optional exact-library ARM probe; its two external artifacts are never
+# bundled with the project or treated as available to ordinary CTest runs.
+add_executable(guest_apt_arm_probe ../tools/guest_apt_arm_probe.c)
+target_link_libraries(guest_apt_arm_probe PRIVATE emucore)
+
 add_executable(test_vfp tests/test_vfp.c)
 target_link_libraries(test_vfp PRIVATE emucore)
 add_test(NAME vfp COMMAND test_vfp)

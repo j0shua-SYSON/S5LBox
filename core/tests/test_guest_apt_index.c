@@ -59,7 +59,8 @@ static int cmp_ref(const char *a, uint32_t an, const char *b, uint32_t bn) {
         if (x > y) return 1;
         ++i;
     }
-    return an == bn ? 0 : an < bn ? -1 : 1;
+    /* The exact ARM method returns +1 when only the first range ends. */
+    return an == bn ? 0 : an < bn ? 1 : -1;
 }
 
 static uint32_t reference_write(pool_t *p, const char *s, uint32_t n) {
@@ -165,7 +166,13 @@ static void orders(void) {
 
 static void byte_cases(void) {
     reset();
+    query("prefix", 6);
+    query("prefix-longer", 13);
+    CHECK(!strcmp(indexed_pool.strings + indexed_pool.items[indexed_pool.head].string, "prefix"),
+          "pinned APT orders the shorter prefix first, unlike strcmp");
     query("", 0);
+    CHECK(!indexed_pool.strings[indexed_pool.items[indexed_pool.head].string],
+          "pinned APT orders an empty range before nonempty ranges");
     for (unsigned a = 1; a < 256; ++a) {
         char key[5] = {(char)a, 'x', 0, 0, 0};
         query(key, 2);
