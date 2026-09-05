@@ -725,6 +725,10 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
     arm_cp15_t *p = &c->cp15;
 
     if (c->arch == ARM_ARCH_V7_CORTEX_A8) {
+        /* System-register rules qualify the generic MRC description:
+         * both MRC CP15 to APSR and MCR CP15 from PC are unpredictable
+         * (DDI0406C.b B3.15.2). Refuse before changing flags or registers. */
+        if (rd == 15u) return ARM_UNDEFINED;
         if (opc1 == 1u && crn == 9u && crm == 0u && opc2 == 2u) {
             /* DDI0344K 3.2.55: L2ACTLR is privileged R/W in Secure state.
              * This profile stays in the Secure reset state: SCR, SMC and
@@ -733,11 +737,9 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
              * No parity/ECC RAM is configured, so bit21 cannot be set.
              * Other fields control cache timing/allocation; synchronous,
              * coherent memory needs no extra queued work or TLB flush. */
-            if (!cpu_is_priv(c) || (!load && rd == 15u)) return ARM_UNDEFINED;
+            if (!cpu_is_priv(c)) return ARM_UNDEFINED;
             if (load) {
-                uint32_t v = c->a8_l2actlr;
-                if (rd == 15u) c->cpsr = (c->cpsr & 0x0fffffffu) | (v & 0xf0000000u);
-                else c->r[rd] = v;
+                c->r[rd] = c->a8_l2actlr;
             } else {
                 uint32_t v = c->r[rd];
                 if (v & ~0x3be101cfu) return ARM_UNDEFINED;
@@ -750,7 +752,7 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
          * identity/cache-size, translation-result, debug/performance and
          * security banks must not alias ARM1176 registers or return zero.
          * Register bit fields and reset signals still need their own audit. */
-        if (opc1 != 0u || (!load && rd == 15u)) return ARM_UNDEFINED;
+        if (opc1 != 0u) return ARM_UNDEFINED;
         bool data_register = crm == 0u &&
             (((crn == 1u || crn == 2u) && opc2 <= 2u) ||
              (crn == 3u && opc2 == 0u) || (crn == 5u && opc2 <= 1u) ||
@@ -886,9 +888,7 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
                 break;
             default: v = 0; break;              /* unmodelled: reads as zero */
         }
-        if (c->arch == ARM_ARCH_V7_CORTEX_A8 && rd == 15u)
-            c->cpsr = (c->cpsr & 0x0fffffffu) | (v & 0xf0000000u); /* MRC APSR_nzcv */
-        else c->r[rd] = v;
+        c->r[rd] = v;
     } else {
         uint32_t v = reg_read(c, pc, rd);
         switch (crn) {
@@ -2930,7 +2930,8 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
                                  uint16_t second, uint32_t *next) {
     /* MCR/MRC T1 (DDI0406C.b A8.8.98/107): CP15 uses the A32 fields,
      * but Thumb forbids Rt=SP. Only Cortex-A8's checked CP15 bank is ready;
-     * other coprocessors/profiles and MCR2/MRC2 remain separate work. */
+     * other coprocessors/profiles remain separate work. MCR2/MRC2 to CP15
+     * are undefined (B3.15.2) and must not alias these encodings. */
     if ((first & 0xff00u) == 0xee00u && (second & 0x0f10u) == 0x0f10u) {
         if (c->arch != ARM_ARCH_V7_CORTEX_A8 || (second >> 12) == 13u)
             return ARM_UNDEFINED;

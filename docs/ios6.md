@@ -74,8 +74,11 @@ Cortex-A8 CP15 accesses validate the complete opcode and register selector
 before using existing storage. Unimplemented identity, cache-size, security,
 performance and other banks are refused, preventing accidental ARM1176
 identity and register aliases. User access is limited to the documented
-barriers and thread-ID permissions. MRC to APSR updates NZCV without writing
-PC; MCR cannot source PC. The legacy CP15 WFI encoding is a no-op on this
+barriers and thread-ID permissions. Both CP15 MRC to APSR and MCR from PC
+are refused as unpredictable, following the system-register restrictions in
+[DDI0406C.b, B3.15.2](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+The generic MRC flag-transfer behavior does not establish CP15 permission.
+The legacy CP15 WFI encoding is a no-op on this
 processor and does not call the ARM1176 wait hook. These rules follow
 [DDI0344K, table 3-3 and sections 3.1, 3.2.40/41/73](https://documentation-service.arm.com/static/5e8e1ac688295d1e18d35fde).
 Control-register bit fields, reset signals and the complete MMU/security
@@ -97,11 +100,12 @@ cleared on ARM1176 restore and Cortex-A8 save/load still refused.
 
 Cortex-A8 Thumb MRC/MCR transfers use the same checked CP15 selector and
 access path. Both halfwords must be fetched before any register changes;
-Thumb additionally forbids SP in the transfer register. MRC to APSR changes
-only NZCV and can execute before the last IT slot. IT conditions, privileged
+Thumb additionally forbids SP in the transfer register. Refused accesses leave
+flags and IT state unchanged. IT conditions, privileged
 state changes and permitted User thread-ID/barrier accesses retain their
-normal semantics. CP14, VFP, MRC2/MCR2 and Swift CP15 transfers remain
-unsupported in Thumb; the ARM1176 instruction path is unchanged.
+normal semantics. CP14, VFP and Swift CP15 transfers remain unsupported in
+Thumb. CP15 MRC2/MCR2 encodings are undefined and refused. The ARM1176
+instruction path is unchanged.
 See [DDI0406C.b, A8.8.98/107](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 This adds transfer execution without supplying unverified CPU identity.
 

@@ -1562,7 +1562,7 @@ static void test_cortex_a8_cp15_selector_boundary(void) {
      }
     }
     /* Keep real stateful thread-ID access in privileged and allowed User
-     * modes, including flag transfer through Rt=15 without a PC write. */
+     * modes. CP15 MRC to APSR is unpredictable (DDI0406C.b B3.15.2). */
     for (unsigned user = 0; user < 2u; user++) {
      for (unsigned op = 1; op <= 4; op++) {
       for (unsigned load = 0; load < 2u; load++) {
@@ -1592,8 +1592,9 @@ static void test_cortex_a8_cp15_selector_boundary(void) {
      uint32_t flags = c.cpsr;
      c.cp15.tpidrurw = (nzcv << 28) | 0x01234567u;
      m_w32(NULL, 0, 0xee1dff50u); /* MRC p15,0,APSR_nzcv,c13,c0,2 */
-     CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cpsr == ((flags & 0x0fffffffu) | (nzcv << 28)),
-           "A8 MRC Rt=15 lost NZCV or wrote PC");
+     CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.cpsr == flags &&
+           c.cp15.tpidrurw == ((nzcv << 28) | 0x01234567u),
+           "A8 accepted unpredictable CP15 MRC to APSR");
      c.r[15] = 0; flags = c.cpsr;
      m_w32(NULL, 0, 0xee0dff50u); /* MCR cannot source PC. */
      CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.cpsr == flags &&
@@ -1709,10 +1710,10 @@ static void test_cortex_a8_l2_auxiliary_control(void) {
             CHECK(arm_step(&c) == ARM_OK && c.cpsr == flags, "A8 L2ACTLR write changed flags");
             c.r[15] = 0;
             m_w32(NULL, 0, 0xee390f50u | (rd << 12));
-            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u &&
-                  (rd == 15u ? c.cpsr == ((flags & 0x0fffffffu) | (reads[i] & 0xf0000000u)) :
+            CHECK(arm_step(&c) == (rd == 15u ? ARM_UNDEFINED : ARM_OK) && c.r[15] == (rd == 15u ? 0u : 4u) &&
+                  (rd == 15u ? c.cpsr == flags :
                                c.r[rd] == reads[i] && c.cpsr == flags),
-                  "A8 L2ACTLR stored read/NZCV mode=%u rd=%u value=%u", mode, rd, i);
+                  "A8 L2ACTLR stored read/APSR refusal mode=%u rd=%u value=%u", mode, rd, i);
         }
      }
     }
@@ -8337,7 +8338,7 @@ static void test_cortex_a8_thumb_cp15_transfers(void) {
             uint32_t flags = c.cpsr;
             uint64_t flushes = c.tlb_flushes;
             bool passed = it != 2u; /* EQ fails with Z clear. */
-            bool allowed = rd != 13u && (load || rd != 15u) &&
+            bool allowed = rd != 13u && rd != 15u &&
                            (!user || (load ? cases[op].user_read : cases[op].user_write));
             m_w16(NULL, 0, (uint16_t)(cases[op].first | (load << 4)));
             m_w16(NULL, 2, (uint16_t)(cases[op].second | (rd << 12)));
@@ -8347,8 +8348,6 @@ static void test_cortex_a8_thumb_cp15_transfers(void) {
                   "Thumb CP15 framing/permission op=%u load=%u user=%u rd=%u it=%u", op, load, user, rd, it);
             uint32_t expected = passed && allowed && !load ? cases[op].readback : cases[op].initial;
             CHECK(*stored[op] == expected, "Thumb CP15 storage changed too early or lost the operand");
-            if (passed && allowed && load && rd == 15u)
-                flags = (flags & 0x0fffffffu) | (cases[op].initial & 0xf0000000u);
             if (ok) flags = (flags & ~TEST_IT_MASK) | test_it_bits(advanced[it]);
             CHECK(c.cpsr == flags && c.tlb_flushes == flushes +
                   (passed && allowed && !load && cases[op].flush ? 1u : 0u),
@@ -8362,8 +8361,9 @@ static void test_cortex_a8_thumb_cp15_transfers(void) {
       }
      }
     }
-    /* All flag patterns, including a flag change before the last IT slot.
-     * Rt=15 is APSR_nzcv here, so it must never be classified as a branch. */
+    /* The system-register rules override generic MRC's APSR transfer:
+     * CP15 Rt=15 is unpredictable. Refuse without advancing even a middle
+     * IT slot, independently of the register's possible flag pattern. */
     for (unsigned nzcv = 0; nzcv < 16u; nzcv++) {
         arm_cpu_t c;
         CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
@@ -8371,9 +8371,9 @@ static void test_cortex_a8_thumb_cp15_transfers(void) {
         c.cp15.tpidrurw = (nzcv << 28) | 0x07ffffffu;
         uint32_t flags = c.cpsr;
         m_w16(NULL, 0, 0xee1du); m_w16(NULL, 2, 0xff50u);
-        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u &&
-              c.cpsr == ((flags & ~(TEST_IT_MASK | 0xf0000000u)) | (nzcv << 28) | test_it_bits(0x18u)),
-              "Thumb MRC APSR lost NZCV/IT or treated Rt15 as a branch");
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.cpsr == flags &&
+              c.cp15.tpidrurw == ((nzcv << 28) | 0x07ffffffu),
+              "Thumb CP15 MRC APSR changed flags/IT instead of refusing unpredictable Rt15");
     }
     /* Other coprocessors and the MRC2/MCR2/CDP/LDC/MRRC spaces remain
      * independent unsupported instructions, with no legacy VFP/debug leak. */
