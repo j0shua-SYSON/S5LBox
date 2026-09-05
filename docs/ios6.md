@@ -96,6 +96,19 @@ read/modify/write sequence. Other CPU profiles retain their reset/write
 behavior. Other control registers and the complete MMU/security model remain
 separate work.
 
+Cortex-A8 ACTLR (`p15,0,c1,c0,1`) resets to `0x00000002`, enabling L2 in
+the control register. The selected L1RSTDISABLE/L2RSTDISABLE inputs are low;
+their read-only monitor bits ignore writes. Nonzero reserved fields are
+refused before state changes. Defined controls retain their values, with
+WFINOP controlling the platform wait hook. Cache/pipeline controls operate
+within the synchronous, coherent memory model; this adds no cache timing or
+parity-error injection. The rules follow
+[DDI0344K, section 3.2.26](https://documentation-service.arm.com/static/5e8e1ac688295d1e18d35fde).
+Tests cover ARM/Thumb transfers in each implemented privilege mode, reset,
+readback, reserved-write refusal and real guest writes that disable and
+restore WFI waiting. These selected reset inputs do not establish the N88
+hardware configuration. Legacy ACTLR behavior is unchanged.
+
 Cortex-A8 L2 auxiliary control (`p15,1,c9,c0,2`) now stores its defined
 fields separately from ARM1176 CP15 state and resets to `0x00000042`.
 The implemented configuration has no L2 parity/ECC RAM, so bit 21 stays clear

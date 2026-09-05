@@ -1720,6 +1720,73 @@ static void test_cortex_a8_system_control_register(void) {
     }
 }
 
+static void test_cortex_a8_auxiliary_control_register(void) {
+    /* DDI0344K 3.2.26/table3-49. Reset enables L2, and the selected
+     * L1RSTDISABLE/L2RSTDISABLE inputs are low. Their monitor bits are
+     * read-only; bits29:21 and bit2 are reserved, not writable features. */
+    static const uint32_t modes[] = {ARM_MODE_USR,ARM_MODE_SVC,ARM_MODE_SYS,
+                                    ARM_MODE_IRQ,ARM_MODE_FIQ,ARM_MODE_ABT,ARM_MODE_UND};
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned mode = 0; mode < sizeof modes / sizeof modes[0]; mode++) {
+      for (unsigned bit = 0; bit <= 32u; bit++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        CHECK(c.cp15.actlr == 2u, "A8 ACTLR reset lost L2EN or inherited stale control fields");
+        c.cpsr = modes[mode] | ARM_CPSR_I | ARM_CPSR_F | ARM_CPSR_N | ARM_CPSR_C |
+                 ARM_CPSR_Q | (5u << 16) | (thumb ? ARM_CPSR_T : 0u);
+        c.excl_valid = true; c.excl_addr = 0x1234u;
+        c.r[4] = bit == 32u ? 0u : 2u | (1u << bit);
+        c.r[2] = 0xabcdef01u;
+        arm_cp15_t expected = c.cp15;
+        bool allowed = mode != 0u && bit != 2u && !(bit >= 21u && bit <= 29u);
+        if (allowed) expected.actlr = bit >= 30u && bit < 32u ? 2u : c.r[4];
+        uint32_t source = c.r[4], flags = c.cpsr, generation = c.tlb_gen;
+        uint64_t flushes = c.tlb_flushes;
+        if (thumb) { m_w16(NULL, 0, 0xee01u); m_w16(NULL, 2, 0x4f30u); }
+        else m_w32(NULL, 0, 0xee014f30u);
+        CHECK(arm_step(&c) == (allowed ? ARM_OK : ARM_UNDEFINED) &&
+              c.r[15] == (allowed ? 4u : 0u) && c.r[4] == source && c.cpsr == flags,
+              "A8 ACTLR write permission/retirement thumb=%u mode=%u bit=%u", thumb, mode, bit);
+        CHECK(memcmp(&c.cp15, &expected, sizeof expected) == 0 &&
+              c.excl_valid && c.excl_addr == 0x1234u && c.tlb_gen == generation && c.tlb_flushes == flushes,
+              "A8 ACTLR write changed unrelated state or lost field policy thumb=%u mode=%u bit=%u", thumb, mode, bit);
+        c.r[15] = 0;
+        if (thumb) { m_w16(NULL, 0, 0xee11u); m_w16(NULL, 2, 0x2f30u); }
+        else m_w32(NULL, 0, 0xee112f30u);
+        CHECK(arm_step(&c) == (mode ? ARM_OK : ARM_UNDEFINED) &&
+              c.r[15] == (mode ? 4u : 0u) && c.r[2] == (mode ? expected.actlr : 0xabcdef01u) &&
+              c.cpsr == flags && memcmp(&c.cp15, &expected, sizeof expected) == 0,
+              "A8 ACTLR readback/User refusal thumb=%u mode=%u bit=%u", thumb, mode, bit);
+      }
+     }
+    }
+    /* RMW sequences must preserve controls already set by earlier code. */
+    const uint32_t entry[] = {0xee11bf30u,0xe38bb002u,0xee01bf30u,
+                             0xee11bf30u,0xe38bb008u,0xee01bf30u};
+    for (unsigned i = 0; i < sizeof entry / sizeof entry[0]; i++) m_w32(NULL, 4u * i, entry[i]);
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    for (unsigned i = 0; i < 6u; i++) CHECK(arm_step(&c) == ARM_OK, "A8 ACTLR entry RMW failed");
+    CHECK(c.cp15.actlr == 10u && c.r[11] == 10u && c.r[15] == 24u,
+          "A8 ACTLR L2EN/L1PE RMW lost control state");
+    const uint32_t writes[] = {0x001ffffbu,0xc01ffffbu,0xc0000000u,0x102u,0x106u,0x200102u,2u};
+    const uint32_t reads[] = {0x001ffffbu,0x001ffffbu,0u,0x102u,0x102u,0x102u,2u};
+    for (unsigned i = 0; i < sizeof writes / sizeof writes[0]; i++) {
+        c.r[15] = 0; c.r[4] = writes[i];
+        m_w32(NULL, 0, 0xee014f30u);
+        CHECK(arm_step(&c) == (i == 4u || i == 5u ? ARM_UNDEFINED : ARM_OK) && c.cp15.actlr == reads[i],
+              "A8 ACTLR combined fields/clears or reserved-write preservation index=%u", i);
+    }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned i = 0; i < sizeof legacy / sizeof legacy[0]; i++) {
+        CHECK(arm_reset_profile(&c, &g_bus, legacy[i]), "reset");
+        CHECK(c.cp15.actlr == 0u, "A8 ACTLR reset changed another profile");
+        c.r[4] = UINT32_MAX; m_w32(NULL, 0, 0xee014f30u);
+        CHECK(arm_step(&c) == ARM_OK && c.cp15.actlr == UINT32_MAX,
+              "A8 ACTLR write policy changed a legacy profile");
+    }
+}
+
 static void test_cortex_a8_l2_auxiliary_control(void) {
     /* DDI0344K 3.2.55, table3-3: reset 0x42, privileged Secure writes.
      * This CPU configuration has no parity/ECC RAM, so bit21 cannot set.
@@ -6209,6 +6276,7 @@ static void test_explicit_profile_reset_and_invalid_configuration(void) {
         CHECK(arm_reset_profile(&c, &g_bus, profiles[i]), "valid reset refused");
         CHECK(c.arch == profiles[i] && c.bus == &g_bus && c.r[15] == 0u &&
               c.cp15.sctlr == (profiles[i] == ARM_ARCH_V7_CORTEX_A8 ? 0x00c50078u : 0u) &&
+              c.cp15.actlr == (profiles[i] == ARM_ARCH_V7_CORTEX_A8 ? 2u : 0u) &&
               c.tlb_gen == 1u && !c.excl_valid &&
               c.vfp_fpexc == 0u && c.cycles == 0u,
               "explicit profile reset left stale state");
@@ -6216,8 +6284,10 @@ static void test_explicit_profile_reset_and_invalid_configuration(void) {
               "explicit reset lost profile-specific L2 reset state");
         c.r[3] = 0xabcdef01u;
         c.a8_l2actlr = 0x02000000u;
+        c.cp15.actlr = UINT32_MAX;
         CHECK(arm_reset_profile(&c, &g_bus, profiles[i]) &&
               c.arch == profiles[i] && c.r[3] == 0u &&
+              c.cp15.actlr == (profiles[i] == ARM_ARCH_V7_CORTEX_A8 ? 2u : 0u) &&
               c.a8_l2actlr == (profiles[i] == ARM_ARCH_V7_CORTEX_A8 ? 0x42u : 0u),
               "repeated explicit reset lost profile or register reset");
     }
@@ -7419,6 +7489,47 @@ static void test_cortex_a8_wfi(void) {
         CHECK(!calls, "neighbor instruction unexpectedly invoked WFI hook thumb=%u index=%u", thumb, i);
      }
     }
+}
+
+static void test_cortex_a8_actlr_guest_wait_control(void) {
+    /* Program the control through real guest CP15 writes. No direct ACTLR
+     * mutation between WFI operations may supply the intended behavior. */
+    for (unsigned encoding = 0; encoding < 3u; encoding++) {
+        unsigned calls = 0;
+        arm_bus_t bus = g_bus; bus.ctx = &calls; bus.wait_for_interrupt = count_wfi;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_N | ARM_CPSR_C | (encoding ? ARM_CPSR_T : 0u);
+        c.r[4] = 0x102u; c.r[5] = 2u;
+        uint32_t flags = c.cpsr;
+        unsigned width = put_wfi(encoding, 4u);
+        if (encoding) {
+            m_w16(NULL, 0, 0xee01u); m_w16(NULL, 2, 0x4f30u);
+            m_w16(NULL, 4u + width, 0xee01u); m_w16(NULL, 6u + width, 0x5f30u);
+        } else {
+            m_w32(NULL, 0, 0xee014f30u); m_w32(NULL, 4u + width, 0xee015f30u);
+        }
+        put_wfi(encoding, 8u + width);
+        CHECK(arm_step(&c) == ARM_OK && c.cp15.actlr == 0x102u && !calls, "guest WFINOP enable");
+        CHECK(arm_step(&c) == ARM_OK && !calls && c.r[15] == 4u + width, "WFINOP did not bypass wait");
+        CHECK(arm_step(&c) == ARM_OK && c.cp15.actlr == 2u && !calls, "guest WFINOP clear");
+        CHECK(arm_step(&c) == ARM_OK && calls == 1u && c.r[15] == 8u + 2u * width && c.cpsr == flags,
+              "guest ACTLR write did not restore WFI wait/retirement");
+    }
+    /* A refused CP15 write in an active IT block cannot partly change the
+     * wait policy, consume the slot or suppress the next valid operation. */
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c.cpsr |= ARM_CPSR_T | ARM_CPSR_Z;
+    c.r[4] = 0x106u;
+    m_w16(NULL, 0, 0xbf0cu); m_w16(NULL, 2, 0xee01u); m_w16(NULL, 4, 0x4f30u);
+    CHECK(arm_step(&c) == ARM_OK, "ACTLR IT setup");
+    uint32_t flags = c.cpsr;
+    CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 2u && c.cpsr == flags && c.cp15.actlr == 2u,
+          "reserved ACTLR write changed IT or wait state before refusal");
+    c.r[4] = 0x102u;
+    CHECK(arm_step(&c) == ARM_OK && c.r[15] == 6u && c.cp15.actlr == 0x102u &&
+          c.cpsr == ((flags & ~TEST_IT_MASK) | test_it_bits(0x18u)), "valid ACTLR retry lost IT retirement");
 }
 
 static void test_cortex_a8_wfi_fetch_boundary(void) {
@@ -8767,6 +8878,7 @@ int main(void) {
     test_thumb2_indexed_transfer_aborts();
     test_thumb_it_encodings_and_sequences();
     test_cortex_a8_wfi();
+    test_cortex_a8_actlr_guest_wait_control();
     test_cortex_a8_wfi_fetch_boundary();
     test_thumb_it_narrow_flags();
     test_thumb_it_exceptions();
@@ -8857,6 +8969,7 @@ int main(void) {
     test_cortex_a8_cp15_maintenance_boundary();
     test_cortex_a8_l2_auxiliary_control();
     test_cortex_a8_system_control_register();
+    test_cortex_a8_auxiliary_control_register();
     test_high_vectors();
     test_mmu_disabled_is_identity();
     test_mmu_section_translation();

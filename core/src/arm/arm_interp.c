@@ -928,7 +928,19 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
                         p->sctlr = v;
                         arm_mmu_tlb_flush(c);
                     }
-                    else if (opc2 == 1) p->actlr = v;
+                    else if (opc2 == 1) {
+                        if (c->arch == ARM_ARCH_V7_CORTEX_A8) {
+                            /* DDI0344K 3.2.26: bits29:21 and bit2 are
+                             * reserved. Bits31:30 monitor reset inputs and
+                             * ignore writes; the selected inputs are low.
+                             * WFINOP controls the platform wait hook. Other
+                             * defined fields configure cache/pipeline timing
+                             * on this synchronous, coherent memory model. */
+                            if (v & 0x3fe00004u) return ARM_UNDEFINED;
+                            v &= 0x001ffffbu;
+                        }
+                        p->actlr = v;
+                    }
                     else if (opc2 == 2) p->cpacr = v;
                 }
                 break;
@@ -990,7 +1002,11 @@ bool arm_reset_profile(arm_cpu_t *cpu, const arm_bus_t *bus, arm_arch_t arch) {
     { arm_cp15_t z = {0}; cpu->cp15 = z; }   /* MMU off, low vectors */
     /* Cortex-A8 reset configuration: CFGTE, CFGEND0, CFGNMFI and VINITHI
      * low. The non-configurable SCTLR fields still read their defined ones. */
-    if (arch == ARM_ARCH_V7_CORTEX_A8) cpu->cp15.sctlr = 0x00c50078u;
+    if (arch == ARM_ARCH_V7_CORTEX_A8) {
+        cpu->cp15.sctlr = 0x00c50078u;
+        /* L1RSTDISABLE/L2RSTDISABLE low; L2EN resets set (3.2.26). */
+        cpu->cp15.actlr = 2u;
+    }
     cpu->a8_l2actlr = arch == ARM_ARCH_V7_CORTEX_A8 ? 0x42u : 0u;
     /*
      * Generation 1, never 0. Entries carry the generation they were filled in
