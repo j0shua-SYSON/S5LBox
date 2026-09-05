@@ -1658,6 +1658,68 @@ static void test_cortex_a8_cp15_maintenance_boundary(void) {
     }
 }
 
+static void test_cortex_a8_system_control_register(void) {
+    /* DDI0344K 3.2.25: low reset inputs, fixed read bits, and supported
+     * memory/cache/vector controls. Reserved SBZP/SBOP violations and
+     * unimplemented TE/TRE/EE modes must refuse before changing state. */
+    static const unsigned writable[] = {0,1,2,11,12,13,29};
+    static const unsigned refused[] = {7,8,9,10,15,19,20,25,26,28,30,31};
+    static const unsigned ones[] = {3,4,5,6,16,18,22,23};
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+     for (unsigned bit = 0; bit < 32u + sizeof ones / sizeof ones[0]; bit++) {
+      for (unsigned user = 0; user < 2u; user++) {
+        memset(g_ram, 0, sizeof g_ram);
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        CHECK(c.cp15.sctlr == 0x00c50078u, "A8 SCTLR reset inherited ARM1176's zero value");
+        c.cpsr = (user ? ARM_MODE_USR : ARM_MODE_SVC) | ARM_CPSR_I | ARM_CPSR_F | ARM_CPSR_N |
+                 ARM_CPSR_C | ARM_CPSR_Q | (thumb ? ARM_CPSR_T : 0u);
+        c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        m_w32(NULL, 0x4000u, 0xc02u); /* Identity mapping if this write enables the MMU. */
+        bool allowed = !user && bit < 32u, variable = false;
+        for (unsigned i = 0; i < sizeof refused / sizeof refused[0]; i++)
+            if (bit == refused[i]) allowed = false;
+        for (unsigned i = 0; i < sizeof writable / sizeof writable[0]; i++)
+            if (bit == writable[i]) variable = true;
+        c.r[4] = bit < 32u ? 0x00c50078u | (1u << bit) : 0x00c50078u & ~(1u << ones[bit - 32u]);
+        uint32_t source = c.r[4], flags = c.cpsr, generation = c.tlb_gen;
+        uint64_t flushes = c.tlb_flushes;
+        if (thumb) { m_w16(NULL, 0, 0xee01u); m_w16(NULL, 2, 0x4f10u); }
+        else m_w32(NULL, 0, 0xee014f10u);
+        uint32_t expected = 0x00c50078u | (allowed && variable ? 1u << bit : 0u);
+        CHECK(arm_step(&c) == (allowed ? ARM_OK : ARM_UNDEFINED) &&
+              c.r[15] == (allowed ? 4u : 0u) && c.r[4] == source && c.cpsr == flags && c.cp15.sctlr == expected,
+              "A8 SCTLR write policy/state thumb=%u bit=%u user=%u value=%08x actual=%08x", thumb, bit, user, source, c.cp15.sctlr);
+        CHECK(allowed ? c.tlb_gen != generation && c.tlb_flushes == flushes + 1u :
+                        c.tlb_gen == generation && c.tlb_flushes == flushes,
+              "A8 SCTLR rejected write flushed translations");
+        if (allowed) {
+            if (thumb) { m_w16(NULL, 4, 0xee11u); m_w16(NULL, 6, 0x2f10u); }
+            else m_w32(NULL, 4, 0xee112f10u);
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 8u && c.r[2] == expected && c.cpsr == flags,
+                  "A8 SCTLR readback/fixed bits/next fetch lost stored semantics");
+        }
+      }
+     }
+    }
+    /* The matching N88 entry reads SCTLR, sets I/Z, then writes it back. */
+    const uint32_t entry[] = {0xee11bf10u,0xe38bbb06u,0xee01bf10u,0xee112f10u};
+    for (unsigned i = 0; i < sizeof entry / sizeof entry[0]; i++) m_w32(NULL, 4u * i, entry[i]);
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    for (unsigned i = 0; i < 4u; i++) CHECK(arm_step(&c) == ARM_OK, "A8 SCTLR entry RMW failed");
+    CHECK(c.cp15.sctlr == 0x00c51878u && c.r[2] == 0x00c51878u && c.r[15] == 16u,
+          "A8 SCTLR RMW lost architectural fixed bits");
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned i = 0; i < sizeof legacy / sizeof legacy[0]; i++) {
+        CHECK(arm_reset_profile(&c, &g_bus, legacy[i]), "reset");
+        CHECK(c.cp15.sctlr == 0u, "A8 SCTLR reset changed another profile");
+        c.r[4] = UINT32_MAX; m_w32(NULL, 0, 0xee014f10u);
+        CHECK(arm_step(&c) == ARM_OK && c.cp15.sctlr == UINT32_MAX,
+              "A8 SCTLR write policy changed the legacy profile path");
+    }
+}
+
 static void test_cortex_a8_l2_auxiliary_control(void) {
     /* DDI0344K 3.2.55, table3-3: reset 0x42, privileged Secure writes.
      * This CPU configuration has no parity/ECC RAM, so bit21 cannot set.
@@ -6146,7 +6208,8 @@ static void test_explicit_profile_reset_and_invalid_configuration(void) {
         memset(&c, 0xa5, sizeof c);
         CHECK(arm_reset_profile(&c, &g_bus, profiles[i]), "valid reset refused");
         CHECK(c.arch == profiles[i] && c.bus == &g_bus && c.r[15] == 0u &&
-              c.cp15.sctlr == 0u && c.tlb_gen == 1u && !c.excl_valid &&
+              c.cp15.sctlr == (profiles[i] == ARM_ARCH_V7_CORTEX_A8 ? 0x00c50078u : 0u) &&
+              c.tlb_gen == 1u && !c.excl_valid &&
               c.vfp_fpexc == 0u && c.cycles == 0u,
               "explicit profile reset left stale state");
         CHECK(c.a8_l2actlr == (profiles[i] == ARM_ARCH_V7_CORTEX_A8 ? 0x42u : 0u),
@@ -8625,6 +8688,7 @@ int main(void) {
     test_cortex_a8_cp15_selector_boundary();
     test_cortex_a8_cp15_maintenance_boundary();
     test_cortex_a8_l2_auxiliary_control();
+    test_cortex_a8_system_control_register();
     test_high_vectors();
     test_mmu_disabled_is_identity();
     test_mmu_section_translation();

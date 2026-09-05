@@ -678,12 +678,11 @@ static arm_status_t undefined_instruction(arm_cpu_t *c, uint32_t pc,
 /*
  * CP15 access via MCR (write) / MRC (read).
  *
- * Note on coverage: the architecturally significant registers below are modeled
- * exactly. Cache and TLB maintenance (c7/c8) are accepted as no-ops because we
- * have no caches to flush, and CP15 registers we do not model read as zero and
- * ignore writes. That is a deliberate exception to this core's usual
- * "trap what you don't implement" rule: CP15 is a configuration space that
- * kernels probe widely, and trapping harmless probes would stop a boot dead.
+ * Cortex-A8 checks selectors, permissions and implemented control fields before
+ * using the shared storage. The legacy profiles retain their historical
+ * register behavior, including zero/ignored accesses to unmodeled banks.
+ * Cache maintenance completes synchronously on coherent memory; TLB operations
+ * invalidate the software translation cache.
  */
 static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
     unsigned cp   = (insn >> 8)  & 0xfu;
@@ -900,7 +899,22 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
                  * the legacy align-down-and-rotate one, which corrupts loaded
                  * data instead of faulting. */
                 if (crm == 0) {
-                    if (opc2 == 0) { p->sctlr = v; arm_mmu_tlb_flush(c); }
+                    if (opc2 == 0) {
+                        if (c->arch == ARM_ARCH_V7_CORTEX_A8) {
+                            /* DDI0344K 3.2.25: required RAO/SBOP bits and
+                             * reserved SBZP bits cannot be repurposed. Refuse
+                             * violations, and TE/TRE/EE whose execution/table
+                             * semantics are not implemented. NMFI and the
+                             * absent VE/FI/HA/RR controls ignore writes.
+                             * Selected reset inputs keep them all zero. */
+                            const uint32_t fixed = 0x00c50078u;
+                            if ((v & fixed) != fixed || (v & (0x84188780u | 0x52000000u)))
+                                return ARM_UNDEFINED;
+                            v = fixed | (v & 0x20003807u); /* AFE, V/I/Z, C/A/M */
+                        }
+                        p->sctlr = v;
+                        arm_mmu_tlb_flush(c);
+                    }
                     else if (opc2 == 1) p->actlr = v;
                     else if (opc2 == 2) p->cpacr = v;
                 }
@@ -961,6 +975,9 @@ bool arm_reset_profile(arm_cpu_t *cpu, const arm_bus_t *bus, arm_arch_t arch) {
     }
     for (int i = 0; i < 5; i++) { cpu->fiq_r8_12[i] = 0; cpu->usr_r8_12[i] = 0; }
     { arm_cp15_t z = {0}; cpu->cp15 = z; }   /* MMU off, low vectors */
+    /* Cortex-A8 reset configuration: CFGTE, CFGEND0, CFGNMFI and VINITHI
+     * low. The non-configurable SCTLR fields still read their defined ones. */
+    if (arch == ARM_ARCH_V7_CORTEX_A8) cpu->cp15.sctlr = 0x00c50078u;
     cpu->a8_l2actlr = arch == ARM_ARCH_V7_CORTEX_A8 ? 0x42u : 0u;
     /*
      * Generation 1, never 0. Entries carry the generation they were filled in

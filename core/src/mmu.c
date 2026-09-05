@@ -104,7 +104,7 @@ static bool ap_permits(const arm_cpu_t *c, unsigned ap, bool apx,
     }
 }
 
-/* Under XP+FA, AP[0] normally becomes the hardware-managed access flag. The
+/* Under XP+FA, AP[0] normally becomes the software-managed access flag. The
  * ARM1176 preserves one deprecated compatibility corner: APX:AP==000 with
  * exactly one of SCTLR.S/R set still uses the legacy read-only permissions. */
 static bool access_flag_faults(const arm_cpu_t *c, bool xp,

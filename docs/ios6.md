@@ -81,8 +81,20 @@ The generic MRC flag-transfer behavior does not establish CP15 permission.
 The legacy CP15 WFI encoding is a no-op on this
 processor and does not call the ARM1176 wait hook. These rules follow
 [DDI0344K, table 3-3 and sections 3.1, 3.2.40/41/73](https://documentation-service.arm.com/static/5e8e1ac688295d1e18d35fde).
-Control-register bit fields, reset signals and the complete MMU/security
-model remain separate work.
+Cortex-A8 SCTLR now resets to `0x00c50078` for the selected ARM-state,
+little-endian, low-vector, maskable-FIQ reset configuration. Its defined
+fixed bits persist across writes. NMFI and the absent VE/FI/HA/RR controls
+ignore writes; reserved SBZP/SBOP violations are refused. Supported controls
+are AFE, V, I, Z, C, A and M. TE, TRE and EE enable requests are refused
+before mutation because Thumb exception entry, TEX remapping and big-endian
+table walks are not implemented. This follows
+[DDI0344K, section 3.2.25](https://documentation-service.arm.com/static/5e8e1ac688295d1e18d35fde)
+and [DDI0406C.b, B3.15.2/B4.1.130](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Tests exercise the actual next instruction fetch after enabling the MMU,
+stored readback, refused writes without TLB changes, and the N88 entry's
+read/modify/write sequence. Other CPU profiles retain their reset/write
+behavior. Other control registers and the complete MMU/security model remain
+separate work.
 
 Cortex-A8 L2 auxiliary control (`p15,1,c9,c0,2`) now stores its defined
 fields separately from ARM1176 CP15 state and resets to `0x00000042`.
