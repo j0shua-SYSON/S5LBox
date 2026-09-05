@@ -6707,6 +6707,47 @@ static void test_thumb2_word_load_aborts(void) {
     }
 }
 
+static void test_thumb_compare_and_branch(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    const uint32_t offsets[] = {0u, 62u, 64u, 126u};
+    for (unsigned p = 0; p < 3; p++) {
+      for (unsigned nz = 0; nz < 2; nz++) {
+       for (unsigned value = 0; value < 2; value++) {
+        for (unsigned rn = 0; rn < 8; rn++) {
+         for (unsigned i = 0; i < 4; i++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
+            /* Z deliberately disagrees with the register's zero status. */
+            c.cpsr |= ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_V | (value ? ARM_CPSR_Z : 0u);
+            c.r[15] = 0x100u; c.r[14] = 0x777u; c.r[rn] = value ? 0x80000000u : 0u;
+            uint32_t cpsr = c.cpsr;
+            uint16_t insn = (uint16_t)(0xb100u | (nz << 11) | ((offsets[i] & 64u) << 3) |
+                                      ((offsets[i] & 62u) << 2) | rn);
+            m_w16(NULL, 0x100u, insn);
+            bool supported = p != 0u, taken = value == nz;
+            CHECK(arm_step(&c) == (supported ? ARM_OK : ARM_UNDEFINED) && c.cycles == 1u &&
+                  c.r[15] == (supported ? (taken ? 0x104u + offsets[i] : 0x102u) : 0x100u) &&
+                  c.r[rn] == (value ? 0x80000000u : 0u) && c.r[14] == 0x777u && c.cpsr == cpsr,
+                  "CB%sZ profile %u Rn %u offset %u used flags or changed state", nz ? "N" : "", p, rn, offsets[i]);
+         }
+        }
+       }
+      }
+    }
+    /* CBZ/CBNZ are forbidden in every active IT state, even when not taken. */
+    const uint32_t it_bits[] = {1u << 25, 1u << 26, 1u << 10, 1u << 11};
+    for (unsigned i = 0; i < 4; i++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        c.cpsr |= ARM_CPSR_T | it_bits[i];
+        c.r[0] = 0u;
+        uint32_t cpsr = c.cpsr;
+        m_w16(NULL, 0, 0xbb18u); /* actual CBNZ r0,PC+70, not taken */
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.cpsr == cpsr,
+              "CBNZ accepted an active IT state");
+    }
+}
+
 int main(void) {
     test_reset_initializes_the_default_profile();
     test_explicit_profile_reset_and_invalid_configuration();
@@ -6726,6 +6767,7 @@ int main(void) {
     test_thumb2_multiple_transfer_aborts();
     test_thumb2_word_loads();
     test_thumb2_word_load_aborts();
+    test_thumb_compare_and_branch();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();
     test_add_reg();

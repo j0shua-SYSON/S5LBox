@@ -74,6 +74,9 @@ including conditional B and ARM/Thumb interworking. BL/BLX update LR only
 after the complete instruction fetch. Tests cover displacement limits,
 all conditions, halfword-aligned BLX, an ARM callee returning to Thumb,
 and a call straddling an unmapped or denied page. IT blocks remain unsupported.
+The narrow CBZ/CBNZ extension is gated to Cortex-A8/Swift and refuses active
+IT state. It tests the register directly, preserves flags, and uses its
+unsigned forward displacement. ARM1176 continues to reject it.
 
 Wide LDM/STM implement increment-after and decrement-before addressing,
 including PUSH/POP aliases. Thumb register-list restrictions are checked
@@ -132,7 +135,7 @@ establish that result.
   The instruction profile is not a complete system-register model.
 - Thumb-2 currently implements MOVW/MOVT, modified-immediate MOV/MOVS and
   arithmetic, LDR/STR with unsigned immediate offsets and LDR literals.
-  Wide B/BL/BLX and IA/DB multiple transfers are also implemented. Other
+  Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple transfers are also implemented. Other
   instruction families and IT state remain to implement.
 - VFP stores only d0-d15 and models VFP11/VFPv2. Cortex-A8 VFPv3 and NEON,
   including the wider register file and context-switch semantics, are absent.
@@ -195,6 +198,10 @@ Multiple transfers advance to `0x802bd23c`, halfwords `f8df c004`
 (`LDR.W ip,[pc,#4]`), after 63,132 steps.
 Wide loads advance the trace to `0x8027b966`, halfword `bb18`
 (`CBNZ r0,0x8027b9b0`), after 63,181 steps.
+CBZ/CBNZ advances to a deliberate diagnostic stop after 63,186 steps:
+the instruction at `0x8027b970` reads physical `0x41000030`, a boot-argument
+field outside the prepared early-entry fields. Device-tree and complete
+boot-argument preparation are required before this trace can continue.
 
 Host tests, exact-commit builds, firmware analysis, guest boot traces, and
 physical app behavior are separate evidence. No iOS 6 boot or usability claim

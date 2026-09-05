@@ -2578,6 +2578,17 @@ static arm_status_t thumb_step(arm_cpu_t *c, uint32_t pc, uint16_t insn,
         return ARM_OK;
     }
     case 0xb: {
+        /* CBZ/CBNZ, ARMv6T2 and later (DDI0406C.b A8.8.29). The split
+         * immediate is unsigned and the comparison neither reads nor
+         * changes flags. ITSTATE[3:0] must be zero for these instructions. */
+        if ((insn & 0xf500u) == 0xb100u) {
+            if (!arm_arch_uses_thumb2_encoding(c->arch) || (c->cpsr & 0x06000c00u))
+                return ARM_UNDEFINED;
+            uint32_t offset = ((insn & 0x200u) >> 3) | ((insn & 0xf8u) >> 2);
+            bool nonzero = (insn & 0x800u) != 0u;
+            if ((c->r[insn & 7u] != 0u) == nonzero) *next = pc4 + offset;
+            return ARM_OK;
+        }
         if ((insn & 0xff00u) == 0xb000u) {   /* ADD/SUB SP, #imm7*4 */
             uint32_t imm = (insn & 0x7fu) << 2;
             c->r[13] = (insn & (1u << 7)) ? c->r[13] - imm : c->r[13] + imm;
