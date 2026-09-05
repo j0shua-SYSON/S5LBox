@@ -371,6 +371,10 @@ static inline bool arm_arch_has_a32_divide(arm_arch_t arch) {
     return arch == ARM_ARCH_V7_SWIFT;
 }
 
+static inline bool arm_arch_has_a32_barriers(arm_arch_t arch) {
+    return arch == ARM_ARCH_V7_SWIFT || arch == ARM_ARCH_V7_CORTEX_A8;
+}
+
 /*
  * Direct-mapped, power of two so the index is a mask rather than a modulo.
  *

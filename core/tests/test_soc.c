@@ -4186,8 +4186,9 @@ static void test_cortex_a8_uses_interpreter_fallback(void) {
     /* This is an instruction fixture on the existing test bus, not an
      * S5L8920 board. Every ARM1176 signed path must decline the new CPU. */
     const uint32_t program[] = {
-        0xe30b3eefu, 0xe34d3eadu, 0xe2844001u, 0xeafffffdu
-    }; /* MOVW/MOVT r3; ADD r4,#1; B to ADD */
+        0xe30b3eefu, 0xe34d3eadu, 0xf57ff05fu, 0xf57ff04fu, 0xf57ff06fu,
+        0xe2844001u, 0xeafffffdu
+    }; /* MOVW/MOVT r3; DMB/DSB/ISB; ADD r4,#1; B to ADD */
     for (unsigned mode = 0; mode < 4u; mode++) {
         s5l8900_t fast = {0}, reference = {0};
         bool fast_ok = s5l8900_init(&fast, 0u, 1u << 20);
@@ -4219,8 +4220,8 @@ static void test_cortex_a8_uses_interpreter_fallback(void) {
               fast_status == ARM_OK && reference_status == ARM_OK,
               "Cortex-A8 fallback stopped");
         CHECK(fast.cpu.arch == ARM_ARCH_V7_CORTEX_A8 &&
-              fast.cpu.r[3] == 0xdeadbeefu && fast.cpu.r[4] == 49u &&
-              fast.cpu.r[15] == 8u && fast.cpu.cycles == reference.cpu.cycles &&
+              fast.cpu.r[3] == 0xdeadbeefu && fast.cpu.r[4] == 48u &&
+              fast.cpu.r[15] == 24u && fast.cpu.cycles == reference.cpu.cycles &&
               fast.cpu.cpsr == reference.cpu.cpsr &&
               memcmp(fast.cpu.r, reference.cpu.r, sizeof fast.cpu.r) == 0 &&
               memcmp(fast.ram, reference.ram, fast.ram_size) == 0,
@@ -4228,12 +4229,12 @@ static void test_cortex_a8_uses_interpreter_fallback(void) {
         CHECK(s5l8900_static_a64_retired(&fast) == 0u,
               "ARM1176 signed handlers ran on Cortex-A8");
         const uint32_t divide = 0xe713f011u;
-        s5l8900_load(&fast, 8u, &divide, sizeof divide);
-        s5l8900_load(&reference, 8u, &divide, sizeof divide);
+        s5l8900_load(&fast, 24u, &divide, sizeof divide);
+        s5l8900_load(&reference, 24u, &divide, sizeof divide);
         CHECK(s5l8900_run(&fast, 1u, &fast_status) == 0u &&
               s5l8900_run(&reference, 1u, &reference_status) == 0u &&
               fast_status == ARM_UNDEFINED && reference_status == ARM_UNDEFINED &&
-              fast.cpu.r[3] == 0xdeadbeefu && fast.cpu.r[15] == 8u,
+              fast.cpu.r[3] == 0xdeadbeefu && fast.cpu.r[15] == 24u,
               "fallback concealed unsupported integer divide");
         s5l8900_free(&fast);
         s5l8900_free(&reference);

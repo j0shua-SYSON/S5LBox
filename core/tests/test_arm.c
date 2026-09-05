@@ -5928,10 +5928,77 @@ static void test_profile_instruction_boundaries(void) {
     }
 }
 
+static void test_a32_barrier_profile_boundaries(void) {
+    static const arm_arch_t profiles[] = {
+        ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_SWIFT, ARM_ARCH_V7_CORTEX_A8,
+        (arm_arch_t)99
+    };
+    static const uint32_t barriers[] = {0xf57ff040u, 0xf57ff050u, 0xf57ff060u};
+    for (unsigned p = 0; p < sizeof profiles / sizeof profiles[0]; p++) {
+        for (unsigned b = 0; b < sizeof barriers / sizeof barriers[0]; b++) {
+            /* DDI0406C.b requires reserved options to execute as SY too. */
+            for (unsigned option = 0; option < 16; option++) {
+                for (unsigned user = 0; user < 2; user++) {
+                    arm_cpu_t c;
+                    arm_reset(&c, &g_bus);
+                    c.arch = profiles[p];
+                    c.cpsr = (user ? ARM_MODE_USR : ARM_MODE_SVC) |
+                             ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_Q;
+                    c.r[0] = 0x12345678u;
+                    c.excl_valid = true;
+                    c.excl_addr = 0x200u;
+                    uint32_t cpsr = c.cpsr;
+                    m_w32(NULL, 0, barriers[b] | option);
+                    bool supported = profiles[p] == ARM_ARCH_V7_SWIFT ||
+                                     profiles[p] == ARM_ARCH_V7_CORTEX_A8;
+                    arm_status_t status = arm_step(&c);
+                    CHECK(status == (supported ? ARM_OK : ARM_UNDEFINED) &&
+                          c.r[15] == (supported ? 4u : 0u),
+                          "profile %u accepted/refused barrier %08x incorrectly",
+                          (unsigned)profiles[p], barriers[b] | option);
+                    CHECK(c.r[0] == 0x12345678u && c.cpsr == cpsr &&
+                          c.excl_valid && c.excl_addr == 0x200u && c.tlb_gen == 1u,
+                          "barrier changed flags/registers/exclusive monitor/TLB");
+                }
+            }
+        }
+    }
+}
+
+static void test_a32_barriers_observe_completed_stores(void) {
+    const uint32_t program[] = {
+        0xe5801000u, /* STR r1,[r0] replaces the upcoming instruction */
+        0xf57ff05fu, /* DMB SY */
+        0xf57ff04fu, /* DSB SY */
+        0xf57ff06fu, /* ISB SY */
+        0xe3a04000u  /* MOV r4,#0 before the store */
+    };
+    for (unsigned host = 0; host < 2; host++) {
+        arm_bus_t bus = g_bus;
+        if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+        memcpy(g_ram, program, sizeof program);
+        c.r[0] = 16u; c.r[1] = 0xe3a0402au; /* MOV r4,#42 */
+        g_watch_addr = 16u;
+        g_watch_writes32 = 0u;
+        for (unsigned step = 0; step < 5; step++) {
+            CHECK(arm_step(&c) == ARM_OK, "barrier program stopped at %u", step);
+            CHECK(g_watch_writes32 == 1u && m_r32(NULL, 16u) == 0xe3a0402au,
+                  "preceding store had not completed across the barrier");
+        }
+        CHECK(c.r[4] == 42u && c.r[15] == 20u && c.cycles == 5u,
+              "ISB did not fetch the updated instruction, host=%u", host);
+        g_watch_addr = 0xffffffffu;
+    }
+}
+
 int main(void) {
     test_reset_initializes_the_default_profile();
     test_explicit_profile_reset_and_invalid_configuration();
     test_profile_instruction_boundaries();
+    test_a32_barrier_profile_boundaries();
+    test_a32_barriers_observe_completed_stores();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();
     test_add_reg();

@@ -43,6 +43,15 @@ Arm documents Cortex-A8 as having no integer division in either instruction
 set in [DDI0344K, section 3.2.15](https://documentation-service.arm.com/static/5e8e1ac688295d1e18d35fde)
 and its [division support table](https://developer.arm.com/community/arm-community-blogs/b/architectures-and-processors-blog/posts/divide-and-conquer).
 
+A32 DMB, DSB and ISB also have explicit ARMv7 gates. Previously they fell
+through a broad PLD hint decoder, including on ARM1176. The interpreter
+completes bus accesses and CP15 changes synchronously and reads instruction
+bytes on every step, satisfying the full-system barrier requirements.
+[DDI0406C.b, A8.8.43/44/53](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92)
+also requires reserved options to execute as full-system barriers. Tests
+cover all options in User and SVC modes, ARM1176/unknown-profile refusals,
+exclusive-monitor preservation and a store followed by instruction refetch.
+
 `arm_reset()` explicitly selects ARM1176 and is safe on uninitialized storage.
 `arm_reset_profile()` resets the implemented state with a validated explicit
 profile. Board reset/wake paths must select their own profile when a new board
@@ -73,10 +82,6 @@ establish that result.
 - Boot arguments, device-tree relocation, importer/storage selection, and
   any compatibility patches need explicit target/version guards. Existing
   iPhone OS 3 patches are not evidence of iOS 6 compatibility.
-- The verified kernel entry at virtual `0x80086084` contains A32 ISB
-  (`f57ff06f`) at `0x8008609c` and DSB (`f57ff04f`) at `0x800860ac`.
-  These ARMv7 encodings are currently unsupported. This is disassembly
-  evidence; a machine boot has not been executed.
 
 ## Complete kernel extraction
 
@@ -89,6 +94,10 @@ The production helpers now produce all 11,821,056 bytes with matching
 Adler-32 `c4bee74e` and SHA-256
 `ec4787ac012567f9c10ba2d5ab611058545bce7e17cd95ef310eba94bfca9b78`.
 An independent padded-block probe produces the same bytes.
+The verified entry at virtual `0x80086084` contains A32 ISB (`f57ff06f`)
+at `0x8008609c` and DSB (`f57ff04f`) at `0x800860ac`. These instructions
+motivated the barrier audit; their earlier acceptance as hints did not
+establish correct profile support or an actual machine boot.
 
 The same correction produces the complete iPhone1,2/7E18 kernel: 7,942,144
 bytes, Adler-32 `2671cd74`, SHA-256

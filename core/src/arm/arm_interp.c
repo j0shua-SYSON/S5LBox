@@ -2885,6 +2885,23 @@ arm_status_t arm_step(arm_cpu_t *c) {
             c->r[15] = next;
             return ARM_OK;
         }
+        /* A32 DSB/DMB/ISB also match the broad hint mask below, but belong
+         * only to ARMv7. Decode them explicitly so ARM1176 cannot inherit
+         * these instructions. DDI0406C.b A8.8.43/44/53 requires unsupported
+         * and reserved option values to execute as full-system barriers.
+         *
+         * This single-CPU interpreter completes each bus access and CP15
+         * change synchronously. It has no pending write buffer or prefetched
+         * instructions: fetch_host caches an address, and each step reads
+         * the current bytes. Thus the full-system ordering/completion and
+         * instruction-refetch requirements need no additional queued work. */
+        uint32_t barrier = insn & 0xfffffff0u;
+        if (barrier == 0xf57ff040u || barrier == 0xf57ff050u ||
+            barrier == 0xf57ff060u) {
+            if (!arm_arch_has_a32_barriers(c->arch)) return ARM_UNDEFINED;
+            c->r[15] = next;
+            return ARM_OK;
+        }
         if ((insn & 0x0c00f000u) == 0x0400f000u) {
             c->r[15] = next;
             return ARM_OK;
