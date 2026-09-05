@@ -134,6 +134,23 @@ masked continuation, conditional skips and second-halfword fetch faults.
 Other profiles and the legacy CP15 WFI path retain their behavior. This is a
 CPU wait mechanism; S5L8920 device timing and complete sleep/wake remain work.
 
+The N88 tree specifies three PL192 banks at `0xbf200000`, with a `0x10000`
+stride. A separate `pl192` component now implements programmed vector values,
+all 16 priority levels, priority masking, nested acknowledge/end-of-interrupt,
+IRQ/FIQ routing and the documented VIC0 blocking daisy interface. Status
+registers retain pending sources while priority masks suppress IRQ delivery.
+Protection gates User register access, and unsupported accesses are refused
+without changing state. Its register identity is the revision 0, 32-source
+configuration documented in
+[DDI0273A, chapters 2 and 3](https://documentation-service.arm.com/static/5e8e218b88295d1e18d37489);
+the N88 controller revision is not established by that manual.
+The component uses stable logical input levels; bus/synchronizer latency,
+integration-test circuitry and a complete S5L8920 machine are separate work.
+The existing S5L8900 controller is unchanged. A host regression executes
+guest vector programming, WFI, three-controller IRQ dispatch, source masking,
+end-of-interrupt and exception return. This is component execution evidence,
+not an iOS kernel boot.
+
 Cortex-A8 access-flag faults are not cached. After an AF-clear descriptor
 faults, software can set its flag and retry without a TLB invalidation, as
 required by [DDI0406C.b, B3.7.4](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).

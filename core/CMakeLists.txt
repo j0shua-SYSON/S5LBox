@@ -28,6 +28,7 @@ add_library(emucore STATIC
     src/md_raw_bridge.c
     src/soc/uart.c
     src/soc/vic.c
+    src/soc/pl192.c
     src/soc/timer.c
     src/soc/mbx.c
     src/soc/power.c
@@ -206,6 +207,10 @@ add_test(NAME vfp COMMAND test_vfp)
 add_executable(test_soc tests/test_soc.c)
 target_link_libraries(test_soc PRIVATE emucore)
 add_test(NAME s5l8900_machine COMMAND test_soc)
+
+add_executable(test_pl192 tests/test_pl192.c)
+target_link_libraries(test_pl192 PRIVATE emucore)
+add_test(NAME pl192_interrupt_controller COMMAND test_pl192)
 
 # The first decoded MBX2D packet. Separate from test_soc's aperture ownership
 # test because the defended property crosses command parsing, the GPU GART,
