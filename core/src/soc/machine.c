@@ -1567,15 +1567,13 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
     }
 #endif
 #if defined(S5LBOX_STATIC_A64_DEFAULT_COMPACT_RAW)
-    /* The callback-free live-byte tier beat the interpreter by 6.06% in an
-     * exact, balanced 100M-instruction A9 replay. Select that proved policy
-     * with the same 256-instruction timebase-bounded ceiling used by the
-     * diagnostic control. Every unsupported or unproved shape still reaches
-     * the architectural interpreter before mutation. */
+    /* Live-byte regions stop at the next device event and commit elapsed
+     * instruction time before any architectural fallback. No decoded graph
+     * array or instruction-clock rate changes with the larger bound. */
     if (!s5l8900_static_a64_set_enabled(m, true) ||
         !s5l8900_static_a64_set_compact_raw(m, true) ||
         !s5l8900_static_a64_set_chain_limit(
-            m, S5LBOX_STATIC_A64_PRODUCT_CHAIN_INSNS)) {
+            m, S5LBOX_STATIC_A64_COMPACT_REGION_INSNS)) {
         s5l8900_free(m);
         return false;
     }
@@ -2175,6 +2173,86 @@ static unsigned retirement_batch_limit(const s5l8900_t *m,
     return remaining;
 }
 
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+/* Only a receive channel stalled on an empty, host/guest-fed FIFO is proved
+ * inert without running PL080. Invalid descriptors and every other enabled
+ * channel retain the literal timebase boundary. This predicate does not call
+ * dma_request_ready: UART4's request callback may release its idle timeout. */
+static bool region_dma_inert(const s5l8900_t *m) {
+    for (unsigned i = 0u; i < S5L8900_SPI_COUNT; i++)
+        if (m->spi[i].tx_level) return false;
+    for (unsigned d = 0u; d < S5L8900_DMAC_COUNT; d++) {
+        const s5l_pl080_t *dma = &m->dmac[d];
+        if (!(dma->config & PL080_CONFIG_EN)) continue;
+        for (unsigned c = 0u; c < S5L_PL080_CHANNELS; c++) {
+            const s5l_pl080_chan_t *ch = &dma->ch[c];
+            if ((ch->cfg & (PL080_CFG_EN | PL080_CFG_HALT)) != PL080_CFG_EN)
+                continue;
+            unsigned sw = (ch->ctrl >> PL080_CTRL_SWIDTH_SHIFT) &
+                          PL080_CTRL_WIDTH_MASK;
+            unsigned dw = (ch->ctrl >> PL080_CTRL_DWIDTH_SHIFT) &
+                          PL080_CTRL_WIDTH_MASK;
+            unsigned n = ch->ctrl & PL080_CTRL_SIZE_MASK;
+            if (sw > 2u || dw > 2u || !n ||
+                ((n << sw) & ((1u << dw) - 1u)) != 0u ||
+                (ch->cfg & PL080_CFG_FLOW_MASK) != (2u << PL080_CFG_FLOW_SHIFT))
+                return false;
+            if (ch->src == S5L8900_UART0_BASE + UART_URXH) {
+                if (m->uart0.rx_count) return false;
+            } else if (ch->src == S5L8900_UART4_BASE + UART_URXH) {
+                if (m->uart4.rx_count) return false;
+            } else {
+                static const uint32_t bases[] = {
+                    S5L8900_SPI0_BASE, S5L8900_SPI1_BASE, S5L8900_SPI2_BASE
+                };
+                bool empty = false;
+                for (unsigned s = 0u; s < S5L8900_SPI_COUNT; s++)
+                    if (ch->src == bases[s] + SPI_RXDATA && !m->spi[s].rx_level)
+                        empty = true;
+                if (!empty) return false;
+            }
+        }
+    }
+    return true;
+}
+
+static unsigned compact_event_batch_limit(const s5l8900_t *m,
+                                           unsigned remaining) {
+    if (!remaining || g_tick_eager || m->level_dirty ||
+        ext_inputs(m) != m->ext_seen || !m->cpu_hz || !m->tb_hz ||
+        m->tb_hz > m->cpu_hz || m->tb_accum >= m->cpu_hz)
+        return 0u;
+    if (m->power_trace_ticks_left || !region_dma_inert(m))
+        return retirement_batch_limit(m, remaining);
+    if (remaining > S5LBOX_STATIC_A64_COMPACT_REGION_INSNS)
+        remaining = S5LBOX_STATIC_A64_COMPACT_REGION_INSNS;
+
+    /* The same event inventory as WFI, but WITHOUT its VIC mask filter:
+     * running code may observe a device whose interrupt is currently masked.
+     * Synchronous devices are inert until fallback; PMU RTC/free-running
+     * counters advance algebraically before any MMIO read. Unknown event
+     * sources fall back to the old first-timebase-edge contract. */
+    for (unsigned i = 0u; i < NWAKE_SOURCES; i++) {
+        uint32_t ticks = 0u;
+        if (!WAKE_SOURCES[i].next_edge)
+            return retirement_batch_limit(m, remaining);
+        s5l_wake_kind_t kind = WAKE_SOURCES[i].next_edge(m, &ticks);
+        if (kind == S5L_WAKE_NEVER) continue;
+        if (kind != S5L_WAKE_AT || !ticks)
+            return retirement_batch_limit(m, remaining);
+        /* Compare before multiplying the possibly uint32-wide deadline.
+         * The remaining region spans at most 4096 timebase ticks. */
+        uint64_t last = (m->tb_accum + (uint64_t)remaining * m->tb_hz) /
+                        m->cpu_hz;
+        if (ticks > last) continue;
+        uint64_t distance = (uint64_t)ticks * m->cpu_hz - m->tb_accum;
+        unsigned bound = (unsigned)((distance + m->tb_hz - 1u) / m->tb_hz);
+        if (bound < remaining) remaining = bound;
+    }
+    return remaining;
+}
+#endif
+
 /*
  * Active wall-clock mode no longer needs an artificial retirement boundary at
  * each 6 MHz timebase edge: the next host sample advances every elapsed edge
@@ -2184,7 +2262,13 @@ static unsigned retirement_batch_limit(const s5l8900_t *m,
 static unsigned run_retirement_batch_limit(const s5l8900_t *m,
                                            unsigned remaining,
                                            bool active_clock) {
-    if (!active_clock) return retirement_batch_limit(m, remaining);
+    if (!active_clock) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+        if (s5l8900_static_a64_uses_event_regions(m))
+            return compact_event_batch_limit(m, remaining);
+#endif
+        return retirement_batch_limit(m, remaining);
+    }
     if (!remaining || m->level_dirty || ext_inputs(m) != m->ext_seen)
         return 0u;
     if (remaining > S5L8900_ACTIVE_CLOCK_BATCH_INSNS)
@@ -2409,8 +2493,12 @@ static bool static_a64_retirement_boundary(void *opaque, unsigned retired) {
     if (!boundary || !boundary->machine || !boundary->active_clock ||
         !boundary->pending_retired || !retired)
         return false;
+    bool was_active = *boundary->active_clock;
     run_clock_retired(boundary->machine, boundary->active_clock,
                       boundary->pending_retired, retired, false, true);
+    /* A region admitted under wall time has no instruction-clock event
+     * horizon. Re-enter through the outer scheduler if the guard switches. */
+    if (was_active != *boundary->active_clock) return false;
     return run_retirement_batch_limit(boundary->machine, 1u,
                                       *boundary->active_clock) != 0u;
 }

@@ -4881,11 +4881,13 @@ bool s5l8900_static_a64_set_known_negative_bypass(s5l8900_t *m,
 /* Host-policy changes such as a new pre-step boundary call this to discard
  * only derivable entries; architectural state and diagnostic totals remain. */
 void s5l8900_static_a64_invalidate_derived(s5l8900_t *m);
-/* Same-binary benchmark control for the total signed invocation bound. A
- * decoded head remains at most sixteen instructions and the machine still
- * clamps every invocation to the first exact timebase edge. The generic engine
- * initializes at sixteen; the gated iOS product explicitly selects 256.
- * Accepted values are 1..256. */
+/* Same-binary control for the total signed invocation bound. A decoded head
+ * remains at most sixteen instructions. The generic engine initializes at
+ * sixteen; decoded invocations retain the first-timebase-edge contract while
+ * the iOS compact tier selects a 4096-instruction event-bounded region.
+ * Accepted values are 1..256, or 1..4096 for the live-byte compact tier. Values
+ * above 256 select event-bounded regions with time committed before fallback;
+ * the decoded graph retains its 256-instruction ceiling. */
 bool s5l8900_static_a64_set_chain_limit(s5l8900_t *m, unsigned max_insns);
 uint64_t s5l8900_static_a64_retired(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_chained_blocks(const s5l8900_t *m);

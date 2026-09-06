@@ -6413,6 +6413,155 @@ static void test_signed_static_a64_thumb_read_oracle(void) {
     s5l8900_free(&reference);
 }
 
+/* A long region must be indistinguishable from literal instruction/tick pairs,
+ * including a timer read after a 900-instruction prefix and interrupt entry
+ * before that read. This uses the shipped run API, not the raw handler helper. */
+static void test_compact_event_regions(void) {
+    if (!s5l8900_static_a64_available()) {
+        printf("  COMPACT-EVENT-REGIONS SKIP: no signed AArch64 handlers\n");
+        return;
+    }
+    static const unsigned budgets[] = {
+        1u, 67u, 68u, 69u, 255u, 256u, 257u, 899u, 900u, 901u,
+        4095u, 4096u, 4097u, 8192u
+    };
+    static const uint32_t program[] = {
+        0xe2811001u,                 /* ADD r1,r1,#1 */
+        0xe2500001u,                 /* SUBS r0,r0,#1 */
+        0x1afffffcu,                 /* BNE 0x100 */
+        0xe5932000u,                 /* LDR r2,[r3]: timer MMIO */
+        0xe5842000u,                 /* STR r2,[r4]: RAM */
+        0xe1a00005u,                 /* MOV r0,r5 */
+        0xeafffff8u                  /* B 0x100 */
+    };
+    unsigned cases = 0u;
+    int failures_before = g_fail;
+    for (unsigned scenario = 0u; scenario < 13u; scenario++) {
+        for (unsigned b = 0u; b < sizeof budgets / sizeof budgets[0]; b++) {
+            s5l8900_t fast = {0}, reference = {0};
+            bool fast_ok = s5l8900_init(&fast, 0u, 1u << 20);
+            bool ref_ok = s5l8900_init(&reference, 0u, 1u << 20);
+            CHECK(fast_ok && ref_ok, "event-region machine init failed");
+            if (!fast_ok || !ref_ok) {
+                if (fast_ok) s5l8900_free(&fast);
+                if (ref_ok) s5l8900_free(&reference);
+                return;
+            }
+            s5l8900_t *machines[] = {&fast, &reference};
+            for (unsigned j = 0u; j < 2u; j++) {
+                s5l8900_t *m = machines[j];
+                const uint32_t spin = 0xeafffffeu;
+                s5l8900_load(m, 0x100u, program, sizeof program);
+                s5l8900_load(m, 0x18u, &spin, sizeof spin);
+                s5l8900_load(m, 0x1cu, &spin, sizeof spin);
+                s5l8900_load(m, 0x08u, &spin, sizeof spin);
+                if (scenario == 0u)
+                    s5l8900_load(m, 0x100u, &spin, sizeof spin);
+                m->cpu.cpsr = ARM_MODE_USR | ARM_CPSR_I | ARM_CPSR_F;
+                m->cpu.r[15] = 0x100u;
+                m->cpu.r[0] = m->cpu.r[5] = 300u;
+                m->cpu.r[3] = S5L8900_TIMER_BASE + TIMER_TICKSLOW;
+                m->cpu.r[4] = 0x800u;
+                if (scenario == 9u || scenario == 10u) {
+                    const uint16_t thumb[] = {
+                        0x3101u, 0x3801u, 0xd1fcu, /* ADD/SUB/BNE 0x100 */
+                        0x681au, 0x6022u, 0x4628u, 0xe7f8u
+                    }; /* LDR r2,[r3]; STR r2,[r4]; MOV r0,r5; B 0x100 */
+                    s5l8900_load(m, 0x100u, thumb, sizeof thumb);
+                    m->cpu.cpsr |= ARM_CPSR_T;
+                }
+                if (scenario == 11u)
+                    m->cpu.cpsr = ARM_MODE_SVC | ARM_CPSR_I | ARM_CPSR_F;
+                if (scenario == 12u) {
+                    const uint32_t svc = 0xef000000u;
+                    s5l8900_load(m, 0x10cu, &svc, sizeof svc);
+                }
+                if (scenario == 2u || scenario == 3u || scenario == 4u ||
+                    scenario == 10u) {
+                    m->timer.t4_state = TIMER4_STATE_START;
+                    m->timer.t4_count = m->timer.t4_value = 5u;
+                    if (scenario != 4u) {
+                        m->vic[0].enable = 1u << S5L8900_IRQ_TIMER;
+                        if (scenario == 3u) {
+                            m->vic[0].select = 1u << S5L8900_IRQ_TIMER;
+                            m->cpu.cpsr &= ~ARM_CPSR_F;
+                        } else m->cpu.cpsr &= ~ARM_CPSR_I;
+                    }
+                }
+                if (scenario == 5u) {
+                    m->clcd.scanning = true;
+                    m->clcd.ctrl = CLCD_CTRL_ENABLE;
+                    m->clcd.gate = 1u;
+                    m->clcd.frame_ticks = 7u;
+                    m->clcd.frame_accum = 2u;
+                    m->clcd.intmask = CLCD_INT_FRAME;
+                    m->vic[0].enable = 1u << S5L8900_IRQ_CLCD;
+                    m->cpu.cpsr &= ~ARM_CPSR_I;
+                }
+                s5l8900_tick(m, 0u);
+                m->tb_accum = b & 1u ? m->cpu_hz - 1u : 0u;
+                if (scenario == 6u || scenario == 7u) {
+                    /* Deliberately arm after the clean refresh. Runnable DMA
+                     * must still execute at the first literal tick, whereas
+                     * an empty UART receive can safely await a future input. */
+                    m->dmac[0].config = PL080_CONFIG_EN;
+                    m->dmac[0].ch[0].cfg = PL080_CFG_EN;
+                    m->dmac[0].ch[0].src = 0x100u;
+                    m->dmac[0].ch[0].dst = 0x900u;
+                    m->dmac[0].ch[0].ctrl = 1u;
+                    if (scenario == 7u) {
+                        m->dmac[0].ch[0].cfg |= 2u << PL080_CFG_FLOW_SHIFT;
+                        m->dmac[0].ch[0].src = S5L8900_UART4_BASE + UART_URXH;
+                    }
+                }
+                if (scenario == 8u) m->power_trace_ticks_left = 1000u;
+            }
+            CHECK(s5l8900_static_a64_set_enabled(&fast, true) &&
+                  s5l8900_static_a64_set_compact_raw(&fast, true) &&
+                  s5l8900_static_a64_set_chain_limit(&fast, 4096u),
+                  "event-region policy was refused");
+            CHECK(!s5l8900_static_a64_set_chain_limit(&fast, 4097u),
+                  "oversized compact region was accepted");
+            arm_status_t fs = ARM_OK, rs = ARM_OK;
+            unsigned ran = s5l8900_run(&fast, budgets[b], &fs);
+            unsigned literal = 0u;
+            for (; literal < budgets[b]; literal++) {
+                rs = arm_step(&reference.cpu);
+                if (rs != ARM_OK) break;
+                s5l8900_tick(&reference, 1u);
+            }
+            CHECK(ran == literal && fs == rs,
+                  "region %u/%u retirement status differs", scenario, budgets[b]);
+            uint8_t *a = NULL, *r = NULL;
+            size_t an = 0u, rn = 0u;
+            snapshot_status_t as = snapshot_save_mem(&fast, &a, &an);
+            snapshot_status_t bs = snapshot_save_mem(&reference, &r, &rn);
+            CHECK(as == SNAP_OK && bs == SNAP_OK,
+                  "region %u/%u snapshot refused: %s / %s", scenario, budgets[b],
+                  snapshot_strerror(as), snapshot_strerror(bs));
+            CHECK(a && r && an == rn && !memcmp(a, r, an),
+                  "region %u/%u serialized machine differs", scenario, budgets[b]);
+            CHECK(fast.tb_accum == reference.tb_accum &&
+                  fast.level_dirty == reference.level_dirty &&
+                  fast.ext_seen == reference.ext_seen,
+                  "region %u/%u deferred state differs", scenario, budgets[b]);
+            if (scenario == 0u && budgets[b] >= 4096u) {
+                uint64_t calls = s5l8900_static_a64_compact_raw_calls(&fast);
+                CHECK(calls && calls <= 3u,
+                      "long region silently used short entries: %llu calls",
+                      (unsigned long long)calls);
+            }
+            free(a); free(r);
+            s5l8900_free(&fast); s5l8900_free(&reference);
+            cases++;
+        }
+    }
+    if (g_fail == failures_before)
+        printf("  COMPACT-EVENT-REGIONS exact=yes cases=%u bound=4096 "
+               "a32=yes thumb=yes mmio-time=yes irq=yes fiq=yes dma=yes "
+               "serialized-machine=yes\n", cases);
+}
+
 static void test_compact_pc_sampling_excludes_fallback_tracing(void) {
     s5l8900_t m = {0};
     s5l_static_a64_compact_pc_profile_t profile;
@@ -6670,6 +6819,7 @@ int main(void) {
     test_signed_static_a64_vstm_oracle();
     test_signed_static_a64_thumb_oracle();
     test_signed_static_a64_thumb_read_oracle();
+    test_compact_event_regions();
     test_compact_pc_sampling_excludes_fallback_tracing();
     test_compact_pc_sampling_records_guest_cursor();
     test_stub_window_stores_and_counts();

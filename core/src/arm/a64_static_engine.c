@@ -1533,12 +1533,25 @@ bool s5l8900_static_a64_set_chain_limit(s5l8900_t *m,
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     static_a64_state_t *state = static_state(m);
     if (!state || !state->enabled || !a64_static_host_available() ||
-        !max_insns || max_insns > A64_STATIC_MAX_CHAIN_INSNS)
+        !max_insns || max_insns > (state->compact_raw_enabled
+            ? S5LBOX_STATIC_A64_COMPACT_REGION_INSNS
+            : A64_STATIC_MAX_CHAIN_INSNS))
         return false;
     state->chain_limit = max_insns;
     return true;
 #else
     (void)max_insns;
+    return false;
+#endif
+}
+
+bool s5l8900_static_a64_uses_event_regions(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = m ? static_state(m) : NULL;
+    return state && state->enabled && state->compact_raw_enabled &&
+           state->chain_limit > A64_STATIC_MAX_CHAIN_INSNS;
+#else
+    (void)m;
     return false;
 #endif
 }
@@ -1970,6 +1983,26 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
         }
     }
 
+    /* An event-bounded region may span many timebase ticks. Publish its exact
+     * elapsed time BEFORE arm_step can read a timer or touch any other device.
+     * RAM-only FETCH/data refills above need no boundary. A resulting IRQ is
+     * checked by fallback_step before it executes the fallback instruction. */
+    if (!priv && s5l8900_static_a64_uses_event_regions(context->machine)) {
+        uint64_t retired64 = cpu->cycles - context->boundary_cycles;
+        if (retired64) {
+            if (!context->retirement_boundary || retired64 > UINT_MAX ||
+                retired64 > context->budget - context->boundary_retired)
+                return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
+            unsigned delta = (unsigned)retired64;
+            bool may_continue = context->retirement_boundary(
+                context->retirement_opaque, delta);
+            context->boundary_retired += delta;
+            context->boundary_cycles = cpu->cycles;
+            if (!may_continue)
+                return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
+        }
+    }
+
     profile_fallback = context->state->compact_fallback_profile_enabled;
     if (profile_fallback) {
         compact_fallback_profile_note_current(context->machine,
@@ -2294,6 +2327,9 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
         if (known_negative) *known_negative = compact_known_negative;
         return completed;
     }
+    /* Changing tiers cannot expose a decoded graph to the compact-only bound. */
+    if (budget > A64_STATIC_MAX_CHAIN_INSNS)
+        budget = A64_STATIC_MAX_CHAIN_INSNS;
     if (state->graph_enabled) {
         unsigned completed = try_graph(m, state, budget);
         if (refilled)

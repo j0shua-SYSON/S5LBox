@@ -10,16 +10,19 @@
  * timing may use the whole ceiling because elapsed edges advance together at
  * the next bounded host sample. */
 #define S5LBOX_STATIC_A64_PRODUCT_CHAIN_INSNS 256u
+/* Live-byte execution has no decoded graph array to size. Its larger region
+ * is bounded by the machine's next event and commits time before fallback. */
+#define S5LBOX_STATIC_A64_COMPACT_REGION_INSNS 4096u
 
 /* Cheap execution-policy gate. In the LTO iOS product this folds to the
  * opaque-state pointer and its first enabled byte, allowing a compiled but
  * disabled engine to avoid the much larger timebase/input eligibility path. */
 bool s5l8900_static_a64_is_enabled(const s5l8900_t *m);
+bool s5l8900_static_a64_uses_event_regions(const s5l8900_t *m);
 
-/* A privileged compact interval may reach another proven FETCH window before
- * its budget is exhausted. The machine loop owns the device/clock boundary
- * that must precede that continuation. The callback accounts exactly the
- * native retirements since its previous invocation and returns whether the
+/* The machine owns the device/clock boundary before a privileged FETCH-window
+ * continuation or an event-region interpreter fallback. The callback accounts
+ * every retirement since its previous invocation and returns whether the
  * ordinary machine gate still permits resident execution. */
 typedef bool (*s5l8900_static_a64_retirement_boundary_fn)(
     void *opaque, unsigned retired);
@@ -27,8 +30,8 @@ typedef bool (*s5l8900_static_a64_retirement_boundary_fn)(
 /* Try an already-translated, time-bounded chain. Each decoded head remains at
  * most sixteen guest instructions, stays inside the current proven fetch block
  * and repeats the cache/raw-byte witness. The configured total cannot exceed
- * the product ceiling above. Zero means fall back to the architectural
- * interpreter without changing guest state. When a positive exact prefix ends
+ * the corresponding decoded/compact ceiling above. Zero means fall back to
+ * the architectural interpreter without changing guest state. When a positive exact prefix ends
  * at an unchanged decoded negative, or a privileged compact interval leaves
  * its fallback instruction untouched, `known_negative` reports that the next
  * signed probe is redundant. `boundary_retired` reports the prefix already

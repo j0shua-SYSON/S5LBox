@@ -214,6 +214,7 @@ jobs:
           if [ "$RUNNER_OS" = "macOS" ]; then
             set +e
             grep -Eq 'STATIC-A64-GUEST-PC-SAMPLING A32=[1-9][0-9]* Thumb=[1-9][0-9]*' <<<"$soc_output" || exit 1
+            grep -Fq 'COMPACT-EVENT-REGIONS exact=yes cases=182 bound=4096 a32=yes thumb=yes mmio-time=yes irq=yes fiq=yes dma=yes serialized-machine=yes' <<<"$soc_output" || exit 1
             static_output="$(./build-jit/core/jitbench --insns 10000 --reps 1 2>&1)"
             static_status=$?
             compact_output="$(./build-jit/core/jitbench --compact-raw-only --insns 10000 --reps 1 2>&1)"
