@@ -716,7 +716,13 @@ static void test_arith_extra_budget_loop(void) {
                 cpu.r[11] = CODE;
                 prime(DATA, ARM_ACCESS_READ, priv != 0u, BASE + 0xc000u);
                 prime(DATA, ARM_ACCESS_WRITE, priv != 0u, BASE + 0xc000u);
-                if (!refill) {
+                /* Native TLB refill deliberately remains User-only. A cold
+                 * privileged request must refuse without mutation; ordinary
+                 * privileged DREAD/DWRITE witnesses still execute natively. */
+                if (priv && refill)
+                    compare_arith_extra(0xe1d100b0u, A64_COMPACT_RAW_ADMIT_EXECUTE,
+                                        false, true);
+                if (!refill || priv) {
                     CHECK(arm_data_cache_try_refill(&cpu, DATA, ARM_ACCESS_READ,
                               priv != 0u), "loop READ witness");
                     CHECK(arm_data_cache_try_refill(&cpu, DATA, ARM_ACCESS_WRITE,

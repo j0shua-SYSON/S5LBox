@@ -24,8 +24,9 @@ uses the existing read/write RAM witness before any architectural mutation.
 The change does not enlarge retirement/device/interrupt budgets, replace guest
 algorithms, alter clocks, or enable the experimental native TLB or bulk modes.
 Ordinary data-cache witnesses and optional native TLB refill share the same
-instruction path. A refused optional bulk comparison now resumes the exact
-ordinary signed-byte load.
+instruction path. Native TLB refill remains User-only: cold privileged requests
+refuse, while existing privileged DREAD/DWRITE witnesses remain usable. A
+refused optional bulk comparison now resumes the exact ordinary signed-byte load.
 
 `test_arm_ram_window` checks portable admission and, on native ARM64 hosts,
 compares full register/flag/memory state with `arm_step`. It covers arithmetic

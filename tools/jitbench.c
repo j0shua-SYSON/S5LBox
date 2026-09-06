@@ -8992,31 +8992,31 @@ static bool validate_compact_raw_oracles(void) {
         UINT32_C(0xe2800001), /* native ADD r0,r0,#1 */
         UINT32_C(0xe5870000), /* fallback STR r0,[r7,#0] */
         UINT32_C(0xe2422001), /* native SUB r2,r2,#1 */
-        UINT32_C(0xe0000090), /* fallback MUL r0,r0,r0 */
+        UINT32_C(0xe6bf0f30), /* fallback REV r0,r0; MUL is now native */
         UINT32_C(0xe2855001), /* native ADD r5,r5,#1 */
     };
     const uint32_t resident_cross_sequential[] = {
         UINT32_C(0xe2800001), /* native ADD at 0x5ffc */
-        UINT32_C(0xe0000090), /* fallback MUL at next 1 KiB window */
+        UINT32_C(0xe6bf0f30), /* fallback REV at next 1 KiB window */
         UINT32_C(0xe2855001), /* native ADD after window publication */
     };
     const uint32_t resident_cross_fast[] = {
         UINT32_C(0xe2800001), /* native ADD at 0x5ffc */
         UINT32_C(0xe2844001), /* native ADD after no-retire publication */
-        UINT32_C(0xe0000090), /* fallback MUL in the published window */
+        UINT32_C(0xe6bf0f30), /* fallback REV in the published window */
     };
     const uint32_t resident_cross_branch[] = {
         UINT32_C(0xe2800001), /* native ADD at 0x63f8 */
         UINT32_C(0xea000000), /* native branch 0x63fc -> 0x6404 */
         UINT32_C(0xe2844001), /* skipped */
-        UINT32_C(0xe0000090), /* fallback MUL at branch target */
+        UINT32_C(0xe6bf0f30), /* fallback REV at branch target */
         UINT32_C(0xe2855001), /* native ADD in published window */
     };
     const uint32_t resident_stale_window[] = {
         UINT32_C(0xe2800001), /* native ADD at 0x67fc */
-        UINT32_C(0xe0000090), /* first fallback publishes 0x6800 */
+        UINT32_C(0xe6bf0f30), /* first fallback publishes 0x6800 */
         UINT32_C(0xe2855001), /* native ADD in the published window */
-        UINT32_C(0xe0000090), /* fallback continues without publication */
+        UINT32_C(0xe6bf0f30), /* fallback continues without publication */
         UINT32_C(0xe2866001), /* must not execute via the stale window */
     };
     const uint32_t resident_fallback_interworking[] = {
@@ -10903,7 +10903,7 @@ done:
 
 /* Prove the resident/native-interpreter partition through the actual machine
  * runner before measuring its compute-only control. The two MMU-on data
- * accesses use already-proven DREAD/DWRITE witnesses; only unsupported MUL
+ * accesses use already-proven DREAD/DWRITE witnesses; only unsupported REV
  * requires arm_step(). The other four ALU operations plus the loop branch
  * stay in the build-time-linked AArch64 loop. */
 static bool validate_soc_compact_raw_resident(void) {
@@ -10912,7 +10912,7 @@ static bool validate_soc_compact_raw_resident(void) {
         UINT32_C(0xe2800001), /* native ADD r0,r0,#1 */
         UINT32_C(0xe5870000), /* native DWRITE-hit STR r0,[r7,#0] */
         UINT32_C(0xe2422001), /* native SUB r2,r2,#1 */
-        UINT32_C(0xe0000090), /* fallback MUL r0,r0,r0 */
+        UINT32_C(0xe6bf0f30), /* fallback REV r0,r0 */
         UINT32_C(0xe2855001), /* native ADD r5,r5,#1 */
         UINT32_C(0xe5971000), /* native DREAD-hit LDR r1,[r7,#0] */
         UINT32_C(0xe0266001), /* native EOR r6,r6,r1 */
@@ -11005,7 +11005,7 @@ static bool validate_soc_compact_raw_data_refill(void) {
         UINT32_C(0xe2800001), /* native ADD r0,r0,#1 */
         UINT32_C(0xe5870000), /* cold DWRITE STR r0,[r7,#0] */
         UINT32_C(0xe2422001), /* native SUB r2,r2,#1 */
-        UINT32_C(0xe0000090), /* literal fallback MUL r0,r0,r0 */
+        UINT32_C(0xe6bf0f30), /* literal fallback REV r0,r0 */
         UINT32_C(0xe2855001), /* native ADD r5,r5,#1 */
         UINT32_C(0xe5971000), /* cold DREAD LDR r1,[r7,#0] */
         UINT32_C(0xe0266001), /* native EOR r6,r6,r1 */
@@ -11098,7 +11098,7 @@ static bool validate_soc_compact_raw_windows(void) {
     for (unsigned i = 0u; i < 256u; i++)
         program[i] = UINT32_C(0xe2800001); /* ADD r0,r0,#1 */
     program[256] = UINT32_C(0xe2844001);   /* admitted ADD at 0x400 */
-    program[257] = UINT32_C(0xe0000090);   /* fallback MUL at 0x404 */
+    program[257] = UINT32_C(0xe6bf0f30);   /* fallback REV at 0x404 */
     program[258] = UINT32_C(0xeafffefc);   /* branch 0x408 -> 0x000 */
 
     if (!run_soc_compact_raw_path(
@@ -11257,7 +11257,7 @@ static bool validate_soc_compact_raw_privileged_windows(void) {
     for (unsigned i = 0u; i < 256u; i++)
         program[i] = UINT32_C(0xe2800001); /* ADD r0,r0,#1 */
     program[256] = UINT32_C(0xe2844001);   /* admitted ADD at 0x400 */
-    program[257] = UINT32_C(0xe0000090);   /* fallback MUL at 0x404 */
+    program[257] = UINT32_C(0xe6bf0f30);   /* fallback REV at 0x404 */
     program[258] = UINT32_C(0xeafffefc);   /* branch 0x408 -> 0x000 */
 
     if (!run_soc_compact_raw_privileged_path(
