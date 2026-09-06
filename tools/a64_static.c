@@ -2125,7 +2125,8 @@ _Static_assert(offsetof(a64_compact_raw_context_t, flat_ram) == 0u &&
                    offsetof(a64_compact_raw_context_t, tlb_stats) == 408u &&
                    offsetof(a64_compact_raw_context_t, ram_map) == 520u &&
                    offsetof(a64_compact_raw_context_t, ram_map_stats) == 528u &&
-                   sizeof(a64_compact_raw_context_t) == 552u,
+                   offsetof(a64_compact_raw_context_t, bulk_ram_window) == 552u &&
+                   sizeof(a64_compact_raw_context_t) == 560u,
                "compact raw native context layout drifted");
 _Static_assert(ARM_RAM_MAP_ENTRIES == 4096u &&
                    sizeof(arm_ram_map_entry_t) == 16u &&
