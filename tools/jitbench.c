@@ -5389,7 +5389,7 @@ static bool validate_compact_raw_admission_shapes(void) {
         { UINT32_C(0xe081031f), false,
           A64_COMPACT_RAW_REJECT_DP_RM_PC },
         { UINT32_C(0xe0810392), false,
-          A64_COMPACT_RAW_REJECT_DP_REGISTER_SHIFT },
+          A64_COMPACT_RAW_ADMIT_EXECUTE },
         { UINT32_C(0xe081000f), false,
           A64_COMPACT_RAW_REJECT_DP_RM_PC },
         { UINT32_C(0xe7970000), false,

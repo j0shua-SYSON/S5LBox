@@ -1878,6 +1878,58 @@ a64_compact_raw_admission_t a64_compact_raw_classify_instruction(
     if (compact_raw_is_vfp_encoding(insn))
         return compact_raw_classify_vfp(cpu, insn);
 
+    if ((insn & UINT32_C(0x0fc000f0)) == UINT32_C(0x00000090) ||
+        (insn & UINT32_C(0x0f8000f0)) == UINT32_C(0x00800090)) {
+        const bool wide = (insn & (1u << 23)) != 0u;
+        const unsigned hi = (insn >> 16) & 15u;
+        const unsigned lo = (insn >> 12) & 15u;
+        const unsigned rs = (insn >> 8) & 15u;
+        const unsigned rm = insn & 15u;
+
+        /* The word forms swap Rd/Rn relative to ordinary DP. Keep PC in
+         * any field literal, even the unused accumulator field of MUL. */
+        if (hi == 15u || lo == 15u || rs == 15u || rm == 15u)
+            return A64_COMPACT_RAW_REJECT_DP_PC;
+        if (wide && hi == lo)
+            return A64_COMPACT_RAW_REJECT_DP_REGISTER_SHIFT;
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
+
+    if ((insn & UINT32_C(0x0e000090)) == UINT32_C(0x00000090) &&
+        (insn & UINT32_C(0x60)) != 0u) {
+        const bool pre = (insn & (1u << 24)) != 0u;
+        const bool up = (insn & (1u << 23)) != 0u;
+        const bool immediate = (insn & (1u << 22)) != 0u;
+        const bool write = (insn & (1u << 21)) != 0u;
+        const bool load = (insn & (1u << 20)) != 0u;
+        const unsigned rn = (insn >> 16) & 15u;
+        const unsigned rd = (insn >> 12) & 15u;
+        const unsigned sh = (insn >> 5) & 3u;
+        uint32_t offset, base, address;
+
+        /* LDRD/STRD are still literal; L is not their load/store selector. */
+        if (!load && sh != 1u)
+            return A64_COMPACT_RAW_REJECT_MEMORY_FORM;
+        if (rd == 15u || ((!pre || write) && rn == 15u))
+            return A64_COMPACT_RAW_REJECT_MEMORY_PC;
+        if ((!pre && write) || ((!pre || write) && rn == rd))
+            return A64_COMPACT_RAW_REJECT_MEMORY_FORM;
+        if (immediate) {
+            offset = ((insn >> 4) & UINT32_C(0xf0)) | (insn & 15u);
+        } else {
+            if ((insn & UINT32_C(0xf00)) != 0u)
+                return A64_COMPACT_RAW_REJECT_MEMORY_FORM;
+            if ((insn & 15u) == 15u)
+                return A64_COMPACT_RAW_REJECT_MEMORY_PC;
+            offset = cpu->r[insn & 15u];
+        }
+        base = rn == 15u ? cpu->r[15] + 8u : cpu->r[rn];
+        address = pre ? (up ? base + offset : base - offset) : base;
+        if (sh != 2u && (address & 1u) != 0u)
+            return A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT;
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
+
     if (((insn >> 26) & 3u) == 0u) {
         unsigned opcode = (insn >> 21) & 15u;
         unsigned rn = (insn >> 16) & 15u;

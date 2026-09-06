@@ -415,9 +415,10 @@ static void test_native_memory_families(void) {
         bool thumb, write, unsupported;
     } cases[] = {
         {0xe5910000u, false, false, false}, {0xe5d10000u, false, false, false},
-        {0xe1d100b0u, false, false, true}, {0xe1d100d0u, false, false, true},
-        {0xe1d100f0u, false, false, true}, {0xe5810000u, false, true, false},
-        {0xe5c10000u, false, true, false}, {0xe1c100b0u, false, true, true},
+        {0xe1d100b0u, false, false, false}, {0xe1d100d0u, false, false, false},
+        {0xe1d100f0u, false, false, false}, {0xe5810000u, false, true, false},
+        {0xe5c10000u, false, true, false}, {0xe1c100b0u, false, true, false},
+        {0xe1c100d0u, false, false, true}, {0xe1c100f0u, false, true, true},
         {0xe8910015u, false, false, false}, {0xe8810015u, false, true, false},
         {0xe4910004u, false, false, false}, {0xe4810004u, false, true, false},
         {0xe4b10004u, false, false, false}, {0xe4a10004u, false, true, false},
@@ -463,13 +464,12 @@ static void test_native_memory_families(void) {
                       ram + 0x8000u, CODE, 1024u, 1u, fallback, &f, &options,
                       NULL, NULL, &stats, &total, &native, &slow), "family run");
             if (cases[i].unsupported) {
-                /* The compact runner never admitted these A32 extra-transfer
-                 * shapes. Refilling memory must not broaden instruction
-                 * semantics or accidentally execute an unsupported form. */
+                /* Doubleword transfers remain outside the scalar mode-3
+                 * family. L is not their load/store selector. */
                 CHECK(a64_compact_raw_classify_instruction(&before,
                           cases[i].opcode, false) ==
-                              A64_COMPACT_RAW_REJECT_DP_REGISTER_SHIFT,
-                      "existing extra-transfer rejection %08x", cases[i].opcode);
+                              A64_COMPACT_RAW_REJECT_MEMORY_FORM,
+                      "doubleword transfer rejection %08x", cases[i].opcode);
                 CHECK(total == 0u && native == 0u && slow == 0u && f.calls == 1u &&
                           stats.fetch == 0u && stats.read == 0u && stats.write == 0u &&
                           !memcmp(cpu.r, before.r, sizeof cpu.r) &&
@@ -491,6 +491,260 @@ static void test_native_memory_families(void) {
             CHECK(stats.read == (cases[i].write ? 0u : 1u) &&
                       stats.write == (cases[i].write ? 1u : 0u),
                   "family proved native refill %08x", cases[i].opcode);
+        }
+    }
+}
+
+static unsigned arith_extra_native_runs;
+
+/* Classify on every host; compare the actual signed runner where available.
+ * A missing memory witness can refuse an otherwise admitted instruction. */
+static void compare_arith_extra(uint32_t opcode,
+        a64_compact_raw_admission_t admission, bool execute, bool refill) {
+    static uint8_t expected_ram[SIZE];
+    insn(CODE, opcode);
+    CHECK(a64_compact_raw_classify_instruction(&cpu, opcode, false) == admission,
+          "arithmetic/extra admission %08x expected %u", opcode, admission);
+    if (!a64_static_host_available()) return;
+    arm_ram_window_t w;
+    CHECK(arm_ram_window_capture(&w, &cpu, BASE, SIZE), "extra RAM capture");
+    before = cpu;
+    reference = cpu;
+    memcpy(saved_ram, ram, SIZE);
+    if (execute)
+        CHECK(arm_step(&reference) == ARM_OK, "extra reference %08x", opcode);
+    memcpy(expected_ram, ram, SIZE);
+    memcpy(ram, saved_ram, SIZE);
+    a64_compact_raw_options_t options = { .ram_window = refill ? &w : NULL };
+    a64_compact_tlb_stats_t stats = {0};
+    fallback_t f = {0};
+    unsigned total = 0, native = 0, slow = 0;
+    reads = writes = 0;
+    CHECK(a64_compact_raw_run_code_window_resident_options(&cpu,
+              ram + 0x8000u, CODE, 1024u, 1u, fallback, &f, &options,
+              NULL, NULL, &stats, &total, &native, &slow), "extra native run");
+    CHECK(total == (unsigned)execute && native == total && !slow &&
+              f.calls == (unsigned)!execute,
+          "extra native admission %08x executed %u fallback %u", opcode, total, f.calls);
+    CHECK(!memcmp(cpu.r, reference.r, sizeof cpu.r) &&
+              cpu.cpsr == reference.cpsr && cpu.cycles == reference.cycles &&
+              cpu.abort_pending == reference.abort_pending &&
+              !memcmp(cpu.vfp_s, reference.vfp_s, sizeof cpu.vfp_s) &&
+              cpu.vfp_fpscr == reference.vfp_fpscr &&
+              cpu.vfp_fpexc == reference.vfp_fpexc &&
+              !memcmp(ram, expected_ram, SIZE),
+          "extra exact architectural state %08x refill %u", opcode, refill);
+    CHECK(!reads && !writes, "extra native access never enters bus %08x", opcode);
+    if (!execute)
+        CHECK(!stats.fetch && !stats.read && !stats.write &&
+                  cpu.dread_hits == before.dread_hits &&
+                  cpu.dwrite_hits == before.dwrite_hits,
+              "refusal has no successful access counters %08x", opcode);
+    arith_extra_native_runs++;
+}
+
+static void test_multiply_families(void) {
+    static const uint32_t values[] = {
+        0u, 1u, 0x7fffffffu, 0x80000000u, 0xffffffffu,
+        0x0000ffffu, 0xffff0000u, 0x13579bdfu,
+    };
+    for (unsigned kind = 0; kind < 12u; kind++) {
+        for (unsigned pair = 0; pair < 64u; pair++) {
+            for (unsigned alias = 0; alias < 5u; alias++) {
+                setup();
+                cpu.cpsr |= (pair & 15u) << 28;
+                cpu.cpsr |= ARM_CPSR_Q;
+                cpu.r[2] = 0xffffffffu;
+                cpu.r[3] = 0x80000000u;
+                cpu.r[4] = values[pair >> 3];
+                cpu.r[5] = values[pair & 7u];
+                cpu.r[6] = pair & 1u ? 0x7fffffffu : 0x80000000u;
+                unsigned rm = alias == 1u || alias == 4u ? 2u : 4u;
+                unsigned rs = alias == 2u || alias == 4u ? 3u : 5u;
+                if (alias == 3u) rs = rm;
+                uint32_t opcode;
+                if (kind < 4u) {
+                    unsigned rn = alias == 4u ? 2u : 6u;
+                    opcode = 0xe0020090u | (rn << 12) | (rs << 8) | rm |
+                        ((kind & 1u) << 20) | ((kind >> 1) << 21);
+                } else {
+                    unsigned form = kind - 4u;
+                    opcode = 0xe0832090u | (rs << 8) | rm |
+                        ((form & 1u) << 20) | (((form >> 1) & 1u) << 21) |
+                        ((form >> 2) << 22);
+                }
+                compare_arith_extra(opcode, A64_COMPACT_RAW_ADMIT_EXECUTE,
+                                    true, false);
+            }
+        }
+    }
+    static const uint32_t refused[] = {
+        0xe00f0594u, 0xe002f594u, 0xe0020f94u, 0xe002059fu,
+        0xe0833094u, 0xe08f2594u, 0xe083f594u, 0xe0832f94u, 0xe083259fu,
+        0xe1032094u, /* SWP is not a multiply. */
+    };
+    for (unsigned i = 0; i < sizeof refused / sizeof refused[0]; i++) {
+        setup();
+        a64_compact_raw_admission_t a = i == 4u || i == 9u
+            ? A64_COMPACT_RAW_REJECT_DP_REGISTER_SHIFT : A64_COMPACT_RAW_REJECT_DP_PC;
+        compare_arith_extra(refused[i], a, false, false);
+        setup(); /* A failed condition skips even an unsupported encoding. */
+        compare_arith_extra(refused[i] & 0x0fffffffu,
+                            A64_COMPACT_RAW_ADMIT_CONDITION_SKIP, true, false);
+    }
+}
+
+static uint32_t extra_opcode(unsigned kind, bool pre, bool up, bool immediate,
+        bool writeback, unsigned rn, unsigned rd, unsigned offset) {
+    unsigned sh = kind < 3u ? kind + 1u : 1u;
+    return 0xe0000090u | ((uint32_t)pre << 24) | ((uint32_t)up << 23) |
+        ((uint32_t)immediate << 22) | ((uint32_t)writeback << 21) |
+        ((uint32_t)(kind < 3u) << 20) | (rn << 16) | (rd << 12) | (sh << 5) |
+        (immediate ? ((offset & 0xf0u) << 4) | (offset & 15u) : offset);
+}
+
+static void test_extra_transfer_forms(void) {
+    static const unsigned offsets[] = {0u, 1u, 2u, 15u, 16u, 127u, 254u, 255u};
+    for (unsigned kind = 0; kind < 4u; kind++) {
+        for (unsigned mode = 0; mode < 12u; mode++) {
+            bool immediate = (mode & 1u) != 0u;
+            bool up = (mode & 2u) != 0u;
+            bool pre = mode / 4u != 2u;
+            bool writeback = mode / 4u == 1u;
+            for (unsigned sample = 0; sample < 32u; sample++) {
+                for (unsigned refill = 0; refill < 2u; refill++) {
+                    setup();
+                    unsigned offset = offsets[sample & 7u];
+                    unsigned rd = sample & 16u ? 2u : 0u;
+                    uint32_t base = DATA + 256u + ((sample >> 3) & 1u);
+                    uint32_t address = pre ? (up ? base + offset : base - offset) : base;
+                    cpu.r[0] = 0xface9876u;
+                    cpu.r[1] = base;
+                    cpu.r[2] = offset;
+                    cpu.cpsr |= (sample & 15u) << 28;
+                    ram[address - VA] = (uint8_t)(sample * 47u);
+                    ram[address - VA + 1u] = (uint8_t)(sample * 71u);
+                    arm_access_t access = kind == 3u ? ARM_ACCESS_WRITE : ARM_ACCESS_READ;
+                    prime(address, access, false, BASE + ((address - VA) & ~1023u));
+                    if (!refill)
+                        CHECK(arm_data_cache_try_refill(&cpu, address, access, false),
+                              "ordinary data-cache proof");
+                    bool aligned = kind == 1u || (address & 1u) == 0u;
+                    compare_arith_extra(extra_opcode(kind, pre, up, immediate,
+                              writeback, 1u, rd, immediate ? offset : 2u),
+                        aligned ? A64_COMPACT_RAW_ADMIT_EXECUTE
+                                : A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT,
+                        aligned, refill != 0u);
+                }
+            }
+        }
+    }
+    /* Literal PC bases and the final two bytes of a 1 KiB witness. Include
+     * every signed byte value and both signs of a halfword. */
+    for (unsigned kind = 0; kind < 4u; kind++) {
+        for (unsigned sample = 0; sample < 256u; sample++) {
+            setup();
+            bool literal = (sample & 1u) != 0u;
+            uint32_t address = literal ? CODE + 24u : DATA + 1022u + (kind == 1u);
+            cpu.r[0] = 0xffff0000u | sample;
+            cpu.r[1] = address;
+            ram[address - VA] = (uint8_t)sample;
+            ram[address - VA + 1u] = (uint8_t)(sample ^ 0x80u);
+            arm_access_t access = kind == 3u ? ARM_ACCESS_WRITE : ARM_ACCESS_READ;
+            prime(address, access, false, BASE + ((address - VA) & ~1023u));
+            compare_arith_extra(extra_opcode(kind, true, true, true, false,
+                      literal ? 15u : 1u, 0u, literal ? 16u : 0u),
+                A64_COMPACT_RAW_ADMIT_EXECUTE, true, true);
+        }
+    }
+    static const struct { uint32_t opcode; a64_compact_raw_admission_t reject; } bad[] = {
+        {0xe1d1f0b0u, A64_COMPACT_RAW_REJECT_MEMORY_PC},
+        {0xe0f100b0u, A64_COMPACT_RAW_REJECT_MEMORY_FORM}, /* P=0,W=1 */
+        {0xe1f110b0u, A64_COMPACT_RAW_REJECT_MEMORY_FORM}, /* base/data WB alias */
+        {0xe0d110b0u, A64_COMPACT_RAW_REJECT_MEMORY_FORM},
+        {0xe1ff00b0u, A64_COMPACT_RAW_REJECT_MEMORY_PC},
+        {0xe0df00b0u, A64_COMPACT_RAW_REJECT_MEMORY_PC},
+        {0xe19101b2u, A64_COMPACT_RAW_REJECT_MEMORY_FORM}, /* SBZ bits11:8 */
+        {0xe19100bfu, A64_COMPACT_RAW_REJECT_MEMORY_PC},
+        {0xe1c100d0u, A64_COMPACT_RAW_REJECT_MEMORY_FORM}, /* LDRD */
+        {0xe1c100f0u, A64_COMPACT_RAW_REJECT_MEMORY_FORM}, /* STRD */
+    };
+    for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        setup();
+        cpu.r[1] = DATA;
+        compare_arith_extra(bad[i].opcode, bad[i].reject, false, true);
+        setup();
+        compare_arith_extra(bad[i].opcode & 0x0fffffffu,
+                            A64_COMPACT_RAW_ADMIT_CONDITION_SKIP, true, true);
+    }
+    for (unsigned kind = 0; kind < 4u; kind++) {
+        for (unsigned refill = 0; refill < 2u; refill++) {
+            setup(); /* No current READ/WRITE mapping; do not page-walk. */
+            cpu.r[0] = 0xdeadbeefu;
+            cpu.r[1] = DATA;
+            compare_arith_extra(extra_opcode(kind, false, true, true, false,
+                      1u, 0u, 2u), A64_COMPACT_RAW_ADMIT_EXECUTE, false, refill != 0u);
+        }
+    }
+    if (a64_static_host_available())
+        printf("NATIVE-ARITH-EXTRA: %u exact execution/refusal comparisons\n",
+               arith_extra_native_runs);
+}
+
+static void test_arith_extra_budget_loop(void) {
+    if (!a64_static_host_available()) return;
+    static uint8_t expected_ram[SIZE];
+    for (unsigned priv = 0; priv < 2u; priv++) {
+        for (unsigned refill = 0; refill < 2u; refill++) {
+            for (unsigned budget = 1; budget <= 131u; budget++) {
+                setup();
+                if (priv) cpu.cpsr = ARM_MODE_SVC;
+                insn(CODE,       0xe1d100b0u); /* LDRH r0,[r1] */
+                insn(CODE + 4u,  0xe0224390u); /* MLA r2,r0,r3,r4 */
+                insn(CODE + 8u,  0xe1d150d1u); /* LDRSB r5,[r1,#1] */
+                insn(CODE + 12u, 0xe0c76095u); /* SMULL r6,r7,r5,r0 */
+                insn(CODE + 16u, 0xe1c120b2u); /* STRH r2,[r1,#2] */
+                insn(CODE + 20u, 0xe1d180f2u); /* LDRSH r8,[r1,#2] */
+                insn(CODE + 24u, 0xe12fff1au); /* BX r10 */
+                half(CODE + 64u, 0x1c40u);    /* ADDS r0,r0,#1 */
+                half(CODE + 66u, 0x4758u);    /* BX r11 */
+                insn(DATA, budget & 1u ? 0x000080ffu : 0xffff7fffu);
+                cpu.r[1] = DATA;
+                cpu.r[3] = 7u;
+                cpu.r[4] = 0xffff1234u;
+                cpu.r[10] = CODE + 65u;
+                cpu.r[11] = CODE;
+                prime(DATA, ARM_ACCESS_READ, priv != 0u, BASE + 0xc000u);
+                prime(DATA, ARM_ACCESS_WRITE, priv != 0u, BASE + 0xc000u);
+                if (!refill) {
+                    CHECK(arm_data_cache_try_refill(&cpu, DATA, ARM_ACCESS_READ,
+                              priv != 0u), "loop READ witness");
+                    CHECK(arm_data_cache_try_refill(&cpu, DATA, ARM_ACCESS_WRITE,
+                              priv != 0u), "loop WRITE witness");
+                }
+                arm_ram_window_t w;
+                CHECK(arm_ram_window_capture(&w, &cpu, BASE, SIZE), "loop capture");
+                reference = cpu;
+                memcpy(saved_ram, ram, SIZE);
+                for (unsigned n = 0; n < budget; n++)
+                    CHECK(arm_step(&reference) == ARM_OK, "mixed loop reference");
+                memcpy(expected_ram, ram, SIZE);
+                memcpy(ram, saved_ram, SIZE);
+                fallback_t f = {0};
+                a64_compact_raw_options_t options = { .ram_window = refill ? &w : NULL };
+                unsigned total, native, slow;
+                CHECK(a64_compact_raw_run_code_window_resident_options(&cpu,
+                          ram + 0x8000u, CODE, 1024u, budget, fallback, &f,
+                          &options, NULL, NULL, NULL, &total, &native, &slow),
+                      "mixed loop native");
+                CHECK(total == budget && native == budget && !slow && !f.calls,
+                      "mixed loop no fallback budget %u priv %u refill %u",
+                      budget, priv, refill);
+                CHECK(!memcmp(cpu.r, reference.r, sizeof cpu.r) &&
+                          cpu.cpsr == reference.cpsr && cpu.cycles == reference.cycles &&
+                          !memcmp(ram, expected_ram, SIZE),
+                      "mixed ARM/Thumb exact prefix budget %u", budget);
+            }
         }
     }
 }
@@ -596,6 +850,9 @@ int main(void) {
     test_native();
     test_native_refusals();
     test_native_memory_families();
+    test_multiply_families();
+    test_extra_transfer_forms();
+    test_arith_extra_budget_loop();
     test_native_live_code();
     test_native_machine();
 #else
