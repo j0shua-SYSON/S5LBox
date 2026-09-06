@@ -6482,6 +6482,38 @@ static void test_compact_pc_sampling_excludes_fallback_tracing(void) {
     s5l8900_free(&m);
 }
 
+typedef struct {
+    const s5l8900_t *machine;
+    uint64_t pc, sum;
+    unsigned rows;
+    bool refuse;
+} guest_pc_export_test_t;
+
+static bool guest_pc_export_row(void *opaque, uint64_t bin,
+                                 uint64_t pc, uint64_t samples) {
+    guest_pc_export_test_t *test = opaque;
+    ++test->rows;
+    test->sum += samples;
+    CHECK(bin == test->pc && (pc & ~UINT64_C(255)) == bin && samples > 0u,
+          "export row is not the sampled guest bin");
+    /* Reenter a reader to prove callbacks do not hold the sampler mutex. */
+    s5l_static_a64_compact_pc_profile_t nested;
+    s5l8900_static_a64_compact_raw_pc_profile(test->machine, &nested);
+    return !test->refuse;
+}
+
+static void test_guest_pc_export_disabled(void) {
+    s5l8900_t m = {0};
+    guest_pc_export_test_t test = {.machine = &m};
+    uint64_t captured = 123u, dropped = 456u;
+    CHECK(!s5l8900_static_a64_compact_raw_guest_pc_profile_visit(
+              &m, guest_pc_export_row, &test, &captured, &dropped) &&
+              captured == 0u && dropped == 0u && test.rows == 0u,
+          "ordinary machine exposed another machine's full histogram");
+    CHECK(!s5l8900_static_a64_compact_raw_guest_pc_profile_visit(
+              NULL, NULL, NULL, NULL, NULL), "null export was accepted");
+}
+
 static void test_compact_pc_sampling_records_guest_cursor(void) {
 #if defined(__APPLE__) && defined(__aarch64__)
     if (!s5l8900_static_a64_available()) return;
@@ -6552,6 +6584,20 @@ static void test_compact_pc_sampling_records_guest_cursor(void) {
               "known single-region guest samples were lost");
         CHECK(profile.fallback_events == 0u,
               "sampling-only guest cursor enabled detailed tracing");
+        guest_pc_export_test_t exported = {.machine = &m, .pc = pc};
+        uint64_t captured = 0u, dropped = 0u;
+        CHECK(s5l8900_static_a64_compact_raw_guest_pc_profile_visit(
+                  &m, guest_pc_export_row, &exported, &captured, &dropped),
+              "full guest histogram export failed");
+        CHECK(exported.rows == 1u && exported.sum == captured &&
+                  captured == profile.guest_pc_captured && dropped == 0u,
+              "full guest histogram export lost samples");
+        exported.rows = 0u;
+        exported.refuse = true;
+        CHECK(!s5l8900_static_a64_compact_raw_guest_pc_profile_visit(
+                  &m, guest_pc_export_row, &exported, &captured, &dropped) &&
+                  captured == 0u && dropped == 0u && exported.rows == 1u,
+              "partial export published complete totals");
     }
     if (sampled[0] && sampled[1])
         printf("  STATIC-A64-GUEST-PC-SAMPLING A32=%llu Thumb=%llu\n",
@@ -6562,6 +6608,7 @@ static void test_compact_pc_sampling_records_guest_cursor(void) {
 
 int main(void) {
     printf("S5LBox S5L8900 machine tests\n");
+    test_guest_pc_export_disabled();
     test_ram_readback();
     test_direct_ram_write_consent_is_fail_closed();
     test_pre_step_hook_is_bounded_and_fail_closed();

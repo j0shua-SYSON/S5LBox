@@ -4811,6 +4811,14 @@ typedef struct {
 
 void s5l8900_static_a64_compact_raw_pc_profile(
     const s5l8900_t *m, s5l_static_a64_compact_pc_profile_t *out);
+/* Full 256-byte guest-VA histogram for the explicitly sampled machine only.
+ * Owner thread only. The callback receives bin, representative PC and count
+ * from an immutable copy, with no sampler lock held. A refusal stops the visit.
+ * Totals are zero on any failure; this does not change execution or samples. */
+bool s5l8900_static_a64_compact_raw_guest_pc_profile_visit(
+    const s5l8900_t *m,
+    bool (*visit)(void *, uint64_t, uint64_t, uint64_t), void *opaque,
+    uint64_t *captured, uint64_t *dropped);
 /* Same-binary rollout/benchmark control for terminal A32/Thumb BX/BLX signed
  * records. It defaults on when the engine is created. Changing it clears only
  * derived decode/graph entries so an off/on comparison cannot reuse a block

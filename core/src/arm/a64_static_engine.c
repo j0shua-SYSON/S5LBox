@@ -1198,6 +1198,23 @@ void s5l8900_static_a64_compact_raw_pc_profile(
 #endif
 }
 
+bool s5l8900_static_a64_compact_raw_guest_pc_profile_visit(
+        const s5l8900_t *m,
+        bool (*visit)(void *, uint64_t, uint64_t, uint64_t), void *opaque,
+        uint64_t *captured, uint64_t *dropped) {
+    if (captured) *captured = 0u;
+    if (dropped) *dropped = 0u;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    if (state && state->compact_raw_pc_profile_enabled)
+        return a64_compact_raw_guest_pc_profile_visit(
+            visit, opaque, captured, dropped);
+#else
+    (void)m; (void)visit; (void)opaque;
+#endif
+    return false;
+}
+
 bool s5l8900_static_a64_compact_raw_pc_profile_slice_begin(
         const s5l8900_t *m) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)

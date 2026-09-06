@@ -21,6 +21,16 @@ static uint64_t sum(void) {
     return count;
 }
 
+typedef struct { unsigned rows, stop; uint64_t sum; bool saw_zero; } visit_t;
+static bool visit_row(void *opaque, uint64_t key, uint64_t pc, uint64_t count) {
+    visit_t *v = opaque;
+    CHECK((pc & ~UINT64_C(255)) == key && count != 0u);
+    ++v->rows;
+    v->sum += count;
+    v->saw_zero |= key == 0u;
+    return !v->stop || v->rows < v->stop;
+}
+
 int main(void) {
     uint32_t guest_pc = 0xdeadbeefu;
     CHECK(compact_guest_pc_sample(0x104u, 0x104u, 0x200u, 0u, &guest_pc));
@@ -62,6 +72,11 @@ int main(void) {
     CHECK(late && late->samples == 100000u && late->pc == 0x20cu);
     CHECK(histogram.captured == 108192u && histogram.dropped == 0u);
     CHECK(sum() == histogram.captured);
+    visit_t visited = {0};
+    CHECK(native_pc_histogram_visit(&histogram, visit_row, &visited));
+    CHECK(visited.rows == 2u && visited.sum == histogram.captured);
+    CHECK(!native_pc_histogram_visit(NULL, visit_row, &visited));
+    CHECK(!native_pc_histogram_visit(&histogram, NULL, &visited));
 
     native_pc_histogram_reset(&histogram);
     for (unsigned i = 0; i < NATIVE_PC_HISTOGRAM_CAPACITY; ++i)
@@ -76,6 +91,13 @@ int main(void) {
         CHECK(native_pc_histogram_note(&histogram, (uintptr_t)i * 256u + 252u));
     CHECK(histogram.captured == 2u * NATIVE_PC_HISTOGRAM_CAPACITY);
     CHECK(sum() == histogram.captured);
+    visited = (visit_t){0};
+    CHECK(native_pc_histogram_visit(&histogram, visit_row, &visited));
+    CHECK(visited.rows == NATIVE_PC_HISTOGRAM_CAPACITY && visited.saw_zero &&
+          visited.sum == histogram.captured);
+    visited = (visit_t){.stop = 17u};
+    CHECK(!native_pc_histogram_visit(&histogram, visit_row, &visited));
+    CHECK(visited.rows == 17u && sum() == histogram.captured);
     for (unsigned i = 0; i < NATIVE_PC_HISTOGRAM_CAPACITY; ++i) {
         native_pc_histogram_bucket_t *b = find((uintptr_t)i * 256u);
         CHECK(b && b->samples == 2u && b->pc == (uintptr_t)i * 256u);
@@ -91,6 +113,9 @@ int main(void) {
     CHECK(histogram.dropped == UINT64_MAX);
     native_pc_histogram_reset(&histogram);
     CHECK(histogram.captured == 0u && histogram.dropped == 0u && sum() == 0u);
+    visited = (visit_t){0};
+    CHECK(native_pc_histogram_visit(&histogram, visit_row, &visited));
+    CHECK(visited.rows == 0u && visited.sum == 0u);
     CHECK(native_pc_histogram_note(&histogram, UINTPTR_MAX));
     CHECK(sum() == 1u);
     printf("native PC streaming histogram: %u checks, %u failures\n", checks, failures);

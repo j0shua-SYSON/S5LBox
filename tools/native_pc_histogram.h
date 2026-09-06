@@ -22,6 +22,21 @@ typedef struct {
     uint64_t dropped;
 } native_pc_histogram_t;
 
+/* Visits a stable copy, never live sampler storage. A false callback stops
+ * immediately; callers must not publish a partial traversal as complete. */
+static inline bool native_pc_histogram_visit(
+        const native_pc_histogram_t *h,
+        bool (*visit)(void *, uint64_t, uint64_t, uint64_t), void *opaque) {
+    if (!h || !visit) return false;
+    for (unsigned i = 0u; i < NATIVE_PC_HISTOGRAM_CAPACITY; ++i) {
+        const native_pc_histogram_bucket_t *b = &h->bucket[i];
+        if (b->samples &&
+            !visit(opaque, (uint64_t)b->key, (uint64_t)b->pc, b->samples))
+            return false;
+    }
+    return true;
+}
+
 _Static_assert((NATIVE_PC_HISTOGRAM_CAPACITY & NATIVE_PC_HISTOGRAM_MASK) == 0,
                "host PC table capacity must be a power of two");
 

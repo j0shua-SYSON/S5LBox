@@ -124,6 +124,7 @@ static uint64_t vm_now_ns(void) {
                   rate:(double)instantRate
                 status:(arm_status_t)status;
 - (void)appendConsole:(NSString *)text;
+- (void)exportGuestPCProfile_emulatorThread;
 - (void)noteDiscardedInput;
 - (void)noteDroppedTouch;
 - (void)noteDroppedButton;
@@ -1598,6 +1599,53 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
 
 #pragma mark - Emulator thread
 
+static bool vm_guest_pc_profile_row(void *opaque, uint64_t bin,
+                                     uint64_t pc, uint64_t samples) {
+    NSMutableString *text = (__bridge NSMutableString *)opaque;
+    [text appendFormat:@"%08llx,%08llx,%llu\n",
+        (unsigned long long)bin, (unsigned long long)pc,
+        (unsigned long long)samples];
+    return true;
+}
+
+/* Export only at a pause/stop boundary, never while timing guest work. Unlike
+ * the compact AX top-16, this preserves every captured bin for attribution.
+ * A unique no-overwrite file and completion footer make partial files explicit. */
+- (void)exportGuestPCProfile_emulatorThread {
+    s5l_static_a64_compact_pc_profile_t profile;
+    s5l8900_static_a64_compact_raw_pc_profile(&_machine, &profile);
+    if (!profile.enabled) return;
+    @autoreleasepool {
+        vm_instance_paths_t paths;
+        if (![self resolveFilesInto:&paths note:NULL]) return;
+        NSMutableString *text = [NSMutableString stringWithString:
+            @"s5lbox-guest-pc-v1\nbin,representative_pc,samples\n"];
+        uint64_t captured = 0u, dropped = 0u;
+        if (!text || !s5l8900_static_a64_compact_raw_guest_pc_profile_visit(
+                &_machine, vm_guest_pc_profile_row, (__bridge void *)text,
+                &captured, &dropped)) {
+            [self appendConsole:@"[vm] guest PC export could not capture all bins\n"];
+            return;
+        }
+        [text appendFormat:@"complete,%llu,%llu\n",
+            (unsigned long long)captured, (unsigned long long)dropped];
+        NSString *directory = [NSString stringWithUTF8String:paths.machine];
+        NSString *name = [NSString stringWithFormat:@"engine.guest-pc-%@.csv",
+            [NSUUID UUID].UUIDString];
+        NSString *path = [directory stringByAppendingPathComponent:name];
+        NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
+        NSError *error = nil;
+        if (path && data && [data writeToFile:path
+                options:NSDataWritingWithoutOverwriting error:&error])
+            [self appendConsole:[NSString stringWithFormat:
+                @"[vm] complete guest PC histogram saved: %@\n", name]];
+        else
+            [self appendConsole:[NSString stringWithFormat:
+                @"[vm] guest PC histogram was not saved: %@\n",
+                error.localizedDescription ?: @"invalid export path or data"]];
+    }
+}
+
 - (void)threadMain:(id)unused {
     (void)unused;
     double lastPublish = vm_now();
@@ -1608,6 +1656,7 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     BOOL checkpointSaved = NO;
     NSString *checkpointFailure = nil;
     BOOL checkpointInputPrepared = NO;
+    BOOL profilePauseExported = NO;
     uint64_t checkpointInputStartNS = 0u;
     uint64_t checkpointInputStartRetired = 0u;
 
@@ -1704,11 +1753,16 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
                  * to freeze halfway through. */
             }
             if (paused && !checkpoint) {
+                if (!profilePauseExported) {
+                    [self exportGuestPCProfile_emulatorThread];
+                    profilePauseExported = YES;
+                }
                 usleep(50 * 1000);
                 lastPublish = vm_now();
                 retiredAtLastPublish = retired;
                 continue;
             }
+            profilePauseExported = NO;
 
             /* The only place ordinary UI input reaches the machine, and it is
              * on this thread, between chunks, with nothing executing. During a
@@ -1869,6 +1923,7 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
             (unsigned long long)retired]];
 
     if (_machineReady) {
+        [self exportGuestPCProfile_emulatorThread];
         s5l8900_free(&_machine);
     }
     /* AFTER the machine, never before: the memory-disk bridges hold a borrowed

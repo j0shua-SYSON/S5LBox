@@ -7,6 +7,7 @@
 
 #include <limits.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #if defined(S5LBOX_STATIC_A64_NATIVE) && defined(__APPLE__) && \
@@ -2614,6 +2615,27 @@ void a64_compact_raw_pc_profile_snapshot(
                          A64_COMPACT_RAW_PC_PROFILE_GUEST_HOT_COUNT);
     (void)pthread_mutex_unlock(&g_compact_profile_lock);
 }
+bool a64_compact_raw_guest_pc_profile_visit(
+        bool (*visit)(void *, uint64_t, uint64_t, uint64_t), void *opaque,
+        uint64_t *captured, uint64_t *dropped) {
+    if (captured) *captured = 0u;
+    if (dropped) *dropped = 0u;
+    if (!visit || !captured || !dropped ||
+        !atomic_load_explicit(&g_compact_profile_enabled, memory_order_acquire))
+        return false;
+    native_pc_histogram_t *copy = malloc(sizeof *copy);
+    if (!copy) return false;
+    (void)pthread_mutex_lock(&g_compact_profile_lock);
+    memcpy(copy, &g_compact_profile_guest_histogram, sizeof *copy);
+    (void)pthread_mutex_unlock(&g_compact_profile_lock);
+    bool ok = native_pc_histogram_visit(copy, visit, opaque);
+    if (ok) {
+        *captured = copy->captured;
+        *dropped = copy->dropped;
+    }
+    free(copy);
+    return ok;
+}
 #else
 bool a64_compact_raw_pc_profile_enable(void) { return false; }
 void a64_compact_raw_pc_profile_slice_begin(void) {}
@@ -2621,6 +2643,14 @@ void a64_compact_raw_pc_profile_slice_end(void) {}
 void a64_compact_raw_pc_profile_snapshot(
         a64_compact_raw_pc_profile_t *out) {
     if (out) memset(out, 0, sizeof *out);
+}
+bool a64_compact_raw_guest_pc_profile_visit(
+        bool (*visit)(void *, uint64_t, uint64_t, uint64_t), void *opaque,
+        uint64_t *captured, uint64_t *dropped) {
+    (void)visit; (void)opaque;
+    if (captured) *captured = 0u;
+    if (dropped) *dropped = 0u;
+    return false;
 }
 #endif
 
