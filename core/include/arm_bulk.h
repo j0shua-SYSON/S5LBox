@@ -1,4 +1,4 @@
-/* Bounded native execution of witnessed A32 routines. */
+/* Bounded native execution of witnessed A32 routines and Thumb loops. */
 #ifndef S5LBOX_ARM_BULK_H
 #define S5LBOX_ARM_BULK_H
 
@@ -19,7 +19,8 @@ typedef struct {
 /* Returns the exact number of original instructions represented, bounded by
  * budget. The caller owns cycle/device accounting. Zero changes no CPU state,
  * cache counters or guest bytes. No page walk, MMIO or executable write occurs.
- * Matching is by complete routine/loop bytes, never by a name or assumed PC.
+ * Matching proves the witnessed instruction pattern and complete admitted
+ * control flow, never a name or assumed PC.
  * A long loop may return an exact prefix at its header for bounded resumption.
  * Ordinary execution enables this only through an explicit host-policy gate. */
 unsigned arm_bulk_string_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,

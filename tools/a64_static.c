@@ -2180,7 +2180,7 @@ extern uint32_t a64_compact_raw_execute(uint32_t *regs, uint32_t *cpsr,
                                         uint32_t max_insns,
                                         a64_compact_raw_context_t *context);
 
-/* Called only from the three candidate instruction shapes in signed text.
+/* Called only from candidate instruction shapes in signed text.
  * The helper sees the live PC and full FETCH witness; it neither observes nor
  * commits the runner's pending cycles. Its returned exact prefix is retired
  * by that runner through the same budget/device boundary as ordinary code. */

@@ -76,6 +76,121 @@ static uint32_t compare_flags(uint32_t cpsr, uint32_t a, uint32_t b) {
     return cpsr;
 }
 
+static uint16_t read16(const uint8_t *p) {
+    return (uint16_t)((uint16_t)p[0] | (uint16_t)p[1] << 8);
+}
+
+static const uint8_t *aligned_word_at(const arm_cpu_t *cpu,
+                                      const arm_bulk_memory_t *memory,
+                                      uint32_t address) {
+    return (address & 3u) ? NULL : word_at(cpu, memory, address);
+}
+
+/* Batch complete read-only pointer-search iterations. The first shape is
+ * register-parametric: MOV previous,current; LDR current,[walk,next_offset];
+ * CMP/BEQ null; LDR value,[current,key_offset]; MOVS walk,current;
+ * CMP/BEQ equal; CMP needle,value; BHI header. Only the full back-edge path
+ * is admitted. Exits, cold mappings and partial budgets stay literal. */
+static unsigned thumb_ordered_chain(arm_cpu_t *cpu,
+                                     const arm_bulk_memory_t *memory,
+                                     uint32_t offset, unsigned budget) {
+    if (memory->code_bytes - offset < 20u || budget < 10u) return 0u;
+    uint16_t h[10];
+    for (unsigned i = 0u; i < 10u; i++)
+        h[i] = read16(memory->code + offset + 2u * i);
+    if ((h[0] & 0xff00u) != 0x4600u || (h[1] & 0xfe00u) != 0x5800u ||
+        (h[4] & 0xfe00u) != 0x5800u || (h[6] & 0xffc0u) != 0x4280u ||
+        (h[3] & 0xff00u) != 0xd000u || (h[7] & 0xff00u) != 0xd000u ||
+        h[9] != 0xd8f5u) return 0u;
+    unsigned previous = (h[0] & 7u) | ((h[0] >> 4) & 8u);
+    unsigned current = h[1] & 7u, walk = (h[1] >> 3) & 7u;
+    unsigned next_offset = (h[1] >> 6) & 7u;
+    unsigned value = h[4] & 7u, key_offset = (h[4] >> 6) & 7u;
+    unsigned needle = (h[6] >> 3) & 7u;
+    unsigned roles[] = {previous, current, walk, value, next_offset, key_offset, needle};
+    if (previous == 15u || ((h[0] >> 3) & 15u) != current ||
+        h[2] != (uint16_t)(0x2800u | current << 8) ||
+        ((h[4] >> 3) & 7u) != current ||
+        h[5] != (uint16_t)(0x1c00u | current << 3 | walk) ||
+        (h[6] & 7u) != value ||
+        h[8] != (uint16_t)(0x4280u | value << 3 | needle)) return 0u;
+    for (unsigned i = 0u; i < 7u; i++)
+        for (unsigned j = 0u; j < i; j++)
+            if (roles[i] == roles[j]) return 0u;
+    uint32_t cur = cpu->r[current], walker = cpu->r[walk];
+    uint32_t prev = cpu->r[previous], key = cpu->r[value];
+    const uint32_t wanted = cpu->r[needle];
+    unsigned count = 0u;
+    while (count < budget / 10u) {
+        const uint8_t *np = aligned_word_at(cpu, memory, walker + cpu->r[next_offset]);
+        if (!np) break;
+        uint32_t next = read32(np);
+        if (!next) break;
+        const uint8_t *kp = aligned_word_at(cpu, memory, next + cpu->r[key_offset]);
+        if (!kp) break;
+        uint32_t next_key = read32(kp);
+        if (wanted <= next_key) break;
+        prev = cur; cur = next; walker = next; key = next_key;
+        count++;
+    }
+    if (!count) return 0u;
+    cpu->r[previous] = prev; cpu->r[current] = cur;
+    cpu->r[walk] = walker; cpu->r[value] = key;
+    cpu->cpsr = compare_flags(cpu->cpsr, wanted, key);
+    if (!memory->flat_ram) cpu->dread_hits += 2u * count;
+    return 10u * count;
+}
+
+/* A second read-only chain shape includes a depth comparison and a target
+ * loaded through an invariant stack slot. Match every instruction in the
+ * cycle, including the final backward branch. The other branch destinations
+ * are irrelevant only because each admitted iteration proves them untaken. */
+static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
+                                      const arm_bulk_memory_t *memory,
+                                      uint32_t offset, unsigned budget) {
+    static const uint16_t shape[] = {
+        0x5919u, 0x2900u, 0xd000u, 0x2100u, 0x1c1eu, 0x468bu,
+        0x4562u, 0xd000u, 0x595bu, 0x2b00u, 0xd000u, 0x4582u,
+        0xd100u, 0x4641u, 0x585au, 0x9900u, 0x6809u, 0x428au, 0xd1ecu,
+    };
+    if (memory->code_bytes - offset < sizeof shape || budget < 19u ||
+        cpu->r[10] != cpu->r[0]) return 0u;
+    for (unsigned i = 0u; i < sizeof shape / sizeof shape[0]; i++) {
+        unsigned mask = (i == 2u || i == 7u || i == 10u || i == 12u || i == 15u)
+            ? 0xff00u : 0xffffu;
+        if ((read16(memory->code + offset + 2u * i) & mask) != shape[i])
+            return 0u;
+    }
+    uint32_t stack_offset = (read16(memory->code + offset + 30u) & 255u) * 4u;
+    const uint8_t *slot = aligned_word_at(cpu, memory, cpu->r[13] + stack_offset);
+    if (!slot) return 0u;
+    const uint8_t *target = aligned_word_at(cpu, memory, read32(slot));
+    if (!target) return 0u;
+    const uint32_t wanted = read32(target);
+    uint32_t current = cpu->r[3], value = cpu->r[2], previous = cpu->r[6];
+    unsigned count = 0u;
+    while (count < budget / 19u) {
+        const uint8_t *payload = aligned_word_at(cpu, memory, current + cpu->r[4]);
+        if (!payload || !read32(payload) || value == cpu->r[12]) break;
+        const uint8_t *link = aligned_word_at(cpu, memory, current + cpu->r[5]);
+        if (!link) break;
+        uint32_t next = read32(link);
+        if (!next) break;
+        const uint8_t *key = aligned_word_at(cpu, memory, next + cpu->r[8]);
+        if (!key) break;
+        uint32_t next_value = read32(key);
+        if (next_value == wanted) break;
+        previous = current; current = next; value = next_value;
+        count++;
+    }
+    if (!count) return 0u;
+    cpu->r[1] = wanted; cpu->r[2] = value; cpu->r[3] = current;
+    cpu->r[6] = previous; cpu->r[11] = 0u;
+    cpu->cpsr = compare_flags(cpu->cpsr, value, wanted);
+    if (!memory->flat_ram) cpu->dread_hits += 5u * count;
+    return 19u * count;
+}
+
 static unsigned compare_loop(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
                               unsigned budget) {
     uint32_t left = cpu->r[0], right = cpu->r[12];
@@ -142,11 +257,11 @@ unsigned arm_bulk_string_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
     uint32_t offset;
     if (!cpu || !memory || !memory->code || budget < 4u ||
         cpu->arch != ARM_ARCH_V6_ARM1176 ||
-        (cpu->cpsr & (ARM_CPSR_MODE_MASK | ARM_CPSR_T | ARM_CPSR_E)) !=
+        (cpu->cpsr & (ARM_CPSR_MODE_MASK | ARM_CPSR_E)) !=
             ARM_MODE_USR || cpu->abort_pending ||
         (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)) ||
         (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
-        (cpu->r[15] & 3u) ||
+        (cpu->r[15] & ((cpu->cpsr & ARM_CPSR_T) ? 1u : 3u)) ||
         (uint64_t)memory->code_base + memory->code_bytes >
             UINT64_C(0x100000000))
         return 0u;
@@ -161,6 +276,10 @@ unsigned arm_bulk_string_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
     offset = cpu->r[15] - memory->code_base;
     if (offset > memory->code_bytes || memory->code_bytes - offset < 4u)
         return 0u;
+    if (cpu->cpsr & ARM_CPSR_T) {
+        unsigned count = thumb_ordered_chain(cpu, memory, offset, budget);
+        return count ? count : thumb_filtered_chain(cpu, memory, offset, budget);
+    }
     uint32_t first = read32(memory->code + offset);
     if (first == compare_words[5]) {
         if (offset < 20u || !matches(memory, offset - 20u, compare_words, 9u))

@@ -1,4 +1,4 @@
-/* Differential and refusal tests for witnessed bulk A32 execution.
+/* Differential and refusal tests for witnessed bulk A32/Thumb execution.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "arm_bulk.h"
 #include <stdio.h>
@@ -384,6 +384,149 @@ static void test_compare_prefixes(void) {
     refusal(&cpu, &memory, 256u);
 }
 
+static void chain_setup(arm_cpu_t *cpu, arm_bulk_memory_t *memory,
+                         unsigned kind, unsigned rotation, unsigned nodes,
+                         uint32_t flags) {
+    setup(cpu, memory, DATA, 0u, flags, false);
+    cpu->cpsr |= ARM_CPSR_T;
+    memory->code_bytes = 64u;
+    for (unsigned i = 0u; i < 32u; i++) w16(NULL, CODE + 2u * i, 0x46c0u);
+    if (kind == 0u) {
+        unsigned prev = 8u + rotation % 7u, cur = (4u + rotation) % 7u;
+        unsigned walk = (6u + rotation) % 7u, noff = (1u + rotation) % 7u;
+        unsigned value = (3u + rotation) % 7u, koff = (2u + rotation) % 7u;
+        unsigned needle = (5u + rotation) % 7u;
+        const uint16_t code[] = {
+            (uint16_t)(0x4600u | cur << 3 | (prev & 7u) | (prev & 8u) << 4),
+            (uint16_t)(0x5800u | noff << 6 | walk << 3 | cur),
+            (uint16_t)(0x2800u | cur << 8), 0xd01bu,
+            (uint16_t)(0x5800u | koff << 6 | cur << 3 | value),
+            (uint16_t)(0x1c00u | cur << 3 | walk),
+            (uint16_t)(0x4280u | needle << 3 | value), 0xd017u,
+            (uint16_t)(0x4280u | value << 3 | needle), 0xd8f5u,
+        };
+        for (unsigned i = 0u; i < sizeof code / sizeof code[0]; i++)
+            w16(NULL, CODE + 2u * i, code[i]);
+        cpu->r[cur] = cpu->r[walk] = DATA;
+        cpu->r[noff] = 0u; cpu->r[koff] = 4u;
+        cpu->r[needle] = 0x80000000u + nodes;
+        for (unsigned i = 0u; i < nodes; i++) {
+            w32(NULL, DATA + 16u * i, i + 1u < nodes ? DATA + 16u * (i + 1u) : 0u);
+            w32(NULL, DATA + 16u * i + 4u, 0x7fffffffu + i);
+        }
+    } else {
+        const uint16_t code[] = {
+            0x5919u, 0x2900u, 0xd01cu, 0x2100u, 0x1c1eu, 0x468bu,
+            0x4562u, 0xd017u, 0x595bu, 0x2b00u, 0xd014u, 0x4582u,
+            0xd112u, 0x4641u, 0x585au, (uint16_t)(0x9900u | rotation),
+            0x6809u, 0x428au, 0xd1ecu,
+        };
+        for (unsigned i = 0u; i < sizeof code / sizeof code[0]; i++)
+            w16(NULL, CODE + 2u * i, code[i]);
+        cpu->r[0] = cpu->r[10] = 3u;
+        cpu->r[2] = 0x7fffffffu; cpu->r[3] = DATA;
+        cpu->r[4] = 4u; cpu->r[5] = 8u; cpu->r[8] = 0u;
+        cpu->r[12] = 0x12345678u; cpu->r[13] = 0x3000u;
+        w32(NULL, 0x3000u + 4u * rotation, 0x3100u);
+        w32(NULL, 0x3100u, 0xfffffff0u);
+        for (unsigned i = 0u; i < nodes; i++) {
+            w32(NULL, DATA + 16u * i, 0x7fffffffu + i);
+            w32(NULL, DATA + 16u * i + 4u, 1u);
+            w32(NULL, DATA + 16u * i + 8u, i + 1u < nodes ? DATA + 16u * (i + 1u) : 0u);
+        }
+    }
+    bus_reads = bus_writes = 0u;
+}
+
+static unsigned chain_differential(arm_cpu_t *cpu,
+                                    const arm_bulk_memory_t *memory,
+                                    unsigned budget, unsigned kind) {
+    arm_cpu_t slow = *cpu, expected = *cpu;
+    unsigned reads = bus_reads, writes = bus_writes;
+    memcpy(before_ram, ram, sizeof ram);
+    unsigned n = arm_bulk_string_try(cpu, memory, budget);
+    unsigned stride = kind ? 19u : 10u;
+    CHECK(n <= budget && n % stride == 0u, "chain prefix budget/count");
+    CHECK(bus_reads == reads && bus_writes == writes, "chain touched bus");
+    CHECK(memcmp(before_ram, ram, sizeof ram) == 0, "chain wrote RAM");
+    for (unsigned i = 0u; i < n; i++)
+        CHECK(arm_step(&slow) == ARM_OK, "chain oracle fault");
+    memcpy(expected.r, slow.r, sizeof expected.r);
+    expected.cpsr = slow.cpsr;
+    if (!memory->flat_ram) expected.dread_hits += n / stride * (kind ? 5u : 2u);
+    CHECK(memcmp(cpu, &expected, sizeof expected) == 0,
+          "chain state differs kind=%u n=%u cpsr=%08x/%08x",
+          kind, n, cpu->cpsr, slow.cpsr);
+    return n;
+}
+
+static void test_thumb_chains(void) {
+    for (unsigned kind = 0u; kind < 2u; kind++) {
+        unsigned stride = kind ? 19u : 10u;
+        for (unsigned rotation = 0u; rotation < 7u; rotation++)
+            for (unsigned flags = 0u; flags < 16u; flags++)
+                for (unsigned budget = 0u; budget < 257u; budget++) {
+                    arm_cpu_t cpu; arm_bulk_memory_t memory;
+                    chain_setup(&cpu, &memory, kind, rotation, 17u,
+                                flags << 28 | ARM_CPSR_Q | ARM_CPSR_A);
+                    unsigned count = budget / stride;
+                    if (count > 16u) count = 16u;
+                    CHECK(chain_differential(&cpu, &memory, budget, kind) == count * stride,
+                          "chain did not batch expected prefix");
+                }
+        for (unsigned half = 0u; half < stride; half++) {
+            arm_cpu_t cpu; arm_bulk_memory_t memory;
+            chain_setup(&cpu, &memory, kind, 0u, 17u, 0u);
+            ram[CODE + 2u * half + 1u] ^= 0x80u;
+            refusal(&cpu, &memory, 256u);
+        }
+        for (unsigned bytes = 0u; bytes < 2u * stride; bytes++) {
+            arm_cpu_t cpu; arm_bulk_memory_t memory;
+            chain_setup(&cpu, &memory, kind, 0u, 17u, 0u);
+            memory.code_bytes = bytes;
+            refusal(&cpu, &memory, 256u);
+        }
+        for (unsigned scenario = 0u; scenario < 10u; scenario++) {
+            arm_cpu_t cpu; arm_bulk_memory_t memory;
+            chain_setup(&cpu, &memory, kind, 0u, 17u, 0u);
+            if (scenario == 0u) cpu.cpsr ^= ARM_CPSR_T;
+            if (scenario == 1u) cpu.r[15]++;
+            if (scenario == 2u) cpu.cpsr |= ARM_CPSR_E;
+            if (scenario == 3u) cpu.irq_line = true;
+            if (scenario == 4u) cpu.abort_pending = true;
+            if (scenario == 5u) cpu.r[kind ? 3u : 6u]++;
+            if (scenario == 6u) cpu.r[kind ? 8u : 2u]++;
+            if (scenario == 7u) {
+                if (kind) cpu.r[10]++;
+                else cpu.r[5] = 0u;
+            }
+            if (scenario == 8u) w32(NULL, DATA + (kind ? 4u : 0u), 0u);
+            if (scenario == 9u) {
+                if (kind) cpu.r[12] = cpu.r[2];
+                else w32(NULL, DATA + 16u + 4u, cpu.r[5]);
+            }
+            refusal(&cpu, &memory, 256u);
+        }
+        arm_cpu_t cpu; arm_bulk_memory_t memory;
+        chain_setup(&cpu, &memory, kind, 0u, 128u, 0u);
+        memory.flat_ram = NULL; memory.data_cache = true;
+        CHECK(arm_data_cache_try_refill(&cpu, DATA, ARM_ACCESS_READ, false), "chain data map");
+        CHECK(arm_data_cache_try_refill(&cpu, 0x3000u, ARM_ACCESS_READ, false), "chain stack map");
+        CHECK(chain_differential(&cpu, &memory, 4096u, kind) == 63u * stride,
+              "chain crossed a cold page or did not keep its warm prefix");
+        refusal(&cpu, &memory, 4096u);
+        CHECK(arm_data_cache_try_refill(&cpu, 0x1400u, ARM_ACCESS_READ, false), "chain next map");
+        CHECK(chain_differential(&cpu, &memory, 4096u, kind) == 64u * stride,
+              "chain did not resume across a newly proved page");
+        chain_setup(&cpu, &memory, kind, 0u, 17u, 0u);
+        memory.flat_ram = NULL; memory.data_cache = true;
+        (void)arm_data_cache_try_refill(&cpu, DATA, ARM_ACCESS_READ, false);
+        (void)arm_data_cache_try_refill(&cpu, 0x3000u, ARM_ACCESS_READ, false);
+        cpu.dread[(DATA >> 10) & 63u].gen++;
+        refusal(&cpu, &memory, 256u);
+    }
+}
+
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 typedef struct {
     arm_cpu_t *cpu;
@@ -478,6 +621,23 @@ static void test_native_integration(void) {
         CHECK(native_differential(&cpu, &memory, 256u, true) == 0u,
               "changed length body was bulk-executed");
     }
+    uint64_t thumb_calls = 0u;
+    for (unsigned kind = 0u; kind < 2u; kind++) {
+        uint64_t kind_calls = 0u;
+        for (unsigned flags = 0u; flags < 16u; flags++)
+            for (unsigned enabled = 0u; enabled < 2u; enabled++) {
+                arm_cpu_t cpu; arm_bulk_memory_t memory;
+                chain_setup(&cpu, &memory, kind, flags % 7u, 17u, flags << 28);
+                memory.flat_ram = NULL; memory.data_cache = true;
+                (void)arm_data_cache_try_refill(&cpu, DATA, ARM_ACCESS_READ, false);
+                (void)arm_data_cache_try_refill(&cpu, 0x3000u, ARM_ACCESS_READ, false);
+                kind_calls += native_differential(&cpu, &memory, 256u, enabled != 0u);
+            }
+        CHECK(kind_calls > 0u, "native Thumb chain kind %u never executed", kind);
+        thumb_calls += kind_calls;
+    }
+    CHECK(thumb_calls > 0u, "native Thumb chain integration never executed");
+    calls += thumb_calls;
     CHECK(calls > 0u, "native bulk integration never executed");
     printf("arm_bulk native integration: %llu bulk calls\n", (unsigned long long)calls);
 }
@@ -493,6 +653,7 @@ int main(void) {
     test_cached_boundaries();
     test_length_prefixes();
     test_compare_prefixes();
+    test_thumb_chains();
     test_native_integration();
     printf("arm_bulk: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
