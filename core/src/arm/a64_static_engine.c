@@ -97,6 +97,7 @@ typedef struct {
     arm_ram_map_t *compact_ram_map;
     a64_compact_ram_map_stats_t compact_ram_map_stats;
     arm_ram_window_t compact_ram_window;
+    arm_ram_window_t compact_bulk_ram_window;
     a64_compact_tlb_stats_t compact_tlb_stats;
     bool compact_raw_pc_profile_enabled;
     bool compact_fallback_profile_enabled;
@@ -803,6 +804,9 @@ void s5l8900_static_a64_invalidate_derived(s5l8900_t *m) {
     memset(&state->compact_pending, 0, sizeof state->compact_pending);
     memset(state->graph_nodes, 0, sizeof state->graph_nodes);
     arm_ram_map_reset(state->compact_ram_map);
+    if (state->compact_bulk_enabled)
+        (void)arm_ram_window_capture(&state->compact_bulk_ram_window, &m->cpu,
+                                     m->ram_base, m->ram_size);
     if (state->compact_tlb_refill_enabled || state->compact_ram_map_enabled) {
         /* Reacquire pointer lifetime after a host reset/invalidation. Failure
          * leaves no grant; execution simply uses the existing fallback. */
@@ -1105,6 +1109,11 @@ bool s5l8900_static_a64_set_compact_bulk(s5l8900_t *m, bool enabled) {
     if (!state || !state->enabled || !state->compact_raw_enabled ||
         !a64_static_host_available()) return false;
     state->compact_bulk_enabled = enabled;
+    if (enabled)
+        (void)arm_ram_window_capture(&state->compact_bulk_ram_window, &m->cpu,
+                                     m->ram_base, m->ram_size);
+    else
+        memset(&state->compact_bulk_ram_window, 0, sizeof state->compact_bulk_ram_window);
     return true;
 #else
     (void)enabled;
@@ -2077,6 +2086,11 @@ static unsigned try_compact_raw(
     const a64_compact_raw_options_t options = {
         .window_cache_enabled = state->compact_raw_window_cache_enabled,
         .bulk_enabled = state->compact_bulk_enabled,
+        .bulk_ram_window = state->compact_bulk_enabled && !priv &&
+            state->compact_bulk_ram_window.read_host == m->ram &&
+            state->compact_bulk_ram_window.base == m->ram_base &&
+            state->compact_bulk_ram_window.bytes == m->ram_size
+                ? &state->compact_bulk_ram_window : NULL,
         .ram_window = (state->compact_tlb_refill_enabled ||
                        state->compact_ram_map_enabled) && !priv &&
             ram_window->read_host == m->ram &&

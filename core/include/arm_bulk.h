@@ -14,6 +14,9 @@ typedef struct {
     const uint8_t *flat_ram;
     size_t flat_size;
     bool data_cache;
+    /* Read-only loops may also consume exact current READ TLB witnesses.
+     * The owner captures and retains this immutable full-RAM capability. */
+    const arm_ram_window_t *ram_window;
 } arm_bulk_memory_t;
 
 /* Returns the exact number of original instructions represented, bounded by

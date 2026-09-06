@@ -2071,6 +2071,7 @@ typedef struct {
     void *guarded_opaque;
     arm_ram_map_t *ram_map;
     a64_compact_ram_map_stats_t ram_map_stats;
+    const arm_ram_window_t *bulk_ram_window;
 } a64_compact_raw_context_t;
 
 _Static_assert(sizeof(void *) == 8u,
@@ -2192,6 +2193,7 @@ unsigned a64_compact_raw_bulk_try(a64_compact_raw_context_t *context,
     arm_bulk_memory_t memory = {
         .code = code, .code_base = code_base, .code_bytes = code_bytes,
         .data_cache = context->dread != NULL,
+        .ram_window = context->bulk_ram_window,
     };
     context->bulk_cpu->r[15] = pc;
     unsigned n = arm_bulk_string_try(context->bulk_cpu, &memory, budget);
@@ -2846,6 +2848,7 @@ bool a64_compact_raw_run_code_window_resident_options(
         context.fallback_opaque = fallback_opaque;
         context.bulk_cpu = options && options->bulk_enabled && fallback && !priv
             ? cpu : NULL;
+        context.bulk_ram_window = context.bulk_cpu ? options->bulk_ram_window : NULL;
         context.tlb_gen = cpu->tlb_gen;
         context.priv_tag = priv ? 1u : 0u;
         context.vfp_s = cpu->vfp_s;

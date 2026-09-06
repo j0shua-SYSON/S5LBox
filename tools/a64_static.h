@@ -336,6 +336,9 @@ typedef struct {
      * map on machine reset/restore/RAM replacement. No default enables it. */
     arm_ram_map_t *ram_map;
     a64_compact_ram_map_stats_t *ram_map_stats;
+    /* The same capability type, used only by read-only bulk loops. Supplying
+     * it does not enable instruction-by-instruction native TLB refill. */
+    const arm_ram_window_t *bulk_ram_window;
 } a64_compact_raw_options_t;
 bool a64_compact_raw_run_code_window_resident_options(
     arm_cpu_t *cpu, const uint8_t *code, uint32_t code_base,

@@ -80,10 +80,17 @@ static uint16_t read16(const uint8_t *p) {
     return (uint16_t)((uint16_t)p[0] | (uint16_t)p[1] << 8);
 }
 
-static const uint8_t *aligned_word_at(const arm_cpu_t *cpu,
-                                      const arm_bulk_memory_t *memory,
-                                      uint32_t address) {
-    return (address & 3u) ? NULL : word_at(cpu, memory, address);
+static const uint8_t *chain_word_at(const arm_cpu_t *cpu,
+                                    const arm_bulk_memory_t *memory,
+                                    uint32_t address, unsigned *tlb_reads) {
+    if (address & 3u) return NULL;
+    const uint8_t *p = word_at(cpu, memory, address);
+    if (p || !memory->ram_window) return p;
+    p = arm_ram_window_tlb_lookup(memory->ram_window, cpu, address,
+                                  ARM_ACCESS_READ, false);
+    if (!p) return NULL;
+    (*tlb_reads)++;
+    return p + (address & 1023u);
 }
 
 /* Batch complete read-only pointer-search iterations. The first shape is
@@ -120,24 +127,31 @@ static unsigned thumb_ordered_chain(arm_cpu_t *cpu,
     uint32_t cur = cpu->r[current], walker = cpu->r[walk];
     uint32_t prev = cpu->r[previous], key = cpu->r[value];
     const uint32_t wanted = cpu->r[needle];
-    unsigned count = 0u;
+    unsigned count = 0u, tlb_reads = 0u;
     while (count < budget / 10u) {
-        const uint8_t *np = aligned_word_at(cpu, memory, walker + cpu->r[next_offset]);
+        unsigned iteration_reads = 0u;
+        const uint8_t *np = chain_word_at(cpu, memory,
+            walker + cpu->r[next_offset], &iteration_reads);
         if (!np) break;
         uint32_t next = read32(np);
         if (!next) break;
-        const uint8_t *kp = aligned_word_at(cpu, memory, next + cpu->r[key_offset]);
+        const uint8_t *kp = chain_word_at(cpu, memory,
+            next + cpu->r[key_offset], &iteration_reads);
         if (!kp) break;
         uint32_t next_key = read32(kp);
         if (wanted <= next_key) break;
         prev = cur; cur = next; walker = next; key = next_key;
+        tlb_reads += iteration_reads;
         count++;
     }
     if (!count) return 0u;
     cpu->r[previous] = prev; cpu->r[current] = cur;
     cpu->r[walk] = walker; cpu->r[value] = key;
     cpu->cpsr = compare_flags(cpu->cpsr, wanted, key);
-    if (!memory->flat_ram) cpu->dread_hits += 2u * count;
+    if (!memory->flat_ram) {
+        cpu->dread_hits += 2u * count - tlb_reads;
+        cpu->tlb_hits += tlb_reads;
+    }
     return 10u * count;
 }
 
@@ -162,32 +176,42 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
             return 0u;
     }
     uint32_t stack_offset = (read16(memory->code + offset + 30u) & 255u) * 4u;
-    const uint8_t *slot = aligned_word_at(cpu, memory, cpu->r[13] + stack_offset);
+    unsigned invariant_reads = 0u;
+    const uint8_t *slot = chain_word_at(cpu, memory,
+        cpu->r[13] + stack_offset, &invariant_reads);
     if (!slot) return 0u;
-    const uint8_t *target = aligned_word_at(cpu, memory, read32(slot));
+    const uint8_t *target = chain_word_at(cpu, memory, read32(slot), &invariant_reads);
     if (!target) return 0u;
     const uint32_t wanted = read32(target);
     uint32_t current = cpu->r[3], value = cpu->r[2], previous = cpu->r[6];
-    unsigned count = 0u;
+    unsigned count = 0u, tlb_reads = 0u;
     while (count < budget / 19u) {
-        const uint8_t *payload = aligned_word_at(cpu, memory, current + cpu->r[4]);
+        unsigned iteration_reads = invariant_reads;
+        const uint8_t *payload = chain_word_at(cpu, memory,
+            current + cpu->r[4], &iteration_reads);
         if (!payload || !read32(payload) || value == cpu->r[12]) break;
-        const uint8_t *link = aligned_word_at(cpu, memory, current + cpu->r[5]);
+        const uint8_t *link = chain_word_at(cpu, memory,
+            current + cpu->r[5], &iteration_reads);
         if (!link) break;
         uint32_t next = read32(link);
         if (!next) break;
-        const uint8_t *key = aligned_word_at(cpu, memory, next + cpu->r[8]);
+        const uint8_t *key = chain_word_at(cpu, memory,
+            next + cpu->r[8], &iteration_reads);
         if (!key) break;
         uint32_t next_value = read32(key);
         if (next_value == wanted) break;
         previous = current; current = next; value = next_value;
+        tlb_reads += iteration_reads;
         count++;
     }
     if (!count) return 0u;
     cpu->r[1] = wanted; cpu->r[2] = value; cpu->r[3] = current;
     cpu->r[6] = previous; cpu->r[11] = 0u;
     cpu->cpsr = compare_flags(cpu->cpsr, value, wanted);
-    if (!memory->flat_ram) cpu->dread_hits += 5u * count;
+    if (!memory->flat_ram) {
+        cpu->dread_hits += 5u * count - tlb_reads;
+        cpu->tlb_hits += tlb_reads;
+    }
     return 19u * count;
 }
 

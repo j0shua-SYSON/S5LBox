@@ -71,6 +71,16 @@ static const arm_bus_t bus = {
     .host_ram = host_ram,
 };
 
+static uint8_t *full_host_ram(void *ctx, uint32_t a, uint32_t n) {
+    (void)ctx;
+    return !split_mapping && n && (uint64_t)a + n <= RAM_SIZE ? ram + a : NULL;
+}
+static const arm_bus_t full_bus = {
+    .read32 = r32, .read16 = r16, .read8 = r8,
+    .write32 = w32, .write16 = w16, .write8 = w8,
+    .host_ram = full_host_ram,
+};
+
 static void setup(arm_cpu_t *cpu, arm_bulk_memory_t *memory,
                   uint32_t address, unsigned length, uint32_t flags,
                   bool thumb_return) {
@@ -453,7 +463,14 @@ static unsigned chain_differential(arm_cpu_t *cpu,
         CHECK(arm_step(&slow) == ARM_OK, "chain oracle fault");
     memcpy(expected.r, slow.r, sizeof expected.r);
     expected.cpsr = slow.cpsr;
-    if (!memory->flat_ram) expected.dread_hits += n / stride * (kind ? 5u : 2u);
+    if (!memory->flat_ram) {
+        uint64_t tlb_reads = cpu->tlb_hits - expected.tlb_hits;
+        unsigned loads = n / stride * (kind ? 5u : 2u);
+        CHECK(tlb_reads <= loads && (memory->ram_window || !tlb_reads),
+              "chain READ witness accounting");
+        expected.dread_hits += loads - tlb_reads;
+        expected.tlb_hits += tlb_reads;
+    }
     CHECK(memcmp(cpu, &expected, sizeof expected) == 0,
           "chain state differs kind=%u n=%u cpsr=%08x/%08x",
           kind, n, cpu->cpsr, slow.cpsr);
@@ -527,6 +544,94 @@ static void test_thumb_chains(void) {
     }
 }
 
+/* Alternate nodes between VAs 64KiB apart, mapped to distinct physical pages.
+ * They collide in DREAD but not the larger, already permission-checked TLB.
+ * Neither the bulk executor nor its refusal path may fill a software cache. */
+static void chain_tlb_setup(arm_cpu_t *cpu, arm_bulk_memory_t *memory,
+                             arm_ram_window_t *window, unsigned kind) {
+    chain_setup(cpu, memory, kind, 0u, 128u, ARM_CPSR_Q | ARM_CPSR_V);
+    for (unsigned i = 0u; i < 128u; i++) {
+        uint32_t pa = DATA + (i & 1u) * 0x1000u + (i >> 1) * 16u;
+        uint32_t next = i == 127u ? 0u :
+            DATA + ((i + 1u) & 1u) * 0x10000u + ((i + 1u) >> 1) * 16u;
+        w32(NULL, pa, kind ? 0x7fffffffu + i : next);
+        w32(NULL, pa + 4u, kind ? 1u : 0x7fffffffu + i);
+        if (kind) w32(NULL, pa + 8u, next);
+    }
+    memset(ram + 0x800u, 0, 1024u);
+    w32(NULL, 0u, 0x801u); /* Coarse table; User RW small pages. */
+    w32(NULL, 0x800u, 0x32u);
+    w32(NULL, 0x804u, 0x1032u);
+    w32(NULL, 0x844u, 0x2032u);
+    w32(NULL, 0x80cu, 0x3032u);
+    cpu->bus = &full_bus;
+    cpu->cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP;
+    cpu->cp15.dacr = 1u;
+    memory->flat_ram = NULL; memory->data_cache = true;
+    static const uint32_t va[] = {DATA, 0x11000u, 0x3000u};
+    for (unsigned i = 0u; i < sizeof va / sizeof va[0]; i++) {
+        uint32_t pa = UINT32_MAX;
+        CHECK(arm_mmu_translate(cpu, va[i], ARM_ACCESS_READ, false, &pa) == 0u,
+              "chain READ translation");
+        CHECK(pa == DATA + i * 0x1000u, "nonidentity chain translation");
+    }
+    uint32_t pa = UINT32_MAX;
+    CHECK(arm_mmu_translate(cpu, CODE, ARM_ACCESS_FETCH, false, &pa) == 0u &&
+              pa == CODE, "chain FETCH witness");
+    CHECK(arm_ram_window_capture(window, cpu, 0u, RAM_SIZE), "chain RAM capability");
+    memory->ram_window = window;
+    bus_reads = bus_writes = 0u;
+}
+
+static void test_thumb_chain_tlb(void) {
+    for (unsigned kind = 0u; kind < 2u; kind++) {
+        unsigned stride = kind ? 19u : 10u;
+        arm_cpu_t cpu; arm_bulk_memory_t memory; arm_ram_window_t window;
+        chain_tlb_setup(&cpu, &memory, &window, kind);
+        CHECK(arm_data_cache_try_refill(&cpu, DATA, ARM_ACCESS_READ, false),
+              "warm colliding DREAD page");
+        CHECK(((DATA >> 10) & (ARM_DREAD_ENTRIES - 1u)) ==
+                  ((0x11000u >> 10) & (ARM_DREAD_ENTRIES - 1u)), "DREAD collision");
+        memory.ram_window = NULL;
+        refusal(&cpu, &memory, 4096u);
+        memset(cpu.dread, 0, sizeof cpu.dread);
+        memory.ram_window = &window;
+        uint64_t hits = cpu.tlb_hits, dread = cpu.dread_hits;
+        CHECK(chain_differential(&cpu, &memory, 4096u, kind) == 127u * stride,
+              "TLB-backed chain did not batch across colliding DREAD pages");
+        CHECK(cpu.tlb_hits - hits == 127u * (kind ? 5u : 2u) &&
+                  cpu.dread_hits == dread, "READ TLB grants mislabeled as DREAD hits");
+        for (unsigned budget = 0u; budget <= 256u; budget++) {
+            chain_tlb_setup(&cpu, &memory, &window, kind);
+            CHECK(chain_differential(&cpu, &memory, budget, kind) ==
+                      budget / stride * stride, "TLB chain partial budget");
+        }
+        chain_tlb_setup(&cpu, &memory, &window, kind);
+        w32(NULL, DATA + 30u * 16u + (kind ? 8u : 0u), 0x21000u);
+        CHECK(chain_differential(&cpu, &memory, 4096u, kind) == 60u * stride,
+              "TLB chain did not stop before an unproved later page");
+        refusal(&cpu, &memory, 4096u);
+        for (unsigned scenario = 0u; scenario < 10u; scenario++) {
+            chain_tlb_setup(&cpu, &memory, &window, kind);
+            unsigned slot = (DATA >> 10) & (ARM_TLB_ENTRIES - 1u);
+            arm_bus_t altered = full_bus;
+            switch (scenario) {
+            case 0: cpu.tlb[slot].gen++; break;
+            case 1: cpu.tlb[slot].tag ^= 1u; break; /* Privileged-only grant. */
+            case 2: cpu.tlb[slot].fsr = 13u; break;
+            case 3: cpu.tlb[slot].pa = RAM_SIZE; break; /* Outside RAM. */
+            case 4: cpu.cp15.ttbr0 ^= 0x4000u; break;
+            case 5: cpu.cp15.context_id++; break;
+            case 6: altered.read32 = NULL; cpu.bus = &altered; break;
+            case 7: window.read_host = NULL; break;
+            case 8: window.bytes = 1024u; break;
+            case 9: cpu.tlb[slot].tag ^= 2u; break; /* Wrong access kind. */
+            }
+            refusal(&cpu, &memory, 4096u);
+        }
+    }
+}
+
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 typedef struct {
     arm_cpu_t *cpu;
@@ -561,12 +666,18 @@ static uint64_t native_differential(arm_cpu_t *cpu,
     unsigned n = 0u, native = 0u, fallback = 0u;
     a64_compact_bulk_stats_t stats = {0};
     memcpy(before_ram, ram, sizeof ram);
-    bool ok = a64_compact_raw_run_code_window_resident_bulk(cpu, memory->code,
+    const a64_compact_raw_options_t options = {
+        .bulk_enabled = enabled, .bulk_ram_window = memory->ram_window,
+    };
+    bool ok = a64_compact_raw_run_code_window_resident_options(cpu, memory->code,
         memory->code_base, memory->code_bytes, budget, native_fallback, &context,
-        false, NULL, enabled, &stats, &n, &native, &fallback);
+        &options, NULL, &stats, NULL, &n, &native, &fallback);
     CHECK(ok, "native bulk wrapper refused");
     CHECK(n <= budget && native + fallback == n, "native retirement partition");
     CHECK(stats.retired <= native, "bulk retirement is not a native subset");
+    if (enabled && memory->ram_window)
+        CHECK(stats.calls == 1u && stats.retired == budget && n == budget,
+              "colliding-page native loop did not run as one complete bulk batch");
     CHECK(enabled || (stats.calls == 0u && stats.retired == 0u), "disabled bulk ran");
     CHECK((stats.calls == 0u) == (stats.retired == 0u), "bulk counter mismatch");
     CHECK(memcmp(ram, before_ram, sizeof ram) == 0, "native bulk wrote RAM");
@@ -638,6 +749,13 @@ static void test_native_integration(void) {
     }
     CHECK(thumb_calls > 0u, "native Thumb chain integration never executed");
     calls += thumb_calls;
+    for (unsigned kind = 0u; kind < 2u; kind++)
+        for (unsigned enabled = 0u; enabled < 2u; enabled++) {
+            arm_cpu_t cpu; arm_bulk_memory_t memory; arm_ram_window_t window;
+            chain_tlb_setup(&cpu, &memory, &window, kind);
+            calls += native_differential(&cpu, &memory, (kind ? 19u : 10u) * 60u,
+                                          enabled != 0u);
+        }
     CHECK(calls > 0u, "native bulk integration never executed");
     printf("arm_bulk native integration: %llu bulk calls\n", (unsigned long long)calls);
 }
@@ -654,6 +772,7 @@ int main(void) {
     test_length_prefixes();
     test_compare_prefixes();
     test_thumb_chains();
+    test_thumb_chain_tlb();
     test_native_integration();
     printf("arm_bulk: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
