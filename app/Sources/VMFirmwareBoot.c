@@ -812,7 +812,7 @@ static bool reapply_engine_controls_after_reset(
         s5l8900_t *machine, bool forced_interpreter,
         bool compact_user_only, bool compact_window_refill_off,
         bool compact_window_cache, bool compact_privileged_window_refill,
-        bool compact_bulk, bool compact_tlb_refill) {
+        bool compact_bulk, bool compact_tlb_refill, bool compact_ram_map) {
     (void)machine;
     (void)forced_interpreter;
     (void)compact_user_only;
@@ -821,6 +821,7 @@ static bool reapply_engine_controls_after_reset(
     (void)compact_privileged_window_refill;
     (void)compact_bulk;
     (void)compact_tlb_refill;
+    (void)compact_ram_map;
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     if (forced_interpreter &&
         !s5l8900_static_a64_set_enabled(machine, false))
@@ -839,6 +840,8 @@ static bool reapply_engine_controls_after_reset(
         return false;
     if (compact_tlb_refill &&
         !s5l8900_static_a64_set_compact_tlb_refill(machine, true)) return false;
+    if (compact_ram_map &&
+        !s5l8900_static_a64_set_compact_ram_map(machine, true)) return false;
     if (!forced_interpreter && compact_privileged_window_refill &&
         !s5l8900_static_a64_set_compact_raw_privileged_window_refill(
             machine, true))
@@ -1116,6 +1119,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     bool compact_window_cache = false;
     bool compact_bulk = false;
     bool compact_tlb_refill = false;
+    bool compact_ram_map = false;
     bool compact_privileged_window_refill = false;
     bool compact_pc_profile = false;
     bool active_clock_off = false;
@@ -1234,6 +1238,25 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                    "native TLB-refill experiment unavailable");
         return false;
     }
+    char compact_ram_map_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    if (!join_path(compact_ram_map_path, sizeof compact_ram_map_path,
+                   paths->work, VM_FW_BOOT_COMPACT_RAM_MAP_FILE)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The persistent RAM-map control path is too long to use.");
+        set_detail(report->summary, sizeof report->summary, "path too long");
+        return false;
+    }
+    compact_ram_map = file_size(compact_ram_map_path) > 0u;
+    if (compact_ram_map && (forced_interpreter || compact_window_cache ||
+        compact_tlb_refill || compact_window_refill_off ||
+        !s5l8900_static_a64_set_compact_ram_map(machine, true))) {
+        set_detail(report->detail, sizeof report->detail,
+                   "Persistent RAM mapping requires the compact engine, "
+                   "full-RAM read permission, and no conflicting window controls.");
+        set_detail(report->summary, sizeof report->summary,
+                   "persistent RAM-map experiment unavailable");
+        return false;
+    }
     char compact_bulk_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
     if (!join_path(compact_bulk_path, sizeof compact_bulk_path, paths->work,
                    VM_FW_BOOT_COMPACT_BULK_FILE)) {
@@ -1311,6 +1334,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     (void)compact_pc_profile;
     (void)compact_bulk;
     (void)compact_tlb_refill;
+    (void)compact_ram_map;
 
 #if defined(S5LBOX_IOS_ACTIVE_REALTIME_CLOCK)
     char active_clock_off_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
@@ -1567,7 +1591,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                 machine, forced_interpreter, compact_user_only,
                 compact_window_refill_off, compact_window_cache,
                 compact_privileged_window_refill, compact_bulk,
-                compact_tlb_refill)) {
+                compact_tlb_refill, compact_ram_map)) {
             free(kernel);
             free(tree);
             (void)file_block_close(boot->media);
@@ -1674,6 +1698,16 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                    "after loading the guest state.");
         set_detail(report->summary, sizeof report->summary,
                    "native TLB-refill restore unavailable");
+        return false;
+    }
+    if (compact_ram_map &&
+        !s5l8900_static_a64_set_compact_ram_map(machine, true)) {
+        (void)file_block_close(boot->media);
+        set_detail(report->detail, sizeof report->detail,
+                   "Persistent RAM-map permission could not be reacquired "
+                   "after loading the guest state.");
+        set_detail(report->summary, sizeof report->summary,
+                   "persistent RAM-map restore unavailable");
         return false;
     }
 #endif
@@ -1859,7 +1893,8 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                        "iPhone OS 3.1.3 restored at %.1f M insn "
                        "(%s%s%s%s%s)",
                        (double)machine->cpu.cycles / 1000000.0, engine_mode,
-                       compact_window_cache ? ", window-cache experiment" : "",
+                       compact_window_cache ? ", window-cache experiment" :
+                           compact_ram_map ? ", persistent RAM-map experiment" : "",
                        compact_pc_profile ? ", compact-PC profile" : "",
                        active_clock_off ? ", active-clock-off control" : "",
                        active_clock_budget_suffix);
@@ -1867,7 +1902,8 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         (void)snprintf(report->summary, sizeof report->summary,
                        "iPhone OS 3.1.3 fresh boot after powered-off "
                        "checkpoint (%s%s%s%s%s)", engine_mode,
-                       compact_window_cache ? ", window-cache experiment" : "",
+                       compact_window_cache ? ", window-cache experiment" :
+                           compact_ram_map ? ", persistent RAM-map experiment" : "",
                        compact_pc_profile ? ", compact-PC profile" : "",
                        active_clock_off ? ", active-clock-off control" : "",
                        active_clock_budget_suffix);
@@ -1876,7 +1912,8 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                        "iPhone OS 3.1.3 kernel, root on /dev/md0 "
                        "(%s%s%s%s%s)",
                        engine_mode,
-                       compact_window_cache ? ", window-cache experiment" : "",
+                       compact_window_cache ? ", window-cache experiment" :
+                           compact_ram_map ? ", persistent RAM-map experiment" : "",
                        compact_pc_profile ? ", compact-PC profile" : "",
                        active_clock_off ? ", active-clock-off control" : "",
                        active_clock_budget_suffix);

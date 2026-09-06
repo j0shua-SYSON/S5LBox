@@ -1561,6 +1561,10 @@ static snapshot_status_t snap_apply(s5l8900_t *m, FILE *f,
     uint64_t plen = 0;
     snap_header(&io, &plen);
     if (io.err != SNAP_OK) return io.err;
+    /* A restored generation can equal one from an earlier guest instant.
+     * Revoke all host-derived execution/RAM grants before replacing any RAM,
+     * including when a later I/O failure interrupts the applying pass. */
+    s5l8900_static_a64_invalidate_derived(m);
     uint64_t body_start = io.pos;
     snap_payload(&io, m);
     if (io.err != SNAP_OK) return io.err;

@@ -259,6 +259,7 @@ typedef struct {
     uint64_t compact_bulk_calls;
     uint64_t compact_bulk_retired;
     uint64_t compact_tlb_fetch, compact_tlb_read, compact_tlb_write;
+    uint64_t compact_ram_map_fetch, compact_ram_map_read, compact_ram_map_write;
     uint64_t compact_pc_profile_polls;
     uint64_t compact_pc_profile_not_running;
     uint64_t compact_pc_profile_state_failures;

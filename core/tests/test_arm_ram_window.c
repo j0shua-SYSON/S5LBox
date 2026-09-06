@@ -1,11 +1,14 @@
 /* Exact TLB-to-RAM continuation: portable proof and real AArch64 execution.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "arm.h"
+#include "arm_ram_map.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 #include "a64_static.h"
 #include "soc.h"
+#include "snapshot.h"
 #endif
 
 #define BASE UINT32_C(0x10000000)
@@ -14,11 +17,12 @@
 #define CODE (VA + 0x8000u)
 #define NEXT (VA + 0x8400u)
 #define DATA (VA + 0xc000u)
-static uint8_t ram[SIZE], saved_ram[SIZE];
+static uint8_t ram[SIZE], saved_ram[SIZE], expected_ram[SIZE];
 static arm_cpu_t cpu, before, reference;
 static arm_bus_t bus;
 static unsigned checks, failures, reads, writes, grants, observed_writes;
 static bool refuse_range;
+static arm_ram_map_t ram_map;
 #define CHECK(c, ...) do { checks++; if (!(c)) { \
     if (failures++ < 30u) { printf("%s:%d: ", __func__, __LINE__); \
         printf(__VA_ARGS__); printf("\n"); } } } while (0)
@@ -133,6 +137,136 @@ static void test_capability(void) {
     cpu.bus = &bus;
     bus.ctx = &w;
     CHECK(!arm_ram_window_current(&w, &cpu), "bus context replacement");
+}
+
+static void test_persistent_map(void) {
+    arm_ram_window_t w;
+    setup();
+    arm_ram_map_reset(&ram_map);
+    arm_ram_map_reset(NULL);
+    CHECK(!arm_ram_map_prepare(NULL, &w, &cpu), "null map");
+    CHECK(!arm_ram_map_prepare(&ram_map, NULL, &cpu), "null capability");
+    CHECK(arm_ram_window_capture(&w, &cpu, BASE, SIZE), "map RAM grant");
+    CHECK(!arm_ram_map_prepare(&ram_map, &w, NULL), "null CPU");
+    CHECK(arm_ram_map_prepare(&ram_map, &w, &cpu), "map prepare");
+    CHECK(arm_ram_map_current(&ram_map, &cpu), "map current");
+    CHECK(!arm_ram_map_lookup(&ram_map, &cpu, CODE, ARM_ACCESS_FETCH),
+          "empty map cannot grant VA zero or any other address");
+
+    unsigned previous_grants = grants;
+    for (unsigned access = 0; access < 3u; access++) {
+        for (unsigned block = 0; block < 64u; block++) {
+            uint32_t va = VA + block * 1024u;
+            uint32_t pa = BASE + (63u - block) * 1024u;
+            prime(va, (arm_access_t)access, false, pa);
+            before = cpu;
+            CHECK(arm_ram_map_publish(&ram_map, &cpu, va,
+                      (arm_access_t)access), "publish exact User permission");
+            for (unsigned offset = 0; offset < 1024u; offset += 31u)
+                CHECK(arm_ram_map_lookup(&ram_map, &cpu, va + offset,
+                          (arm_access_t)access) == ram + pa - BASE,
+                      "persistent map matches all bytes in 1KiB grant");
+            CHECK(!memcmp(&cpu, &before, sizeof cpu), "map does not alter CPU");
+        }
+    }
+    CHECK(reads == 0u && writes == 0u && grants == previous_grants,
+          "map never walks, calls bus, or requests another RAM grant");
+    CHECK(!arm_ram_map_publish(&ram_map, &cpu, DATA, (arm_access_t)-1) &&
+              !arm_ram_map_lookup(&ram_map, &cpu, DATA, (arm_access_t)-1),
+          "invalid access rejected");
+    prime(DATA, ARM_ACCESS_READ, false, BASE + 0xc000u);
+    CHECK(arm_ram_map_publish(&ram_map, &cpu, DATA, ARM_ACCESS_READ), "seed read");
+    unsigned index = slot(DATA, ARM_ACCESS_READ);
+    memset(&cpu.tlb[index], 0, sizeof cpu.tlb[index]);
+    CHECK(!arm_ram_window_tlb_lookup(&w, &cpu, DATA, ARM_ACCESS_READ, false) &&
+              arm_ram_map_lookup(&ram_map, &cpu, DATA, ARM_ACCESS_READ) ==
+                  ram + 0xc000u,
+          "TLB eviction does not revoke an independent proved RAM mapping");
+
+    /* Deliberate map collisions cannot answer for the evicted address. */
+    uint32_t alias = DATA + UINT32_C(0x400000);
+    while (arm_ram_map_slot(alias, ARM_ACCESS_READ) !=
+               arm_ram_map_slot(DATA, ARM_ACCESS_READ)) alias += 1024u;
+    prime(alias, ARM_ACCESS_READ, false, BASE + 0xc400u);
+    CHECK(arm_ram_map_publish(&ram_map, &cpu, alias, ARM_ACCESS_READ), "alias fill");
+    CHECK(!arm_ram_map_lookup(&ram_map, &cpu, DATA, ARM_ACCESS_READ) &&
+              arm_ram_map_lookup(&ram_map, &cpu, alias, ARM_ACCESS_READ) ==
+                  ram + 0xc400u, "full key separates direct-map aliases");
+
+    arm_mmu_tlb_flush(&cpu);
+    CHECK(!arm_ram_map_current(&ram_map, &cpu), "flush ends old lease");
+    CHECK(arm_ram_map_prepare(&ram_map, &w, &cpu) &&
+              !arm_ram_map_lookup(&ram_map, &cpu, alias, ARM_ACCESS_READ),
+          "new generation cannot consume old keys");
+    for (unsigned access = 0; access < 3u; access++) {
+        prime(DATA, (arm_access_t)access, true, BASE + 0xc000u);
+        CHECK(!arm_ram_map_publish(&ram_map, &cpu, DATA, (arm_access_t)access),
+              "privileged TLB entry cannot grant User mapping");
+        prime(DATA, (arm_access_t)access, false, BASE + 0xc000u);
+        unsigned i = slot(DATA, (arm_access_t)access);
+        cpu.tlb[i].fsr = 15u;
+        CHECK(!arm_ram_map_publish(&ram_map, &cpu, DATA, (arm_access_t)access),
+              "faulting TLB entry cannot be published");
+        cpu.tlb[i].fsr = 0;
+        cpu.tlb[i].pa = BASE + SIZE;
+        CHECK(!arm_ram_map_publish(&ram_map, &cpu, DATA, (arm_access_t)access),
+              "non-RAM range cannot be published");
+        cpu.tlb[i].pa = BASE + 1u;
+        CHECK(!arm_ram_map_publish(&ram_map, &cpu, DATA, (arm_access_t)access),
+              "unaligned physical block cannot be published");
+    }
+
+    prime(DATA, ARM_ACCESS_WRITE, false, BASE + 0xc000u);
+    CHECK(arm_ram_map_publish(&ram_map, &cpu, DATA, ARM_ACCESS_WRITE), "seed write");
+    bus.host_ram_write = NULL;
+    CHECK(!arm_ram_map_lookup(&ram_map, &cpu, DATA, ARM_ACCESS_WRITE) &&
+              !arm_ram_map_prepare(&ram_map, &w, &cpu) && !ram_map.bound,
+          "revoked write observer grant invalidates lease");
+    CHECK(arm_ram_window_capture(&w, &cpu, BASE, SIZE) &&
+              arm_ram_map_prepare(&ram_map, &w, &cpu), "rebind read-only RAM");
+    CHECK(!arm_ram_map_lookup(&ram_map, &cpu, DATA, ARM_ACCESS_WRITE) &&
+              !arm_ram_map_publish(&ram_map, &cpu, DATA, ARM_ACCESS_WRITE),
+          "read-only rebind does not resurrect old write pointer");
+    prime(DATA, ARM_ACCESS_READ, false, BASE + 0xc000u);
+    CHECK(arm_ram_map_publish(&ram_map, &cpu, DATA, ARM_ACCESS_READ),
+          "read-only grant still supports reads");
+    cpu.cpsr = ARM_MODE_SVC;
+    CHECK(!arm_ram_map_lookup(&ram_map, &cpu, DATA, ARM_ACCESS_READ),
+          "User mapping never crosses into kernel execution");
+    cpu.cpsr = ARM_MODE_USR;
+    cpu.irq_line = true;
+    CHECK(!arm_ram_map_current(&ram_map, &cpu), "pending IRQ stops lease");
+    cpu.irq_line = false;
+    cpu.cp15.ttbr0 ^= 0x4000u;
+    CHECK(!arm_ram_map_lookup(&ram_map, &cpu, DATA, ARM_ACCESS_READ) &&
+              !arm_ram_map_prepare(&ram_map, &w, &cpu), "unannounced TTBR change");
+    cpu.cp15.ttbr0 ^= 0x4000u;
+    CHECK(arm_ram_map_prepare(&ram_map, &w, &cpu) &&
+              !arm_ram_map_lookup(&ram_map, &cpu, DATA, ARM_ACCESS_READ),
+          "failed prepare requires a new permission witness");
+
+    CHECK(arm_ram_map_publish(&ram_map, &cpu, DATA, ARM_ACCESS_READ), "wrap seed");
+    cpu.tlb_flushes += UINT64_C(1) << 32;
+    CHECK(!arm_ram_map_current(&ram_map, &cpu) &&
+              arm_ram_map_prepare(&ram_map, &w, &cpu) &&
+              !arm_ram_map_lookup(&ram_map, &cpu, DATA, ARM_ACCESS_READ),
+          "full generation lap cannot resurrect identical old key");
+    cpu.tlb_gen = UINT32_MAX;
+    CHECK(arm_ram_map_prepare(&ram_map, &w, &cpu), "last generation");
+    prime(DATA, ARM_ACCESS_READ, false, BASE + 0xc000u);
+    CHECK(arm_ram_map_publish(&ram_map, &cpu, DATA, ARM_ACCESS_READ), "last seed");
+    arm_mmu_tlb_flush(&cpu);
+    CHECK(arm_ram_map_prepare(&ram_map, &w, &cpu) &&
+              !arm_ram_map_lookup(&ram_map, &cpu, DATA, ARM_ACCESS_READ),
+          "actual generation wrap clears persistent witnesses");
+    reference = cpu;
+    CHECK(!arm_ram_map_lookup(&ram_map, &reference, DATA, ARM_ACCESS_READ) &&
+              arm_ram_map_prepare(&ram_map, &w, &reference) &&
+              !arm_ram_map_lookup(&ram_map, &reference, DATA, ARM_ACCESS_READ),
+          "different CPU owner never inherits a cache grant");
+    arm_ram_map_reset(&ram_map);
+    CHECK(!arm_ram_map_current(&ram_map, &reference), "reset revokes all pointers");
+    puts("PERSISTENT-RAM-MAP portable permission/lifetime checks executed");
 }
 
 static void test_exact_lookup(void) {
@@ -329,6 +463,7 @@ static void test_native(void) {
             CHECK(budget < 2u || stored == 0x13579bdfu, "store result");
         }
     }
+    for (unsigned persistent = 0; persistent < 2u; persistent++) {
     for (unsigned mutate = 1; mutate <= 22u; mutate++) {
         for (unsigned retire = 0; retire < 2u; retire++) {
             setup();
@@ -336,7 +471,15 @@ static void test_native(void) {
             insn(CODE + 4u, 0xe3a00007u);
             arm_ram_window_t w;
             CHECK(arm_ram_window_capture(&w, &cpu, BASE, SIZE), "capture");
-            a64_compact_raw_options_t options = { .ram_window = &w };
+            arm_ram_map_reset(&ram_map);
+            if (persistent) {
+                CHECK(arm_ram_map_prepare(&ram_map, &w, &cpu) &&
+                          arm_ram_map_publish(&ram_map, &cpu, CODE, ARM_ACCESS_FETCH),
+                      "warm mapping before callback revocation");
+            }
+            a64_compact_raw_options_t options = {
+                .ram_window = &w, .ram_map = persistent ? &ram_map : NULL,
+            };
             fallback_t f = { .mutate = mutate, .retire = retire != 0u };
             unsigned total, native, slow;
             uint64_t cycles = cpu.cycles;
@@ -348,11 +491,77 @@ static void test_native(void) {
                       cpu.r[0] == 0u, "context mutation %u stops exactly", mutate);
         }
     }
+    }
     puts("NATIVE-TLB-REFILL real execution and mutation-boundary checks complete");
+}
+
+static void test_native_persistent_map(void) {
+    if (!a64_static_host_available()) return;
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+        setup();
+        native_program(thumb != 0u);
+        arm_ram_window_t w;
+        CHECK(arm_ram_window_capture(&w, &cpu, BASE, SIZE), "persistent capture");
+        arm_ram_map_reset(&ram_map);
+        for (unsigned phase = 0; phase < 2u; phase++) {
+            if (phase) {
+                /* Independent derived grants must survive both a native call
+                 * boundary and eviction from the small first-level caches
+                 * and raw TLB. The actual page tables still grant each VA. */
+                memset(cpu.dread, 0, sizeof cpu.dread);
+                memset(cpu.dwrite, 0, sizeof cpu.dwrite);
+                memset(&cpu.tlb[slot(NEXT, ARM_ACCESS_FETCH)], 0,
+                       sizeof cpu.tlb[0]);
+                memset(&cpu.tlb[slot(DATA, ARM_ACCESS_READ)], 0,
+                       sizeof cpu.tlb[0]);
+                memset(&cpu.tlb[slot(DATA+1024u, ARM_ACCESS_WRITE)], 0,
+                       sizeof cpu.tlb[0]);
+            }
+            reference = cpu;
+            memcpy(saved_ram, ram, SIZE);
+            for (unsigned i = 0; i < 510u; i++)
+                CHECK(arm_step(&reference) == ARM_OK, "persistent literal oracle");
+            memcpy(expected_ram, ram, SIZE);
+            memcpy(ram, saved_ram, SIZE);
+            reads = writes = 0;
+            fallback_t f = {0};
+            a64_compact_tlb_stats_t raw = {0};
+            a64_compact_ram_map_stats_t mapped = {0};
+            a64_compact_raw_options_t options = {
+                .ram_window = &w, .ram_map = &ram_map, .ram_map_stats = &mapped,
+            };
+            unsigned total, native, slow;
+            CHECK(a64_compact_raw_run_code_window_resident_options(&cpu,
+                      ram + 0x8000u, CODE, 1024u, 510u, fallback, &f, &options,
+                      NULL, NULL, &raw, &total, &native, &slow), "persistent native");
+            CHECK(total == 510u && native == total && !slow && !f.calls,
+                  "persistent map keeps exact bounded native execution");
+            CHECK(!memcmp(cpu.r, reference.r, sizeof cpu.r) &&
+                      cpu.cpsr == reference.cpsr && cpu.cycles == reference.cycles,
+                  "persistent native/interpreter architecture matches");
+            uint32_t stored;
+            memcpy(&stored, ram + 0xc400u, sizeof stored);
+            CHECK(stored == 0x13579bdfu && !memcmp(ram, expected_ram, SIZE) &&
+                      reads == 0u && writes == 0u,
+                  "persistent memory result without bus callbacks");
+            CHECK(mapped.fetch > 0u, "native map FETCH hit actually executed");
+            if (phase) {
+                CHECK(mapped.read == 1u && mapped.write == 1u && !raw.fetch &&
+                          !raw.read && !raw.write,
+                      "warm persistent map replaces all raw-TLB refills");
+            } else {
+                CHECK(raw.read == 1u && raw.write == 1u && raw.fetch == 2u &&
+                          !mapped.read && !mapped.write,
+                      "only proved raw refills publish cold mappings");
+            }
+        }
+    }
+    puts("NATIVE-PERSISTENT-RAM-MAP A32/Thumb fetch/read/write hits executed");
 }
 
 static void test_native_refusals(void) {
     if (!a64_static_host_available()) return;
+    for (unsigned persistent = 0; persistent < 2u; persistent++) {
     for (unsigned access = 0; access < 3u; access++) {
         for (unsigned kind = 0; kind < 9u; kind++) {
             setup();
@@ -383,7 +592,10 @@ static void test_native_refusals(void) {
             CHECK(arm_ram_window_capture(&w, &cpu, BASE,
                       kind == 7u ? 0x8500u : SIZE), "refusal capture");
             /* For the truncated FETCH case the target block is 0x8400. */
-            a64_compact_raw_options_t options = { .ram_window = &w };
+            arm_ram_map_reset(&ram_map);
+            a64_compact_raw_options_t options = {
+                .ram_window = &w, .ram_map = persistent ? &ram_map : NULL,
+            };
             a64_compact_tlb_stats_t stats;
             fallback_t f = {0};
             unsigned total, native, slow;
@@ -405,6 +617,7 @@ static void test_native_refusals(void) {
                       cpu.cpsr == before.cpsr && !cpu.abort_pending,
                   "refused instruction did not mutate architecture");
         }
+    }
     }
 }
 
@@ -492,6 +705,46 @@ static void test_native_memory_families(void) {
                       stats.write == (cases[i].write ? 1u : 0u),
                   "family proved native refill %08x", cases[i].opcode);
         }
+    }
+}
+
+static void test_native_map_revocation(void) {
+    if (!a64_static_host_available()) return;
+    for (unsigned access = 0; access < 3u; access++) {
+        setup();
+        native_program(false);
+        uint32_t target = access == ARM_ACCESS_FETCH ? NEXT : DATA;
+        prime(target, (arm_access_t)access, false, BASE + target - VA);
+        insn(CODE, access == ARM_ACCESS_FETCH ? 0xe12fff13u :
+             access == ARM_ACCESS_WRITE ? 0xe5810000u : 0xe5910000u);
+        arm_ram_window_t w;
+        CHECK(arm_ram_window_capture(&w, &cpu, BASE, SIZE), "revocation capture");
+        arm_ram_map_reset(&ram_map);
+        CHECK(arm_ram_map_prepare(&ram_map, &w, &cpu) &&
+                  arm_ram_map_publish(&ram_map, &cpu, target, (arm_access_t)access),
+              "old generation really has a usable mapping");
+        arm_mmu_tlb_flush(&cpu);
+        prime(CODE, ARM_ACCESS_FETCH, false, BASE + CODE - VA);
+        prime(target, (arm_access_t)access, false, BASE + target - VA);
+        cpu.tlb[slot(target, (arm_access_t)access)].fsr = 15u;
+        a64_compact_ram_map_stats_t mapped;
+        a64_compact_tlb_stats_t raw;
+        a64_compact_raw_options_t options = {
+            .ram_window = &w, .ram_map = &ram_map, .ram_map_stats = &mapped,
+        };
+        fallback_t f = {0};
+        unsigned total, native, slow;
+        memcpy(saved_ram, ram, SIZE);
+        reads = writes = 0;
+        CHECK(a64_compact_raw_run_code_window_resident_options(&cpu,
+                  ram + 0x8000u, CODE, 1024u, 10u, fallback, &f, &options,
+                  NULL, NULL, &raw, &total, &native, &slow), "revoked native run");
+        unsigned prefix = access == ARM_ACCESS_FETCH ? 1u : 0u;
+        CHECK(total == prefix && native == prefix && !slow && f.calls == 1u &&
+                  !mapped.read && !mapped.write && !mapped.fetch &&
+                  !raw.read && !raw.write && !raw.fetch &&
+                  !memcmp(saved_ram, ram, SIZE) && !reads && !writes,
+              "warm mapping cannot bypass new access fault %u", access);
     }
 }
 
@@ -757,6 +1010,7 @@ static void test_arith_extra_budget_loop(void) {
 
 static void test_native_live_code(void) {
     if (!a64_static_host_available()) return;
+    for (unsigned persistent = 0; persistent < 2u; persistent++) {
     for (unsigned different = 0; different < 2u; different++) {
         setup();
         uint32_t target = different ? NEXT : CODE + 8u;
@@ -771,7 +1025,18 @@ static void test_native_live_code(void) {
             prime(target, ARM_ACCESS_FETCH, false, BASE + 0x8400u);
         arm_ram_window_t w;
         CHECK(arm_ram_window_capture(&w, &cpu, BASE, SIZE), "live-code capture");
-        a64_compact_raw_options_t options = { .ram_window = &w };
+        arm_ram_map_reset(&ram_map);
+        if (persistent) {
+            CHECK(arm_ram_map_prepare(&ram_map, &w, &cpu) &&
+                      arm_ram_map_publish(&ram_map, &cpu, target, ARM_ACCESS_WRITE) &&
+                      arm_ram_map_publish(&ram_map, &cpu, target, ARM_ACCESS_FETCH),
+                  "warm read-code/write-data grants before live modification");
+        }
+        a64_compact_ram_map_stats_t mapped = {0};
+        a64_compact_raw_options_t options = {
+            .ram_window = &w, .ram_map = persistent ? &ram_map : NULL,
+            .ram_map_stats = &mapped,
+        };
         a64_compact_tlb_stats_t stats;
         fallback_t f = {0};
         unsigned total, native, slow;
@@ -779,9 +1044,11 @@ static void test_native_live_code(void) {
                   ram + 0x8000u, CODE, 1024u, 3u, fallback, &f, &options,
                   NULL, NULL, &stats, &total, &native, &slow), "live-code run");
         CHECK(total == 3u && native == 3u && slow == 0u && !f.calls &&
-                  cpu.r[2] == 9u && stats.write == 1u &&
-                  stats.fetch == different,
+                  cpu.r[2] == 9u && stats.write + mapped.write == 1u &&
+                  stats.fetch + mapped.fetch == different &&
+                  mapped.write == persistent,
               "live guest store visible in %s window", different ? "new" : "same");
+    }
     }
 }
 
@@ -847,22 +1114,140 @@ static void test_native_machine(void) {
     s5l8900_free(&fast);
     s5l8900_free(&literal);
 }
+
+static void test_native_map_machine(void) {
+    static s5l8900_t fast, literal;
+    CHECK(!s5l8900_static_a64_set_compact_ram_map(NULL, true) &&
+              !s5l8900_static_a64_set_compact_ram_map(&fast, true),
+          "persistent map rejects absent/uninitialized machine");
+    bool a = s5l8900_init(&fast, BASE, 1u << 20);
+    bool b = s5l8900_init(&literal, BASE, 1u << 20);
+    CHECK(a && b, "persistent machine init");
+    if (!a || !b) {
+        if (a) s5l8900_free(&fast);
+        if (b) s5l8900_free(&literal);
+        return;
+    }
+    CHECK(!s5l8900_static_a64_compact_ram_map_fetch(&fast) &&
+              !s5l8900_static_a64_compact_ram_map_read(&fast) &&
+              !s5l8900_static_a64_compact_ram_map_write(&fast),
+          "persistent mapping counters default to zero");
+    if (!a64_static_host_available()) {
+        CHECK(!s5l8900_static_a64_set_compact_ram_map(&fast, true),
+              "unavailable persistent native engine refused");
+    } else {
+        setup();
+        /* Match snapshot_load's reset generation deliberately. The test must
+         * exercise lifetime revocation, not accidentally pass due to gen !=. */
+        cpu.tlb_gen = 1u;
+        prime(CODE, ARM_ACCESS_FETCH, false, BASE + 0x8000u);
+        native_program(false);
+        s5l8900_load(&fast, BASE, ram, SIZE);
+        s5l8900_load(&literal, BASE, ram, SIZE);
+        fast.cpu = literal.cpu = cpu;
+        fast.cpu.bus = &fast.bus;
+        literal.cpu.bus = &literal.bus;
+        fast.cpu.fetch_host = fast.ram + 0x8000u;
+        literal.cpu.fetch_host = literal.ram + 0x8000u;
+        fast.cpu.fetch_gen = literal.cpu.fetch_gen = 1u;
+        CHECK(s5l8900_set_direct_ram_writes(&fast, true) &&
+                  s5l8900_set_direct_ram_writes(&literal, true), "map write consent");
+        s5l8900_tick(&fast, 0u);
+        s5l8900_tick(&literal, 0u);
+        CHECK(s5l8900_static_a64_set_enabled(&fast, true) &&
+                  s5l8900_static_a64_set_compact_raw(&fast, true) &&
+                  s5l8900_static_a64_set_compact_ram_map(&fast, true), "enable map");
+        CHECK(s5l8900_static_a64_set_enabled(&literal, false), "map literal oracle");
+        CHECK(!s5l8900_static_a64_set_compact_tlb_refill(&fast, true) &&
+                  !s5l8900_static_a64_set_compact_raw_window_cache(&fast, true) &&
+                  !s5l8900_static_a64_set_compact_raw_window_refill(&fast, false) &&
+                  s5l8900_static_a64_set_compact_tlb_refill(&fast, false),
+              "conflicts refused; disabling other experiment preserves map");
+        uint8_t *snapshot = NULL;
+        size_t snapshot_size = 0;
+        CHECK(snapshot_save_mem(&literal, &snapshot, &snapshot_size) == SNAP_OK,
+              "save initial persistent-map machine");
+        /* An old, still-valid cached translation can differ from the page
+         * table stored in the snapshot. A restore must not keep that grant. */
+        fast.cpu.tlb[slot(DATA, ARM_ACCESS_READ)].pa = BASE + 0xe000u;
+        uint32_t old_value = 0xdeadbeefu, stored = 0;
+        memcpy(fast.ram + 0xe000u, &old_value, sizeof old_value);
+        arm_status_t fast_status = ARM_OK, literal_status = ARM_OK;
+        CHECK(s5l8900_run(&fast, 510u, &fast_status) == 510u && fast_status == ARM_OK,
+              "populate persistent machine mappings");
+        memcpy(&stored, fast.ram + 0xc400u, sizeof stored);
+        CHECK(stored == old_value &&
+                  s5l8900_static_a64_compact_ram_map_fetch(&fast) > 0u,
+              "old translation and warm native map were actually used");
+        uint64_t reads_before = s5l8900_static_a64_compact_tlb_read(&fast);
+        CHECK(snapshot && snapshot_load_mem(&fast, snapshot, snapshot_size) == SNAP_OK,
+              "restore into same live machine/map allocation");
+        free(snapshot);
+        /* Supply only the new initial FETCH witness and current stamp. DATA
+         * has to be translated again; no old derived cache may supply it. */
+        fast.cpu.tlb_stamp = cpu.tlb_stamp;
+        fast.cpu.tlb[slot(CODE, ARM_ACCESS_FETCH)] = cpu.tlb[slot(CODE, ARM_ACCESS_FETCH)];
+        fast.cpu.fetch_host = fast.ram + 0x8000u;
+        fast.cpu.fetch_blk = CODE;
+        fast.cpu.fetch_gen = fast.cpu.tlb_gen;
+        fast.cpu.fetch_priv = false;
+        CHECK(fast.cpu.tlb_gen == 1u && fast.cpu.tlb_flushes == cpu.tlb_flushes,
+              "restored translation generation/flush count intentionally collide");
+        CHECK(s5l8900_run(&fast, 8192u, &fast_status) == 8192u &&
+                  s5l8900_run(&literal, 8192u, &literal_status) == 8192u &&
+                  fast_status == ARM_OK && literal_status == ARM_OK,
+              "restored map exact machine retirement");
+        CHECK(!memcmp(fast.cpu.r, literal.cpu.r, sizeof fast.cpu.r) &&
+                  fast.cpu.cpsr == literal.cpu.cpsr &&
+                  fast.cpu.cycles == literal.cpu.cycles &&
+                  !memcmp(fast.ram, literal.ram, fast.ram_size),
+              "restored persistent map equals literal CPU and every RAM byte");
+        /* The first new DATA access may refill through the literal callback,
+         * so its exact raw-native counter is not prescribed here. */
+        CHECK(s5l8900_static_a64_compact_tlb_read(&fast) >= reads_before,
+              "host evidence survives snapshot restore");
+        uint64_t hits = s5l8900_static_a64_compact_ram_map_fetch(&fast);
+        CHECK(s5l8900_static_a64_set_compact_ram_map(&fast, false) &&
+                  s5l8900_run(&fast, 510u, &fast_status) == 510u &&
+                  s5l8900_static_a64_compact_ram_map_fetch(&fast) == hits,
+              "same-machine OFF really stops new map hits");
+        CHECK(s5l8900_static_a64_set_compact_raw(&fast, false) &&
+                  !s5l8900_static_a64_set_compact_ram_map(&fast, true) &&
+                  s5l8900_static_a64_set_compact_raw(&fast, true) &&
+                  s5l8900_static_a64_set_compact_ram_map(&fast, true),
+              "engine switching requires explicit map admission");
+        arm_bus_t saved_bus = fast.bus;
+        fast.bus.host_ram = NULL;
+        CHECK(!s5l8900_static_a64_set_compact_ram_map(&fast, true),
+              "revoked full-RAM grant fails closed");
+        fast.bus = saved_bus;
+        CHECK(s5l8900_run(&fast, 510u, &fast_status) == 510u &&
+                  s5l8900_static_a64_compact_ram_map_fetch(&fast) == hits,
+              "failed map admission cannot leave old experiment active");
+    }
+    s5l8900_free(&fast);
+    s5l8900_free(&literal);
+}
 #endif
 
 int main(void) {
     test_capability();
     test_exact_lookup();
+    test_persistent_map();
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     test_native();
+    test_native_persistent_map();
     test_native_refusals();
+    test_native_map_revocation();
     test_native_memory_families();
     test_multiply_families();
     test_extra_transfer_forms();
     test_arith_extra_budget_loop();
     test_native_live_code();
     test_native_machine();
+    test_native_map_machine();
 #else
-    (void)saved_ram; (void)reference; (void)insn; (void)half;
+    (void)saved_ram; (void)expected_ram; (void)reference; (void)insn; (void)half;
 #endif
     printf("RAM-window/TLB: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;

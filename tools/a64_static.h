@@ -14,6 +14,7 @@
 #define S5LBOX_A64_STATIC_H
 
 #include "arm.h"
+#include "arm_ram_map.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -315,6 +316,10 @@ typedef struct {
     uint64_t fetch, read, write;
 } a64_compact_tlb_stats_t;
 
+typedef struct {
+    uint64_t read, write, fetch;
+} a64_compact_ram_map_stats_t;
+
 /* Optional, User-only second-level refill from the existing exact TLB. This
  * never walks page tables. A full-range bus capability supplies host pointers;
  * access-specific TLB tags still supply guest permission. Any interpreter
@@ -326,6 +331,11 @@ typedef struct {
     bool window_cache_enabled, bulk_enabled;
     const arm_ram_window_t *ram_window;
     uint32_t *owner_fetch_block;
+    /* Independent opt-in persistent grants; requires ram_window above.
+     * Hits are NOT raw TLB hits and are counted separately. Owner resets the
+     * map on machine reset/restore/RAM replacement. No default enables it. */
+    arm_ram_map_t *ram_map;
+    a64_compact_ram_map_stats_t *ram_map_stats;
 } a64_compact_raw_options_t;
 bool a64_compact_raw_run_code_window_resident_options(
     arm_cpu_t *cpu, const uint8_t *code, uint32_t code_base,

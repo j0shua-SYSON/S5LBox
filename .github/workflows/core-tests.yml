@@ -186,6 +186,7 @@ jobs:
           printf '%s\n' "$output"
           if [ "$RUNNER_OS" = "macOS" ]; then
             grep -Fq 'NATIVE-TLB-REFILL real execution and mutation-boundary checks complete' <<<"$output"
+            grep -Fq 'NATIVE-PERSISTENT-RAM-MAP A32/Thumb fetch/read/write hits executed' <<<"$output"
             grep -Eq 'NATIVE-ARITH-EXTRA: [1-9][0-9]* exact execution/refusal comparisons' <<<"$output"
           else
             grep -Fq 'NATIVE-TLB-REFILL execution unavailable on this host' <<<"$output"

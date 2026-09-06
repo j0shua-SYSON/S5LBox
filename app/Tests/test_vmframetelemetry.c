@@ -158,6 +158,9 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.compact_tlb_fetch = base + 142u;
     value.compact_tlb_read = base + 143u;
     value.compact_tlb_write = base + 144u;
+    value.compact_ram_map_fetch = base + 145u;
+    value.compact_ram_map_read = base + 146u;
+    value.compact_ram_map_write = base + 147u;
     value.compact_pc_profile_samples = base + 41u;
     value.compact_pc_profile_outside = base + 42u;
     value.compact_pc_profile_entry = base + 43u;
@@ -510,6 +513,9 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.compact_tlb_fetch == 2142u &&
            state.execution_last.compact_tlb_read == 2143u &&
            state.execution_last.compact_tlb_write == 2144u &&
+           state.execution_last.compact_ram_map_fetch == 2145u &&
+           state.execution_last.compact_ram_map_read == 2146u &&
+           state.execution_last.compact_ram_map_write == 2147u &&
            state.execution_last.compact_pc_profile_polls == 2063u &&
            state.execution_last.compact_pc_profile_not_running == 2064u &&
            state.execution_last.compact_pc_profile_state_failures == 2065u &&

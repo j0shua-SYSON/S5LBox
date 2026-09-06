@@ -2783,6 +2783,7 @@ def compact_tlb_refill_body(fetch: bool, thumb: bool = False) -> list[str]:
             ".La64cr_thumb_memory_publish_miss" if thumb else
             ".La64cr_memory_publish_miss")
     va = "w26" if fetch else "w10"
+    map_label = ".La64cr_map_" + ("fetch" if fetch else "thumb" if thumb else "data")
     out = [
         "    ldr x5, [x27, #368]",
         f"    cbz x5, {fail}",
@@ -2800,6 +2801,36 @@ def compact_tlb_refill_body(fetch: bool, thumb: bool = False) -> list[str]:
         ]
     else:
         out += ["    eor w4, w15, #1", "    and w4, w4, #1"]
+    # The optional map retains successful User RAM permissions independently
+    # of raw-TLB eviction and native entry lifetime. Entry and callback gates
+    # own context/bus revocation; one complete generation/VA/access key proves
+    # the cached block here. No guest opcode or firmware byte is cached.
+    out += [
+        "    ldr x5, [x27, #520]",
+        f"    cbz x5, {map_label}_raw",
+        f"    lsr w3, {va}, #10",
+        "    eor w2, w3, w3, lsr #12",
+        "    add w2, w2, w4, lsl #10",
+        "    and w2, w2, #4095",
+        "    add x5, x5, w2, uxtw #4",
+        f"    and w3, {va}, #0xfffffc00",
+        "    orr w3, w3, w4, lsl #1",
+        "    ldr w1, [x27, #80]",
+        "    lsl x1, x1, #32",
+        "    orr x1, x1, x3",
+        "    ldr x2, [x5, #8]",
+        "    cmp x2, x1",
+        f"    b.ne {map_label}_raw",
+        "    ldr x0, [x5]",
+        f"    cbz x0, {map_label}_raw",
+        "    add x1, x27, #528",
+        "    ldr x2, [x1, w4, uxtw #3]",
+        "    add x2, x2, #1",
+        "    str x2, [x1, w4, uxtw #3]",
+        f"    b {map_label}_ready",
+        f"{map_label}_raw:",
+        "    ldr x5, [x27, #368]",
+    ]
     out += [
         f"    lsr w3, {va}, #10",
         "    add w2, w3, w4, lsl #10",
@@ -2841,6 +2872,23 @@ def compact_tlb_refill_body(fetch: bool, thumb: bool = False) -> list[str]:
         ]
     out += [
         "    add x0, x1, w0, uxtw",
+        # A raw-TLB success is the only native publication route. x0 is the
+        # fully range-checked host block, not a partial/unaligned address.
+        "    ldr x5, [x27, #520]",
+        f"    cbz x5, {map_label}_raw_count",
+        f"    lsr w3, {va}, #10",
+        "    eor w2, w3, w3, lsr #12",
+        "    add w2, w2, w4, lsl #10",
+        "    and w2, w2, #4095",
+        "    add x5, x5, w2, uxtw #4",
+        f"    and w3, {va}, #0xfffffc00",
+        "    orr w3, w3, w4, lsl #1",
+        "    ldr w1, [x27, #80]",
+        "    lsl x1, x1, #32",
+        "    orr x1, x1, x3",
+        "    str x0, [x5]",
+        "    str x1, [x5, #8]",
+        f"{map_label}_raw_count:",
         "    ldr x1, [x27, #384]",
         "    ldr x2, [x1]",
         "    add x2, x2, #1",
@@ -2848,6 +2896,10 @@ def compact_tlb_refill_body(fetch: bool, thumb: bool = False) -> list[str]:
     ]
     if fetch:
         out += [
+            "    ldr x1, [x27, #408]",
+            "    add x1, x1, #1",
+            "    str x1, [x27, #408]",
+            f"{map_label}_ready:",
             "    mov x22, x0",
             "    and w23, w26, #0xfffffc00",
             "    mov w24, #1024",
@@ -2864,13 +2916,16 @@ def compact_tlb_refill_body(fetch: bool, thumb: bool = False) -> list[str]:
             "    cbz x1, .La64cr_tlb_fetch_published",
             "    str w23, [x1]",
             ".La64cr_tlb_fetch_published:",
-            "    ldr x1, [x27, #408]",
-            "    add x1, x1, #1",
-            "    str x1, [x27, #408]",
             "    b .La64cr_loop",
         ]
     else:
         out += [
+            "    add x1, x27, #416",
+            "    add x1, x1, w4, uxtw #3",
+            "    ldr x2, [x1]",
+            "    add x2, x2, #1",
+            "    str x2, [x1]",
+            f"{map_label}_ready:",
             "    ldr x1, [x27, #16]",
             "    ldr x2, [x27, #24]",
             "    cmp w4, #1",
@@ -2883,11 +2938,6 @@ def compact_tlb_refill_body(fetch: bool, thumb: bool = False) -> list[str]:
             "    str w3, [x1, #8]",
             "    ldr w2, [x27, #80]",
             "    str w2, [x1, #12]",
-            "    add x1, x27, #416",
-            "    add x1, x1, w4, uxtw #3",
-            "    ldr x2, [x1]",
-            "    add x2, x2, #1",
-            "    str x2, [x1]",
             "    ldr x1, [x27, #32]",
             "    ldr x2, [x27, #40]",
             "    cmp w4, #1",

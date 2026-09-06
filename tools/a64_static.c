@@ -2069,6 +2069,8 @@ typedef struct {
     arm_cp15_t tlb_cp15;
     a64_compact_raw_fallback_fn guarded_fallback;
     void *guarded_opaque;
+    arm_ram_map_t *ram_map;
+    a64_compact_ram_map_stats_t ram_map_stats;
 } a64_compact_raw_context_t;
 
 _Static_assert(sizeof(void *) == 8u,
@@ -2120,8 +2122,22 @@ _Static_assert(offsetof(a64_compact_raw_context_t, flat_ram) == 0u &&
                    offsetof(a64_compact_raw_context_t,
                             owner_fetch_block) == 400u &&
                    offsetof(a64_compact_raw_context_t, tlb_stats) == 408u &&
-                   sizeof(a64_compact_raw_context_t) == 520u,
+                   offsetof(a64_compact_raw_context_t, ram_map) == 520u &&
+                   offsetof(a64_compact_raw_context_t, ram_map_stats) == 528u &&
+                   sizeof(a64_compact_raw_context_t) == 552u,
                "compact raw native context layout drifted");
+_Static_assert(ARM_RAM_MAP_ENTRIES == 4096u &&
+                   sizeof(arm_ram_map_entry_t) == 16u &&
+                   offsetof(arm_ram_map_entry_t, host) == 0u &&
+                   offsetof(arm_ram_map_entry_t, key) == 8u &&
+                   offsetof(arm_ram_map_t, entries) == 0u &&
+                   ARM_ACCESS_READ == 0 && ARM_ACCESS_WRITE == 1 &&
+                   ARM_ACCESS_FETCH == 2 &&
+                   offsetof(a64_compact_ram_map_stats_t, read) == 0u &&
+                   offsetof(a64_compact_ram_map_stats_t, write) == 8u &&
+                   offsetof(a64_compact_ram_map_stats_t, fetch) == 16u &&
+                   sizeof(a64_compact_ram_map_stats_t) == 24u,
+               "persistent native RAM map layout drifted");
 _Static_assert(offsetof(arm_ram_window_t, read_host) == 104u &&
                    offsetof(arm_ram_window_t, write_host) == 112u &&
                    offsetof(arm_ram_window_t, base) == 120u &&
@@ -2200,7 +2216,8 @@ static a64_compact_raw_fallback_result_t compact_tlb_guarded_fallback(
         result != A64_COMPACT_RAW_FALLBACK_NO_RETIRE_CONTINUE) return result;
     const arm_cpu_t *cpu = context->tlb_cpu;
     const arm_cp15_t *saved = &context->tlb_cp15;
-    if (arm_ram_window_current(context->ram_window, cpu) &&
+    if ((!context->ram_map || arm_ram_map_current(context->ram_map, cpu)) &&
+        arm_ram_window_current(context->ram_window, cpu) &&
         cpu->tlb_gen == context->tlb_gen &&
         cpu->cp15.sctlr == saved->sctlr &&
         cpu->cp15.ttbr0 == saved->ttbr0 &&
@@ -2774,6 +2791,8 @@ bool a64_compact_raw_run_code_window_resident_options(
     if (window_cache_hits) *window_cache_hits = 0u;
     if (bulk_stats) memset(bulk_stats, 0, sizeof *bulk_stats);
     if (tlb_stats) memset(tlb_stats, 0, sizeof *tlb_stats);
+    if (options && options->ram_map_stats)
+        memset(options->ram_map_stats, 0, sizeof *options->ram_map_stats);
     code_end = (uint64_t)code_base + code_bytes;
     if (!cpu || !code || !max_insns || code_bytes < 4u ||
         (code_base & 3u) != 0u || (code_bytes & 3u) != 0u ||
@@ -2834,6 +2853,9 @@ bool a64_compact_raw_run_code_window_resident_options(
             context.guarded_opaque = fallback_opaque;
             context.fallback = compact_tlb_guarded_fallback;
             context.fallback_opaque = &context;
+            if (options->ram_map &&
+                arm_ram_map_prepare(options->ram_map, options->ram_window, cpu))
+                context.ram_map = options->ram_map;
             /* Do not combine two independent window-reuse experiments. */
             context.window_cache_enabled = 0u;
         }
@@ -2860,6 +2882,8 @@ bool a64_compact_raw_run_code_window_resident_options(
             *window_cache_hits = context.window_cache_hits;
         if (bulk_stats) *bulk_stats = context.bulk_stats;
         if (tlb_stats) *tlb_stats = context.tlb_stats;
+        if (options && options->ram_map_stats)
+            *options->ram_map_stats = context.ram_map_stats;
         if (context.window_cache_enabled && context.current_window.code &&
             cpu->tlb_gen == context.tlb_gen &&
             ((cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR) == priv &&

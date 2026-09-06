@@ -93,6 +93,9 @@ typedef struct {
     bool compact_raw_window_cache_enabled;
     bool compact_bulk_enabled;
     bool compact_tlb_refill_enabled;
+    bool compact_ram_map_enabled;
+    arm_ram_map_t *compact_ram_map;
+    a64_compact_ram_map_stats_t compact_ram_map_stats;
     arm_ram_window_t compact_ram_window;
     a64_compact_tlb_stats_t compact_tlb_stats;
     bool compact_raw_pc_profile_enabled;
@@ -799,7 +802,8 @@ void s5l8900_static_a64_invalidate_derived(s5l8900_t *m) {
     memset(state->cache, 0, sizeof state->cache);
     memset(&state->compact_pending, 0, sizeof state->compact_pending);
     memset(state->graph_nodes, 0, sizeof state->graph_nodes);
-    if (state->compact_tlb_refill_enabled) {
+    arm_ram_map_reset(state->compact_ram_map);
+    if (state->compact_tlb_refill_enabled || state->compact_ram_map_enabled) {
         /* Reacquire pointer lifetime after a host reset/invalidation. Failure
          * leaves no grant; execution simply uses the existing fallback. */
         (void)arm_ram_window_capture(&state->compact_ram_window, &m->cpu,
@@ -815,7 +819,10 @@ bool s5l8900_static_a64_set_enabled(s5l8900_t *m, bool enabled) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     static_a64_state_t *state = static_state(m);
     if (!enabled) {
-        if (state) state->enabled = false;
+        if (state) {
+            state->enabled = false;
+            arm_ram_map_reset(state->compact_ram_map);
+        }
         return true;
     }
     if (!a64_static_host_available()) return false;
@@ -858,6 +865,7 @@ bool s5l8900_static_a64_set_persistent(s5l8900_t *m, bool enabled) {
         return false;
     state->graph_enabled = false;
     state->compact_raw_enabled = false;
+    arm_ram_map_reset(state->compact_ram_map);
     state->persistent = true;
     return true;
 #else
@@ -878,6 +886,7 @@ bool s5l8900_static_a64_set_graph(s5l8900_t *m, bool enabled) {
         return false;
     state->persistent = false;
     state->compact_raw_enabled = false;
+    arm_ram_map_reset(state->compact_ram_map);
     state->graph_enabled = true;
     return true;
 #else
@@ -893,6 +902,7 @@ bool s5l8900_static_a64_set_compact_raw(s5l8900_t *m, bool enabled) {
     if (!enabled) {
         if (state) {
             state->compact_raw_enabled = false;
+            arm_ram_map_reset(state->compact_ram_map);
             memset(&state->compact_pending, 0,
                    sizeof state->compact_pending);
         }
@@ -903,6 +913,7 @@ bool s5l8900_static_a64_set_compact_raw(s5l8900_t *m, bool enabled) {
     state->persistent = false;
     state->graph_enabled = false;
     memset(&state->compact_pending, 0, sizeof state->compact_pending);
+    arm_ram_map_reset(state->compact_ram_map);
     state->compact_raw_enabled = true;
     return true;
 #else
@@ -933,6 +944,7 @@ bool s5l8900_static_a64_set_compact_raw_window_refill(s5l8900_t *m,
     static_a64_state_t *state = static_state(m);
     if (!state || !state->enabled || !a64_static_host_available())
         return false;
+    if (!enabled && state->compact_ram_map_enabled) return false;
     state->compact_raw_window_refill_enabled = enabled;
     return true;
 #else
@@ -963,6 +975,7 @@ bool s5l8900_static_a64_set_compact_raw_window_cache(s5l8900_t *m,
     static_a64_state_t *state = static_state(m);
     if (!state || !state->enabled || !a64_static_host_available())
         return false;
+    if (enabled && state->compact_ram_map_enabled) return false;
     state->compact_raw_window_cache_enabled = enabled;
     return true;
 #else
@@ -977,7 +990,9 @@ bool s5l8900_static_a64_set_compact_tlb_refill(s5l8900_t *m, bool enabled) {
     static_a64_state_t *state = static_state(m);
     if (!state || !state->enabled || !state->compact_raw_enabled ||
         !a64_static_host_available()) return false;
+    if (enabled && state->compact_ram_map_enabled) return false;
     state->compact_tlb_refill_enabled = false;
+    if (state->compact_ram_map_enabled) return true;
     memset(&state->compact_ram_window, 0, sizeof state->compact_ram_window);
     if (enabled &&
         (!arm_ram_window_capture(&state->compact_ram_window, &m->cpu,
@@ -988,6 +1003,68 @@ bool s5l8900_static_a64_set_compact_tlb_refill(s5l8900_t *m, bool enabled) {
 #else
     (void)enabled;
     return false;
+#endif
+}
+
+bool s5l8900_static_a64_set_compact_ram_map(s5l8900_t *m, bool enabled) {
+    if (!m) return false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (!state || !state->enabled || !state->compact_raw_enabled ||
+        !a64_static_host_available()) return false;
+    if (!enabled) {
+        state->compact_ram_map_enabled = false;
+        arm_ram_map_reset(state->compact_ram_map);
+        return true;
+    }
+    if (state->compact_tlb_refill_enabled || state->compact_raw_window_cache_enabled ||
+        !state->compact_raw_window_refill_enabled)
+        return false;
+    state->compact_ram_map_enabled = false;
+    arm_ram_map_reset(state->compact_ram_map);
+    memset(&state->compact_ram_window, 0, sizeof state->compact_ram_window);
+    arm_ram_window_t captured;
+    if (!arm_ram_window_capture(&captured, &m->cpu, m->ram_base, m->ram_size) ||
+        captured.read_host != m->ram) return false;
+    if (!state->compact_ram_map) {
+        state->compact_ram_map = calloc(1u, sizeof *state->compact_ram_map);
+        if (!state->compact_ram_map) return false;
+    }
+    arm_ram_map_reset(state->compact_ram_map);
+    state->compact_ram_window = captured;
+    state->compact_ram_map_enabled = true;
+    return true;
+#else
+    (void)enabled;
+    return false;
+#endif
+}
+
+uint64_t s5l8900_static_a64_compact_ram_map_fetch(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_ram_map_stats.fetch : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+uint64_t s5l8900_static_a64_compact_ram_map_read(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_ram_map_stats.read : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+uint64_t s5l8900_static_a64_compact_ram_map_write(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_ram_map_stats.write : 0u;
+#else
+    (void)m;
+    return 0u;
 #endif
 }
 
@@ -1935,6 +2012,7 @@ static unsigned try_compact_raw(
     uint64_t window_cache_hits = 0u;
     a64_compact_bulk_stats_t bulk_stats = {0};
     a64_compact_tlb_stats_t tlb_stats = {0};
+    a64_compact_ram_map_stats_t map_stats = {0};
 
     if (known_negative) *known_negative = false;
     if (boundary_retired) *boundary_retired = 0u;
@@ -1982,11 +2060,14 @@ static unsigned try_compact_raw(
     const a64_compact_raw_options_t options = {
         .window_cache_enabled = state->compact_raw_window_cache_enabled,
         .bulk_enabled = state->compact_bulk_enabled,
-        .ram_window = state->compact_tlb_refill_enabled && !priv &&
+        .ram_window = (state->compact_tlb_refill_enabled ||
+                       state->compact_ram_map_enabled) && !priv &&
             ram_window->read_host == m->ram &&
             ram_window->base == m->ram_base && ram_window->bytes == m->ram_size
                 ? ram_window : NULL,
         .owner_fetch_block = &fallback_context.fetch_block,
+        .ram_map = state->compact_ram_map_enabled ? state->compact_ram_map : NULL,
+        .ram_map_stats = &map_stats,
     };
     if (!a64_compact_raw_run_code_window_resident_options(
             cpu, cpu->fetch_host, fetch_block, UINT32_C(0x400), budget,
@@ -2006,8 +2087,13 @@ static unsigned try_compact_raw(
     state->compact_tlb_stats.fetch += tlb_stats.fetch;
     state->compact_tlb_stats.read += tlb_stats.read;
     state->compact_tlb_stats.write += tlb_stats.write;
-    state->compact_raw_window_crossings += window_cache_hits + tlb_stats.fetch;
-    state->compact_raw_window_reloads += window_cache_hits + tlb_stats.fetch;
+    state->compact_ram_map_stats.fetch += map_stats.fetch;
+    state->compact_ram_map_stats.read += map_stats.read;
+    state->compact_ram_map_stats.write += map_stats.write;
+    state->compact_raw_window_crossings +=
+        window_cache_hits + tlb_stats.fetch + map_stats.fetch;
+    state->compact_raw_window_reloads +=
+        window_cache_hits + tlb_stats.fetch + map_stats.fetch;
     if (completed) {
         state->compact_raw_calls++;
         state->compact_raw_retired += native_completed;
@@ -2333,6 +2419,8 @@ bool s5l8900_static_a64_commit_known_negative_bypass(s5l8900_t *m) {
 void s5l8900_static_a64_dispose(s5l8900_t *m) {
     if (!m) return;
 #if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (state) free(state->compact_ram_map);
     free(m->static_a64_state);
 #endif
     m->static_a64_state = NULL;

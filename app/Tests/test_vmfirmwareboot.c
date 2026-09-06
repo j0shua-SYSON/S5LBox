@@ -303,6 +303,12 @@ static void test_saved_state_restore_fixture(void) {
     FILE *window_cache_file = fopen(window_cache_marker, "rb");
     bool expect_window_cache = window_cache_file != NULL;
     if (window_cache_file) fclose(window_cache_file);
+    char ram_map_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    snprintf(ram_map_marker, sizeof ram_map_marker, "%s/%s", fixture,
+             VM_FW_BOOT_COMPACT_RAM_MAP_FILE);
+    FILE *ram_map_file = fopen(ram_map_marker, "rb");
+    bool expect_ram_map = ram_map_file != NULL;
+    if (ram_map_file) fclose(ram_map_file);
     char privileged_window_refill_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
     snprintf(privileged_window_refill_marker,
              sizeof privileged_window_refill_marker, "%s/%s", fixture,
@@ -452,6 +458,10 @@ static void test_saved_state_restore_fixture(void) {
             CHECK(mentions(report.summary, "window-cache experiment"),
                   "window-cache marker did not reach the engine: %s",
                   report.summary);
+        CHECK(mentions(report.summary, "persistent RAM-map experiment") ==
+                  expect_ram_map,
+              "persistent map marker disagrees with the boot report: %s",
+              report.summary);
         if (!expect_interpreter && expect_privileged_window_refill)
             CHECK(mentions(report.summary,
                            "privileged-window experiment"),
@@ -465,6 +475,7 @@ static void test_saved_state_restore_fixture(void) {
         (void)expect_user_only;
         (void)expect_window_refill_off;
         (void)expect_window_cache;
+        (void)expect_ram_map;
         (void)expect_privileged_window_refill;
         (void)expect_compact_pc_profile;
 #endif
@@ -473,6 +484,7 @@ static void test_saved_state_restore_fixture(void) {
         (void)expect_user_only;
         (void)expect_window_refill_off;
         (void)expect_window_cache;
+        (void)expect_ram_map;
         (void)expect_privileged_window_refill;
         (void)expect_compact_pc_profile;
 #endif

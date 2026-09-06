@@ -4691,6 +4691,12 @@ bool s5l8900_static_a64_set_compact_bulk(s5l8900_t *m, bool enabled);
 /* User-mode native refill from the existing TLB and a full-RAM bus grant.
  * Host policy, default off; never serialized. */
 bool s5l8900_static_a64_set_compact_tlb_refill(s5l8900_t *m, bool enabled);
+/* Independent persistent User RAM grants; conflicts with the older window
+ * cache/raw-TLB-only experiments and remains off unless explicitly enabled. */
+bool s5l8900_static_a64_set_compact_ram_map(s5l8900_t *m, bool enabled);
+uint64_t s5l8900_static_a64_compact_ram_map_fetch(const s5l8900_t *m);
+uint64_t s5l8900_static_a64_compact_ram_map_read(const s5l8900_t *m);
+uint64_t s5l8900_static_a64_compact_ram_map_write(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_tlb_fetch(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_tlb_read(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_tlb_write(const s5l8900_t *m);
