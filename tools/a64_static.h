@@ -370,6 +370,7 @@ typedef enum {
 } a64_compact_raw_pc_profile_region_t;
 
 #define A64_COMPACT_RAW_PC_PROFILE_HOT_COUNT 8u
+#define A64_COMPACT_RAW_PC_PROFILE_GUEST_HOT_COUNT 16u
 
 typedef struct {
     uintptr_t pc;
@@ -390,6 +391,14 @@ typedef struct {
     uint64_t outside_pc_dropped;
     a64_compact_raw_pc_profile_hot_t
         outside_hot[A64_COMPACT_RAW_PC_PROFILE_HOT_COUNT];
+    /* 256-byte guest virtual-address bins, not retired-instruction counts.
+     * W26 is accepted only inside the generated live-register interval.
+     * No process/image identity is implied by a virtual address. */
+    uint64_t guest_pc_captured;
+    uint64_t guest_pc_dropped;
+    uint64_t guest_pc_unavailable;
+    a64_compact_raw_pc_profile_hot_t
+        guest_hot[A64_COMPACT_RAW_PC_PROFILE_GUEST_HOT_COUNT];
 } a64_compact_raw_pc_profile_t;
 
 bool a64_compact_raw_pc_profile_enable(void);

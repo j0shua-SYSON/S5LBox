@@ -212,6 +212,7 @@ jobs:
           grep -Eq '[1-9][0-9]* passed, 0 failed' <<<"$memory_output"
           if [ "$RUNNER_OS" = "macOS" ]; then
             set +e
+            grep -Eq 'STATIC-A64-GUEST-PC-SAMPLING A32=[1-9][0-9]* Thumb=[1-9][0-9]*' <<<"$soc_output" || exit 1
             static_output="$(./build-jit/core/jitbench --insns 10000 --reps 1 2>&1)"
             static_status=$?
             compact_output="$(./build-jit/core/jitbench --compact-raw-only --insns 10000 --reps 1 2>&1)"

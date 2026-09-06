@@ -74,6 +74,7 @@ typedef struct {
  * keeps diagnostics out of the instruction hot path while still exposing
  * whether a signed invocation retired useful work or failed an entry gate. */
 #define VM_COMPACT_PC_PROFILE_HOT_COUNT 8u
+#define VM_COMPACT_PC_PROFILE_GUEST_HOT_COUNT 16u
 #define VM_COMPACT_FALLBACK_PROFILE_OUTCOME_COUNT 13u
 #define VM_COMPACT_FALLBACK_PROFILE_HOT_COUNT 8u
 #define VM_MBX_3D_REJECTION_HISTORY 4u
@@ -292,6 +293,13 @@ typedef struct {
         VM_COMPACT_PC_PROFILE_HOT_COUNT];
     uint64_t compact_pc_profile_outside_hot_samples[
         VM_COMPACT_PC_PROFILE_HOT_COUNT];
+    uint64_t compact_pc_profile_guest_pc_captured;
+    uint64_t compact_pc_profile_guest_pc_dropped;
+    uint64_t compact_pc_profile_guest_pc_unavailable;
+    uint64_t compact_pc_profile_guest_hot_pc[
+        VM_COMPACT_PC_PROFILE_GUEST_HOT_COUNT];
+    uint64_t compact_pc_profile_guest_hot_samples[
+        VM_COMPACT_PC_PROFILE_GUEST_HOT_COUNT];
     uint64_t compact_fallback_profile_events;
     uint64_t compact_fallback_profile_witness_misses;
     uint64_t compact_fallback_profile_outcome[

@@ -39,3 +39,10 @@ Physical acceptance still requires same-build/checkpoint timings for demanding
 general guest work and Cydia, with profiling disabled and lifecycle checks.
 Correctness tests, native coverage, and removed fallbacks alone are not speed
 evidence. Keep the separate bulk/TLB experiments disabled for that comparison.
+
+The first matched physical refresh comparison did not establish a speed win:
+old engine (114.519,132.312] seconds, expanded native engine
+(117.590,132.317] seconds. Both used the same ready checkpoint and exact APT v3
+library/repository bytes. About 23 percent fewer compact fallback retirements
+did not translate into a measured wall-time improvement. The reload target
+remains unmet; statistical guest-cursor attribution is the next diagnostic.

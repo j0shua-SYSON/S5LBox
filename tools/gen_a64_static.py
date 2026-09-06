@@ -3567,6 +3567,8 @@ def compact_raw_function() -> list[str]:
         "    mov w28, #4",       # current A32/Thumb instruction width
         "    mov w29, wzr",      # native retirements pending cycle commit
         "    ldr w26, [x19, #60]", # architectural PC
+        ".globl A64S_CSYM(a64_compact_raw_profile_guest_live_begin)",
+        "A64S_CSYM(a64_compact_raw_profile_guest_live_begin):",
         # Pin the semantic jump table once rather than resolving it per
         # instruction.  The table contains relative offsets and is ordinary
         # signed text on every platform.
@@ -5540,6 +5542,8 @@ def compact_raw_function() -> list[str]:
         "    sub w0, w0, w25",
         "    str w26, [x19, #60]",
         "    ldp x27, x28, [sp, #80]",
+        ".globl A64S_CSYM(a64_compact_raw_profile_guest_live_end)",
+        "A64S_CSYM(a64_compact_raw_profile_guest_live_end):",
         "    ldp x25, x26, [sp, #64]",
         "    ldp x23, x24, [sp, #48]",
         "    ldp x21, x22, [sp, #32]",

@@ -6427,7 +6427,11 @@ static void test_compact_pc_sampling_excludes_fallback_tracing(void) {
         CHECK(!s5l8900_static_a64_enable_compact_raw_pc_profile(&m, false),
               "unavailable engine accepted sampling");
         s5l8900_static_a64_compact_raw_pc_profile(&m, &profile);
-        CHECK(!profile.enabled && profile.fallback_events == 0u,
+        CHECK(!profile.enabled && profile.fallback_events == 0u &&
+                  profile.guest_pc_captured == 0u &&
+                  profile.guest_pc_dropped == 0u &&
+                  profile.guest_pc_unavailable == 0u &&
+                  profile.guest_hot[0].samples == 0u,
               "unsupported profile returned live counters");
         s5l8900_free(&m);
         return;
@@ -6478,6 +6482,84 @@ static void test_compact_pc_sampling_excludes_fallback_tracing(void) {
     s5l8900_free(&m);
 }
 
+static void test_compact_pc_sampling_records_guest_cursor(void) {
+#if defined(__APPLE__) && defined(__aarch64__)
+    if (!s5l8900_static_a64_available()) return;
+    s5l8900_t m = {0};
+    bool initialized = s5l8900_init(&m, 0u, 1u << 20);
+    CHECK(initialized, "guest cursor profile machine init failed");
+    if (!initialized) return;
+    CHECK(s5l8900_static_a64_set_enabled(&m, true) &&
+              s5l8900_static_a64_set_compact_raw(&m, true),
+          "guest cursor profile engine enable failed");
+    const uint32_t a32_loop = UINT32_C(0xeafffffe);
+    const uint16_t thumb_loop = UINT16_C(0xe7fe);
+    s5l8900_load(&m, 0x1200u, &a32_loop, sizeof a32_loop);
+    s5l8900_load(&m, 0x1300u, &thumb_loop, sizeof thumb_loop);
+    s5l_static_a64_compact_pc_profile_t profile;
+    s5l8900_static_a64_compact_raw_pc_profile(&m, &profile);
+    CHECK(!profile.enabled && profile.guest_pc_captured == 0u &&
+              profile.guest_hot[0].samples == 0u,
+          "ordinary machine exposed another machine's profile");
+    uint64_t sampled[2] = {0u, 0u};
+    for (unsigned mode = 0u; mode < 2u; ++mode) {
+        uint32_t pc = 0x1200u + mode * 0x100u;
+        uint32_t cpsr = ARM_MODE_USR | ARM_CPSR_I | ARM_CPSR_F |
+                        (mode ? ARM_CPSR_T : 0u);
+        m.cpu.r[15] = pc;
+        m.cpu.cpsr = cpsr;
+        for (unsigned r = 0u; r < 15u; ++r)
+            m.cpu.r[r] = UINT32_C(0xfeed0000) + r;
+        CHECK(s5l8900_static_a64_enable_compact_raw_pc_profile(&m, false),
+              "guest cursor profile could not start in mode %u", mode);
+        s5l8900_static_a64_compact_raw_pc_profile(&m, &profile);
+        CHECK(profile.guest_pc_captured == 0u &&
+                  profile.guest_pc_dropped == 0u &&
+                  profile.guest_pc_unavailable == 0u &&
+                  profile.guest_hot[0].samples == 0u,
+              "guest cursor profile did not reset");
+        /* Keep the real target runnable long enough for the 2 ms sampler,
+         * with a finite instruction cap even on a starved CI host. There is
+         * no synthetic injection or acceptance of an all-zero native run. */
+        for (unsigned burst = 0u; burst < 128u; ++burst) {
+            uint64_t cycles = m.cpu.cycles;
+            arm_status_t status = ARM_OK;
+            CHECK(s5l8900_run(&m, 1000000u, &status) == 1000000u &&
+                      status == ARM_OK, "sampled branch loop stopped");
+            CHECK(m.cpu.cycles == cycles + 1000000u &&
+                      m.cpu.r[15] == pc && m.cpu.cpsr == cpsr,
+                  "sampling changed guest cycles, cursor or flags");
+            for (unsigned r = 0u; r < 15u; ++r)
+                CHECK(m.cpu.r[r] == UINT32_C(0xfeed0000) + r,
+                      "sampling changed guest register %u", r);
+            s5l8900_static_a64_compact_raw_pc_profile(&m, &profile);
+            if (profile.guest_pc_captured >= 12u) break;
+        }
+        sampled[mode] = profile.guest_pc_captured;
+        CHECK(profile.guest_pc_captured > 0u && profile.guest_pc_dropped == 0u,
+              "native sampler captured no bounded guest cursor in mode %u", mode);
+        CHECK(profile.guest_pc_captured + profile.guest_pc_dropped +
+                  profile.guest_pc_unavailable == profile.samples,
+              "guest cursor sample partition is incomplete");
+        uint64_t sum = 0u;
+        for (unsigned i = 0u; i < S5L_STATIC_A64_COMPACT_PC_GUEST_HOT_COUNT; ++i) {
+            sum += profile.guest_hot[i].samples;
+            if (profile.guest_hot[i].samples)
+                CHECK((profile.guest_hot[i].pc & ~UINT64_C(255)) == pc,
+                      "guest cursor contains a host pointer or wrong guest loop");
+        }
+        CHECK(sum == profile.guest_pc_captured,
+              "known single-region guest samples were lost");
+        CHECK(profile.fallback_events == 0u,
+              "sampling-only guest cursor enabled detailed tracing");
+    }
+    if (sampled[0] && sampled[1])
+        printf("  STATIC-A64-GUEST-PC-SAMPLING A32=%llu Thumb=%llu\n",
+               (unsigned long long)sampled[0], (unsigned long long)sampled[1]);
+    s5l8900_free(&m);
+#endif
+}
+
 int main(void) {
     printf("S5LBox S5L8900 machine tests\n");
     test_ram_readback();
@@ -6507,6 +6589,7 @@ int main(void) {
     test_signed_static_a64_thumb_oracle();
     test_signed_static_a64_thumb_read_oracle();
     test_compact_pc_sampling_excludes_fallback_tracing();
+    test_compact_pc_sampling_records_guest_cursor();
     test_stub_window_stores_and_counts();
     test_mmio_width_alignment_and_window_edges();
     test_address_space_wrap_is_refused();

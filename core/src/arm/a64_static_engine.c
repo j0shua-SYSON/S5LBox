@@ -1109,6 +1109,9 @@ void s5l8900_static_a64_compact_raw_pc_profile(
         _Static_assert((unsigned)S5L_STATIC_A64_COMPACT_PC_HOT_COUNT ==
                            (unsigned)A64_COMPACT_RAW_PC_PROFILE_HOT_COUNT,
                        "compact PC-profile hot count drifted");
+        _Static_assert((unsigned)S5L_STATIC_A64_COMPACT_PC_GUEST_HOT_COUNT ==
+                           (unsigned)A64_COMPACT_RAW_PC_PROFILE_GUEST_HOT_COUNT,
+                       "compact PC-profile guest hot count drifted");
         a64_compact_raw_pc_profile_snapshot(&native);
         out->enabled = native.enabled;
         out->polls = native.polls;
@@ -1129,6 +1132,14 @@ void s5l8900_static_a64_compact_raw_pc_profile(
                 (uint64_t)native.outside_hot[i].pc;
             out->outside_hot[i].samples =
                 native.outside_hot[i].samples;
+        }
+        out->guest_pc_captured = native.guest_pc_captured;
+        out->guest_pc_dropped = native.guest_pc_dropped;
+        out->guest_pc_unavailable = native.guest_pc_unavailable;
+        for (unsigned i = 0u;
+             i < (unsigned)S5L_STATIC_A64_COMPACT_PC_GUEST_HOT_COUNT; i++) {
+            out->guest_hot[i].pc = (uint64_t)native.guest_hot[i].pc;
+            out->guest_hot[i].samples = native.guest_hot[i].samples;
         }
         out->fallback_events = state->compact_fallback_profile_events;
         out->fallback_witness_misses =

@@ -1,4 +1,5 @@
 #include "native_pc_histogram.h"
+#include "compact_guest_pc_sample.h"
 #include <stdio.h>
 
 static native_pc_histogram_t histogram;
@@ -21,6 +22,34 @@ static uint64_t sum(void) {
 }
 
 int main(void) {
+    uint32_t guest_pc = 0xdeadbeefu;
+    CHECK(compact_guest_pc_sample(0x104u, 0x104u, 0x200u, 0u, &guest_pc));
+    CHECK(guest_pc == 0u);
+    CHECK(compact_guest_pc_sample(0x1fcu, 0x104u, 0x200u,
+                                  UINT32_C(0xfffffffe), &guest_pc));
+    CHECK(guest_pc == UINT32_C(0xfffffffe));
+    const struct { uintptr_t pc, begin, end; uint64_t x26; } invalid[] = {
+        {0x100u, 0x104u, 0x200u, 0x1200u}, /* prologue */
+        {0x200u, 0x104u, 0x200u, 0x1200u}, /* epilogue */
+        {0x204u, 0x104u, 0x200u, 0x1200u}, /* callback/outside */
+        {0x106u, 0x104u, 0x200u, 0x1200u}, /* invalid host PC */
+        {0x104u, 0u, 0x200u, 0x1200u},
+        {0x104u, 0x104u, 0x104u, 0x1200u},
+        {0x104u, 0x200u, 0x104u, 0x1200u},
+        {0x108u, 0x106u, 0x200u, 0x1200u},
+        {0x108u, 0x104u, 0x202u, 0x1200u},
+        {0x104u, 0x104u, 0x200u, 0x1201u},
+        {0x104u, 0x104u, 0x200u, UINT64_C(0x100001200)},
+        {0x104u, 0x104u, 0x200u, UINT64_MAX},
+    };
+    for (unsigned i = 0u; i < sizeof invalid / sizeof invalid[0]; ++i) {
+        guest_pc = 0xdeadbeefu;
+        CHECK(!compact_guest_pc_sample(invalid[i].pc, invalid[i].begin,
+                                       invalid[i].end, invalid[i].x26,
+                                       &guest_pc));
+        CHECK(guest_pc == 0xdeadbeefu);
+    }
+    CHECK(!compact_guest_pc_sample(0x104u, 0x104u, 0x200u, 0x1200u, NULL));
     native_pc_histogram_reset(&histogram);
     /* The former 4096-sample capture filled during startup and missed all of
      * this later hot phase. Capture must not depend on snapshot polling. */

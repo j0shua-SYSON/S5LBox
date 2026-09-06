@@ -1,8 +1,10 @@
 # Ordered APT catalog index experiment
 
-Status: offline guest-library candidate with host and ARM execution tests;
-not linked into the host app and not installed in a guest. No physical Cydia
-improvement is claimed.
+Status: the exact v3 guest-library candidate has been installed in the test
+guest through a private reversible package. The host app does not contain it.
+Real refreshes complete, but still take minutes; the seconds-level usability
+target is not met. Catalog equivalence and package-removal rollback are still
+acceptance gates, so this is not a default guest-library replacement.
 
 The exact pinned `apt7-lib` 0.7.20.2-1 library implements `WriteUniqString` with
 a 26-entry recent-value cache followed by a descending sorted linked-list
@@ -83,10 +85,23 @@ gate and remains disabled; see [bulk execution](bulk-execution.md).
 
 ## Next gates
 
-1. Exact-commit CI, including the rebuilt library's ARM execution probe.
-2. Real guest loader validation and safe installation with preserved backups.
-3. Same-build physical Cydia refresh from preserved paired checkpoints, with
-   catalog/package equivalence, repeated reloads, and lifecycle checks.
+The corrected v3 ARM probe and exact-commit CI passed. A private package loaded
+the exact candidate in Cydia; read-only checks of stopped retained disk images
+confirmed its hash, the unchanged pinned package version, and the preserved
+original library. Three physical refreshes completed. The two continuously
+observed comparisons on the same ready checkpoint completed within
+(114.519,132.312] and (117.590,132.317] seconds on the old and expanded-native
+emulator engines respectively. Their bounds overlap: the native arithmetic
+extension does not establish a speed win. Both used the identical v3 library
+and repository contents, with bulk, native TLB and profiling disabled.
+
+Remaining gates:
+
+1. Full catalog/package graph equivalence, not only clean cache headers and
+   matching repository hashes/counts.
+2. Removal of the private package must safely restore the original library.
+3. Substantial physical refresh and general-work acceleration, repeated with
+   preserved paired checkpoints and normal lifecycle checks.
 
 Do not change the pinned package version or default installation policy on the
 strength of the host comparison counts. Do not modify a mounted guest disk

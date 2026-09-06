@@ -848,6 +848,24 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
                     i, imageName,
                     i, symbolName];
             }
+            [outsidePCs appendFormat:
+                @",compact_pc_profile_guest_pc_captured=%llu,"
+                 "compact_pc_profile_guest_pc_dropped=%llu,"
+                 "compact_pc_profile_guest_pc_unavailable=%llu",
+                (unsigned long long)last->compact_pc_profile_guest_pc_captured,
+                (unsigned long long)last->compact_pc_profile_guest_pc_dropped,
+                (unsigned long long)last->compact_pc_profile_guest_pc_unavailable];
+            /* Guest virtual addresses must never be passed to host dladdr. */
+            for (unsigned i = 0u;
+                 i < VM_COMPACT_PC_PROFILE_GUEST_HOT_COUNT; i++) {
+                [outsidePCs appendFormat:
+                    @",compact_pc_profile_guest_hot%u_pc=%08llx,"
+                     "compact_pc_profile_guest_hot%u_samples=%llu",
+                    i, (unsigned long long)
+                        last->compact_pc_profile_guest_hot_pc[i],
+                    i, (unsigned long long)
+                        last->compact_pc_profile_guest_hot_samples[i]];
+            }
             static NSString * const fallbackOutcomeNames[] = {
                 @"admit_execute",
                 @"admit_condition_skip",

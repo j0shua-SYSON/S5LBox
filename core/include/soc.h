@@ -4731,6 +4731,7 @@ typedef enum {
 } s5l_static_a64_compact_pc_region_t;
 
 #define S5L_STATIC_A64_COMPACT_PC_HOT_COUNT 8u
+#define S5L_STATIC_A64_COMPACT_PC_GUEST_HOT_COUNT 16u
 
 /* Exact events observed at the compact runner's architectural fallback
  * boundary while the opt-in PC profiler's fallback_details mode is active.
@@ -4769,6 +4770,13 @@ typedef struct {
     uint64_t outside_pc_dropped;
     s5l_static_a64_compact_pc_hot_t
         outside_hot[S5L_STATIC_A64_COMPACT_PC_HOT_COUNT];
+    /* Sampled live guest cursor, binned by 256-byte virtual-address region.
+     * Not process-qualified and not an exact instruction-frequency profile. */
+    uint64_t guest_pc_captured;
+    uint64_t guest_pc_dropped;
+    uint64_t guest_pc_unavailable;
+    s5l_static_a64_compact_pc_hot_t
+        guest_hot[S5L_STATIC_A64_COMPACT_PC_GUEST_HOT_COUNT];
     uint64_t fallback_events;
     uint64_t fallback_witness_misses;
     uint64_t fallback_outcome[

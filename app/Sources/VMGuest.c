@@ -557,6 +557,22 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                 execution.compact_pc_profile_outside_hot_samples[i] =
                     pc_profile.outside_hot[i].samples;
             }
+            _Static_assert(VM_COMPACT_PC_PROFILE_GUEST_HOT_COUNT ==
+                               S5L_STATIC_A64_COMPACT_PC_GUEST_HOT_COUNT,
+                           "compact PC-profile guest hot count drifted");
+            execution.compact_pc_profile_guest_pc_captured =
+                pc_profile.guest_pc_captured;
+            execution.compact_pc_profile_guest_pc_dropped =
+                pc_profile.guest_pc_dropped;
+            execution.compact_pc_profile_guest_pc_unavailable =
+                pc_profile.guest_pc_unavailable;
+            for (unsigned i = 0u;
+                 i < VM_COMPACT_PC_PROFILE_GUEST_HOT_COUNT; i++) {
+                execution.compact_pc_profile_guest_hot_pc[i] =
+                    pc_profile.guest_hot[i].pc;
+                execution.compact_pc_profile_guest_hot_samples[i] =
+                    pc_profile.guest_hot[i].samples;
+            }
             _Static_assert(VM_COMPACT_FALLBACK_PROFILE_OUTCOME_COUNT ==
                                S5L_STATIC_A64_COMPACT_FALLBACK_OUTCOME_COUNT,
                            "compact fallback outcome count drifted");

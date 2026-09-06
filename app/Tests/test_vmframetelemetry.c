@@ -173,6 +173,13 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.compact_pc_profile_reference_pc = UINT64_C(0x100000000) + base;
     value.compact_pc_profile_outside_pc_captured = base + 53u;
     value.compact_pc_profile_outside_pc_dropped = base + 54u;
+    value.compact_pc_profile_guest_pc_captured = base + 300u;
+    value.compact_pc_profile_guest_pc_dropped = base + 301u;
+    value.compact_pc_profile_guest_pc_unavailable = base + 302u;
+    for (unsigned i = 0u; i < VM_COMPACT_PC_PROFILE_GUEST_HOT_COUNT; i++) {
+        value.compact_pc_profile_guest_hot_pc[i] = 0x30000000u + i * 256u;
+        value.compact_pc_profile_guest_hot_samples[i] = base + 303u + i;
+    }
     value.compact_pc_profile_polls = base + 63u;
     value.compact_pc_profile_not_running = base + 64u;
     value.compact_pc_profile_state_failures = base + 65u;
@@ -543,6 +550,13 @@ static void test_boundaries_and_sampled_changes(void) {
                UINT64_C(0x200000000) + 2000u + UINT64_C(0x700) &&
            state.execution_last.compact_pc_profile_outside_hot_samples[7] ==
                2062u &&
+           state.execution_last.compact_pc_profile_guest_pc_captured == 2300u &&
+           state.execution_last.compact_pc_profile_guest_pc_dropped == 2301u &&
+           state.execution_last.compact_pc_profile_guest_pc_unavailable == 2302u &&
+           state.execution_last.compact_pc_profile_guest_hot_pc[0] == 0x30000000u &&
+           state.execution_last.compact_pc_profile_guest_hot_samples[0] == 2303u &&
+           state.execution_last.compact_pc_profile_guest_hot_pc[15] == 0x30000f00u &&
+           state.execution_last.compact_pc_profile_guest_hot_samples[15] == 2318u &&
            state.execution_last.compact_fallback_profile_events == 2125u &&
            state.execution_last.compact_fallback_profile_witness_misses ==
                2126u &&
