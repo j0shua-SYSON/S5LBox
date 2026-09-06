@@ -4825,6 +4825,14 @@ bool s5l8900_static_a64_compact_raw_guest_pc_profile_visit(
     const s5l8900_t *m,
     bool (*visit)(void *, uint64_t, uint64_t, uint64_t), void *opaque,
     uint64_t *captured, uint64_t *dropped);
+/* Full sampled host-PC distribution, including compact-runner code. Same
+ * owner-thread, stable-copy and failure contract as the guest histogram.
+ * Captured plus dropped equals the sampled host-PC total at the same boundary;
+ * bins are statistical 256-byte regions, not exact function or CPU-time shares. */
+bool s5l8900_static_a64_compact_raw_host_pc_profile_visit(
+    const s5l8900_t *m,
+    bool (*visit)(void *, uint64_t, uint64_t, uint64_t), void *opaque,
+    uint64_t *captured, uint64_t *dropped);
 /* Same-binary rollout/benchmark control for terminal A32/Thumb BX/BLX signed
  * records. It defaults on when the engine is created. Changing it clears only
  * derived decode/graph entries so an off/on comparison cannot reuse a block

@@ -6512,7 +6512,29 @@ static void test_guest_pc_export_disabled(void) {
           "ordinary machine exposed another machine's full histogram");
     CHECK(!s5l8900_static_a64_compact_raw_guest_pc_profile_visit(
               NULL, NULL, NULL, NULL, NULL), "null export was accepted");
+    captured = 123u;
+    dropped = 456u;
+    CHECK(!s5l8900_static_a64_compact_raw_host_pc_profile_visit(
+              &m, guest_pc_export_row, &test, &captured, &dropped) &&
+              captured == 0u && dropped == 0u && test.rows == 0u,
+          "ordinary machine exposed native histogram or stale totals");
+    CHECK(!s5l8900_static_a64_compact_raw_host_pc_profile_visit(
+              NULL, NULL, NULL, NULL, NULL), "null native export was accepted");
 }
+
+#if defined(__APPLE__) && defined(__aarch64__)
+static bool host_pc_export_row(void *opaque, uint64_t bin,
+                                uint64_t pc, uint64_t samples) {
+    guest_pc_export_test_t *test = opaque;
+    ++test->rows;
+    test->sum += samples;
+    CHECK((pc & ~UINT64_C(255)) == bin && samples > 0u,
+          "native export row has invalid bin or count");
+    s5l_static_a64_compact_pc_profile_t nested;
+    s5l8900_static_a64_compact_raw_pc_profile(test->machine, &nested);
+    return !test->refuse;
+}
+#endif
 
 static void test_compact_pc_sampling_records_guest_cursor(void) {
 #if defined(__APPLE__) && defined(__aarch64__)
@@ -6598,6 +6620,19 @@ static void test_compact_pc_sampling_records_guest_cursor(void) {
                   &m, guest_pc_export_row, &exported, &captured, &dropped) &&
                   captured == 0u && dropped == 0u && exported.rows == 1u,
               "partial export published complete totals");
+        exported = (guest_pc_export_test_t){.machine = &m};
+        CHECK(s5l8900_static_a64_compact_raw_host_pc_profile_visit(
+                  &m, host_pc_export_row, &exported, &captured, &dropped),
+              "full native histogram export failed");
+        CHECK(exported.rows > 0u && exported.sum == captured && dropped == 0u &&
+                  captured == profile.samples,
+              "full native histogram did not account for every captured host PC");
+        exported.rows = 0u;
+        exported.refuse = true;
+        CHECK(!s5l8900_static_a64_compact_raw_host_pc_profile_visit(
+                  &m, host_pc_export_row, &exported, &captured, &dropped) &&
+                  captured == 0u && dropped == 0u && exported.rows == 1u,
+              "partial native export published complete totals");
     }
     if (sampled[0] && sampled[1])
         printf("  STATIC-A64-GUEST-PC-SAMPLING A32=%llu Thumb=%llu\n",

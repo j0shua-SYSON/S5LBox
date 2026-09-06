@@ -41,6 +41,7 @@
 
 #import <mach/mach.h>
 #import <pthread.h>
+#import <dlfcn.h>
 #import <time.h>
 #import <unistd.h>
 #import <stdio.h>
@@ -125,6 +126,7 @@ static uint64_t vm_now_ns(void) {
                 status:(arm_status_t)status;
 - (void)appendConsole:(NSString *)text;
 - (void)exportGuestPCProfile_emulatorThread;
+- (void)exportNativePCProfile_emulatorThread;
 - (void)noteDiscardedInput;
 - (void)noteDroppedTouch;
 - (void)noteDroppedButton;
@@ -1646,6 +1648,69 @@ static bool vm_guest_pc_profile_row(void *opaque, uint64_t bin,
     }
 }
 
+static NSString *vm_profile_csv_string(const char *value) {
+    NSString *text = value ? [NSString stringWithUTF8String:value] : @"";
+    return [NSString stringWithFormat:@"\"%@\"",
+        [(text ?: @"") stringByReplacingOccurrencesOfString:@"\""
+                                                withString:@"\"\""]];
+}
+
+static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
+                                     uint64_t pc, uint64_t samples) {
+    NSMutableString *text = (__bridge NSMutableString *)opaque;
+    Dl_info info = {0};
+    (void)dladdr((const void *)(uintptr_t)pc, &info);
+    [text appendFormat:@"%016llx,%016llx,%llu,%016llx,%016llx,%@,%@\n",
+        (unsigned long long)bin, (unsigned long long)pc,
+        (unsigned long long)samples,
+        (unsigned long long)(uintptr_t)info.dli_fbase,
+        (unsigned long long)(uintptr_t)info.dli_saddr,
+        vm_profile_csv_string(info.dli_fname),
+        vm_profile_csv_string(info.dli_sname)];
+    return true;
+}
+
+/* Native addresses are host diagnostic state, never serialized into a guest
+ * checkpoint. Symbol lookup and file I/O occur only at pause/stop boundaries.
+ * Keep all bins: the AX top-eight omits most outside-runner observations. */
+- (void)exportNativePCProfile_emulatorThread {
+    s5l_static_a64_compact_pc_profile_t profile;
+    s5l8900_static_a64_compact_raw_pc_profile(&_machine, &profile);
+    if (!profile.enabled) return;
+    @autoreleasepool {
+        vm_instance_paths_t paths;
+        if (![self resolveFilesInto:&paths note:NULL]) return;
+        NSMutableString *text = [NSMutableString stringWithFormat:
+            @"s5lbox-native-pc-v1\nreference_pc,%016llx\n"
+             "bin,representative_pc,samples,image_base,symbol_address,image,symbol\n",
+            (unsigned long long)profile.reference_pc];
+        uint64_t captured = 0u, dropped = 0u;
+        if (!text || !s5l8900_static_a64_compact_raw_host_pc_profile_visit(
+                &_machine, vm_native_pc_profile_row, (__bridge void *)text,
+                &captured, &dropped) || captured > profile.samples ||
+                dropped != profile.samples - captured) {
+            [self appendConsole:@"[vm] native PC export did not match the paused sample total\n"];
+            return;
+        }
+        [text appendFormat:@"complete,%llu,%llu\n",
+            (unsigned long long)captured, (unsigned long long)dropped];
+        NSString *directory = [NSString stringWithUTF8String:paths.machine];
+        NSString *name = [NSString stringWithFormat:@"engine.native-pc-%@.csv",
+            [NSUUID UUID].UUIDString];
+        NSString *path = [directory stringByAppendingPathComponent:name];
+        NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
+        NSError *error = nil;
+        if (path && data && [data writeToFile:path
+                options:NSDataWritingWithoutOverwriting error:&error])
+            [self appendConsole:[NSString stringWithFormat:
+                @"[vm] complete native PC histogram saved: %@\n", name]];
+        else
+            [self appendConsole:[NSString stringWithFormat:
+                @"[vm] native PC histogram was not saved: %@\n",
+                error.localizedDescription ?: @"invalid export path or data"]];
+    }
+}
+
 - (void)threadMain:(id)unused {
     (void)unused;
     double lastPublish = vm_now();
@@ -1755,6 +1820,7 @@ static bool vm_guest_pc_profile_row(void *opaque, uint64_t bin,
             if (paused && !checkpoint) {
                 if (!profilePauseExported) {
                     [self exportGuestPCProfile_emulatorThread];
+                    [self exportNativePCProfile_emulatorThread];
                     profilePauseExported = YES;
                 }
                 usleep(50 * 1000);
@@ -1924,6 +1990,7 @@ static bool vm_guest_pc_profile_row(void *opaque, uint64_t bin,
 
     if (_machineReady) {
         [self exportGuestPCProfile_emulatorThread];
+        [self exportNativePCProfile_emulatorThread];
         s5l8900_free(&_machine);
     }
     /* AFTER the machine, never before: the memory-disk bridges hold a borrowed

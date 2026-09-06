@@ -2322,6 +2322,7 @@ _Static_assert(sizeof(uintptr_t) == sizeof(uint64_t),
  * still pay no initialization, thread, timer, signal, or ranking work. */
 static native_pc_histogram_t g_compact_profile_outside_histogram;
 static native_pc_histogram_t g_compact_profile_guest_histogram;
+static native_pc_histogram_t g_compact_profile_host_histogram;
 static uint64_t g_compact_profile_guest_unavailable;
 
 static void compact_profile_increment(uint64_t *value) {
@@ -2340,6 +2341,7 @@ static void compact_profile_reset_locked(void) {
         g_compact_profile_region[i] = 0;
     native_pc_histogram_reset(&g_compact_profile_outside_histogram);
     native_pc_histogram_reset(&g_compact_profile_guest_histogram);
+    native_pc_histogram_reset(&g_compact_profile_host_histogram);
     g_compact_profile_guest_unavailable = 0u;
 }
 
@@ -2400,6 +2402,7 @@ static bool compact_profile_layout_valid(void) {
 
 static void compact_profile_sample_pc_locked(uintptr_t pc) {
     compact_profile_increment(&g_compact_profile_samples);
+    (void)native_pc_histogram_note(&g_compact_profile_host_histogram, pc);
 
     const uintptr_t begin =
         (uintptr_t)g_compact_profile_boundary[0];
@@ -2632,7 +2635,8 @@ void a64_compact_raw_pc_profile_snapshot(
                          A64_COMPACT_RAW_PC_PROFILE_GUEST_HOT_COUNT);
     (void)pthread_mutex_unlock(&g_compact_profile_lock);
 }
-bool a64_compact_raw_guest_pc_profile_visit(
+static bool compact_profile_histogram_visit(
+        const native_pc_histogram_t *source,
         bool (*visit)(void *, uint64_t, uint64_t, uint64_t), void *opaque,
         uint64_t *captured, uint64_t *dropped) {
     if (captured) *captured = 0u;
@@ -2643,7 +2647,7 @@ bool a64_compact_raw_guest_pc_profile_visit(
     native_pc_histogram_t *copy = malloc(sizeof *copy);
     if (!copy) return false;
     (void)pthread_mutex_lock(&g_compact_profile_lock);
-    memcpy(copy, &g_compact_profile_guest_histogram, sizeof *copy);
+    memcpy(copy, source, sizeof *copy);
     (void)pthread_mutex_unlock(&g_compact_profile_lock);
     bool ok = native_pc_histogram_visit(copy, visit, opaque);
     if (ok) {
@@ -2652,6 +2656,18 @@ bool a64_compact_raw_guest_pc_profile_visit(
     }
     free(copy);
     return ok;
+}
+bool a64_compact_raw_guest_pc_profile_visit(
+        bool (*visit)(void *, uint64_t, uint64_t, uint64_t), void *opaque,
+        uint64_t *captured, uint64_t *dropped) {
+    return compact_profile_histogram_visit(&g_compact_profile_guest_histogram,
+                                          visit, opaque, captured, dropped);
+}
+bool a64_compact_raw_host_pc_profile_visit(
+        bool (*visit)(void *, uint64_t, uint64_t, uint64_t), void *opaque,
+        uint64_t *captured, uint64_t *dropped) {
+    return compact_profile_histogram_visit(&g_compact_profile_host_histogram,
+                                          visit, opaque, captured, dropped);
 }
 #else
 bool a64_compact_raw_pc_profile_enable(void) { return false; }
@@ -2662,6 +2678,14 @@ void a64_compact_raw_pc_profile_snapshot(
     if (out) memset(out, 0, sizeof *out);
 }
 bool a64_compact_raw_guest_pc_profile_visit(
+        bool (*visit)(void *, uint64_t, uint64_t, uint64_t), void *opaque,
+        uint64_t *captured, uint64_t *dropped) {
+    (void)visit; (void)opaque;
+    if (captured) *captured = 0u;
+    if (dropped) *dropped = 0u;
+    return false;
+}
+bool a64_compact_raw_host_pc_profile_visit(
         bool (*visit)(void *, uint64_t, uint64_t, uint64_t), void *opaque,
         uint64_t *captured, uint64_t *dropped) {
     (void)visit; (void)opaque;

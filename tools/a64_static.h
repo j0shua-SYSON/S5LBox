@@ -422,6 +422,11 @@ void a64_compact_raw_pc_profile_snapshot(
 bool a64_compact_raw_guest_pc_profile_visit(
     bool (*visit)(void *, uint64_t, uint64_t, uint64_t), void *opaque,
     uint64_t *captured, uint64_t *dropped);
+/* Complete native-PC histogram, including runner and outside-runner samples.
+ * Same stable-copy/failure contract as the guest histogram; 256-byte bins. */
+bool a64_compact_raw_host_pc_profile_visit(
+    bool (*visit)(void *, uint64_t, uint64_t, uint64_t), void *opaque,
+    uint64_t *captured, uint64_t *dropped);
 
 /* Execute against flat, power-of-two RAM. A non-loop block may be executed once;
  * repeated execution is accepted only when its exit PC equals its start PC.
