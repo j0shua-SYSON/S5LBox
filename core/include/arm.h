@@ -304,7 +304,30 @@ typedef struct arm_bus {
      */
     arm_privileged_svc_handler_t privileged_svc_handler;
     void                         *privileged_svc_ctx;
+
+    /* Optional latched host-side bus failure, for incomplete devices or
+     * failed backing I/O. A failing physical callback must latch this before
+     * returning, leave a failed write uncommitted, and retain diagnostics in
+     * ctx. The interpreter discards the failed read value and stops with
+     * ARM_HALT at the current instruction instead of inventing a guest abort.
+     * PC, CPSR and the retired-instruction count stay fixed on that stop.
+     * The owner explicitly clears the latch before retrying. Earlier completed
+     * accesses in a multiple transfer are not undone. RAM shortcuts must only
+     * expose ranges that cannot fail; host_ram/host_ram_write and this query
+     * must be side-effect-free. Interposers must forward this callback.
+     * Native engines fall back while this hook is installed. NULL preserves
+     * the existing infallible callback contract. This host state is not part
+     * of a guest snapshot. */
+    bool (*access_failed)(void *ctx);
 } arm_bus_t;
+
+static inline bool arm_bus_access_failed(const arm_bus_t *bus) {
+    return bus && bus->access_failed && bus->access_failed(bus->ctx);
+}
+
+/* Host-side page-table read failure, distinct from every architectural FSR.
+ * Never publish this sentinel in DFSR/IFSR or cache it as a translation fault. */
+#define ARM_MMU_BUS_FAILURE UINT32_C(0xffffffff)
 
 /*
  * Register banks. ARM banks r13/r14 per privileged mode, and additionally
@@ -626,7 +649,9 @@ typedef enum {
 
 /*
  * Translate a virtual address. Returns 0 on success (writing the physical
- * address to *pa) or a non-zero ARMv6 fault status register value.
+ * address to *pa), a non-zero architectural fault status register value, or
+ * ARM_MMU_BUS_FAILURE for a latched host bus failure. Every failure leaves
+ * *pa untouched; host failures are not cached and must never become guest FSRs.
  * With the MMU disabled (SCTLR.M clear) translation is the identity map.
  *
  * Only ARM_ACCESS_WRITE sets FSR.WnR, and only ARM_ACCESS_FETCH is checked
@@ -643,7 +668,8 @@ uint32_t arm_mmu_translate(arm_cpu_t *cpu, uint32_t va, arm_access_t acc,
  * complete physical block must be exposed by host_ram. A successful MMU-on
  * reuse accounts for the one TLB hit that the displaced arm_step() fetch
  * would have recorded. Every refusal leaves the fetch cache and counters
- * untouched, so the caller can fall back to arm_step() for faults or MMIO. */
+ * untouched, so the caller can fall back to arm_step() for faults or MMIO.
+ * Checked buses are refused, including when no failure is currently latched. */
 bool arm_fetch_cache_try_refill(arm_cpu_t *cpu, uint32_t va, bool priv);
 
 /* Rebuild one 1 KiB data-cache host pointer without walking page tables,
@@ -653,7 +679,8 @@ bool arm_fetch_cache_try_refill(arm_cpu_t *cpu, uint32_t va, bool priv);
  * READ requires host_ram and WRITE separately requires host_ram_write. The
  * native instruction retry owns data-cache hit accounting; this administrative
  * refill accounts only for an MMU-on TLB hit that displaced arm_step() would
- * have consumed. Every refusal leaves caches and counters untouched. */
+ * have consumed. Every refusal leaves caches and counters untouched.
+ * Checked buses are refused, including when no failure is currently latched. */
 bool arm_data_cache_try_refill(arm_cpu_t *cpu, uint32_t va,
                                arm_access_t access, bool priv);
 

@@ -225,9 +225,12 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * and does not change the snapshot stream. 127944 includes the CPU's inactive
  * Cortex-A8 L2 state and padding, excluded for the ARM1176-only format above.
  * 128072 includes the inactive A8 upper VFP bank, also omitted and cleared.
+ * 128080 adds the bus's host-only access_failed callback. Like the other bus
+ * callbacks it is retained from the destination and is not serialized, so
+ * the guest snapshot byte stream and version remain unchanged.
  * The size below must be read from the
  * compiler's emitted `.space`, not inferred from source padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         128072, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         128080, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -1090,6 +1093,8 @@ static void snap_nor(sn_io_t *io, s5l_nor_t *n) {
  * policy/measurement),
  * `nor.data` and `stubs[].regs`/`stubs[].name` (host allocations / string
  * literals). ram_base/ram_size live in GEOM.
+ * The bus access_failed hook and its live host latch are excluded too; loading
+ * guest state must not replace the destination's bus diagnostics or policy.
  */
 static void snap_mach(sn_io_t *io, s5l8900_t *m) {
     snap_uart(io, &m->uart0);

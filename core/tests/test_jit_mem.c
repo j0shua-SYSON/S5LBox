@@ -318,6 +318,8 @@ static void test_wrong_thread_is_rejected(void) {
 }
 #endif
 
+static bool entry_checked_bus(void *ctx) { (void)ctx; return false; }
+
 static void test_block_entry_guards(void) {
     jit_buf_t b = {0}, wrong = {0};
     jit_block_t blk;
@@ -333,14 +335,15 @@ static void test_block_entry_guards(void) {
         printf("  SKIP: this host refused an arena for entry checks\n");
         return;
     }
-    code = jit_buf_take(&b, 1);
+    code = jit_buf_take(&b, 2);
     other = jit_buf_take(&b, 1);
     if (!code || !other || !jit_buf_begin_write(&b)) {
         CHECK(false, "could not prepare entry-guard code");
         CHECK(jit_buf_free(&b), "entry-guard setup cleanup failed");
         return;
     }
-    code[0] = 0xd65f03c0u; /* ret */
+    code[0] = 0x52800000u; /* mov w0,#JIT_EXIT_NEXT */
+    code[1] = 0xd65f03c0u; /* ret */
     other[0] = 0xd65f03c0u;
     CHECK(jit_buf_end_write(&b), "entry-guard end failed");
     CHECK(jit_buf_commit(&b, other, sizeof *other),
@@ -349,13 +352,28 @@ static void test_block_entry_guards(void) {
     memset(&blk, 0, sizeof blk);
     memset(&cpu, 0, sizeof cpu);
     blk.code = code;
-    blk.code_words = 1;
+    blk.code_words = 2;
     blk.insn_count = 1;
     CHECK(jit_enter(&b, &blk, &cpu) == JIT_EXIT_INTERPRET,
           "uncommitted block was entered");
     CHECK(jit_block_commit(&b, &blk), "block commit failed");
     CHECK(jit_enter(&b, &blk, NULL) == JIT_EXIT_INTERPRET,
           "NULL CPU was accepted");
+    /* A committed, executable block must still reject a different CPU or a
+     * checked bus. The successful control makes this observable on arm64. */
+    CHECK(jit_enter(&b, &blk, &cpu) ==
+              (jit_host_can_execute() && b.executable ? JIT_EXIT_NEXT : JIT_EXIT_INTERPRET),
+          "valid committed control block failed");
+    const arm_arch_t rejected[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT, (arm_arch_t)99};
+    for (unsigned p = 0; p < sizeof rejected/sizeof rejected[0]; p++) {
+        cpu.arch = rejected[p];
+        CHECK(jit_enter(&b,&blk,&cpu) == JIT_EXIT_INTERPRET, "committed block entered on unsupported CPU");
+    }
+    cpu.arch = ARM_ARCH_V6_ARM1176;
+    arm_bus_t checked_bus = {.access_failed = entry_checked_bus};
+    cpu.bus = &checked_bus;
+    CHECK(jit_enter(&b,&blk,&cpu) == JIT_EXIT_INTERPRET, "committed block entered on checked bus");
+    cpu.bus = NULL;
 
     blk.code = other;
     CHECK(jit_enter(&b, &blk, &cpu) == JIT_EXIT_INTERPRET,

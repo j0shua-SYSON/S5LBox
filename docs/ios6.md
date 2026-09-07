@@ -53,6 +53,20 @@ at argument offset `0x30` is virtual; its byte length is at `0x34`.
 
 ## CPU boundary
 
+The physical bus can now report a latched host failure through the optional
+`access_failed` callback. The interpreter stops with `ARM_HALT` at the failing
+instruction, discards failed read values, and preserves PC, CPSR, fault registers
+and retirement count. This is a missing host capability or backing-I/O failure,
+not a fabricated guest external abort. The bus owner retains diagnostics and
+explicitly clears the latch before retrying; failed writes must not commit.
+Earlier completed bus transfers remain observable, and a failed exclusive store
+retains its monitor for retry. Both instruction halfwords, data transfers, and
+page-table reads follow this contract; host page-table failures are never cached.
+Native execution requires an ARM1176 CPU and a bus without this hook. Legacy
+buses omit it and retain their existing behavior. The host callback adds no
+serialized guest state; ARM1176 snapshot bytes and version remain unchanged.
+This CPU/MMU boundary does not establish checked DMA or a complete S5L8920 board.
+
 `arm_arch_t` values are identifiers, not ordered architecture levels.
 ARM1176 remains zero and Swift remains one; Cortex-A8 has its own identifier.
 Explicit predicates allow A32 MOVW/MOVT on Swift and Cortex-A8, while A32

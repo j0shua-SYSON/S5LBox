@@ -2504,7 +2504,7 @@ bool a64_compact_raw_run(arm_cpu_t *cpu, const uint8_t *code,
     if (!completed) return false;
     *completed = 0u;
     code_end = (uint64_t)code_base + code_bytes;
-    if (!cpu || !code || !ram || !max_insns || code_bytes < 4u ||
+    if (!a64_static_cpu_supported(cpu) || !code || !ram || !max_insns || code_bytes < 4u ||
         (code_base & 3u) != 0u || (code_bytes & 3u) != 0u ||
         code_end > (uint64_t)UINT32_MAX + 1u ||
         (cpu->r[15] & ((cpu->cpsr & ARM_CPSR_T) ? 1u : 3u)) != 0u ||
@@ -2581,7 +2581,7 @@ bool a64_compact_raw_run_code_window_resident_cached(
     *fallback_completed = 0u;
     if (window_cache_hits) *window_cache_hits = 0u;
     code_end = (uint64_t)code_base + code_bytes;
-    if (!cpu || !code || !max_insns || code_bytes < 4u ||
+    if (!a64_static_cpu_supported(cpu) || !code || !max_insns || code_bytes < 4u ||
         (code_base & 3u) != 0u || (code_bytes & 3u) != 0u ||
         code_end > (uint64_t)UINT32_MAX + 1u ||
         (cpu->r[15] & ((cpu->cpsr & ARM_CPSR_T) ? 1u : 3u)) != 0u ||
@@ -2911,7 +2911,7 @@ static bool validate_run(const arm_cpu_t *cpu,
     bool saw_indirect_exit = false;
     bool saw_thumb_conditional_exit = false;
 
-    if (!cpu || !block || !blocks || !ram ||
+    if (!a64_static_cpu_supported(cpu) || !block || !blocks || !ram ||
         !block->insn_count || block->insn_count > A64_STATIC_MAX_INSNS ||
         block->uop_count < block->insn_count ||
         block->uop_count > A64_STATIC_MAX_UOPS ||
@@ -3181,7 +3181,7 @@ bool a64_static_run_read_hits_decoded(arm_cpu_t *cpu,
                                       const a64_static_block_t *block,
                                       uint8_t *ram, size_t ram_size,
                                       unsigned *completed) {
-    if (!cpu || !ram || !completed || !ram_size ||
+    if (!a64_static_cpu_supported(cpu) || !ram || !completed || !ram_size ||
         (ram_size & (ram_size - 1u)) != 0u ||
         ram_size - 1u > UINT32_MAX ||
         !validate_decoded_hits_at(
@@ -3196,7 +3196,7 @@ bool a64_static_run_memory_hits_decoded(arm_cpu_t *cpu,
                                         uint8_t *ram, size_t ram_size,
                                         bool vfp_fp_session,
                                         unsigned *completed) {
-    if (!cpu || !ram || !completed || !ram_size ||
+    if (!a64_static_cpu_supported(cpu) || !ram || !completed || !ram_size ||
         (ram_size & (ram_size - 1u)) != 0u ||
         ram_size - 1u > UINT32_MAX ||
         !validate_decoded_hits_at(
@@ -3266,7 +3266,7 @@ static bool run_hits_chain(arm_cpu_t *cpu,
     if (!completed || !blocks) return false;
     *completed = 0u;
     *blocks = 0u;
-    if (!cpu) return false;
+    if (!a64_static_cpu_supported(cpu)) return false;
     thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
     priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
     if (!ram || !budget ||

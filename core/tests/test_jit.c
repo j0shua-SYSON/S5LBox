@@ -1220,6 +1220,42 @@ static void test_code_buffer(void) {
     }
 }
 
+static bool checked_bus_failure(void *ctx) { return *(bool *)ctx; }
+
+static void test_unsupported_cpu_and_checked_bus_fall_back(void) {
+    static const arm_arch_t profiles[] = {
+        ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT, (arm_arch_t)99
+    };
+    for (unsigned p = 0; p < sizeof profiles/sizeof profiles[0]; p++)
+     for (unsigned checked = 0; checked < 2u; checked++)
+      for (unsigned thumb = 0; thumb < 2u; thumb++) {
+        arm_cpu_t c;
+        arm_bus_t bus = g_bus;
+        bool bus_failed = false;
+        jit_block_t blk;
+        const uint32_t program[] = {0xe3a02001u,0xeafffffeu};
+        load(&c,0u,program,2u);
+        if (thumb) { m_w16(NULL,0u,0x2201u); m_w16(NULL,2u,0xe7feu); c.cpsr |= ARM_CPSR_T; }
+        c.arch = profiles[p]; c.bus = &bus;
+        if (checked) { bus.ctx = &bus_failed; bus.access_failed = checked_bus_failure; }
+        bool supported = p == 0u && !checked;
+        memset(g_code,0xa5,sizeof g_code);
+        g_read8_calls = g_write8_calls = g_read16_calls = g_write16_calls = g_read32_calls = g_write32_calls = 0u;
+        CHECK(jit_translate(&c,0u,g_code,CODE_WORDS,&blk) == supported, "wrong profile/bus translation decision");
+        if (supported) continue;
+        CHECK(blk.insn_count == 0u && blk.native_count == 0u && blk.code_words == 0u &&
+              blk.end_reason == JIT_END_FALLBACK && g_code[0] == 0xa5a5a5a5u,
+              "unsupported CPU or checked bus emitted code");
+        CHECK(jit_mem_load32(&c,0x100u) == (UINT64_C(1) << 32) &&
+              jit_mem_load16(&c,0x101u) == (UINT64_C(1) << 32) &&
+              jit_mem_store32(&c,0xfffu,0u) != 0u && jit_mem_store16(&c,0x100u,0u) != 0u,
+              "memory helper did not request interpreter fallback");
+        CHECK(g_read8_calls == 0u && g_write8_calls == 0u && g_read16_calls == 0u &&
+              g_write16_calls == 0u && g_read32_calls == 0u && g_write32_calls == 0u &&
+              c.tlb_hits == 0u && c.tlb_misses == 0u, "refused engine accessed memory or translated a page");
+    }
+}
+
 int main(void) {
     printf("jit translator (host can execute arm64: %s)\n",
            jit_host_can_execute() ? "yes" : "no");
@@ -1253,6 +1289,7 @@ int main(void) {
     test_store_sequence();
     test_memory_helpers_cross_pages_without_replay_side_effects();
     test_memory_helpers_honor_sctlr_u_and_a();
+    test_unsupported_cpu_and_checked_bus_fall_back();
     test_code_buffer();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

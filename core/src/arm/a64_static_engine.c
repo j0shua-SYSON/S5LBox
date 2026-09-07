@@ -443,7 +443,7 @@ static bool compact_pending_matches(const s5l8900_t *m,
     pending = &state->compact_pending;
     if (!pending->valid) return false;
     cpu = &m->cpu;
-    if (cpu->arch != ARM_ARCH_V6_ARM1176 ||
+    if (!a64_static_cpu_supported(cpu) ||
         !arm_mode_is_valid(cpu->cpsr) || cpu->abort_pending ||
         (cpu->cpsr & ARM_CPSR_E) != 0u ||
         (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
@@ -546,7 +546,7 @@ static bool current_cached_unsupported(const s5l8900_t *m,
         !state->known_negative_bypass_enabled)
         return false;
     cpu = &m->cpu;
-    if (cpu->arch != ARM_ARCH_V6_ARM1176 ||
+    if (!a64_static_cpu_supported(cpu) ||
         !arm_mode_is_valid(cpu->cpsr) || cpu->abort_pending ||
         (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
         (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)))
@@ -710,7 +710,7 @@ static const a64_static_block_t *select_persistent_block(
     /* This is the same fail-closed head contract as the legacy C loop. Guest
      * general registers/NZCV remain pinned across this callback, so selection
      * deliberately consults only state that the signed subset cannot mutate. */
-    if (cpu->arch != ARM_ARCH_V6_ARM1176 ||
+    if (!a64_static_cpu_supported(cpu) ||
         !arm_mode_is_valid(cpu->cpsr) || cpu->abort_pending ||
         (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
         (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)))
@@ -1630,6 +1630,7 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
     if (!context || !context->machine || !context->state || !next_window)
         return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
     cpu = &context->machine->cpu;
+    if (!a64_static_cpu_supported(cpu)) return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
     step_block = cpu->r[15] & ~UINT32_C(0x3ff);
     thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
     priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
@@ -1706,7 +1707,7 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
             priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
             width = thumb ? 2u : 4u;
             step_block = cpu->r[15] & ~UINT32_C(0x3ff);
-            if (!priv || !arm_mode_is_valid(cpu->cpsr) ||
+            if (!a64_static_cpu_supported(cpu) || !priv || !arm_mode_is_valid(cpu->cpsr) ||
                 (cpu->cpsr & ARM_CPSR_E) != 0u || cpu->abort_pending ||
                 (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
                 (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)) ||
@@ -1763,7 +1764,8 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
      * witness. It cannot walk the MMU or enter a fault/device path inside the
      * resident interval; refusal returns to the outer machine loop. */
     priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
-    if ((cpu->r[15] & ((cpu->cpsr & ARM_CPSR_T) ? 1u : 3u)) != 0u ||
+    if (!a64_static_cpu_supported(cpu) ||
+        (cpu->r[15] & ((cpu->cpsr & ARM_CPSR_T) ? 1u : 3u)) != 0u ||
         !arm_fetch_cache_try_refill(cpu, cpu->r[15], priv)) {
         if (crossed) context->state->compact_raw_window_stops++;
         return A64_COMPACT_RAW_FALLBACK_RETIRE_STOP;
@@ -1814,7 +1816,7 @@ static unsigned try_compact_raw(
      * pre-step target list is not enough: any installed host hook disables
      * this path until a target-aware in-loop guard exists. */
     if (!budget || m->pre_step_hook ||
-        cpu->arch != ARM_ARCH_V6_ARM1176 ||
+        !a64_static_cpu_supported(cpu) ||
         !arm_mode_is_valid(cpu->cpsr) || cpu->abort_pending ||
         (cpu->cpsr & ARM_CPSR_E) != 0u ||
         (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
@@ -1991,8 +1993,8 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
         return 0u;
 
     cpu = &m->cpu;
+    if (!a64_static_cpu_supported(cpu)) return 0u;
     if (state->fetch_refill_enabled &&
-        cpu->arch == ARM_ARCH_V6_ARM1176 &&
         arm_mode_is_valid(cpu->cpsr) && !cpu->abort_pending &&
         !(cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) &&
         !(cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I))) {
@@ -2074,7 +2076,7 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
         /* Recheck every head. Signed instructions cannot change the MMU,
          * privilege, interrupt masks or instruction state, but keeping these
          * gates local makes that invariant fail closed if the subset grows. */
-        if (cpu->arch != ARM_ARCH_V6_ARM1176 ||
+        if (!a64_static_cpu_supported(cpu) ||
             !arm_mode_is_valid(cpu->cpsr) || cpu->abort_pending ||
             (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
             (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)))

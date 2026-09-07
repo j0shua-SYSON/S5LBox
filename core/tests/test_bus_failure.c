@@ -1,0 +1,380 @@
+/* Checked physical-bus failures must stop before fabricated guest effects.
+ * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
+#include "arm.h"
+#include <stdio.h>
+#include <string.h>
+#ifdef S5LBOX_STATIC_A64_ENGINE
+#include "a64_static.h"
+#endif
+
+typedef struct {
+    uint8_t ram[0x10000];
+    uint32_t fail_address;
+    unsigned fail_size, fail_nth, matches, accesses, after_failure;
+    bool fail_write, failed;
+} fixture_t;
+static unsigned passed, failed;
+#define CHECK(c, msg) do { if (c) passed++; else { failed++; printf("FAIL %s:%d: %s\n", __func__, __LINE__, msg); } } while (0)
+
+static bool reject(fixture_t *f, uint32_t address, unsigned size, bool write) {
+    f->accesses++;
+    if (f->failed) { f->after_failure++; return true; }
+    if ((uint64_t)address + size > sizeof f->ram ||
+        (address == f->fail_address && size == f->fail_size && write == f->fail_write && ++f->matches == f->fail_nth)) {
+        f->failed = true;
+        return true;
+    }
+    return false;
+}
+#define ACCESSORS(bits) \
+static uint##bits##_t read##bits(void *ctx, uint32_t address) { \
+    fixture_t *f = ctx; uint##bits##_t value = 0u; \
+    if (!reject(f, address, (bits)/8u, false)) memcpy(&value, f->ram + address, (bits)/8u); \
+    return value; \
+} \
+static void write##bits(void *ctx, uint32_t address, uint##bits##_t value) { \
+    fixture_t *f = ctx; \
+    if (!reject(f, address, (bits)/8u, true)) memcpy(f->ram + address, &value, (bits)/8u); \
+}
+ACCESSORS(8)
+ACCESSORS(16)
+ACCESSORS(32)
+static bool access_failed(void *ctx) { return ((fixture_t *)ctx)->failed; }
+static uint8_t *host_ram(void *ctx, uint32_t address, uint32_t size) {
+    fixture_t *f = ctx;
+    if ((uint64_t)address + size > sizeof f->ram ||
+        (f->fail_size && f->fail_address >= address && (uint64_t)f->fail_address < (uint64_t)address + size)) return NULL;
+    return f->ram + address;
+}
+static void put16(fixture_t *f, uint32_t address, uint16_t value) { memcpy(f->ram + address, &value, 2u); }
+static void put32(fixture_t *f, uint32_t address, uint32_t value) { memcpy(f->ram + address, &value, 4u); }
+static uint32_t get32(const fixture_t *f, uint32_t address) { uint32_t value; memcpy(&value, f->ram + address, 4u); return value; }
+
+static void setup(fixture_t *f, arm_bus_t *bus, arm_cpu_t *c, bool thumb, bool host) {
+    memset(f, 0, sizeof *f);
+    f->fail_address = UINT32_MAX; f->fail_nth = 1u;
+    *bus = (arm_bus_t){.ctx=f,.read8=read8,.read16=read16,.read32=read32,
+                      .write8=write8,.write16=write16,.write32=write32,.access_failed=access_failed};
+    if (host) { bus->host_ram = host_ram; bus->host_ram_write = host_ram; }
+    CHECK(arm_reset_profile(c, bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    c->cpsr = ARM_MODE_SYS | ARM_CPSR_N | ARM_CPSR_C | (thumb ? ARM_CPSR_T : 0u);
+    c->r[1] = 0x1000u; c->r[2] = 0x87654321u; c->r[3] = 0x12345678u;
+    c->cp15.dfsr = 0x123u; c->cp15.ifsr = 0x456u;
+    c->cp15.dfar = 0x789u; c->cp15.ifar = 0xabcu;
+}
+static void check_stop(fixture_t *f, arm_cpu_t *c, uint32_t pc, uint32_t flags) {
+    CHECK(c->cycles == 0u, "failed host access counted as a retired instruction");
+    CHECK(f->failed && f->after_failure == 0u, "callbacks continued after the first bus failure");
+    CHECK(c->r[15] == pc && c->cpsr == flags && !c->abort_pending, "bus failure retired or entered a guest exception");
+    CHECK(c->cp15.dfsr == 0x123u && c->cp15.ifsr == 0x456u &&
+          c->cp15.dfar == 0x789u && c->cp15.ifar == 0xabcu, "host bus failure was published as a guest fault");
+    unsigned accesses = f->accesses;
+    uint64_t cycles = c->cycles;
+    c->irq_line = true; /* A latched host failure must stop before IRQ entry. */
+    CHECK(arm_step(c) == ARM_HALT && f->accesses == accesses && c->r[15] == pc && c->cycles == cycles,
+          "latched failure did not stop a second step before fetch or IRQ");
+    c->irq_line = false;
+}
+
+static void test_data_and_retry(void) {
+    static const struct { uint32_t load, store; unsigned size; bool thumb, wide, writeback; } cases[] = {
+        {0xe4912004u,0xe4812004u,4u,false,false,true},
+        {0xe4d12001u,0xe4c12001u,1u,false,false,true},
+        {0xe0d120b2u,0xe0c120b2u,2u,false,false,true},
+        {0x680au,0x600au,4u,true,false,false},
+        {0x780au,0x700au,1u,true,false,false},
+        {0x880au,0x800au,2u,true,false,false},
+        {0xf8512b04u,0xf8412b04u,4u,true,true,true},
+        {0xf8112b01u,0xf8012b01u,1u,true,true,true},
+        {0xf8312b02u,0xf8212b02u,2u,true,true,true}
+    };
+    for (unsigned n = 0; n < sizeof cases/sizeof cases[0]; n++)
+     for (unsigned write = 0; write < 2u; write++)
+      for (unsigned host = 0; host < 2u; host++) {
+        fixture_t f; arm_bus_t bus; arm_cpu_t c;
+        setup(&f, &bus, &c, cases[n].thumb, host != 0u);
+        if (cases[n].thumb && host) c.cpsr |= 0x1800u; /* Last IT NE slot. */
+        f.fail_address = 0x1000u; f.fail_size = cases[n].size; f.fail_write = write != 0u;
+        uint32_t insn = write ? cases[n].store : cases[n].load, flags = c.cpsr;
+        if (cases[n].wide) { put16(&f, 0u, (uint16_t)(insn >> 16)); put16(&f, 2u, (uint16_t)insn); }
+        else if (cases[n].thumb) put16(&f, 0u, (uint16_t)insn);
+        else put32(&f, 0u, insn);
+        put32(&f, 0x1000u, 0x44332211u);
+        CHECK(arm_step(&c) == ARM_HALT, "failed data callback did not halt");
+        CHECK(c.r[1] == 0x1000u && c.r[2] == 0x87654321u && get32(&f,0x1000u) == 0x44332211u,
+              "failed transfer committed data, destination or writeback");
+        check_stop(&f, &c, 0u, flags);
+        f.failed = false; f.fail_size = 0u;
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == (cases[n].thumb && !cases[n].wide ? 2u : 4u), "cleared failure did not retry the same instruction");
+        uint32_t mask = cases[n].size == 4u ? UINT32_MAX : (1u << (cases[n].size * 8u)) - 1u;
+        CHECK(c.r[1] == 0x1000u + (cases[n].writeback ? cases[n].size : 0u) &&
+              c.r[2] == (write ? 0x87654321u : 0x44332211u & mask) &&
+              get32(&f,0x1000u) == (write ? (0x44332211u & ~mask) | (0x87654321u & mask) : 0x44332211u),
+              "failed read or write was cached, or retry produced wrong data");
+      }
+}
+
+static void test_fetch_and_latched_cache(void) {
+    for (unsigned kind = 0; kind < 3u; kind++)
+     for (unsigned second = 0; second < (kind == 2u ? 2u : 1u); second++)
+      for (unsigned host = 0; host < 2u; host++) {
+        fixture_t f; arm_bus_t bus; arm_cpu_t c;
+        setup(&f, &bus, &c, kind != 0u, host != 0u);
+        if (kind == 0u) put32(&f,0u,0xe3a02001u);
+        else if (kind == 1u) put16(&f,0u,0x2201u);
+        else { put16(&f,0u,0xf240u); put16(&f,2u,0x0201u); }
+        f.fail_address = second * 2u; f.fail_size = kind ? 2u : 4u;
+        uint32_t flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_HALT && c.r[2] == 0x87654321u, "failed instruction fetch executed returned zero bytes");
+        check_stop(&f,&c,0u,flags);
+        f.failed = false; f.fail_size = 0u;
+        CHECK(arm_step(&c) == ARM_OK && c.r[2] == 1u, "instruction fetch failure did not retry");
+      }
+    fixture_t f; arm_bus_t bus; arm_cpu_t c;
+    setup(&f,&bus,&c,false,true);
+    put32(&f,0u,0xe1a00000u); put32(&f,4u,0xe3a02001u);
+    CHECK(arm_step(&c) == ARM_OK && c.fetch_host != NULL, "warm fetch cache");
+    f.failed = true;
+    unsigned accesses = f.accesses;
+    CHECK(arm_step(&c) == ARM_HALT && c.r[15] == 4u && c.r[2] == 0x87654321u && f.accesses == accesses,
+          "populated fetch cache bypassed a latched failure");
+}
+
+static void map_pages(fixture_t *f, arm_cpu_t *c) {
+    c->cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP; c->cp15.ttbr0 = 0x4000u; c->cp15.dacr = 1u;
+    put32(f,0x4000u,0x6001u); put32(f,0x6000u,0x803eu);
+    put32(f,0x6004u,0xa03eu); put32(f,0x6008u,0xc03eu);
+}
+static void test_walk_failures(void) {
+    for (unsigned data = 0; data < 2u; data++)
+     for (unsigned level = 0; level < 2u; level++)
+      for (unsigned host = 0; host < 2u; host++) {
+        fixture_t f; arm_bus_t bus; arm_cpu_t c;
+        setup(&f,&bus,&c,false,host != 0u); map_pages(&f,&c);
+        put32(&f,0x8000u,0xe5912000u); put32(&f,0xa000u,0x44332211u);
+        f.fail_address = level ? (data ? 0x6004u : 0x6000u) : 0x4000u;
+        f.fail_size = 4u; f.fail_nth = data && !level ? 2u : 1u;
+        uint32_t flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_HALT && c.r[2] == 0x87654321u, "failed table walk became a fabricated translation abort");
+        check_stop(&f,&c,0u,flags);
+        f.failed = false; f.fail_size = 0u;
+        CHECK(arm_step(&c) == ARM_OK && c.r[2] == 0x44332211u && c.r[15] == 4u, "host table-walk failure was cached as a guest fault");
+      }
+    fixture_t f; arm_bus_t bus; arm_cpu_t c;
+    setup(&f,&bus,&c,false,false); map_pages(&f,&c);
+    f.fail_address = 0x6004u; f.fail_size = 4u;
+    uint32_t pa = 0xdeadbeefu;
+    CHECK(arm_mmu_translate(&c,0x1000u,ARM_ACCESS_READ,true,&pa) == ARM_MMU_BUS_FAILURE && pa == 0xdeadbeefu,
+          "direct MMU caller lost host failure distinction or output preservation");
+    f.failed = false; f.fail_size = 0u;
+    CHECK(arm_mmu_translate(&c,0x1000u,ARM_ACCESS_READ,true,&pa) == 0u && pa == 0xa000u, "MMU cached a failed physical read");
+}
+
+static void test_partial_transfers_and_vfp(void) {
+    for (unsigned write = 0; write < 2u; write++) {
+        fixture_t f; arm_bus_t bus; arm_cpu_t c;
+        setup(&f,&bus,&c,false,false);
+        put32(&f,0u,write ? 0xe8a1000cu : 0xe8b1000cu);
+        put32(&f,0x1000u,0x11111111u); put32(&f,0x1004u,0x22222222u);
+        f.fail_address = 0x1004u; f.fail_size = 4u; f.fail_write = write != 0u;
+        uint32_t flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_HALT && c.r[1] == 0x1000u && c.r[3] == 0x12345678u &&
+              c.r[2] == 0x87654321u && /* LDM stages the entire register list. */
+              get32(&f,0x1000u) == (write ? 0x87654321u : 0x11111111u) && get32(&f,0x1004u) == 0x22222222u,
+              "multiple transfer lost completed prefix or committed failed destination/writeback");
+        check_stop(&f,&c,0u,flags);
+
+        setup(&f,&bus,&c,false,false); map_pages(&f,&c);
+        c.r[1] = 0x1fffu;
+        put32(&f,0x8000u,write ? 0xe4812004u : 0xe4912004u);
+        f.ram[0xafffu] = 0x11u; put32(&f,0xc000u,0xeeeeeeeeu);
+        f.fail_address = 0xc000u; f.fail_size = 1u; f.fail_write = write != 0u;
+        flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_HALT && c.r[1] == 0x1fffu && c.r[2] == 0x87654321u &&
+              f.ram[0xafffu] == (write ? 0x21u : 0x11u) && get32(&f,0xc000u) == 0xeeeeeeeeu,
+              "cross-page bus failure read beyond the failed byte or committed a partial load");
+        check_stop(&f,&c,0u,flags);
+
+        setup(&f,&bus,&c,false,false);
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = 0x40000000u; c.vfp_s[2] = 0x76543210u;
+        put32(&f,0u,write ? 0xed811a00u : 0xed911a00u); put32(&f,0x1000u,0x44332211u);
+        f.fail_address = 0x1000u; f.fail_size = 4u; f.fail_write = write != 0u;
+        flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_HALT && c.vfp_s[2] == 0x76543210u && get32(&f,0x1000u) == 0x44332211u,
+              "VFP transfer used failed bus data or committed a failed store");
+        check_stop(&f,&c,0u,flags);
+    }
+}
+
+static arm_svc_result_t failed_svc(void *ctx, arm_cpu_t *c, uint32_t pc, uint32_t encoding) {
+    (void)pc; (void)encoding;
+    c->r[2] = read32(ctx, 0x1000u);
+    c->r[15] = 0x200u; c->cpsr = ARM_MODE_USR; c->cycles += 20u;
+    return ARM_SVC_HANDLED; /* A host failure overrides even an erroneous success. */
+}
+static bool failed_wait(void *ctx) { (void)read32(ctx, 0x1000u); return true; }
+
+static void test_exception_and_host_hook_paths(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+        fixture_t f; arm_bus_t bus; arm_cpu_t c;
+        setup(&f,&bus,&c,thumb != 0u,false);
+        if (thumb) put16(&f,0u,0xdf00u); else put32(&f,0u,0xef000000u);
+        bus.privileged_svc_handler = failed_svc; bus.privileged_svc_ctx = &f;
+        f.fail_address = 0x1000u; f.fail_size = 4u;
+        uint32_t flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_HALT && c.r[2] == 0x87654321u && c.cycles == 0u,
+              "SVC callback committed failed host I/O or retired");
+        check_stop(&f,&c,0u,flags);
+        setup(&f,&bus,&c,thumb != 0u,false);
+        if (thumb) put16(&f,0u,0xbf30u); else put32(&f,0u,0xe320f003u);
+        bus.wait_for_interrupt = failed_wait;
+        f.fail_address = 0x1000u; f.fail_size = 4u; flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_HALT, "WFI retired after a failed platform wait");
+        check_stop(&f,&c,0u,flags);
+    }
+    for (unsigned write = 0; write < 2u; write++)
+     for (unsigned second = 0; second < 2u; second++) {
+        fixture_t f; arm_bus_t bus; arm_cpu_t c;
+        setup(&f,&bus,&c,false,false);
+        c.cpsr = ARM_MODE_SVC | ARM_CPSR_N | ARM_CPSR_C;
+        c.r[13] = 0x1000u; c.r[14] = 0x22222222u; c.spsr[ARM_BANK_SVC] = ARM_MODE_SYS;
+        /* SRSIA sp!,#SVC / RFEIA r1! exercise the direct exception-return paths. */
+        put32(&f,0u,write ? 0xf8ed0513u : 0xf8b10a00u);
+        put32(&f,0x1000u,0x200u); put32(&f,0x1004u,ARM_MODE_SYS);
+        f.fail_address = 0x1000u + 4u * second; f.fail_size = 4u; f.fail_write = write != 0u;
+        uint32_t flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_HALT && c.r[1] == 0x1000u && c.r[13] == 0x1000u &&
+              get32(&f,0x1000u) == (write && second ? 0x22222222u : 0x200u) &&
+              get32(&f,0x1004u) == ARM_MODE_SYS, "SRS/RFE committed failed data or writeback");
+        check_stop(&f,&c,0u,flags);
+    }
+}
+
+static void test_second_halfword_walk_failure(void) {
+    for (unsigned level = 0; level < 2u; level++) {
+        fixture_t f; arm_bus_t bus; arm_cpu_t c;
+        setup(&f,&bus,&c,true,true); map_pages(&f,&c);
+        c.r[15] = 0xffeu;
+        put16(&f,0x8ffeu,0xf240u); put16(&f,0xa000u,0x0201u);
+        f.fail_address = level ? 0x6004u : 0x4000u; f.fail_size = 4u; f.fail_nth = level ? 1u : 2u;
+        uint32_t flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_HALT && c.r[2] == 0x87654321u,
+              "second-halfword walk failure decoded a partial Thumb instruction");
+        check_stop(&f,&c,0xffeu,flags);
+        f.failed = false; f.fail_size = 0u;
+        CHECK(arm_step(&c) == ARM_OK && c.r[2] == 1u && c.r[15] == 0x1002u,
+              "second-halfword walk failure was cached or changed framing");
+    }
+}
+
+static void test_exclusive_store_retry(void) {
+    static const struct { uint32_t insn; unsigned size; } cases[] = {
+        {0xe1813f92u,4u}, {0xe1c13f92u,1u}, {0xe1e13f92u,2u}, {0xe1a14f92u,4u}
+    }; /* STREX/STREXB/STREXH r3,r2,[r1]; STREXD r4,r2,r3,[r1]. */
+    for (unsigned n = 0; n < sizeof cases/sizeof cases[0]; n++) {
+        fixture_t f; arm_bus_t bus; arm_cpu_t c;
+        setup(&f,&bus,&c,false,false);
+        put32(&f,0u,cases[n].insn); put32(&f,0x1000u,0x44332211u);
+        c.excl_valid = true; c.excl_addr = 0x1000u; c.r[4] = 0xabcdef01u;
+        f.fail_address = 0x1000u; f.fail_size = cases[n].size; f.fail_write = true;
+        uint32_t flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_HALT && c.excl_valid && c.excl_addr == 0x1000u &&
+              c.r[3] == 0x12345678u && c.r[4] == 0xabcdef01u && get32(&f,0x1000u) == 0x44332211u,
+              "failed exclusive store consumed its monitor or committed a result");
+        check_stop(&f,&c,0u,flags);
+        f.failed = false; f.fail_size = 0u;
+        CHECK(arm_step(&c) == ARM_OK && !c.excl_valid && c.r[n == 3u ? 4u : 3u] == 0u,
+              "retry of a failed exclusive store reported spurious monitor failure");
+    }
+}
+
+static void test_native_cache_refill_refused(void) {
+    fixture_t f; arm_bus_t bus; arm_cpu_t c;
+    setup(&f,&bus,&c,false,true); map_pages(&f,&c);
+    put32(&f,0x8000u,0xe5912000u);
+    CHECK(arm_step(&c) == ARM_OK && c.fetch_host != NULL, "warm checked-bus caches");
+    uint64_t hits = c.tlb_hits, misses = c.tlb_misses;
+    const uint8_t *fetch = c.fetch_host;
+    CHECK(!arm_fetch_cache_try_refill(&c,0u,true) &&
+          !arm_data_cache_try_refill(&c,0x1000u,ARM_ACCESS_READ,true) &&
+          !arm_data_cache_try_refill(&c,0x1000u,ARM_ACCESS_WRITE,true),
+          "native cache refill accepted a checked bus before failure");
+    CHECK(c.fetch_host == fetch && c.tlb_hits == hits && c.tlb_misses == misses,
+          "refused native refill changed cache state or counters");
+}
+
+static void test_counter_wraparound(void) {
+    fixture_t f; arm_bus_t bus; arm_cpu_t c;
+    setup(&f,&bus,&c,false,false);
+    put32(&f,0u,0xe5912000u);
+    c.cycles = UINT64_MAX;
+    f.fail_address = 0x1000u; f.fail_size = 4u;
+    CHECK(arm_step(&c) == ARM_HALT && c.cycles == UINT64_MAX && c.r[15] == 0u,
+          "failed access did not reverse a wrapping retirement increment");
+    f.failed = false; f.fail_size = 0u;
+    CHECK(arm_step(&c) == ARM_OK && c.cycles == 0u && c.r[15] == 4u,
+          "successful retry did not retire exactly once across wraparound");
+}
+
+#ifdef S5LBOX_STATIC_A64_ENGINE
+static void test_signed_runner_entry_guards(void) {
+    static const arm_arch_t profiles[] = {
+        ARM_ARCH_V6_ARM1176, ARM_ARCH_V6_ARM1176,
+        ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT, (arm_arch_t)99
+    };
+    if (!a64_static_host_available())
+        printf("SKIP native signed execution: no AArch64 handlers on this host\n");
+    for (unsigned p = 0; p < sizeof profiles/sizeof profiles[0]; p++)
+     for (unsigned runner = 0; runner < 12u; runner++) {
+        fixture_t f; arm_bus_t bus; arm_cpu_t c;
+        a64_static_block_t block = {0};
+        a64_static_graph_node_t nodes[A64_STATIC_GRAPH_SLOTS] = {{0}};
+        setup(&f,&bus,&c,false,true);
+        c.arch = profiles[p];
+        if (p != 1u) bus.access_failed = NULL;
+        c.r[2] = 0u;
+        c.fetch_host = f.ram; c.fetch_gen = c.tlb_gen; c.fetch_priv = true;
+        put32(&f,0u,0xe2822001u); put32(&f,4u,0xeafffffdu);
+        CHECK(a64_static_decode_memory_hits_bytes_at(f.ram,2u,false,0u,&block), "decode signed control block");
+        unsigned completed = 0u, blocks = 0u, native = 0u, fallback = 0u;
+        uint64_t hits = 0u;
+        bool result = false;
+        switch (runner) {
+        case 0: result = a64_static_run(&c,&block,1u,f.ram,sizeof f.ram); break;
+        case 1: result = a64_static_run_read_hits(&c,&block,f.ram,sizeof f.ram,&completed); break;
+        case 2: result = a64_static_run_memory_hits(&c,&block,f.ram,sizeof f.ram,&completed); break;
+        case 3: result = a64_static_run_read_hits_decoded(&c,&block,f.ram,sizeof f.ram,&completed); break;
+        case 4: result = a64_static_run_memory_hits_decoded(&c,&block,f.ram,sizeof f.ram,true,&completed); break;
+        case 5: result = a64_static_run_read_hits_chain(&c,&block,f.ram,sizeof f.ram,2u,NULL,NULL,&completed,&blocks); break;
+        case 6: result = a64_static_run_memory_hits_chain(&c,&block,f.ram,sizeof f.ram,2u,NULL,NULL,true,&completed,&blocks); break;
+        case 7: result = a64_static_run_read_hits_graph(&c,&block,f.ram,sizeof f.ram,2u,nodes,&completed,&blocks); break;
+        case 8: result = a64_static_run_memory_hits_graph(&c,&block,f.ram,sizeof f.ram,2u,nodes,true,&completed,&blocks); break;
+        case 9: result = a64_compact_raw_run(&c,f.ram,0u,8u,2u,f.ram,sizeof f.ram,&completed); break;
+        case 10: result = a64_compact_raw_run_code_window(&c,f.ram,0u,8u,2u,&completed); break;
+        case 11: result = a64_compact_raw_run_code_window_resident_cached(&c,f.ram,0u,8u,2u,NULL,NULL,true,&hits,&completed,&native,&fallback); break;
+        }
+        bool expected = p == 0u && a64_static_host_available();
+        CHECK(result == expected, "signed runner profile/bus decision");
+        CHECK(c.r[2] == (expected ? 1u : 0u) && c.r[15] == 0u && c.cycles == (expected ? 2u : 0u),
+              "signed runner did not preserve refused state or execute the valid control");
+        CHECK(f.accesses == 0u, "signed runner guard entered a bus callback");
+    }
+}
+#endif
+
+int main(void) {
+    test_data_and_retry();
+    test_fetch_and_latched_cache();
+    test_walk_failures();
+    test_partial_transfers_and_vfp();
+    test_exception_and_host_hook_paths();
+    test_second_halfword_walk_failure();
+    test_exclusive_store_retry();
+    test_native_cache_refill_refused();
+    test_counter_wraparound();
+#ifdef S5LBOX_STATIC_A64_ENGINE
+    test_signed_runner_entry_guards();
+#endif
+    printf("%u passed, %u failed\n",passed,failed);
+    return failed ? 1 : 0;
+}

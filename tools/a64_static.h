@@ -19,6 +19,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Every native entry implements ARM1176 semantics and assumes an infallible
+ * bus. Checked buses must stop at the original access in the interpreter. */
+static inline bool a64_static_cpu_supported(const arm_cpu_t *cpu) {
+    return cpu && cpu->arch == ARM_ARCH_V6_ARM1176 &&
+           (!cpu->bus || !cpu->bus->access_failed);
+}
+
 #define A64_STATIC_MAX_INSNS 16u
 /* One decoded head remains capped at sixteen instructions. A callback-free
  * invocation may visit several already-validated heads, but this separate

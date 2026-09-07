@@ -67,6 +67,7 @@ privileged_svc_result(arm_cpu_t *c, uint32_t pc, uint32_t encoding) {
     arm_svc_result_t result =
         c->bus->privileged_svc_handler(c->bus->privileged_svc_ctx,
                                        c, pc, encoding);
+    if (arm_bus_access_failed(c->bus)) result = ARM_SVC_ERROR;
     if (result == ARM_SVC_HANDLED || result == ARM_SVC_REDIRECTED)
         return result;
 
@@ -94,6 +95,19 @@ static void note_abort(arm_cpu_t *c, uint32_t fsr, uint32_t va) {
     c->abort_pending = true;
     c->abort_fsr = fsr;
     c->abort_far = va;
+}
+
+static inline bool note_bus_failure(arm_cpu_t *c, uint32_t va) {
+    if (!arm_bus_access_failed(c->bus)) return false;
+    note_abort(c, ARM_MMU_BUS_FAILURE, va);
+    return true;
+}
+
+/* Decode counts the instruction before executing it. A host capability stop
+ * does not retire; reverse that increment, including unsigned wraparound. */
+static arm_status_t halt_failed_instruction(arm_cpu_t *c) {
+    c->cycles--;
+    return ARM_HALT;
 }
 
 static void note_alignment_abort(arm_cpu_t *c, uint32_t va, bool write) {
@@ -190,8 +204,9 @@ static uint32_t mem_read_crossing(arm_cpu_t *c, uint32_t va, unsigned n, bool pr
             if (f) { note_abort(c, f, a); return 0; }
             page_pa = pa & ~ARM_PAGE_MASK;
         }
-        val |= (uint32_t)c->bus->read8(c->bus->ctx, page_pa | (a & ARM_PAGE_MASK))
-               << (8u * i);
+        uint8_t part = c->bus->read8(c->bus->ctx, page_pa | (a & ARM_PAGE_MASK));
+        if (note_bus_failure(c, a)) return 0u;
+        val |= (uint32_t)part << (8u * i);
     }
     return val;
 }
@@ -210,6 +225,7 @@ static void mem_write_crossing(arm_cpu_t *c, uint32_t va, unsigned n, uint32_t v
         }
         c->bus->write8(c->bus->ctx, page_pa | (a & ARM_PAGE_MASK),
                        (uint8_t)(v >> (8u * i)));
+        if (note_bus_failure(c, a)) return;
     }
 }
 
@@ -313,6 +329,7 @@ static inline void dwrite_fill(arm_cpu_t *c, uint32_t va, uint32_t pa,
 
 #define MEM_READ(bits)                                                        \
     static uint##bits##_t mem_r##bits##_as(arm_cpu_t *c, uint32_t va, bool priv) { \
+        if (note_bus_failure(c, va)) return 0;                               \
         uint32_t original = va;                                               \
         if ((bits) > 8 && (va & ((bits) / 8u - 1u)) != 0u) {                 \
             if ((c->cp15.sctlr & ARM_SCTLR_A) != 0u) {                       \
@@ -333,6 +350,7 @@ static inline void dwrite_fill(arm_cpu_t *c, uint32_t va, uint32_t pa,
                                                    priv, &pa);                \
                 if (f) { note_abort(c, f, va); return 0; }                    \
                 value = c->bus->read##bits(c->bus->ctx, pa);                 \
+                if (note_bus_failure(c, va)) return 0;                       \
                 dread_fill(c, va, pa, priv);                                  \
             }                                                                 \
         }                                                                     \
@@ -346,6 +364,7 @@ static inline void dwrite_fill(arm_cpu_t *c, uint32_t va, uint32_t pa,
 #define MEM_WRITE(bits)                                                       \
     static void mem_w##bits##_as(arm_cpu_t *c, uint32_t va, uint##bits##_t v, \
                                   bool priv) {                                 \
+        if (note_bus_failure(c, va)) return;                                 \
         if ((bits) > 8 && (va & ((bits) / 8u - 1u)) != 0u) {                 \
             if ((c->cp15.sctlr & ARM_SCTLR_A) != 0u) {                       \
                 note_alignment_abort(c, va, true); return;                    \
@@ -361,6 +380,7 @@ static inline void dwrite_fill(arm_cpu_t *c, uint32_t va, uint32_t pa,
         uint32_t pa, f = arm_mmu_translate(c, va, ARM_ACCESS_WRITE, priv, &pa);\
         if (f) { note_abort(c, f, va); return; }                              \
         c->bus->write##bits(c->bus->ctx, pa, v);                              \
+        if (note_bus_failure(c, va)) return;                                 \
         dwrite_fill(c, va, pa, priv);                                         \
     }                                                                         \
     static inline void mem_w##bits(arm_cpu_t *c, uint32_t va, uint##bits##_t v) {\
@@ -549,13 +569,17 @@ static void take_exception(arm_cpu_t *c, uint32_t vector, uint32_t mode,
 /* Complete a data abort latched by the translating memory helpers. This is a
  * helper rather than only arm_step's tail path because unconditional SRS/RFE
  * return directly from their decoder and must take the same exception there. */
-static void take_pending_data_abort(arm_cpu_t *c, uint32_t pc) {
+static arm_status_t take_pending_data_abort(arm_cpu_t *c, uint32_t pc) {
     uint32_t vec;
     c->abort_pending = false;
+    /* An unavailable physical bus operation is a host capability boundary,
+     * not an architectural abort that a guest handler can repair. */
+    if (c->abort_fsr == ARM_MMU_BUS_FAILURE) return halt_failed_instruction(c);
     c->cp15.dfsr = c->abort_fsr;
     c->cp15.dfar = c->abort_far;
     take_exception(c, ARM_VEC_DATA_ABORT, ARM_MODE_ABT, pc + 8u, false, &vec);
     c->r[15] = vec;
+    return ARM_OK;
 }
 
 /* ============================ the Undefined-instruction discrimination =====
@@ -3366,6 +3390,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
 
 arm_status_t arm_step(arm_cpu_t *c) {
     if (!arm_arch_is_valid(c->arch)) return ARM_UNDEFINED;
+    if (arm_bus_access_failed(c->bus)) return ARM_HALT;
     uint32_t pc   = c->r[15];
 
     /* A corrupted snapshot or malformed exception frame must not turn an
@@ -3419,6 +3444,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
                                                fetch_priv, &fetch_pa);
         if (fetch_fsr) {
             uint32_t vec;
+            if (fetch_fsr == ARM_MMU_BUS_FAILURE) return ARM_HALT;
             c->cycles++;
             c->cp15.ifsr = fetch_fsr;
             c->cp15.ifar = pc;
@@ -3449,6 +3475,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
             ? (uint16_t)((uint16_t)fetch_host[0] |
                          ((uint16_t)fetch_host[1] << 8))
             : c->bus->read16(c->bus->ctx, fetch_pa);
+        if (arm_bus_access_failed(c->bus)) return ARM_HALT;
         uint32_t tnext = pc + 2;
         c->cycles++;
         arm_status_t tst = ARM_OK;
@@ -3467,6 +3494,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
                                                    fetch_priv, &second_pa);
             if (second_fsr) {
                 uint32_t vec;
+                if (second_fsr == ARM_MMU_BUS_FAILURE) return halt_failed_instruction(c);
                 c->cp15.ifsr = second_fsr;
                 c->cp15.ifar = pc + 2u;
                 take_exception(c, ARM_VEC_PREFETCH, ARM_MODE_ABT, pc + 4u,
@@ -3475,6 +3503,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
                 return ARM_OK;
             }
             second = c->bus->read16(c->bus->ctx, second_pa);
+            if (arm_bus_access_failed(c->bus)) return halt_failed_instruction(c);
             tnext = pc + 4u;
         }
         if (!thumb_it_placement(it, tinsn, second, wide)) return ARM_UNDEFINED;
@@ -3486,10 +3515,8 @@ arm_status_t arm_step(arm_cpu_t *c) {
             else tst = thumb_step(c, pc, tinsn, &tnext, &exception_taken);
         }
         if (tst == ARM_HALT) return ARM_HALT;
-        if (c->abort_pending) {
-            take_pending_data_abort(c, pc);
-            return ARM_OK;
-        }
+        if (c->abort_pending) return take_pending_data_abort(c, pc);
+        if (arm_bus_access_failed(c->bus)) return halt_failed_instruction(c);
         if (tst == ARM_GUEST_UNDEFINED) return take_undefined_instruction(c, pc);
         if (tst == ARM_OK) {
             if (it && !exception_taken) thumb_advance_it(c, it);
@@ -3508,6 +3535,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
     c->cycles++;
 
     uint32_t cond = insn >> 28;
+    if (arm_bus_access_failed(c->bus)) return halt_failed_instruction(c);
 
     /* cond==0xF is NOT "always" on ARMv6 — it is the unconditional instruction
      * space (PLD, BLX immediate, SETEND, CPS, RFE, SRS). Decoding it as a
@@ -3623,14 +3651,13 @@ arm_status_t arm_step(arm_cpu_t *c) {
             uint32_t base = U ? (P ? sp + 4u : sp) : (P ? sp - 8u : sp - 4u);
 
             if (!prepare_multiword_address(c, &base, 4u, true)) {
-                take_pending_data_abort(c, pc);
-                return ARM_OK;
+                return take_pending_data_abort(c, pc);
             }
 
             mem_w32(c, base, c->r[14]);
-            if (c->abort_pending) { take_pending_data_abort(c, pc); return ARM_OK; }
+            if (c->abort_pending) return take_pending_data_abort(c, pc);
             mem_w32(c, base + 4u, c->spsr[cur]);
-            if (c->abort_pending) { take_pending_data_abort(c, pc); return ARM_OK; }
+            if (c->abort_pending) return take_pending_data_abort(c, pc);
 
             if (W) {
                 uint32_t wb = U ? sp + 8u : sp - 8u;
@@ -3659,14 +3686,13 @@ arm_status_t arm_step(arm_cpu_t *c) {
             uint32_t base = U ? (P ? sp + 4u : sp) : (P ? sp - 8u : sp - 4u);
 
             if (!prepare_multiword_address(c, &base, 4u, false)) {
-                take_pending_data_abort(c, pc);
-                return ARM_OK;
+                return take_pending_data_abort(c, pc);
             }
 
             uint32_t new_pc = mem_r32(c, base);
-            if (c->abort_pending) { take_pending_data_abort(c, pc); return ARM_OK; }
+            if (c->abort_pending) return take_pending_data_abort(c, pc);
             uint32_t new_cpsr = mem_r32(c, base + 4u);
-            if (c->abort_pending) { take_pending_data_abort(c, pc); return ARM_OK; }
+            if (c->abort_pending) return take_pending_data_abort(c, pc);
 
             if (!arm_mode_is_valid(new_cpsr)) return ARM_UNDEFINED;
             if ((new_cpsr & ARM_CPSR_T) == 0u && (new_pc & 2u) != 0u)
@@ -3824,7 +3850,9 @@ arm_status_t arm_step(arm_cpu_t *c) {
                 } else {
                     c->r[rd] = 1;                         /* 1 = failed */
                 }
-                c->excl_valid = false; /* monitor is consumed either way */
+                /* Keep the monitor for an explicit host retry. Guest aborts
+                 * retain the existing monitor-consumption behavior. */
+                if (!arm_bus_access_failed(c->bus)) c->excl_valid = false;
             }
         }
     /*
@@ -3870,7 +3898,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
                 } else {
                     c->r[rd] = 1;
                 }
-                c->excl_valid = false;
+                if (!arm_bus_access_failed(c->bus)) c->excl_valid = false;
             }
         }
     } else if ((insn & 0x0ff00ff0u) == 0x01d00f90u) {     /* LDREXB Rd,[Rn] */
@@ -3899,7 +3927,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
             } else {
                 c->r[rd] = 1;
             }
-            c->excl_valid = false;
+            if (!arm_bus_access_failed(c->bus)) c->excl_valid = false;
         }
     } else if ((insn & 0x0ff00ff0u) == 0x01f00f90u) {     /* LDREXH Rd,[Rn] */
         unsigned rn = (insn >> 16) & 0xfu, rd = (insn >> 12) & 0xfu;
@@ -3930,7 +3958,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
                 } else {
                     c->r[rd] = 1;
                 }
-                c->excl_valid = false;
+                if (!arm_bus_access_failed(c->bus)) c->excl_valid = false;
             }
         }
     /*
@@ -3999,10 +4027,8 @@ arm_status_t arm_step(arm_cpu_t *c) {
 
     /* A translation fault latched during the instruction becomes a data abort.
      * LR_abt is the aborting instruction's address + 8, per the architecture. */
-    if (c->abort_pending) {
-        take_pending_data_abort(c, pc);
-        return ARM_OK;
-    }
+    if (c->abort_pending) return take_pending_data_abort(c, pc);
+    if (arm_bus_access_failed(c->bus)) return halt_failed_instruction(c);
 
     /* Every ARM-state encoding we declined funnels through here, wherever in
      * the decode tree it was rejected — the CDP, LDC/STC and MCRR/MRRC forms

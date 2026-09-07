@@ -200,6 +200,13 @@ add_executable(test_arm tests/test_arm.c)
 target_link_libraries(test_arm PRIVATE emucore)
 add_test(NAME arm_interp COMMAND test_arm)
 
+add_executable(test_bus_failure tests/test_bus_failure.c)
+target_link_libraries(test_bus_failure PRIVATE emucore)
+if(S5LBOX_STATIC_A64_ENGINE)
+    target_include_directories(test_bus_failure PRIVATE ../tools)
+endif()
+add_test(NAME arm_bus_failure COMMAND test_bus_failure)
+
 add_executable(test_vfp tests/test_vfp.c)
 target_link_libraries(test_vfp PRIVATE emucore)
 add_test(NAME vfp COMMAND test_vfp)

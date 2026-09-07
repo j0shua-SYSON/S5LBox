@@ -125,6 +125,7 @@ static bool jit_pretranslate_crossing(arm_cpu_t *c, uint32_t va, unsigned n,
 }
 
 uint64_t jit_mem_load32(arm_cpu_t *c, uint32_t va) {
+    if (!jit_cpu_supported(c)) return UINT64_C(1) << 32;
     uint32_t original = va;
     uint32_t pa;
     if ((va & 3u) != 0u) {
@@ -154,6 +155,7 @@ uint64_t jit_mem_load32(arm_cpu_t *c, uint32_t va) {
     return jit_legacy_rotate_word(c->bus->read32(c->bus->ctx, pa), original - va);
 }
 uint64_t jit_mem_load16(arm_cpu_t *c, uint32_t va) {
+    if (!jit_cpu_supported(c)) return UINT64_C(1) << 32;
     uint32_t pa;
     if ((va & 1u) != 0u) {
         if ((c->cp15.sctlr & ARM_SCTLR_A) != 0u)
@@ -177,12 +179,14 @@ uint64_t jit_mem_load16(arm_cpu_t *c, uint32_t va) {
     return c->bus->read16(c->bus->ctx, pa);
 }
 static uint64_t jit_helper_load8(arm_cpu_t *c, uint32_t va) {
+    if (!jit_cpu_supported(c)) return UINT64_C(1) << 32;
     uint32_t pa;
     if (arm_mmu_translate(c, va, ARM_ACCESS_READ, jit_priv(c), &pa))
         return (uint64_t)1 << 32;
     return c->bus->read8(c->bus->ctx, pa);
 }
 uint32_t jit_mem_store32(arm_cpu_t *c, uint32_t va, uint32_t val) {
+    if (!jit_cpu_supported(c)) return 1u;
     uint32_t pa;
     if ((va & 3u) != 0u) {
         if ((c->cp15.sctlr & ARM_SCTLR_A) != 0u) return 1u;
@@ -201,6 +205,7 @@ uint32_t jit_mem_store32(arm_cpu_t *c, uint32_t va, uint32_t val) {
     return 0u;
 }
 uint32_t jit_mem_store16(arm_cpu_t *c, uint32_t va, uint32_t val) {
+    if (!jit_cpu_supported(c)) return 1u;
     uint32_t pa;
     if ((va & 1u) != 0u) {
         if ((c->cp15.sctlr & ARM_SCTLR_A) != 0u) return 1u;
@@ -219,6 +224,7 @@ uint32_t jit_mem_store16(arm_cpu_t *c, uint32_t va, uint32_t val) {
     return 0u;
 }
 static uint32_t jit_helper_store8(arm_cpu_t *c, uint32_t va, uint32_t val) {
+    if (!jit_cpu_supported(c)) return 1u;
     uint32_t pa;
     if (arm_mmu_translate(c, va, ARM_ACCESS_WRITE, jit_priv(c), &pa)) return 1u;
     c->bus->write8(c->bus->ctx, pa, (uint8_t)val);
@@ -1442,6 +1448,8 @@ bool jit_translate(arm_cpu_t *cpu, uint32_t va, uint32_t *code,
     unsigned  i;
 
     memset(out, 0, sizeof *out);
+    out->end_reason = JIT_END_FALLBACK;
+    if (!jit_cpu_supported(cpu)) return false;
     memset(&t, 0, sizeof t);
     t.cpu  = cpu;
     t.priv = jit_priv(cpu);

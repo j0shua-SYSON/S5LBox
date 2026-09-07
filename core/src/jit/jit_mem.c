@@ -318,7 +318,7 @@ const char *jit_buf_policy(const jit_buf_t *b) {
 int jit_enter(const jit_buf_t *arena, const jit_block_t *blk, arm_cpu_t *cpu) {
     size_t bytes;
 
-    if (!arena || !blk || !cpu || !arena->base || arena->generation == 0 ||
+    if (!arena || !blk || !jit_cpu_supported(cpu) || !arena->base || arena->generation == 0 ||
         arena->write_epoch == 0 ||
         !arena->executable ||
         arena->write_depth != 0 || !blk->code ||

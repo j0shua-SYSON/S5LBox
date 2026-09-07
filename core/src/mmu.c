@@ -30,8 +30,10 @@
  *   [11]   WnR     — see below.
  *   [7:4]  domain  — read by nothing in the kernel, but cheap and correct.
  *   [12]   ExT     — external abort qualifier. We have no external abort source:
- *                    an unmapped bus read returns zero rather than signalling,
- *                    so status 0x8/0xc/0xe are unreachable and ExT stays clear.
+ *                    the legacy bus does not signal one, so status 0x8/0xc/0xe
+ *                    are unreachable and ExT stays clear. Optional checked-bus
+ *                    failures report missing host capabilities, not an emulated
+ *                    external abort; ARM_MMU_BUS_FAILURE never becomes an FSR.
  *   [1]/status 0b0001 — alignment. XNU clears SCTLR.A and sets SCTLR.U at
  *                    __start+0x16c, so ordinary halfword/word accesses can be
  *                    unaligned while multiple, coprocessor, swap and exclusive
@@ -236,6 +238,7 @@ void arm_mmu_tlb_flush(arm_cpu_t *c) {
  */
 uint32_t arm_mmu_translate(arm_cpu_t *c, uint32_t va, arm_access_t acc,
                            bool priv, uint32_t *pa) {
+    if (arm_bus_access_failed(c->bus)) return ARM_MMU_BUS_FAILURE;
     if (!(c->cp15.sctlr & ARM_SCTLR_M)) { *pa = va; return 0; }
 
     /*
@@ -305,6 +308,7 @@ uint32_t arm_mmu_translate(arm_cpu_t *c, uint32_t va, arm_access_t acc,
     /* Straight into the caller's pa, so the untouched-on-fault contract is the
      * walk's own rather than something restated here. */
     uint32_t fsr = mmu_walk(c, va, acc, priv, pa);
+    if (fsr == ARM_MMU_BUS_FAILURE) return fsr;
     /* ARMv7 software-managed Access flags (DDI0406C.b B3.7.4): an AF=0
      * descriptor is never held in the TLB. Software sets AF and retries
      * without TLBI, so caching this fault would keep rejecting the page.
@@ -326,7 +330,7 @@ bool arm_fetch_cache_try_refill(arm_cpu_t *c, uint32_t va, bool priv) {
     const uint32_t va_block = va & ~UINT32_C(0x3ff);
     bool count_tlb_hit = false;
 
-    if (!c || !c->bus || !c->bus->host_ram) return false;
+    if (!c || !c->bus || c->bus->access_failed || !c->bus->host_ram) return false;
     if (c->fetch_host && c->fetch_blk == va_block &&
         c->fetch_gen == c->tlb_gen && c->fetch_priv == priv)
         return true;
@@ -368,7 +372,7 @@ bool arm_data_cache_try_refill(arm_cpu_t *c, uint32_t va,
     bool count_tlb_hit = false;
     const bool mmu_enabled = (c && (c->cp15.sctlr & ARM_SCTLR_M) != 0u);
 
-    if (!c || !c->bus ||
+    if (!c || !c->bus || c->bus->access_failed ||
         (access != ARM_ACCESS_READ && access != ARM_ACCESS_WRITE))
         return false;
     if (mmu_enabled &&
@@ -466,6 +470,7 @@ static uint32_t mmu_walk(arm_cpu_t *c, uint32_t va, arm_access_t acc,
         return fsr_make(ARM_FSR_SECTION_TRANSLATION, 0, write);
 
     uint32_t l1      = c->bus->read32(c->bus->ctx, l1_addr);
+    if (arm_bus_access_failed(c->bus)) return ARM_MMU_BUS_FAILURE;
     unsigned type    = l1 & 3u;
     unsigned domain  = (l1 >> 5) & 0xfu;
     bool xp = (c->cp15.sctlr & ARM_SCTLR_XP) != 0u;
@@ -527,6 +532,7 @@ static uint32_t mmu_walk(arm_cpu_t *c, uint32_t va, arm_access_t acc,
     if (type == 1u) {                       /* coarse second-level table */
         uint32_t l2_addr = (l1 & 0xfffffc00u) | (((va >> 12) & 0xffu) << 2);
         uint32_t l2      = c->bus->read32(c->bus->ctx, l2_addr);
+        if (arm_bus_access_failed(c->bus)) return ARM_MMU_BUS_FAILURE;
         unsigned t2      = l2 & 3u;
 
         if (t2 == 0u) return fsr_make(ARM_FSR_PAGE_TRANSLATION, domain, write);

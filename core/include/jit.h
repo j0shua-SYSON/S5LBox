@@ -23,6 +23,15 @@
 #include "arm.h"
 #include <stddef.h>
 
+/* The translator and emitted helpers implement only the ARM1176 contract.
+ * Checked buses require the interpreter to stop on the original failed access;
+ * replaying that access from native code could duplicate earlier MMIO effects.
+ * Test hook presence, even when no failure is currently latched. */
+static inline bool jit_cpu_supported(const arm_cpu_t *cpu) {
+    return cpu && cpu->arch == ARM_ARCH_V6_ARM1176 &&
+           (!cpu->bus || !cpu->bus->access_failed);
+}
+
 /* ---------------------------------------------------------- host mapping --
  * Fixed across all blocks, because chaining means one block branches into
  * another with no glue code and both must agree on where guest state lives.
@@ -136,7 +145,8 @@ uint32_t jit_get_deny(void);
  * Returns false if not a single instruction could be translated, in which case
  * out->insn_count is 0 and the caller must interpret. A block with
  * insn_count == 0 and end_reason == JIT_END_FALLBACK is the normal "the very
- * first instruction is not one we handle" result.
+ * first instruction is not one we handle" result. Non-ARM1176 profiles and
+ * buses with access_failed installed return that fallback before any fetch.
  */
 bool jit_translate(arm_cpu_t *cpu, uint32_t va, uint32_t *code,
                    size_t cap_words, jit_block_t *out);
@@ -144,7 +154,8 @@ bool jit_translate(arm_cpu_t *cpu, uint32_t va, uint32_t *code,
 /* Memory-helper ABI used by emitted blocks. These are visible so the fault and
  * page-crossing contract can be tested on hosts that cannot execute AArch64:
  * loads return bit 32 on fault, stores return non-zero, and a fault is reported
- * before any bus access so interpreter replay cannot duplicate MMIO effects. */
+ * before any bus access so interpreter replay cannot duplicate MMIO effects.
+ * Unsupported CPU profiles and checked buses request the same fallback. */
 uint64_t jit_mem_load32(arm_cpu_t *cpu, uint32_t va);
 uint64_t jit_mem_load16(arm_cpu_t *cpu, uint32_t va);
 uint32_t jit_mem_store32(arm_cpu_t *cpu, uint32_t va, uint32_t value);
@@ -210,6 +221,8 @@ const char *jit_buf_policy(const jit_buf_t *b);
  * jit_block_commit() against `arena`; range, generation, write-epoch and
  * closed-write-state checks fail safely to JIT_EXIT_INTERPRET. On a non-arm64
  * host this always returns JIT_EXIT_INTERPRET, so callers keep working slowly.
+ * Entry also refuses non-ARM1176 CPU profiles and checked buses, even if the
+ * block was committed before the profile or bus configuration changed.
  */
 int jit_enter(const jit_buf_t *arena, const jit_block_t *blk, arm_cpu_t *cpu);
 

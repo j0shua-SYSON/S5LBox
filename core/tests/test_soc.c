@@ -4182,6 +4182,51 @@ static void test_timer_interrupt_reaches_handler(void) {
     s5l8900_free(&m);
 }
 
+static bool checked_bus_ok(void *ctx) { (void)ctx; return false; }
+static bool checked_bus_stopped(void *ctx) { (void)ctx; return true; }
+
+static void test_checked_bus_uses_interpreter_fallback(void) {
+    for (unsigned mode = 0; mode < 4u; mode++)
+     for (unsigned thumb = 0; thumb < 2u; thumb++) {
+        s5l8900_t m = {0};
+        bool initialized = s5l8900_init(&m,0u,1u << 20);
+        CHECK(initialized, "checked-bus machine fixture init");
+        if (!initialized) return;
+        const uint32_t arm[] = {0xe2822001u,0xeafffffdu}; /* ADD r2,#1; B to ADD */
+        const uint16_t narrow[] = {0x3201u,0xe7fdu};
+        s5l8900_load(&m,0u,thumb ? (const void *)narrow : (const void *)arm,
+                    thumb ? sizeof narrow : sizeof arm);
+        m.cpu.cpsr = ARM_MODE_SYS | (thumb ? ARM_CPSR_T : 0u);
+        bool available = s5l8900_static_a64_available();
+        CHECK(s5l8900_static_a64_set_enabled(&m,true) == available, "static availability");
+        if (available) {
+            CHECK(s5l8900_static_a64_set_persistent(&m,mode == 1u) &&
+                  s5l8900_static_a64_set_graph(&m,mode == 2u) &&
+                  s5l8900_static_a64_set_compact_raw(&m,mode == 3u) &&
+                  s5l8900_static_a64_set_compact_raw_privileged(&m,true) &&
+                  s5l8900_static_a64_set_fetch_refill(&m,true) &&
+                  s5l8900_static_a64_set_known_negative_bypass(&m,true), "static fixture configuration");
+        }
+        arm_status_t status = ARM_OK;
+        CHECK(s5l8900_run(&m,200u,&status) == 200u && status == ARM_OK && m.cpu.r[2] == 100u,
+              "warm native caches and descriptors");
+        uint64_t native = s5l8900_static_a64_retired(&m);
+        m.bus.access_failed = checked_bus_ok;
+        CHECK(s5l8900_run(&m,200u,&status) == 200u && status == ARM_OK &&
+              m.cpu.r[2] == 200u && m.cpu.r[15] == 0u && s5l8900_static_a64_retired(&m) == native,
+              "checked bus reused native code instead of the interpreter");
+        m.bus.access_failed = checked_bus_stopped;
+        uint64_t cycles = m.cpu.cycles;
+        CHECK(s5l8900_run(&m,200u,&status) == 0u && status == ARM_HALT && m.cpu.r[15] == 0u &&
+              m.cpu.r[2] == 200u && m.cpu.cycles == cycles && s5l8900_static_a64_retired(&m) == native,
+              "latched host failure retired through a warm engine");
+        m.bus.access_failed = checked_bus_ok;
+        CHECK(s5l8900_run(&m,1u,&status) == 1u && status == ARM_OK && m.cpu.r[2] == 201u &&
+              s5l8900_static_a64_retired(&m) == native, "cleared bus latch did not resume in interpreter");
+        s5l8900_free(&m);
+    }
+}
+
 static void test_cortex_a8_uses_interpreter_fallback(void) {
     /* This is an instruction fixture on the existing test bus, not an
      * S5L8920 board. Every ARM1176 signed path must decline the new CPU. */
@@ -6534,6 +6579,7 @@ int main(void) {
     test_watchdog_reboot_is_a_bounded_host_boundary();
     test_bare_metal_uart_hello();
     test_cortex_a8_uses_interpreter_fallback();
+    test_checked_bus_uses_interpreter_fallback();
     test_signed_static_a64_soc_oracle();
     test_signed_static_a64_store_oracle();
     test_signed_static_a64_stm_oracle();
