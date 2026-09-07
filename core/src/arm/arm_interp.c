@@ -718,6 +718,43 @@ static arm_status_t exec_a8_neon_single_elements(arm_cpu_t *c, uint32_t insn) {
     return ARM_OK;
 }
 
+/* Advanced SIMD register Boolean operations (DDI0406C.b A8.8.287/289/290,
+ * 315/358/360). U:op selects AND/BIC/ORR/ORN/EOR/BSL/BIT/BIF; Thumb moves
+ * U from bit24 to bit28. VORR with identical sources is the VMOV alias. */
+static bool a8_neon_bitwise_space(const arm_cpu_t *c, uint32_t insn) {
+    if (c->arch != ARM_ARCH_V7_CORTEX_A8) return false;
+    return (c->cpsr & ARM_CPSR_T) ? (insn & 0xef800f10u) == 0xef000110u
+                                : (insn & 0xfe800f10u) == 0xf2000110u;
+}
+
+static arm_status_t exec_a8_neon_bitwise(arm_cpu_t *c, uint32_t insn) {
+    unsigned d = ((insn >> 12) & 15u) | ((insn >> 18) & 16u);
+    unsigned n = ((insn >> 16) & 15u) | ((insn >> 3) & 16u);
+    unsigned m = (insn & 15u) | ((insn >> 1) & 16u), quad = (insn >> 6) & 1u;
+    if (quad && ((d | n | m) & 1u)) return ARM_UNDEFINED;
+    if (!vfp_cpacr_permits(c) || !vfp_enabled(c)) return ARM_GUEST_UNDEFINED;
+    unsigned op = ((insn >> 20) & 3u) |
+        ((insn & (1u << ((c->cpsr & ARM_CPSR_T) ? 28u : 24u))) ? 4u : 0u);
+    uint64_t result[2];
+    for (unsigned r = 0; r <= quad; r++) {
+        uint64_t old = vfp_get_d(c, d + r), a = vfp_get_d(c, n + r), b = vfp_get_d(c, m + r);
+        switch (op) {
+        case 0: result[r] = a & b; break;
+        case 1: result[r] = a & ~b; break;
+        case 2: result[r] = a | b; break;
+        case 3: result[r] = a | ~b; break;
+        case 4: result[r] = a ^ b; break;
+        case 5: result[r] = (a & old) | (b & ~old); break;
+        case 6: result[r] = (a & b) | (old & ~b); break;
+        default: result[r] = (old & b) | (a & ~b); break;
+        }
+    }
+    /* Read every operand before publishing an aliased destination. These
+     * raw bits neither consult nor modify FPSCR, CPSR or the host FP state. */
+    for (unsigned r = 0; r <= quad; r++) vfp_set_d(c, d + r, result[r]);
+    return ARM_OK;
+}
+
 /* vfp_cpacr_permits() and vfp_enabled() live in vfp.c (declared in vfp.h):
  * they are half of the availability gate the VFP unit itself applies, and one
  * copy of that rule is the only safe number of copies.
@@ -727,7 +764,7 @@ static bool vfp_lazy_enable_trap(const arm_cpu_t *c, uint32_t insn) {
     /* Checked A8 operations report every actual access denial explicitly as
      * ARM_GUEST_UNDEFINED. An unsupported ID or invalid encoding is still
      * a capability stop when EN=0, not a fault the guest can fix by enabling. */
-    if (a8_neon_single_elements_space(c, insn)) return false;
+    if (a8_neon_single_elements_space(c, insn) || a8_neon_bitwise_space(c, insn)) return false;
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 &&
         (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn) ||
          vfp_is_memory_transfer(insn) || vfp_is_bitwise_data(insn) || vfp_is_compare_data(insn))) return false;
@@ -3166,6 +3203,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         return ARM_OK;
     uint32_t insn = ((uint32_t)first << 16) | second;
     if (a8_neon_single_elements_space(c, insn)) return exec_a8_neon_single_elements(c, insn);
+    if (a8_neon_bitwise_space(c, insn)) return exec_a8_neon_bitwise(c, insn);
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn >> 28) == 0xeu &&
         (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn) ||
          vfp_is_memory_transfer(insn) || vfp_is_bitwise_data(insn) || vfp_is_compare_data(insn)))
@@ -3802,6 +3840,13 @@ arm_status_t arm_step(arm_cpu_t *c) {
         if (barrier == 0xf57ff040u || barrier == 0xf57ff050u ||
             barrier == 0xf57ff060u) {
             if (!arm_arch_has_a32_barriers(c->arch)) return ARM_UNDEFINED;
+            c->r[15] = next;
+            return ARM_OK;
+        }
+        if (a8_neon_bitwise_space(c, insn)) {
+            arm_status_t status = exec_a8_neon_bitwise(c, insn);
+            if (status == ARM_GUEST_UNDEFINED) return take_undefined_instruction(c, pc);
+            if (status != ARM_OK) return status;
             c->r[15] = next;
             return ARM_OK;
         }

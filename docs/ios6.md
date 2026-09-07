@@ -244,9 +244,26 @@ Tests cover all register lists, alignment fields, post-index aliases,
 permissions, conditional execution, MMU and bus faults, and split Thumb
 fetch faults. The A8 ARM decoder handles NEON memory before its broad preload
 hint check, so D15/D31 transfers and unsupported structure forms cannot be
-swallowed as hints. The matching cache's unchanged `fmodf` now executes its
-NEON stack save in an isolated User-mode fixture and stops at the later
-VORR instruction. Full function execution remains unverified.
+swallowed as hints.
+
+ARM and Thumb NEON register VAND, VBIC, VORR, VORN, VEOR, VBSL, VBIT and
+VBIF now operate on all 32 D registers or 16 Q registers, including VORR's
+VMOV alias. They preserve FPSCR, ARM flags and the host FP environment;
+masked operations read the original destination before writing their result.
+Odd Q-register encodings stop before access checks, and valid permission
+denials enter the guest Undefined handler. These rules follow
+[DDI0406C.b, A8.8.287/289/290/315/358/360](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Tests use independent bit truth tables and cover register aliases, denied
+access, conditional execution, neighboring encodings, split Thumb fetch
+faults and guest enable/retry. Immediate forms remain separate work.
+
+The matching cache's unchanged `fmodf` now returns the expected raw results
+for eight normal-input cases in an isolated User-mode fixture. These cover
+smaller/equal/greater magnitudes, both operand signs and signed zero, with
+exact stack contents and access counts, callee-register preservation and
+NEON stack save/restore. Before Boolean support, the same fixture stopped
+at its first VORR. Special inputs and helper paths remain untested; this
+fixture does not establish process launch or a complete firmware boot.
 
 ARM and Thumb VLDR/VSTR now move one S or D register through the translating
 memory accessors, including D16-D31. They use signed, scaled immediate
@@ -749,7 +766,8 @@ establish that result.
 - Cortex-A8 stores d0-d31 and supports system/core/memory transfers plus
   VFP copies, immediate constants and sign operations with short vectors,
   scalar comparisons across the full register bank, and the bounded
-  32/64-bit NEON VLD1/VST1 memory forms described above.
+  32/64-bit NEON VLD1/VST1 memory forms and register Boolean operations
+  described above.
   Upper-bank arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Shared lower-bank arithmetic
   still derives from VFP11 and requires a complete Cortex-A8 semantic audit.

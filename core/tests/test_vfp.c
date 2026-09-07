@@ -793,6 +793,173 @@ static void test_a8_neon_memory_invalid_and_it(void) {
     }
 }
 
+/* Raw Advanced SIMD Boolean register operations, in encoding order:
+ * VAND, VBIC, VORR/VMOV, VORN, VEOR, VBSL, VBIT, VBIF. Q operands here
+ * are spelled as their first D register to test every alignment bit. */
+static uint32_t a8_neon_bits(unsigned thumb, unsigned op, unsigned quad,
+                              unsigned dst, unsigned left, unsigned right) {
+    return (thumb ? 0xef000110u : 0xf2000110u) | ((op & 3u) << 20) |
+        ((op >> 2) << (thumb ? 28u : 24u)) | (quad << 6) |
+        ((dst & 15u) << 12) | ((dst >> 4) << 22) |
+        ((left & 15u) << 16) | ((left >> 4) << 7) | (right & 15u) | ((right >> 4) << 5);
+}
+
+static uint64_t a8_neon_bits_expected(unsigned op, uint64_t old, uint64_t left, uint64_t right) {
+    /* Truth tables indexed by (old destination, left, right), independent
+     * of the production word expressions. Covers all eight Boolean inputs. */
+    static const unsigned truth[] = {0x88u,0x44u,0xeeu,0xddu,0x66u,0xcau,0xd8u,0xe4u};
+    uint64_t result = 0;
+    for (unsigned bit = 0; bit < 64u; bit++) {
+        unsigned index = (unsigned)(((old >> bit) & 1u) * 4u + ((left >> bit) & 1u) * 2u + ((right >> bit) & 1u));
+        result |= (uint64_t)((truth[op] >> index) & 1u) << bit;
+    }
+    return result;
+}
+
+static void test_a8_neon_bitwise_registers(void) {
+    static const uint64_t patterns[] = {
+        0u, UINT64_MAX, UINT64_C(0xaaaaaaaaaaaaaaaa), UINT64_C(0xcccccccccccccccc),
+        UINT64_C(0xf0f0f0f0f0f0f0f0), UINT64_C(0xfff0000000000001),
+        UINT64_C(0x7ff8123487654321), UINT64_C(0x8000000000000000)
+    };
+    CHECK(a8_neon_bits(1u, 2u, 0u, 0u, 8u, 8u) == 0xef280118u &&
+          a8_neon_bits(0u, 2u, 0u, 0u, 8u, 8u) == 0xf2280118u &&
+          a8_neon_bits(1u, 7u, 0u, 31u, 16u, 16u) == 0xff70f1b0u, "NEON Boolean encoding anchors");
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned quad = 0; quad < 2u; quad++)
+      for (unsigned op = 0; op < 8u; op++)
+       for (unsigned dst = 0; dst < 32u; dst += quad + 1u)
+        for (unsigned left = 0; left < 32u; left += quad + 1u)
+         for (unsigned variant = 0; variant < 6u; variant++) {
+            unsigned right = variant == 0u ? dst : variant == 1u ? left :
+                (dst + left * 3u + variant * 7u) & (quad ? 30u : 31u);
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.cpsr |= ARM_CPSR_E;
+            c.vfp_fpscr |= ARM_FPSCR_LEN | ARM_FPSCR_STRIDE | ARM_FPSCR_NZCV;
+            c.excl_valid = true; c.excl_addr = 0x2468u;
+            uint64_t expected[32];
+            for (unsigned d = 0; d < 32u; d++) {
+                expected[d] = patterns[(d + variant) % 8u] ^ (UINT64_C(1) << ((d * 3u) % 64u));
+                vfp_set_d(&c, d, expected[d]);
+            }
+            uint64_t result[2];
+            for (unsigned lane = 0; lane <= quad; lane++) result[lane] =
+                a8_neon_bits_expected(op, expected[dst + lane], expected[left + lane], expected[right + lane]);
+            for (unsigned lane = 0; lane <= quad; lane++) expected[dst + lane] = result[lane];
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c, thumb, a8_neon_bits(thumb, op, quad, dst, left, right)) == ARM_OK &&
+                  c.r[15] == 0x104u && c.cycles == 1u && c.cpsr == flags && c.vfp_fpscr == fpscr &&
+                  c.excl_valid && c.excl_addr == 0x2468u, "NEON Boolean disposition T=%u Q=%u op=%u d=%u n=%u m=%u",
+                  thumb, quad, op, dst, left, right);
+            bool same = true;
+            for (unsigned d = 0; d < 32u; d++) same &= vfp_get_d(&c, d) == expected[d];
+            for (unsigned r = 0; r < 15u; r++) same &= c.r[r] == 0u;
+            CHECK(same, "NEON Boolean result, alias or untouched register mismatch");
+         }
+}
+
+static void test_a8_neon_bitwise_access_and_host_state(void) {
+    static const unsigned permissions[] = {0u,1u,3u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned quad = 0; quad < 2u; quad++)
+      for (unsigned op = 0; op < 8u; op++)
+       for (unsigned user = 0; user < 2u; user++)
+        for (unsigned enabled = 0; enabled < 2u; enabled++)
+         for (unsigned access = 0; access < 3u; access++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permissions[access] * 0x00500000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            uint64_t expected[2];
+            bool allowed = enabled && (permissions[access] == 3u || (permissions[access] == 1u && !user));
+            for (unsigned lane = 0; lane <= quad; lane++) {
+                vfp_set_d(&c, 30u + lane, UINT64_C(0xcccccccccccccccc) ^ lane);
+                vfp_set_d(&c, 16u + lane, UINT64_C(0xaaaaaaaaaaaaaaaa) ^ lane);
+                vfp_set_d(&c, 0u + lane, UINT64_C(0xf0f0f0f0f0f0f0f0) ^ lane);
+                expected[lane] = allowed ? a8_neon_bits_expected(op, vfp_get_d(&c, 30u + lane),
+                    vfp_get_d(&c, 16u + lane), vfp_get_d(&c, lane)) : vfp_get_d(&c, 30u + lane);
+            }
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c, thumb, a8_neon_bits(thumb, op, quad, 30u, 16u, 0u)) == ARM_OK &&
+                  c.vfp_fpscr == fpscr, "NEON Boolean access disposition");
+            CHECK(allowed ? c.r[15] == 0x104u && c.cpsr == flags :
+                  c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == (thumb ? 0x102u : 0x104u) &&
+                  c.spsr[ARM_BANK_UND] == flags, "NEON Boolean access exception state");
+            for (unsigned lane = 0; lane <= quad; lane++) CHECK(vfp_get_d(&c, 30u + lane) == expected[lane],
+                "NEON Boolean denied access changed destination");
+         }
+    fenv_t saved;
+    CHECK(fegetenv(&saved) == 0, "save NEON host FP environment");
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned quad = 0; quad < 2u; quad++)
+      for (unsigned op = 0; op < 8u; op++)
+       for (unsigned host = 0; host < 4u; host++)
+        for (unsigned guest = 0; guest < 4u; guest++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.vfp_fpscr = (c.vfp_fpscr & ~ARM_FPSCR_RMODE) | (guest << 22);
+            vfp_set_d(&c, 16u, UINT64_C(0xfff0000000000001));
+            vfp_set_d(&c, 17u, UINT64_C(0x8000000000000001));
+            CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
+                  feraiseexcept(FE_DIVBYZERO) == 0, "prepare NEON host FP environment");
+            int exceptions = fetestexcept(FE_ALL_EXCEPT);
+            CHECK(a8_move_step(&c, thumb, a8_neon_bits(thumb, op, quad, 30u, 16u, 16u)) == ARM_OK &&
+                  fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == exceptions,
+                  "NEON Boolean operation touched host rounding or exception flags");
+        }
+    CHECK(fesetenv(&saved) == 0, "restore NEON host FP environment");
+}
+
+static void test_a8_neon_bitwise_invalid_and_it(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned op = 0; op < 8u; op++)
+      for (unsigned enabled = 0; enabled < 2u; enabled++)
+       for (unsigned skip = 0; skip < (thumb ? 2u : 1u); skip++)
+        for (unsigned odd = 0; odd < 8u; odd++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            if (skip) c.cp15.cpacr = 0u;
+            if (thumb) { m_w16(NULL, 0x100u, skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK, "NEON Boolean IT setup"); }
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c, d, UINT64_C(0xf0f0f0f0f0f00000) + d);
+            uint32_t pc = c.r[15], flags = c.cpsr, fpscr = c.vfp_fpscr;
+            uint32_t insn = a8_neon_bits(thumb, op, 1u, 30u + (odd & 1u), 16u + ((odd >> 1) & 1u), (odd >> 2) & 1u);
+            CHECK(a8_move_step(&c, thumb, insn) == (skip || !odd ? ARM_OK : ARM_UNDEFINED),
+                  "NEON Boolean odd-Q/IT disposition T=%u op=%u EN=%u skip=%u odd=%u", thumb, op, enabled, skip, odd);
+            if (skip || odd) {
+                CHECK(c.r[15] == (skip ? pc + 4u : pc) && c.cpsr == (skip ? flags & ~0x0600fc00u : flags) &&
+                      c.vfp_fpscr == fpscr, "NEON odd Q mutated flags or retired");
+                bool same = true;
+                for (unsigned d = 0; d < 32u; d++) same &= vfp_get_d(&c, d) == UINT64_C(0xf0f0f0f0f0f00000) + d;
+                CHECK(same, "NEON odd Q or skipped instruction modified registers");
+            } else if (!enabled) CHECK(c.r[15] == ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND] == flags,
+                "NEON valid Q access did not enter guest Undefined");
+            else CHECK(c.r[15] == pc + 4u && c.cpsr == (flags & ~0x0600fc00u), "NEON valid Q IT did not retire");
+        }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++)
+     for (unsigned op = 0; op < 8u; op++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, legacy[profile]), "legacy NEON Boolean reset");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        CHECK(a8_move_step(&c, 0u, a8_neon_bits(0u, op, 0u, 31u, 16u, 0u)) == ARM_UNDEFINED && c.r[15] == 0u,
+              "NEON Boolean operation leaked into a legacy profile");
+     }
+    /* Adjacent fixed fields select other SIMD arithmetic or immediates,
+     * which cannot become Boolean copies. Keep access enabled here. */
+    static const uint32_t toggles[] = {0x00800000u,0x00000200u,0x00000400u,0x00000800u,0x00000010u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned field = 0; field < sizeof toggles / sizeof toggles[0]; field++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, thumb);
+        uint32_t insn = a8_neon_bits(thumb, 2u, 0u, 31u, 16u, 16u) ^ toggles[field];
+        CHECK(a8_move_step(&c, thumb, insn) == ARM_UNDEFINED && c.r[15] == 0x100u && vfp_get_d(&c, 31u) == 0u,
+              "NEON Boolean decoder swallowed a neighboring allocation");
+     }
+}
+
 static void test_a8_vfp_full_bank_core_moves(void) {
     for (unsigned thumb = 0; thumb < 2u; thumb++) {
         arm_cpu_t c;
@@ -2909,6 +3076,9 @@ static void test_condition_codes_apply(void) {
 
 /* --------------------------------------------------------------- main ---- */
 int main(void) {
+    test_a8_neon_bitwise_registers();
+    test_a8_neon_bitwise_access_and_host_state();
+    test_a8_neon_bitwise_invalid_and_it();
     test_a8_neon_memory_registers();
     test_a8_neon_memory_alignment_and_access();
     test_a8_neon_memory_invalid_and_it();
