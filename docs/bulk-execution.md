@@ -35,6 +35,9 @@ modify the guest disk, guest code, checkpoint format, or stock-host policy.
 `compact_bulk_calls` counts successful operations/prefixes. `compact_bulk_retired`
 counts the original instructions they represent and is a subset of native
 retirements, not additional guest time. Neither counter is snapshot state.
+`compact_bulk_reuse_current` reports accepted search summaries in the current
+cache epoch. It is an absolute gauge, reset on cache invalidation/disable,
+not a lifetime delta or an application-speed measurement.
 
 ## Validation and rollout gate
 
@@ -70,7 +73,7 @@ pages, changed/truncated branch targets and precise refusal after a prefix.
 Native integration requires the entire chosen budget in one batch on both
 warm and cold pages. This expands execution coverage, not the physical gate.
 
-The same opt-in path retains up to 256 summaries of 32 read-only search
+The same opt-in path retains up to 256 summaries of 2-32 read-only search
 iterations, with at most eight 1 KiB RAM pages per summary (about 2 MiB total).
 Reuse rechecks the live instruction shape, query bounds, current User READ
 mapping of every page, and exact loaded values with byte comparisons. It does
@@ -78,13 +81,22 @@ not rely on hashes, page generations, write callbacks or saved host pointers.
 This covers direct CPU/graphics/bridge writes and changed mappings without
 instrumenting stores. Equal pages pass a single comparison; changed pages are
 checked against the exact loaded-word mask so unrelated stores do not discard
-useful work. Over-capacity spans and partial budgets stay literal.
+useful work. Over-capacity spans and incomplete individual iterations stay
+literal. A machine-budget boundary can publish a shorter complete prefix;
+loads from a refused next iteration are never included in that prefix.
 Original instruction/load counts and final registers/flags remain exact;
 the existing device budget is unchanged. Summaries are derived host data,
 reset with the engine and freed on disable/disposal, never checkpoint bytes.
 The regression requires actual reuse, then changes inputs, data, mappings,
 permissions and code and compares against ordinary instruction execution.
 No application wall-time improvement has yet been established for this path.
+
+The original fixed-32 summary test used larger standalone budgets and missed
+the normal active-clock machine cap of 256 instructions. No 32-iteration search
+fit that interval (the shortest requires 320 instructions). The regression now
+derives its short budgets from `S5L8900_ACTIVE_CLOCK_BATCH_INSNS` and requires
+actual reuse in all seven path shapes, including native warm/cold execution.
+Summary length follows available complete work; device timing is not enlarged.
 
 ## First physical result
 

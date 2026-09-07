@@ -18,7 +18,7 @@ typedef struct {
 
 typedef struct {
     bool valid, empty_path;
-    unsigned kind, pages, retired, loads;
+    unsigned kind, pages, retired, loads, iterations;
     uint32_t start, offsets[4];
     uint32_t previous, current, value;
     uint32_t low, high, head_low, head_high;
@@ -168,17 +168,17 @@ static void segment_begin(bulk_segment_t *entry, unsigned kind,
     entry->low = entry->head_low = UINT32_MAX;
 }
 
-static const uint8_t *segment_word(const arm_cpu_t *cpu,
-                                    const arm_bulk_memory_t *memory,
-                                    bulk_segment_t *entry, uint32_t address,
-                                    unsigned *tlb_reads, unsigned *walk_reads) {
-    const uint8_t *p = chain_word_at(cpu, memory, address, tlb_reads, walk_reads);
-    if (!p || !entry || entry->pages > BULK_PAGES) return p;
+/* Record only loads belonging to an admitted complete iteration. A later
+ * refused iteration must not contaminate a reusable short prefix's load
+ * counts or dependencies. The read-only call still owns each source pointer. */
+static void segment_note(bulk_segment_t *entry, uint32_t address,
+                           const uint8_t *p) {
+    if (!entry || entry->pages > BULK_PAGES) return;
     uint32_t page = address & ~UINT32_C(1023);
     unsigned i = 0u;
     while (i < entry->pages && entry->page[i].address != page) i++;
     if (i == entry->pages) {
-        if (entry->pages++ == BULK_PAGES) return p;
+        if (entry->pages++ == BULK_PAGES) return;
         entry->page[i].address = page;
         entry->page[i].source = p - (address & 1023u);
         entry->page[i].reads = 0u;
@@ -188,12 +188,11 @@ static const uint8_t *segment_word(const arm_cpu_t *cpu,
     entry->page[i].words[word / 32u] |= UINT32_C(1) << (word % 32u);
     entry->page[i].reads++;
     entry->loads++;
-    return p;
 }
 
 static void segment_finish(bulk_segment_t *entry, uint32_t previous,
                              uint32_t current, uint32_t value) {
-    if (!entry || entry->pages > BULK_PAGES) return;
+    if (!entry || entry->iterations < 2u || entry->pages > BULK_PAGES) return;
     entry->previous = previous; entry->current = current; entry->value = value;
     for (unsigned i = 0u; i < entry->pages; i++) {
         memcpy(entry->page[i].bytes, entry->page[i].source, 1024u);
@@ -300,23 +299,25 @@ static unsigned thumb_ordered_chain(arm_cpu_t *cpu,
                 wanted > entry->high &&
                 segment_validate(cpu, memory, entry, &tlb_reads, &walk_reads)) {
                 prev = entry->previous; cur = walker = entry->current;
-                key = entry->value; count += BULK_SEGMENT;
+                key = entry->value; count += entry->iterations;
                 continue;
             }
-            building = budget / 10u - count >= BULK_SEGMENT ? entry : NULL;
+            building = budget / 10u - count >= 2u ? entry : NULL;
             segment_begin(building, 1u, walker, offsets);
         }
         unsigned iteration_reads = 0u, iteration_walks = 0u;
-        const uint8_t *np = segment_word(cpu, memory, building,
+        const uint8_t *np = chain_word_at(cpu, memory,
             walker + cpu->r[next_offset], &iteration_reads, &iteration_walks);
         if (!np) break;
         uint32_t next = read32(np);
         if (!next) break;
-        const uint8_t *kp = segment_word(cpu, memory, building,
+        const uint8_t *kp = chain_word_at(cpu, memory,
             next + cpu->r[key_offset], &iteration_reads, &iteration_walks);
         if (!kp) break;
         uint32_t next_key = read32(kp);
         if (wanted <= next_key) break;
+        segment_note(building, walker + cpu->r[next_offset], np);
+        segment_note(building, next + cpu->r[key_offset], kp);
         prev = cur; cur = next; walker = next; key = next_key;
         tlb_reads += iteration_reads;
         walk_reads += iteration_walks;
@@ -324,12 +325,14 @@ static unsigned thumb_ordered_chain(arm_cpu_t *cpu,
         if (building) {
             segment_range(key, &building->low, &building->high);
             building->retired += 10u;
+            building->iterations++;
         }
         if (++part == BULK_SEGMENT) {
             segment_finish(building, prev, cur, key);
             part = 0u;
         }
     }
+    if (part) segment_finish(building, prev, cur, key);
     if (!count) return 0u;
     cpu->r[previous] = prev; cpu->r[current] = cur;
     cpu->r[walk] = walker; cpu->r[value] = key;
@@ -415,18 +418,19 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
                 segment_validate(cpu, memory, entry, &tlb_reads, &walk_reads)) {
                 previous = entry->previous; current = entry->current;
                 value = entry->value; retired += entry->retired;
-                loads += entry->loads + (same_depth ? 2u * BULK_SEGMENT : 0u);
-                tlb_reads += invariant_reads * BULK_SEGMENT;
-                walk_reads += invariant_walks * BULK_SEGMENT;
+                loads += entry->loads + (same_depth ? 2u * entry->iterations : 0u);
+                tlb_reads += invariant_reads * entry->iterations;
+                walk_reads += invariant_walks * entry->iterations;
                 continue;
             }
-            building = (budget - retired) / stride >= BULK_SEGMENT ? entry : NULL;
+            building = (budget - retired) / stride >= 2u ? entry : NULL;
             segment_begin(building, kind, current, offsets);
         }
         unsigned cost = stride, iteration_loads = same_depth ? 5u : 3u;
         unsigned iteration_reads = invariant_reads;
         unsigned iteration_walks = invariant_walks;
-        const uint8_t *payload = segment_word(cpu, memory, building,
+        const uint8_t *child = NULL, *sibling = NULL;
+        const uint8_t *payload = chain_word_at(cpu, memory,
             current + cpu->r[4], &iteration_reads, &iteration_walks);
         if (!payload) break;
         if (!read32(payload)) {
@@ -436,30 +440,38 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
                 if (!thumb_filtered_empty_path(memory, offset)) break;
                 empty_path_witnessed = true;
             }
-            const uint8_t *child = segment_word(cpu, memory, building,
+            child = chain_word_at(cpu, memory,
                 current + cpu->r[9], &iteration_reads, &iteration_walks);
             if (!child || !read32(child)) break;
-            const uint8_t *sibling = segment_word(cpu, memory, building,
+            sibling = chain_word_at(cpu, memory,
                 current + cpu->r[5], &iteration_reads, &iteration_walks);
             if (!sibling || !read32(sibling)) break;
             iteration_loads += 2u;
-            if (building) building->empty_path = true;
         }
         if (value == cpu->r[12]) break;
-        const uint8_t *link = segment_word(cpu, memory, building,
+        const uint8_t *link = chain_word_at(cpu, memory,
             current + cpu->r[5], &iteration_reads, &iteration_walks);
         if (!link) break;
         uint32_t next = read32(link);
         if (!next) break;
-        const uint8_t *key = segment_word(cpu, memory, building,
+        const uint8_t *key = chain_word_at(cpu, memory,
             next + cpu->r[8], &iteration_reads, &iteration_walks);
         if (!key) break;
         uint32_t next_value = read32(key);
         if (same_depth && next_value == wanted) break;
         if (building) {
+            segment_note(building, current + cpu->r[4], payload);
+            if (child) {
+                segment_note(building, current + cpu->r[9], child);
+                segment_note(building, current + cpu->r[5], sibling);
+                building->empty_path = true;
+            }
+            segment_note(building, current + cpu->r[5], link);
+            segment_note(building, next + cpu->r[8], key);
             segment_range(next_value, &building->low, &building->high);
             if (part) segment_range(value, &building->head_low, &building->head_high);
             building->retired += cost;
+            building->iterations++;
         }
         previous = current; current = next; value = next_value;
         tlb_reads += iteration_reads;
@@ -471,6 +483,7 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
             part = 0u;
         }
     }
+    if (part) segment_finish(building, previous, current, value);
     if (!retired) return 0u;
     cpu->r[1] = same_depth ? wanted : cpu->r[8];
     cpu->r[2] = value; cpu->r[3] = current;

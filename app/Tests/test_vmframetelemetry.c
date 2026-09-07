@@ -155,6 +155,7 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.compact_window_cache_hits = base + 40u;
     value.compact_bulk_calls = base + 140u;
     value.compact_bulk_retired = base + 141u;
+    value.compact_bulk_reuse_current = base + 300u;
     value.compact_tlb_fetch = base + 142u;
     value.compact_tlb_read = base + 143u;
     value.compact_tlb_write = base + 144u;
@@ -510,6 +511,7 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.compact_window_cache_hits == 2040u &&
            state.execution_last.compact_bulk_calls == 2140u &&
            state.execution_last.compact_bulk_retired == 2141u &&
+           state.execution_last.compact_bulk_reuse_current == 2300u &&
            state.execution_last.compact_tlb_fetch == 2142u &&
            state.execution_last.compact_tlb_read == 2143u &&
            state.execution_last.compact_tlb_write == 2144u &&
@@ -702,11 +704,26 @@ static void test_worst_scanout_gap_keeps_its_work_witness(void) {
     }
 }
 
+static void test_search_reuse_is_a_resettable_gauge(void) {
+    vm_frame_telemetry_reset(true);
+    vm_execution_telemetry_observation_t first = execution_observation(1000u);
+    vm_execution_telemetry_observation_t second = execution_observation(1100u);
+    second.compact_bulk_reuse_current = 0u;
+    vm_frame_telemetry_note_execution(&first);
+    vm_frame_telemetry_note_execution(&second);
+    vm_frame_telemetry_snapshot_t state;
+    vm_frame_telemetry_snapshot(&state);
+    CHECK(state.execution_consistent && state.execution_captured &&
+          state.execution_last.compact_bulk_reuse_current == 0u,
+          "summary invalidation was treated as a counter regression");
+}
+
 int main(void) {
     test_disabled_is_inert();
     test_machine_generation_boundary();
     test_boundaries_and_sampled_changes();
     test_worst_scanout_gap_keeps_its_work_witness();
+    test_search_reuse_is_a_resettable_gauge();
     printf("vm frame telemetry: %u checks, %u failed\n", tests, failed);
     return failed ? 1 : 0;
 }

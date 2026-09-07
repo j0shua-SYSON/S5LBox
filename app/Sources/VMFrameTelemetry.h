@@ -258,6 +258,8 @@ typedef struct {
     uint64_t compact_window_cache_hits;
     uint64_t compact_bulk_calls;
     uint64_t compact_bulk_retired;
+    /* Gauge reset by summary-cache invalidation/disable, not a monotonic delta. */
+    uint64_t compact_bulk_reuse_current;
     uint64_t compact_tlb_fetch, compact_tlb_read, compact_tlb_write;
     uint64_t compact_ram_map_fetch, compact_ram_map_read, compact_ram_map_write;
     uint64_t compact_pc_profile_polls;

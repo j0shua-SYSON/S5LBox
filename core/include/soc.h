@@ -4702,6 +4702,8 @@ uint64_t s5l8900_static_a64_compact_tlb_read(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_tlb_write(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_bulk_calls(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_bulk_retired(const s5l8900_t *m);
+/* Current summary-cache epoch, not a lifetime retirement counter. */
+uint64_t s5l8900_static_a64_compact_bulk_reuse_current(const s5l8900_t *m);
 /* Explicit diagnostic-only sampling for the compact runner. On a supported
  * Apple AArch64 host a marker-created sampler polls only the pthread executing
  * s5l8900_run(), and retains a PC only when that target is running before and

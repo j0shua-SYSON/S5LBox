@@ -1151,6 +1151,16 @@ uint64_t s5l8900_static_a64_compact_bulk_retired(const s5l8900_t *m) {
 #endif
 }
 
+uint64_t s5l8900_static_a64_compact_bulk_reuse_current(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? arm_bulk_cache_hits(state->compact_bulk_cache) : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
 bool s5l8900_static_a64_enable_compact_raw_pc_profile(
         s5l8900_t *m, bool fallback_details) {
     if (!m) return false;

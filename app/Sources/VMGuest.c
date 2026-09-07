@@ -409,6 +409,8 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                 s5l8900_static_a64_compact_bulk_calls(m);
             execution.compact_bulk_retired =
                 s5l8900_static_a64_compact_bulk_retired(m);
+            execution.compact_bulk_reuse_current =
+                s5l8900_static_a64_compact_bulk_reuse_current(m);
             execution.compact_tlb_fetch = s5l8900_static_a64_compact_tlb_fetch(m);
             execution.compact_tlb_read = s5l8900_static_a64_compact_tlb_read(m);
             execution.compact_tlb_write = s5l8900_static_a64_compact_tlb_write(m);

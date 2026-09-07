@@ -26,6 +26,9 @@ static int g_pass = 0, g_fail = 0;
 static void test_ram_readback(void) {
     s5l8900_t m;
     CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+    CHECK(s5l8900_static_a64_compact_bulk_reuse_current(NULL) == 0u &&
+          s5l8900_static_a64_compact_bulk_reuse_current(&m) == 0u,
+          "unconfigured machine reported search reuse");
     uint32_t v = 0xdeadbeef;
     s5l8900_load(&m, 0x100, &v, 4);
     CHECK(m.bus.read32(m.bus.ctx, 0x100) == 0xdeadbeefu,

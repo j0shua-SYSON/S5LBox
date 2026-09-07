@@ -1,6 +1,7 @@
 /* Differential and refusal tests for witnessed bulk A32/Thumb execution.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "arm_bulk.h"
+#include "soc.h"
 #include <stdio.h>
 #include <string.h>
 #if defined(S5LBOX_STATIC_A64_ENGINE)
@@ -816,7 +817,7 @@ static void test_chain_reuse(void) {
         ram[DATA + (shape ? 0u : 4u)] ^= 1u;
         cpu = initial;
         (void)chain_differential(&cpu, &memory, 4096u, shape ? 2u : 0u);
-        CHECK(arm_bulk_cache_hits(cache) == hits + 3u,
+        CHECK(arm_bulk_cache_hits(cache) == hits * 2u,
               "unread-word change discarded summaries");
         for (unsigned flags = 0u; flags < 16u; flags++)
             for (unsigned b = 0u; b < sizeof budgets / sizeof budgets[0]; b++) {
@@ -918,6 +919,31 @@ static void test_chain_reuse(void) {
     CHECK(arm_bulk_cache_hits(cache) == 0u, "over-capacity segment was cached");
     arm_bulk_cache_destroy(cache);
     puts("arm_bulk search reuse: live bytes, query ranges, mappings and budgets checked");
+}
+
+static void test_chain_reuse_at_machine_budgets(void) {
+    arm_bulk_cache_t *cache = arm_bulk_cache_create();
+    CHECK(cache != NULL, "machine-budget search cache allocation");
+    if (!cache) return;
+    for (unsigned shape = 0u; shape < 7u; shape++)
+        for (unsigned budget = S5L8900_ACTIVE_CLOCK_BATCH_INSNS / 4u;
+             budget <= S5L8900_ACTIVE_CLOCK_BATCH_INSNS;
+             budget += S5L8900_ACTIVE_CLOCK_BATCH_INSNS / 4u) {
+            arm_cpu_t initial; arm_bulk_memory_t memory;
+            chain_setup(&initial, &memory, shape ? 1u : 0u, 0u, 128u, ARM_CPSR_Q);
+            if (shape) filtered_paths_install(&initial, &memory,
+                shape > 3u, (shape - 1u) % 3u, 128u, false);
+            memory.cache = cache;
+            arm_bulk_cache_reset(cache);
+            arm_cpu_t cpu = initial;
+            unsigned n = chain_differential(&cpu, &memory, budget, shape ? 2u : 0u);
+            cpu = initial;
+            CHECK(chain_differential(&cpu, &memory, budget, shape ? 2u : 0u) == n,
+                  "machine-budget replay changed retirement");
+            CHECK(arm_bulk_cache_hits(cache) == 1u,
+                  "no actual summary reuse at machine budget %u shape %u", budget, shape);
+        }
+    arm_bulk_cache_destroy(cache);
 }
 
 #if defined(S5LBOX_STATIC_A64_ENGINE)
@@ -1085,6 +1111,22 @@ static void test_native_integration(void) {
                 calls += native_differential(&cpu, &memory, budget, true);
             }
             CHECK(arm_bulk_cache_hits(cache) > 0u, "native summary reuse never executed");
+            for (unsigned fraction = 1u; fraction <= 4u; fraction++) {
+                unsigned cap = fraction * S5L8900_ACTIVE_CLOCK_BATCH_INSNS / 4u;
+                unsigned short_budget = shape ? filtered_paths_prefix(shape > 3u,
+                    (shape - 1u) % 3u, 128u, cap) : cap / 10u * 10u;
+                arm_bulk_cache_reset(cache);
+                for (unsigned repeat = 0u; repeat < 2u; repeat++) {
+                    arm_cpu_t cpu = initial;
+                    if (repeat) memset(cpu.tlb, 0, sizeof cpu.tlb);
+                    calls += native_differential(&cpu, &memory, short_budget, true);
+                }
+                uint64_t hits = arm_bulk_cache_hits(cache);
+                CHECK(hits == 1u, "native machine-budget summary did not replay");
+                arm_cpu_t cpu = initial;
+                calls += native_differential(&cpu, &memory, short_budget, false);
+                CHECK(arm_bulk_cache_hits(cache) == hits, "disabled native summary replayed");
+            }
         }
         arm_bulk_cache_destroy(cache);
     }
@@ -1108,6 +1150,7 @@ int main(void) {
     test_thumb_chain_cold();
     test_thumb_filtered_paths();
     test_chain_reuse();
+    test_chain_reuse_at_machine_budgets();
     test_native_integration();
     printf("arm_bulk: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
