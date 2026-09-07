@@ -20,6 +20,7 @@ add_library(emucore STATIC
     src/arm/arm_interp.c
     src/arm/arm_bulk.c
     src/arm/arm_ram_map.c
+    src/arm/arm_ram_watch.c
     src/arm/vfp.c
     src/arm/a64_static_engine.c
     src/mmu.c

@@ -341,6 +341,7 @@ typedef struct {
      * it does not enable instruction-by-instruction native TLB refill. */
     const arm_ram_window_t *bulk_ram_window;
     arm_bulk_cache_t *bulk_cache;
+    arm_ram_watch_t *bulk_watch;
 } a64_compact_raw_options_t;
 bool a64_compact_raw_run_code_window_resident_options(
     arm_cpu_t *cpu, const uint8_t *code, uint32_t code_base,

@@ -1,6 +1,7 @@
 /* Native-buffer transport checks. Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "guest_packet_bridge.h"
 #include "soc.h"
+#include "ram_publication_check.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -11,6 +12,8 @@ static uint8_t large_payload[GUEST_PACKET_RX_MAX];
 static size_t large_length, peek_capacity;
 static unsigned sent, consumed, finished, passed, failed;
 static bool accept_send, have_rx;
+static ram_publication_check_t publication;
+static uint8_t publication_before[1u<<20], publication_notified[1u<<20];
 #define CHECK(x) do { if (x) passed++; else { failed++; \
     printf("FAIL line %u: %s\n", (unsigned)__LINE__, #x); } } while (0)
 #define VA UINT32_C(0xc0000000)
@@ -48,7 +51,11 @@ static size_t peek_large_packet(void *ctx, const uint8_t *token, size_t capacity
     return large_length < capacity ? large_length : capacity;
 }
 static arm_svc_result_t handler(void *ctx, arm_cpu_t *c, uint32_t pc, uint32_t op) {
-    return guest_packet_bridge_svc(ctx, c, pc, op);
+    ram_publication_begin(&publication, machine.ram, machine.ram_base,
+        machine.ram_size, publication_before, publication_notified);
+    arm_svc_result_t result = guest_packet_bridge_svc(ctx, c, pc, op);
+    CHECK(ram_publication_end(&publication));
+    return result;
 }
 static void reset(void) {
     memset(machine.ram, 0, machine.ram_size);
@@ -65,6 +72,7 @@ static void reset(void) {
         .sites = {RX, TX, VA+0x900u, VA+0xa00u, VA+0xb00u,
                   BATCH, VA+0xd00u, VA+0xe00u},
         .ram = machine.ram, .ram_base = 0u, .ram_size = machine.ram_size,
+        .ram_changed = ram_publication_notice, .ram_changed_context = &publication,
         .send = send_packet, .peek = peek_packet, .consume = consume_packet
     };
     arm_bus_set_privileged_svc_handler(&machine.bus, handler, &bridge);

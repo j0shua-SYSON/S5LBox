@@ -81,6 +81,159 @@ static void test_direct_ram_write_consent_is_fail_closed(void) {
     s5l8900_free(&m);
 }
 
+static void test_watched_ram_revokes_stores_and_tracks_publications(void) {
+    s5l8900_t m;
+    CHECK(!s5l8900_set_ram_watch(NULL, true), "NULL watch enable accepted");
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+    CHECK(s5l8900_set_direct_ram_writes(&m, true), "direct writes failed");
+    arm_ram_window_t old_window;
+    CHECK(arm_ram_window_capture(&old_window, &m.cpu, 0u, m.ram_size), "old window");
+    CHECK(old_window.write_host == m.ram, "old write window absent");
+    CHECK(s5l8900_set_ram_watch(&m, true), "watch enable failed");
+    CHECK(!arm_ram_window_current(&old_window, &m.cpu), "old write grant survived");
+    arm_ram_window_t window;
+    CHECK(arm_ram_window_capture(&window, &m.cpu, 0u, m.ram_size) &&
+          window.read_host == m.ram && !window.write_host, "whole-RAM write granted");
+    CHECK(s5l8900_ram_watch_current(&m) == m.ram_watch, "canonical watch absent");
+    CHECK(m.bus.host_ram_write(&m, 0x400u, 1024u) == m.ram + 0x400u,
+          "unwatched page lost direct writes");
+    m.cpu.dwrite[2].host = m.ram + 0x400u;
+    m.cpu.dwrite[7].host = m.ram + 0x400u;
+    m.cpu.dwrite[9].host = m.ram + 0x800u;
+    uint64_t first = arm_ram_watch_capture(m.ram_watch, &m.cpu, m.ram + 0x400u);
+    CHECK(first && !m.cpu.dwrite[2].host && !m.cpu.dwrite[7].host &&
+          m.cpu.dwrite[9].host == m.ram + 0x800u, "DWRITE alias revocation");
+    CHECK(!m.bus.host_ram_write(&m, 0x400u, 1024u) &&
+          !m.bus.host_ram_write(&m, 0x3ffu, 2u) &&
+          m.bus.host_ram_write(&m, 0x800u, 1024u), "watched range grant");
+    m.bus.write8(&m, 0x800u, 3u);
+    CHECK(arm_ram_watch_capture(m.ram_watch, &m.cpu, m.ram + 0x400u) == first,
+          "unrelated store invalidated read proof");
+    m.bus.write16(&m, 0x400u, 4u);
+    uint64_t second = arm_ram_watch_capture(m.ram_watch, &m.cpu, m.ram + 0x400u);
+    CHECK(second && second != first, "bus write retained proof");
+    uint32_t word = 7u;
+    s5l8900_load(&m, 0x404u, &word, sizeof word);
+    uint64_t third = arm_ram_watch_capture(m.ram_watch, &m.cpu, m.ram + 0x400u);
+    CHECK(third && third != second, "host load retained proof");
+    uint64_t other = arm_ram_watch_capture(m.ram_watch, &m.cpu, m.ram + 0x800u);
+    m.bus.write32(&m, 0x7feu, word);
+    CHECK(arm_ram_watch_capture(m.ram_watch, &m.cpu, m.ram + 0x400u) != third &&
+          arm_ram_watch_capture(m.ram_watch, &m.cpu, m.ram + 0x800u) != other,
+          "cross-page publication left a valid proof");
+    first = arm_ram_watch_capture(m.ram_watch, &m.cpu, m.ram + 0x400u);
+    s5l8900_static_a64_invalidate_derived(&m);
+    CHECK(arm_ram_watch_capture(m.ram_watch, &m.cpu, m.ram + 0x400u) != first,
+          "reset reused a pre-reset stamp");
+    void (*canonical)(void *, uint32_t, uint32_t) = m.bus.write32;
+    m.bus.write32 = direct_write_test_interposer;
+    CHECK(!s5l8900_ram_watch_current(&m) && !s5l8900_set_ram_watch(&m, true),
+          "interposed bus retained owned read proofs");
+    m.bus.write32 = canonical;
+    CHECK(s5l8900_set_ram_watch(&m, false) && !m.ram_watch &&
+          m.bus.host_ram_write == m.bus.host_ram, "watch disposal lost consent");
+    CHECK(!arm_ram_watch_capture(NULL, &m.cpu, m.ram), "missing watch stamp");
+    s5l8900_free(&m);
+}
+
+static void test_ram_watch_is_not_snapshot_state(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+    CHECK(s5l8900_set_ram_watch(&m, true), "watch enable failed");
+    uint8_t *before = NULL, *after = NULL;
+    size_t before_size = 0u, after_size = 0u;
+    CHECK(snapshot_save_mem(&m, &before, &before_size) == SNAP_OK, "save before watch");
+    uint64_t stamp = arm_ram_watch_capture(m.ram_watch, &m.cpu, m.ram + 0x400u);
+    CHECK(snapshot_save_mem(&m, &after, &after_size) == SNAP_OK &&
+          before && after && before_size == after_size &&
+          memcmp(before, after, before_size) == 0, "watch changed checkpoint bytes");
+    m.bus.write32(&m, 0x400u, 0xfeed1234u);
+    CHECK(snapshot_load_mem(&m, before, before_size) == SNAP_OK, "restore watched RAM");
+    CHECK(m.ram_watch && stamp &&
+          arm_ram_watch_capture(m.ram_watch, &m.cpu, m.ram + 0x400u) != stamp &&
+          m.bus.read32(&m, 0x400u) == 0u, "restore retained stale RAM proof");
+    free(before); free(after); s5l8900_free(&m);
+}
+
+static void test_ram_watch_boundaries(void) {
+    uint8_t bytes[2048] = {0};
+    arm_cpu_t cpu = {0};
+    CHECK(!arm_ram_watch_create(NULL, 0u, 1024u) &&
+          !arm_ram_watch_create(bytes, 0u, 0u) &&
+          !arm_ram_watch_create(bytes, 1u, 1024u) &&
+          !arm_ram_watch_create(bytes, 0u, 1023u) &&
+          !arm_ram_watch_create(bytes, 0xfffffc00u, 2048u), "invalid watch geometry");
+    arm_ram_watch_t *watch = arm_ram_watch_create(bytes, 0xfffff800u, sizeof bytes);
+    CHECK(watch != NULL, "top-of-address-space watch refused");
+    if (!watch) return;
+    CHECK(!arm_ram_watch_capture(watch, NULL, bytes) &&
+          !arm_ram_watch_capture(watch, &cpu, NULL) &&
+          !arm_ram_watch_capture(watch, &cpu, bytes + 1u) &&
+          !arm_ram_watch_capture(watch, &cpu, bytes + sizeof bytes), "invalid capture");
+    CHECK(arm_ram_watch_unwatched(watch, 0xffffffffu, 1u) &&
+          !arm_ram_watch_unwatched(watch, 0xffffffffu, 2u) &&
+          !arm_ram_watch_unwatched(watch, 0xfffff7ffu, 1u) &&
+          !arm_ram_watch_unwatched(watch, 0xfffff800u, 0u), "invalid range grant");
+    uint64_t a = arm_ram_watch_capture(watch, &cpu, bytes);
+    uint64_t b = arm_ram_watch_capture(watch, &cpu, bytes + 1024u);
+    CHECK(a && b && a != b, "different pages shared a stamp");
+    arm_ram_watch_changed(watch, 0xfffff7ffu, 2u);
+    CHECK(arm_ram_watch_capture(watch, &cpu, bytes) != a &&
+          arm_ram_watch_capture(watch, &cpu, bytes + 1024u) == b, "lower clipping");
+    arm_ram_watch_changed(watch, 0xffffffffu, 2u);
+    CHECK(arm_ram_watch_capture(watch, &cpu, bytes + 1024u) != b, "upper clipping");
+    a = arm_ram_watch_capture(watch, &cpu, bytes);
+    arm_ram_watch_changed(watch, 0u, 4u);
+    arm_ram_watch_changed(watch, 0xfffff800u, 0u);
+    CHECK(arm_ram_watch_capture(watch, &cpu, bytes) == a, "empty/outside write changed stamp");
+    arm_ram_watch_destroy(watch);
+}
+
+static void test_cpu_stores_respect_ram_watch(void) {
+    static const uint32_t arm_code[] = {0xe5801000u, 0xe5c01004u, 0xe1c010b6u, 0xe8800006u};
+    static const uint16_t thumb_code[] = {0x6001u, 0x7101u, 0x80c1u, 0xc006u};
+    unsigned native_runs = 0u;
+    for (unsigned native = 0u; native <= (unsigned)s5l8900_static_a64_available(); native++)
+    for (unsigned thumb = 0u; thumb < 2u; thumb++) {
+        s5l8900_t m;
+        CHECK(s5l8900_init(&m, 0u, 1u << 20), "store watch machine init");
+        s5l8900_load(&m, 0u, thumb ? (const void *)thumb_code : (const void *)arm_code,
+                     thumb ? sizeof thumb_code : sizeof arm_code);
+        if (native) {
+            CHECK(s5l8900_static_a64_set_enabled(&m, true) &&
+                  s5l8900_static_a64_set_compact_raw(&m, true), "native store setup");
+        }
+        m.cpu.cpsr = ARM_MODE_USR | ARM_CPSR_I | ARM_CPSR_F | (thumb ? ARM_CPSR_T : 0u);
+        CHECK(s5l8900_set_direct_ram_writes(&m, true) &&
+              s5l8900_set_ram_watch(&m, true), "store write consent");
+        CHECK(arm_data_cache_try_refill(&m.cpu, 0x400u, ARM_ACCESS_WRITE, false),
+              "unwatched store page did not fill DWRITE");
+        uint64_t stamp = arm_ram_watch_capture(m.ram_watch, &m.cpu, m.ram + 0x400u);
+        CHECK(stamp != 0u, "store watch capture");
+        for (unsigned i = 0u; i < 4u; i++) {
+            m.cpu.r[0] = 0x400u; m.cpu.r[1] = 0x10203040u + i; m.cpu.r[2] = 0x76543210u;
+            m.cpu.r[15] = i * (thumb ? 2u : 4u);
+            uint64_t hits = m.cpu.dwrite_hits;
+            arm_status_t status = ARM_OK;
+            if (native) {
+                CHECK(s5l8900_run(&m, 1u, &status) == 1u, "native watched store retirement");
+                native_runs++;
+            } else status = arm_step(&m.cpu);
+            CHECK(status == ARM_OK && m.cpu.dwrite_hits == hits,
+                  "watched store reused a revoked DWRITE grant");
+            uint64_t next = arm_ram_watch_capture(m.ram_watch, &m.cpu, m.ram + 0x400u);
+            CHECK(next && next != stamp, "CPU store kept a stale stamp (%u/%u/%u)", native, thumb, i);
+            stamp = next;
+        }
+        CHECK(m.bus.read32(&m, 0x400u) == 0x10203043u &&
+              m.bus.read32(&m, 0x404u) == 0x76543210u, "watched store bytes differ");
+        CHECK(m.bus.host_ram_write(&m, 0x800u, 1024u) == m.ram + 0x800u,
+              "unrelated page lost direct stores");
+        s5l8900_free(&m);
+    }
+    printf("  RAM-WATCH-CPU-STORES native=%u interpreter=8\n", native_runs);
+}
+
 typedef struct {
     s5l8900_t *machine;
     uint32_t next_pc;
@@ -6794,6 +6947,10 @@ static void test_compact_pc_sampling_records_guest_cursor(void) {
 }
 
 int main(void) {
+    test_ram_watch_boundaries();
+    test_cpu_stores_respect_ram_watch();
+    test_watched_ram_revokes_stores_and_tracks_publications();
+    test_ram_watch_is_not_snapshot_state();
     printf("S5LBox S5L8900 machine tests\n");
     test_guest_pc_export_disabled();
     test_ram_readback();

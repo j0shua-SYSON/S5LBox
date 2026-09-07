@@ -282,6 +282,8 @@ static uint32_t mapped_load_u32(const md_raw_bridge_config_t *config,
 static void mapped_store_u32(const md_raw_bridge_config_t *config,
                              uint32_t pa, uint32_t value) {
     size_t offset = (size_t)((uint64_t)pa - config->ram_base);
+    if (config->ram_changed)
+        config->ram_changed(config->ram_changed_context, pa, 4u);
     store_u32(config->ram + offset, value);
 }
 
@@ -403,6 +405,9 @@ static void copy_scratch_to_guest(md_raw_bridge_t *bridge) {
         const md_raw_bridge_data_span_t *span = &bridge->data_spans[i];
         size_t ram_offset = (size_t)((uint64_t)span->pa -
                                      bridge->config.ram_base);
+        if (bridge->config.ram_changed)
+            bridge->config.ram_changed(bridge->config.ram_changed_context,
+                                       span->pa, span->length);
         memcpy(bridge->config.ram + ram_offset,
                bridge->scratch + scratch_offset, span->length);
         scratch_offset += span->length;
@@ -851,6 +856,9 @@ static arm_svc_result_t start_uiomove(md_raw_bridge_t *bridge,
     pending->media_length = media_length;
     bounce = pending_bounce(bridge, pending);
 
+    if (config->ram_changed)
+        config->ram_changed(config->ram_changed_context,
+                            (uint32_t)pending->bounce_pa, (uint32_t)residual);
     memset(bounce, 0, (size_t)residual);
     if (rw == XNU32_UIO_READ && media_length != 0u) {
         block_status = vm_block_read_exact(

@@ -215,9 +215,11 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * fits existing padding before its edram pointer and also stays out of
  * snap_mbx(). 127936 adds uart4's host-only demand-refill callback pointer;
  * like its existing peer callbacks it is retained from the live destination
- * and does not change the snapshot stream. The size below must be read from the
+ * and does not change the snapshot stream. 127944 adds the derived RAM-watch
+ * owner, also deliberately absent from snap_mach(); load revokes its proofs
+ * before replacing RAM. The size below must be read from the
  * compiler's emitted `.space`, not inferred from source padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         127936, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         127944, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */

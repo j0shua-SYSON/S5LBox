@@ -3,11 +3,12 @@
 #define S5LBOX_ARM_BULK_H
 
 #include "arm.h"
+#include "arm_ram_watch.h"
 #include <stddef.h>
 
 /* Derived, bounded data summaries; never executable or serialized. Every hit
- * re-proves current READ mappings and compares all captured load bytes. No
- * write observer, dirty-bit discipline or retained host pointer is trusted. */
+ * re-proves current READ mappings and unchanged load bytes, using an optional
+ * owned write witness or exact comparisons. No old host pointer is followed. */
 typedef struct arm_bulk_cache arm_bulk_cache_t;
 arm_bulk_cache_t *arm_bulk_cache_create(void);
 void arm_bulk_cache_destroy(arm_bulk_cache_t *cache);
@@ -29,11 +30,15 @@ typedef struct {
      * publication is allowed while speculating about an entire iteration. */
     const arm_ram_window_t *ram_window;
     arm_bulk_cache_t *cache;
+    /* Optional, fully owned write-consent witness. NULL retains exact byte
+     * validation. Reset the cache before changing this object's lifetime. */
+    arm_ram_watch_t *watch;
 } arm_bulk_memory_t;
 
 /* Returns the exact number of original instructions represented, bounded by
- * budget. The caller owns cycle/device accounting. Zero changes no CPU state,
- * cache counters or guest bytes. No bus access, MMIO or executable write occurs.
+ * budget. The caller owns cycle/device accounting. Zero changes no architectural
+ * CPU state, cache counters or guest bytes. Capturing a write witness can revoke
+ * derived DWRITE grants. No bus access, MMIO or executable write occurs.
  * Matching proves the witnessed instruction pattern and complete admitted
  * control flow, never a name or assumed PC.
  * A long loop may return an exact prefix at its header for bounded resumption.

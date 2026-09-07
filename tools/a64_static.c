@@ -2073,6 +2073,7 @@ typedef struct {
     a64_compact_ram_map_stats_t ram_map_stats;
     const arm_ram_window_t *bulk_ram_window;
     arm_bulk_cache_t *bulk_cache;
+    arm_ram_watch_t *bulk_watch;
 } a64_compact_raw_context_t;
 
 _Static_assert(sizeof(void *) == 8u,
@@ -2128,7 +2129,8 @@ _Static_assert(offsetof(a64_compact_raw_context_t, flat_ram) == 0u &&
                    offsetof(a64_compact_raw_context_t, ram_map_stats) == 528u &&
                    offsetof(a64_compact_raw_context_t, bulk_ram_window) == 552u &&
                    offsetof(a64_compact_raw_context_t, bulk_cache) == 560u &&
-                   sizeof(a64_compact_raw_context_t) == 568u,
+                   offsetof(a64_compact_raw_context_t, bulk_watch) == 568u &&
+                   sizeof(a64_compact_raw_context_t) == 576u,
                "compact raw native context layout drifted");
 _Static_assert(ARM_RAM_MAP_ENTRIES == 4096u &&
                    sizeof(arm_ram_map_entry_t) == 16u &&
@@ -2198,6 +2200,7 @@ unsigned a64_compact_raw_bulk_try(a64_compact_raw_context_t *context,
         .data_cache = context->dread != NULL,
         .ram_window = context->bulk_ram_window,
         .cache = context->bulk_cache,
+        .watch = context->bulk_watch,
     };
     context->bulk_cpu->r[15] = pc;
     unsigned n = arm_bulk_string_try(context->bulk_cpu, &memory, budget);
@@ -2867,6 +2870,7 @@ bool a64_compact_raw_run_code_window_resident_options(
             ? cpu : NULL;
         context.bulk_ram_window = context.bulk_cpu ? options->bulk_ram_window : NULL;
         context.bulk_cache = context.bulk_cpu ? options->bulk_cache : NULL;
+        context.bulk_watch = context.bulk_cpu ? options->bulk_watch : NULL;
         context.tlb_gen = cpu->tlb_gen;
         context.priv_tag = priv ? 1u : 0u;
         context.vfp_s = cpu->vfp_s;

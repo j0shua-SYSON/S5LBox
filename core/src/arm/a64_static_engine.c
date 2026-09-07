@@ -798,6 +798,7 @@ bool s5l8900_static_a64_is_enabled(const s5l8900_t *m) {
 }
 
 void s5l8900_static_a64_invalidate_derived(s5l8900_t *m) {
+    if (m) arm_ram_watch_reset(m->ram_watch);
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     static_a64_state_t *state = static_state(m);
     if (!state) return;
@@ -2140,6 +2141,7 @@ static unsigned try_compact_raw(
         .window_cache_enabled = state->compact_raw_window_cache_enabled,
         .bulk_enabled = state->compact_bulk_enabled,
         .bulk_cache = state->compact_bulk_cache,
+        .bulk_watch = state->compact_bulk_enabled ? s5l8900_ram_watch_current(m) : NULL,
         .bulk_ram_window = state->compact_bulk_enabled && !priv &&
             state->compact_bulk_ram_window.read_host == m->ram &&
             state->compact_bulk_ram_window.base == m->ram_base &&

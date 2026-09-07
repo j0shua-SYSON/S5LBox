@@ -1099,6 +1099,8 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
         strategy.ram_size            = machine->ram_size;
         strategy.ram                 = machine->ram;
         strategy.block               = request->root_media;
+        strategy.ram_changed         = s5l8900_ram_changed;
+        strategy.ram_changed_context = machine;
 
         md_raw_bridge_config_t raw;
         memset(&raw, 0, sizeof raw);
@@ -1119,6 +1121,8 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
         raw.ram_size                = machine->ram_size;
         raw.ram                     = machine->ram;
         raw.block                   = request->root_media;
+        raw.ram_changed             = s5l8900_ram_changed;
+        raw.ram_changed_context     = machine;
 
         if (!md_bridge_config_valid(&strategy) ||
             !md_raw_bridge_config_valid(&raw))
@@ -1135,7 +1139,9 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
             .sites = request->packet_sites,
             .ram = machine->ram,
             .ram_base = machine->ram_base,
-            .ram_size = machine->ram_size
+            .ram_size = machine->ram_size,
+            .ram_changed = s5l8900_ram_changed,
+            .ram_changed_context = machine
         };
         md->installed = true;
         arm_bus_set_privileged_svc_handler(&machine->bus, bringup_svc_handler,

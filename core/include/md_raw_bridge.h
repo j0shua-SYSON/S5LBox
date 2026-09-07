@@ -73,6 +73,8 @@ typedef struct {
     const vm_block_t *block;
     vm_block_cancel_fn cancelled;
     void *cancel_context;
+    arm_ram_changed_fn ram_changed;
+    void *ram_changed_context;
 } md_raw_bridge_config_t;
 
 typedef struct {

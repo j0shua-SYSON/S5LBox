@@ -329,6 +329,20 @@ static uint8_t *machine_host_ram(void *ctx, uint32_t pa, uint32_t len) {
     return m->ram + (pa - m->ram_base);
 }
 
+static uint8_t *machine_watched_ram_write(void *ctx, uint32_t pa, uint32_t len) {
+    s5l8900_t *m = ctx;
+    /* A reusable whole-window grant cannot express subsequently watched
+     * pages. Individual DWRITE/graphics grants remain revocable and bounded. */
+    if (!m || (pa == m->ram_base && len == m->ram_size) ||
+        !arm_ram_watch_unwatched(m->ram_watch, pa, len)) return NULL;
+    return machine_host_ram(ctx, pa, len);
+}
+
+void s5l8900_ram_changed(void *machine, uint32_t pa, uint32_t length) {
+    s5l8900_t *m = machine;
+    if (m) arm_ram_watch_changed(m->ram_watch, pa, length);
+}
+
 static uint32_t bus_read(void *ctx, uint32_t addr, unsigned bytes) {
     s5l8900_t *m = ctx;
 
@@ -471,6 +485,7 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
     s5l8900_t *m = ctx;
 
     if (in_ram(m, addr, bytes)) {
+        s5l8900_ram_changed(m, addr, bytes);
         memcpy(&m->ram[addr - m->ram_base], &val, bytes);
         return;
     }
@@ -740,10 +755,45 @@ bool s5l8900_set_direct_ram_writes(s5l8900_t *m, bool enabled) {
         memset(m->cpu.dwrite, 0, sizeof m->cpu.dwrite);
         return false;
     }
-    m->bus.host_ram_write = enabled ? machine_host_ram : NULL;
+    m->bus.host_ram_write = enabled ?
+        (m->ram_watch ? machine_watched_ram_write : machine_host_ram) : NULL;
     /* A pointer granted under an earlier frontend contract must never survive
      * a mode change. Generation tags cannot express revoked consent. */
     memset(m->cpu.dwrite, 0, sizeof m->cpu.dwrite);
+    return true;
+}
+
+arm_ram_watch_t *s5l8900_ram_watch_current(const s5l8900_t *m) {
+    if (!m || !m->ram_watch || m->cpu.bus != &m->bus || m->bus.ctx != m ||
+        m->bus.read32 != r32 || m->bus.read16 != r16 || m->bus.read8 != r8 ||
+        m->bus.write32 != w32 || m->bus.write16 != w16 || m->bus.write8 != w8 ||
+        m->bus.host_ram != machine_host_ram ||
+        (m->bus.host_ram_write && m->bus.host_ram_write != machine_watched_ram_write))
+        return NULL;
+    return m->ram_watch;
+}
+
+bool s5l8900_set_ram_watch(s5l8900_t *m, bool enabled) {
+    if (!m) return false;
+    if (enabled) {
+        if (m->ram_watch) return s5l8900_ram_watch_current(m) != NULL;
+        if (m->cpu.bus != &m->bus || m->bus.ctx != m ||
+            m->bus.read32 != r32 || m->bus.read16 != r16 || m->bus.read8 != r8 ||
+            m->bus.write32 != w32 || m->bus.write16 != w16 || m->bus.write8 != w8 ||
+            m->bus.host_ram != machine_host_ram ||
+            (m->bus.host_ram_write && m->bus.host_ram_write != machine_host_ram))
+            return false;
+        m->ram_watch = arm_ram_watch_create(m->ram, m->ram_base, m->ram_size);
+        if (!m->ram_watch) return false;
+        if (m->bus.host_ram_write) m->bus.host_ram_write = machine_watched_ram_write;
+    } else {
+        arm_ram_watch_destroy(m->ram_watch);
+        m->ram_watch = NULL;
+        if (m->bus.host_ram_write == machine_watched_ram_write)
+            m->bus.host_ram_write = machine_host_ram;
+    }
+    memset(m->cpu.dwrite, 0, sizeof m->cpu.dwrite);
+    s5l8900_static_a64_invalidate_derived(m);
     return true;
 }
 
@@ -1591,6 +1641,8 @@ void s5l8900_free(s5l8900_t *m) {
         m->stubs[i].regs = NULL;
     }
     m->stub_count = 0;
+    arm_ram_watch_destroy(m->ram_watch);
+    m->ram_watch = NULL;
     free(m->ram);
     m->ram = NULL;
     free(m->mbx.edram);
@@ -1603,6 +1655,7 @@ void s5l8900_load(s5l8900_t *m, uint32_t addr, const void *data, size_t len) {
     /* Check before narrowing: a >4 GiB length must not truncate into range. */
     if (len > 0xffffffffu) return;
     if (!in_ram(m, addr, (uint32_t)len)) return;
+    s5l8900_ram_changed(m, addr, (uint32_t)len);
     memcpy(&m->ram[addr - m->ram_base], data, len);
 }
 

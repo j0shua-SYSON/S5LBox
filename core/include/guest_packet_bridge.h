@@ -32,6 +32,8 @@ typedef struct {
     guest_packet_sites_t sites;
     uint8_t *ram;
     uint64_t ram_base, ram_size;
+    arm_ram_changed_fn ram_changed;
+    void *ram_changed_context;
     /* Queue-only callbacks. send=false retains the original serial fallback.
      * peek borrows a packet until consume; both must be non-reentrant. */
     bool (*send)(void *ctx, const uint8_t *packet, size_t length);

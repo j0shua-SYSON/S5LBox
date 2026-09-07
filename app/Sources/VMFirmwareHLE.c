@@ -129,7 +129,7 @@ static bool hle_writev(void *opaque, const ios3_hle_write_span_t *spans,
             uint32_t pa = 0u;
             (void)arm_mmu_translate(&m->cpu, current, ARM_ACCESS_WRITE,
                                     false, &pa);
-            memcpy(m->ram + (pa - m->ram_base), bytes + done, chunk);
+            s5l8900_load(m, pa, bytes + done, chunk);
             done += chunk;
         }
     }

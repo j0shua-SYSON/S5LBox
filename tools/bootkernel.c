@@ -37124,6 +37124,8 @@ external_md_work_ready:
         bridge_config.ram_base = UINT64_C(0x08000000);
         bridge_config.ram_size = UINT64_C(128) << 20;
         bridge_config.ram = mach.ram;
+        bridge_config.ram_changed = s5l8900_ram_changed;
+        bridge_config.ram_changed_context = &mach;
         bridge_config.block = file_block_get(external_block_adapter);
         md_raw_bridge_config_t raw_config;
         memset(&raw_config, 0, sizeof raw_config);
@@ -37142,6 +37144,8 @@ external_md_work_ready:
         raw_config.ram_base = UINT64_C(0x08000000);
         raw_config.ram_size = UINT64_C(128) << 20;
         raw_config.ram = mach.ram;
+        raw_config.ram_changed = s5l8900_ram_changed;
+        raw_config.ram_changed_context = &mach;
         raw_config.block = file_block_get(external_block_adapter);
 
         if (!md_bridge_config_valid(&bridge_config) ||

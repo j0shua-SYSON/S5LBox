@@ -202,6 +202,10 @@ typedef arm_svc_result_t (*arm_privileged_svc_handler_t)(void *ctx,
  * harness supplies flat RAM, the machine layer supplies the S5L8900 memory map.
  * All accesses are little-endian, matching the guest.
  */
+/* Serialized host publication notice, before modifying the physical range.
+ * This invalidates derived read proofs; it never performs the write itself. */
+typedef void (*arm_ram_changed_fn)(void *ctx, uint32_t pa, uint32_t length);
+
 typedef struct arm_bus {
     void    *ctx;
     uint32_t (*read32)(void *ctx, uint32_t addr);

@@ -836,7 +836,8 @@ static bool reapply_engine_controls_after_reset(
     if (compact_window_cache &&
         !s5l8900_static_a64_set_compact_raw_window_cache(machine, true))
         return false;
-    if (compact_bulk && !s5l8900_static_a64_set_compact_bulk(machine, true))
+    if (compact_bulk && (!s5l8900_static_a64_set_compact_bulk(machine, true) ||
+                         !s5l8900_set_ram_watch(machine, true)))
         return false;
     if (compact_tlb_refill &&
         !s5l8900_static_a64_set_compact_tlb_refill(machine, true)) return false;
@@ -1267,7 +1268,8 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     }
     compact_bulk = file_size(compact_bulk_path) > 0u;
     if (compact_bulk && (forced_interpreter ||
-        !s5l8900_static_a64_set_compact_bulk(machine, true))) {
+        !s5l8900_static_a64_set_compact_bulk(machine, true) ||
+        !s5l8900_set_ram_watch(machine, true))) {
         set_detail(report->detail, sizeof report->detail,
                    "The bulk-loop experiment requires the signed compact "
                    "engine and conflicts with the interpreter control.");

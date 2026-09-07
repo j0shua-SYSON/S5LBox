@@ -11,6 +11,7 @@
  */
 #include <stddef.h>
 #include "md_bridge.h"
+#include "ram_publication_check.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -295,6 +296,9 @@ typedef struct {
     arm_cpu_t cpu;
 } fixture_t;
 
+static ram_publication_check_t publication;
+static uint8_t publication_before[TEST_RAM_SIZE], publication_notified[TEST_RAM_SIZE];
+
 static md_bridge_config_t default_config(fixture_t *fixture) {
     md_bridge_config_t config = {0};
     config.read_site.pc = TEST_READ_PC;
@@ -307,6 +311,8 @@ static md_bridge_config_t default_config(fixture_t *fixture) {
     config.ram_size = TEST_RAM_SIZE;
     config.ram = fixture->ram.bytes;
     config.block = &fixture->block;
+    config.ram_changed = ram_publication_notice;
+    config.ram_changed_context = &publication;
     return config;
 }
 
@@ -362,8 +368,12 @@ static arm_svc_result_t invoke(fixture_t *fixture,
         ? TEST_READ_PC : TEST_WRITE_PC;
     uint32_t encoding = direction == MD_BRIDGE_DIRECTION_READ
         ? TEST_READ_SVC : TEST_WRITE_SVC;
-    return md_bridge_handle_svc(&fixture->bridge, &fixture->cpu,
-                                pc, encoding);
+    ram_publication_begin(&publication, fixture->ram.bytes, fixture->ram.base,
+        TEST_RAM_SIZE, publication_before, publication_notified);
+    arm_svc_result_t result = md_bridge_handle_svc(&fixture->bridge, &fixture->cpu,
+                                                  pc, encoding);
+    CHECK(ram_publication_end(&publication), "missing or late RAM write notice");
+    return result;
 }
 
 static void expect_error(fixture_t *fixture,
@@ -1315,6 +1325,19 @@ static void test_error_strings_and_nulls(void) {
 }
 
 int main(void) {
+    /* Prove the publication oracle fails for both absent and late notices. */
+    uint8_t bytes[4] = {0}, before[4], notified[4];
+    ram_publication_begin(&publication, bytes, 0u, sizeof bytes, before, notified);
+    bytes[0] = 1u;
+    CHECK(!ram_publication_end(&publication), "oracle accepted a missing notice");
+    ram_publication_begin(&publication, bytes, 0u, sizeof bytes, before, notified);
+    bytes[0] = 2u;
+    ram_publication_notice(&publication, 0u, 1u);
+    CHECK(!ram_publication_end(&publication), "oracle accepted a late notice");
+    ram_publication_begin(&publication, bytes, 0u, sizeof bytes, before, notified);
+    ram_publication_notice(&publication, 0u, 1u);
+    bytes[0] = 3u;
+    CHECK(ram_publication_end(&publication), "oracle rejected a pre-write notice");
     printf("S5LBox md bridge tests\n");
     test_success_and_cpu_immutability();
     test_exact_gate_is_unhandled();

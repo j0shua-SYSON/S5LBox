@@ -19,6 +19,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "arm.h"
+#include "arm_ram_watch.h"
 
 /* ------------------------------------------------------------ memory map
  *
@@ -4244,6 +4245,8 @@ typedef struct {
      * from guest RAM. The public enable call owns it; s5l8900_free releases
      * it. Keeping one per machine avoids cross-VM code/data aliases. */
     void      *static_a64_state;
+    /* Derived physical-page write witnesses; never serialized. */
+    arm_ram_watch_t *ram_watch;
 
     /*
      * Optional host-function interception, also never serialised.  A hook is
@@ -4618,6 +4621,14 @@ void s5l8900_free(s5l8900_t *m);
  * only while the machine still owns its canonical, uninterposed write bus.
  * Disabling is always safe and invalidates every derived write pointer. */
 bool s5l8900_set_direct_ram_writes(s5l8900_t *m, bool enabled);
+
+/* Opt-in ownership contract for reusable RAM proofs. The frontend must report
+ * direct host publications through ram_changed; canonical CPU/DMA/graphics
+ * stores are covered by the machine bus. Full-window WRITE grants are revoked
+ * and watched pages cannot enter DWRITE. No architectural state is changed. */
+bool s5l8900_set_ram_watch(s5l8900_t *m, bool enabled);
+arm_ram_watch_t *s5l8900_ram_watch_current(const s5l8900_t *m);
+void s5l8900_ram_changed(void *machine, uint32_t pa, uint32_t length);
 
 /*
  * Install or clear an exact-PC host replacement hook.  `fn == NULL` clears

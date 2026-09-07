@@ -54,8 +54,10 @@ static void copy_from(const map_t *m, uint8_t *out) {
         out += m->span[i].length;
     }
 }
-static void copy_to(const map_t *m, const uint8_t *in) {
+static void copy_to(const guest_packet_bridge_t *b, const map_t *m, const uint8_t *in) {
     for (unsigned i = 0; i < m->count; i++) {
+        if (b->ram_changed)
+            b->ram_changed(b->ram_changed_context, m->span[i].pa, m->span[i].length);
         memcpy(m->span[i].data, in, m->span[i].length);
         in += m->span[i].length;
     }
@@ -154,7 +156,8 @@ static int prepare_rx(guest_packet_bridge_t *b, arm_cpu_t *c, uint32_t first,
     return 1;
 }
 
-static void commit_rx(const rx_chain_t *chain, const uint8_t *packet, size_t n) {
+static void commit_rx(const guest_packet_bridge_t *b,
+                       const rx_chain_t *chain, const uint8_t *packet, size_t n) {
     uint8_t framed[GUEST_PACKET_RX_MAX + 4u], fields[8];
     memcpy(framed, "\xff\x03\x00\x21", 4u);
     memcpy(framed + 4u, packet, n);
@@ -165,18 +168,20 @@ static void commit_rx(const rx_chain_t *chain, const uint8_t *packet, size_t n) 
         for (unsigned s = 0u; copied < size; s++) {
             uint32_t part = v->data.span[s].length;
             if (part > size - copied) part = size - copied;
+            if (b->ram_changed)
+                b->ram_changed(b->ram_changed_context, v->data.span[s].pa, part);
             memcpy(v->data.span[s].data, framed + offset + copied, part);
             copied += part;
         }
         st32(fields, size); st32(fields + 4u, v->data_va);
-        copy_to(&v->fields, fields);
+        copy_to(b, &v->fields, fields);
         left -= size;
         offset += size;
         st32(fields, left ? v->next : 0u);
-        copy_to(&v->next_field, fields);
+        copy_to(b, &v->next_field, fields);
         if (!left) {
             st32(fields, v->next);
-            copy_to(&chain->link, fields);
+            copy_to(b, &chain->link, fields);
         }
     }
     /* This is the private serial driver's allocation reserve, not ifnet MTU
@@ -184,7 +189,7 @@ static void commit_rx(const rx_chain_t *chain, const uint8_t *packet, size_t n) 
      * partial allocation failure; peek_large never exceeds actual capacity. */
     if (chain->large && chain->mru < GUEST_PACKET_RX_MAX) {
         st32(fields, GUEST_PACKET_RX_MAX);
-        copy_to(&chain->reserve, fields);
+        copy_to(b, &chain->reserve, fields);
     }
 }
 
@@ -261,7 +266,7 @@ static arm_svc_result_t receive(guest_packet_bridge_t *b, arm_cpu_t *c) {
     if (prepare_rx(b, c, m, true, &chain) != 1) return fail(b);
     if (b->peek_large) n = b->peek_large(b->ctx, token + 4u, chain.capacity, &packet);
     if (!packet || n < 20u || n > chain.capacity) return fail(b);
-    commit_rx(&chain, packet, n);
+    commit_rx(b, &chain, packet, n);
     c->r[1] = (uint32_t)n + 4u; /* native mbuf_pkthdr_setlen follows the SVC */
     b->consume(b->ctx);
     b->rx_packets++;
@@ -311,7 +316,7 @@ static arm_svc_result_t receive_batch(guest_packet_bridge_t *b, arm_cpu_t *c) {
     if (!ready) return finish_batch(b, c);
     if (b->peek_large) n = b->peek_large(b->ctx, NULL, chain.capacity, &packet);
     if (!packet || n < 20u || n > chain.capacity) return fail(b);
-    commit_rx(&chain, packet, n);
+    commit_rx(b, &chain, packet, n);
     b->consume(b->ctx);
     b->batch_left--;
     b->rx_packets++;

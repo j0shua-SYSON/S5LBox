@@ -946,6 +946,53 @@ static void test_chain_reuse_at_machine_budgets(void) {
     arm_bulk_cache_destroy(cache);
 }
 
+static void test_chain_write_witnesses(void) {
+    arm_bulk_cache_t *cache = arm_bulk_cache_create();
+    arm_ram_watch_t *watch = arm_ram_watch_create(ram, 0u, sizeof ram);
+    CHECK(cache && watch, "write witness allocation");
+    if (!cache || !watch) {
+        arm_bulk_cache_destroy(cache); arm_ram_watch_destroy(watch); return;
+    }
+    for (unsigned shape = 0u; shape < 7u; shape++) {
+        arm_cpu_t initial; arm_bulk_memory_t memory;
+        arm_bulk_cache_reset(cache); arm_ram_watch_reset(watch);
+        chain_setup(&initial, &memory, shape ? 1u : 0u, 0u, 128u, ARM_CPSR_Q);
+        if (shape) filtered_paths_install(&initial, &memory,
+            shape > 3u, (shape - 1u) % 3u, 128u, false);
+        memory.cache = cache; memory.watch = watch;
+        for (unsigned repeat = 0u; repeat < 2u; repeat++) {
+            arm_cpu_t cpu = initial;
+            (void)chain_differential(&cpu, &memory, 256u, shape ? 2u : 0u);
+        }
+        CHECK(arm_bulk_cache_hits(cache) == 1u, "watched short search did not reuse");
+        /* A publication in an unread word still preserves the exact loaded
+         * dependencies, but the old page stamp alone must no longer suffice. */
+        arm_ram_watch_changed(watch, DATA + (shape ? 0u : 4u), 4u);
+        ram[DATA + (shape ? 0u : 4u)] ^= 1u;
+        arm_cpu_t cpu = initial;
+        (void)chain_differential(&cpu, &memory, 256u, shape ? 2u : 0u);
+        CHECK(arm_bulk_cache_hits(cache) == 2u, "unread publication discarded search");
+        uint32_t link = DATA + 16u * 7u + (shape ? 8u : 0u);
+        arm_ram_watch_changed(watch, link, 4u);
+        w32(NULL, link, 0u);
+        cpu = initial;
+        (void)chain_differential(&cpu, &memory, 256u, shape ? 2u : 0u);
+        CHECK(arm_bulk_cache_hits(cache) == 2u, "changed link used stale read proof");
+        /* An owner reset cannot reuse stamps even when the summary survives
+         * long enough for the next exact byte validation. */
+        arm_ram_watch_reset(watch);
+        w32(NULL, link, DATA + 16u * 9u);
+        cpu = initial;
+        (void)chain_differential(&cpu, &memory, 256u, shape ? 2u : 0u);
+        /* Losing the write owner returns to byte proof, never trusted stamps. */
+        memory.watch = NULL;
+        w32(NULL, link, 0u);
+        cpu = initial;
+        (void)chain_differential(&cpu, &memory, 256u, shape ? 2u : 0u);
+    }
+    arm_bulk_cache_destroy(cache); arm_ram_watch_destroy(watch);
+}
+
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 typedef struct {
     arm_cpu_t *cpu;
@@ -982,7 +1029,7 @@ static uint64_t native_differential(arm_cpu_t *cpu,
     memcpy(before_ram, ram, sizeof ram);
     const a64_compact_raw_options_t options = {
         .bulk_enabled = enabled, .bulk_ram_window = memory->ram_window,
-        .bulk_cache = memory->cache,
+        .bulk_cache = memory->cache, .bulk_watch = memory->watch,
     };
     bool ok = a64_compact_raw_run_code_window_resident_options(cpu, memory->code,
         memory->code_base, memory->code_bytes, budget, native_fallback, &context,
@@ -1096,12 +1143,17 @@ static void test_native_integration(void) {
     arm_bulk_cache_t *cache = arm_bulk_cache_create();
     CHECK(cache != NULL, "native summary cache allocation");
     if (cache) {
+        arm_ram_watch_t *watch = arm_ram_watch_create(ram, 0u, sizeof ram);
+        CHECK(watch != NULL, "native write witness allocation");
+        for (unsigned watched = 0u; watched < (watch ? 2u : 1u); watched++)
         for (unsigned shape = 0u; shape < 7u; shape++) {
+            arm_ram_watch_reset(watch);
             arm_cpu_t initial; arm_bulk_memory_t memory; arm_ram_window_t window;
             chain_tlb_setup(&initial, &memory, &window, shape ? 1u : 0u);
             if (shape) filtered_paths_install(&initial, &memory,
                 shape > 3u, (shape - 1u) % 3u, 128u, true);
             memory.cache = cache;
+            memory.watch = watched ? watch : NULL;
             arm_bulk_cache_reset(cache);
             unsigned budget = shape ? filtered_paths_prefix(shape > 3u,
                 (shape - 1u) % 3u, 65u, 4096u) : 640u;
@@ -1129,6 +1181,7 @@ static void test_native_integration(void) {
             }
         }
         arm_bulk_cache_destroy(cache);
+        arm_ram_watch_destroy(watch);
     }
     CHECK(calls > 0u, "native bulk integration never executed");
     printf("arm_bulk native integration: %llu bulk calls\n", (unsigned long long)calls);
@@ -1151,6 +1204,7 @@ int main(void) {
     test_thumb_filtered_paths();
     test_chain_reuse();
     test_chain_reuse_at_machine_budgets();
+    test_chain_write_witnesses();
     test_native_integration();
     printf("arm_bulk: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;

@@ -13,6 +13,7 @@ typedef struct {
     /* Used only while building, in this read-only call; never dereferenced by
      * a cache hit. Validation resolves a fresh live pointer for every page. */
     const uint8_t *source;
+    uint64_t stamp;
     uint8_t bytes[1024];
 } bulk_page_t;
 
@@ -22,6 +23,7 @@ typedef struct {
     uint32_t start, offsets[4];
     uint32_t previous, current, value;
     uint32_t low, high, head_low, head_high;
+    const arm_ram_watch_t *watch;
     bulk_page_t page[BULK_PAGES];
 } bulk_segment_t;
 
@@ -190,27 +192,31 @@ static void segment_note(bulk_segment_t *entry, uint32_t address,
     entry->loads++;
 }
 
-static void segment_finish(bulk_segment_t *entry, uint32_t previous,
+static void segment_finish(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
+                             bulk_segment_t *entry, uint32_t previous,
                              uint32_t current, uint32_t value) {
     if (!entry || entry->iterations < 2u || entry->pages > BULK_PAGES) return;
     entry->previous = previous; entry->current = current; entry->value = value;
+    entry->watch = memory->watch;
     for (unsigned i = 0u; i < entry->pages; i++) {
+        entry->page[i].stamp = arm_ram_watch_capture(memory->watch, cpu,
+                                                    entry->page[i].source);
         memcpy(entry->page[i].bytes, entry->page[i].source, 1024u);
         entry->page[i].source = NULL;
     }
     entry->valid = true;
 }
 
-/* Re-reading the witnessed plain-RAM bytes catches ALL writers, including direct
- * native stores, DMA, bridges, restore and aliases. Translation generation
- * alone is not a content witness. A changed mapping is acceptable only when
- * its newly proved contents reproduce every original load. No hashes decide
- * equality, no old host pointer is followed, and no guest cache is published.
+/* A current owned write stamp can prove unchanged physical bytes; otherwise
+ * re-read the witnessed plain RAM. Translation generation alone is not a
+ * content witness. A changed mapping is acceptable only when its newly proved
+ * contents reproduce every original load. No hashes decide equality, no old
+ * host pointer is followed, and no guest READ cache is published.
  * Most pages compare equal at once. If unrelated data in the page changed,
  * check the exact loaded words before discarding useful search work. A word
  * mask records dependencies, not a hash of their values.
  * Logical load accounting uses each page's live witness classification. */
-static bool segment_validate(const arm_cpu_t *cpu,
+static bool segment_validate(arm_cpu_t *cpu,
                                const arm_bulk_memory_t *memory,
                                bulk_segment_t *entry,
                                unsigned *tlb_reads, unsigned *walk_reads) {
@@ -220,7 +226,9 @@ static bool segment_validate(const arm_cpu_t *cpu,
         unsigned read = 0u, walk = 0u;
         const uint8_t *p = chain_word_at(cpu, memory, page->address, &read, &walk);
         if (!p) return false;
-        if (memcmp(p, page->bytes, 1024u) != 0) {
+        uint64_t stamp = arm_ram_watch_capture(memory->watch, cpu, p);
+        bool unchanged = stamp && entry->watch == memory->watch && page->stamp == stamp;
+        if (!unchanged && memcmp(p, page->bytes, 1024u) != 0) {
             for (unsigned group = 0u; group < 8u; group++) {
                 uint32_t words = page->words[group];
                 while (words) {
@@ -237,10 +245,12 @@ static bool segment_validate(const arm_cpu_t *cpu,
             }
             memcpy(page->bytes, p, 1024u);
         }
+        page->stamp = stamp;
         reads += read * page->reads;
         walks += walk * page->reads;
     }
     *tlb_reads += reads; *walk_reads += walks;
+    entry->watch = memory->watch;
     memory->cache->hits++;
     return true;
 }
@@ -328,11 +338,11 @@ static unsigned thumb_ordered_chain(arm_cpu_t *cpu,
             building->iterations++;
         }
         if (++part == BULK_SEGMENT) {
-            segment_finish(building, prev, cur, key);
+            segment_finish(cpu, memory, building, prev, cur, key);
             part = 0u;
         }
     }
-    if (part) segment_finish(building, prev, cur, key);
+    if (part) segment_finish(cpu, memory, building, prev, cur, key);
     if (!count) return 0u;
     cpu->r[previous] = prev; cpu->r[current] = cur;
     cpu->r[walk] = walker; cpu->r[value] = key;
@@ -479,11 +489,11 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
         loads += iteration_loads;
         retired += cost;
         if (++part == BULK_SEGMENT) {
-            segment_finish(building, previous, current, value);
+            segment_finish(cpu, memory, building, previous, current, value);
             part = 0u;
         }
     }
-    if (part) segment_finish(building, previous, current, value);
+    if (part) segment_finish(cpu, memory, building, previous, current, value);
     if (!retired) return 0u;
     cpu->r[1] = same_depth ? wanted : cpu->r[8];
     cpu->r[2] = value; cpu->r[3] = current;

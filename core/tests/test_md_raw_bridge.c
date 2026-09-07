@@ -5,6 +5,7 @@
  */
 #include <stddef.h>
 #include "md_raw_bridge.h"
+#include "ram_publication_check.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -220,6 +221,8 @@ typedef struct {
 
 /* Static because the bridge owns bounded staging and coherent-tail buffers. */
 static fixture_t fixture;
+static ram_publication_check_t publication;
+static uint8_t publication_before[TEST_RAM_SIZE], publication_notified[TEST_RAM_SIZE];
 
 static void put_u32(uint32_t address, uint32_t value) {
     ram_write32(&fixture.ram, address, value);
@@ -286,6 +289,8 @@ static md_raw_bridge_config_t default_config(void) {
     config.bounce_stride = TEST_BOUNCE_STRIDE;
     config.bounce_slot_count = TEST_BOUNCE_SLOTS;
     config.block = &fixture.block;
+    config.ram_changed = ram_publication_notice;
+    config.ram_changed_context = &publication;
     return config;
 }
 
@@ -340,8 +345,12 @@ static arm_svc_result_t invoke_entry_raw(void) {
      * a remapped page through the mapping it replaced.
      */
     arm_mmu_tlb_flush(&fixture.cpu);
-    return md_raw_bridge_handle_svc(&fixture.bridge, &fixture.cpu,
-                                    TEST_RAW_PC, TEST_RAW_SVC);
+    ram_publication_begin(&publication, fixture.ram.bytes, fixture.ram.base,
+        TEST_RAM_SIZE, publication_before, publication_notified);
+    arm_svc_result_t result = md_raw_bridge_handle_svc(&fixture.bridge, &fixture.cpu,
+                                                     TEST_RAW_PC, TEST_RAW_SVC);
+    CHECK(ram_publication_end(&publication), "missing or late entry RAM write notice");
+    return result;
 }
 
 static arm_svc_result_t invoke_completion(void) {
@@ -354,9 +363,12 @@ static arm_svc_result_t invoke_completion(void) {
      * a remapped page through the mapping it replaced.
      */
     arm_mmu_tlb_flush(&fixture.cpu);
-    return md_raw_bridge_handle_svc(&fixture.bridge, &fixture.cpu,
-                                    TEST_RAW_COMPLETION_PC,
-                                    TEST_RAW_COMPLETION_SVC);
+    ram_publication_begin(&publication, fixture.ram.bytes, fixture.ram.base,
+        TEST_RAM_SIZE, publication_before, publication_notified);
+    arm_svc_result_t result = md_raw_bridge_handle_svc(&fixture.bridge, &fixture.cpu,
+        TEST_RAW_COMPLETION_PC, TEST_RAW_COMPLETION_SVC);
+    CHECK(ram_publication_end(&publication), "missing or late completion RAM write notice");
+    return result;
 }
 
 static arm_svc_result_t invoke(void) {
