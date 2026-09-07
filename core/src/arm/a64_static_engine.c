@@ -92,6 +92,7 @@ typedef struct {
     bool compact_raw_privileged_window_refill_enabled;
     bool compact_raw_window_cache_enabled;
     bool compact_bulk_enabled;
+    arm_bulk_cache_t *compact_bulk_cache;
     bool compact_tlb_refill_enabled;
     bool compact_ram_map_enabled;
     arm_ram_map_t *compact_ram_map;
@@ -804,6 +805,7 @@ void s5l8900_static_a64_invalidate_derived(s5l8900_t *m) {
     memset(&state->compact_pending, 0, sizeof state->compact_pending);
     memset(state->graph_nodes, 0, sizeof state->graph_nodes);
     arm_ram_map_reset(state->compact_ram_map);
+    arm_bulk_cache_reset(state->compact_bulk_cache);
     if (state->compact_bulk_enabled)
         (void)arm_ram_window_capture(&state->compact_bulk_ram_window, &m->cpu,
                                      m->ram_base, m->ram_size);
@@ -1108,6 +1110,14 @@ bool s5l8900_static_a64_set_compact_bulk(s5l8900_t *m, bool enabled) {
     static_a64_state_t *state = static_state(m);
     if (!state || !state->enabled || !state->compact_raw_enabled ||
         !a64_static_host_available()) return false;
+    if (enabled && !state->compact_bulk_cache) {
+        state->compact_bulk_cache = arm_bulk_cache_create();
+        if (!state->compact_bulk_cache) return false;
+    }
+    if (!enabled) {
+        arm_bulk_cache_destroy(state->compact_bulk_cache);
+        state->compact_bulk_cache = NULL;
+    }
     state->compact_bulk_enabled = enabled;
     if (enabled)
         (void)arm_ram_window_capture(&state->compact_bulk_ram_window, &m->cpu,
@@ -2119,6 +2129,7 @@ static unsigned try_compact_raw(
     const a64_compact_raw_options_t options = {
         .window_cache_enabled = state->compact_raw_window_cache_enabled,
         .bulk_enabled = state->compact_bulk_enabled,
+        .bulk_cache = state->compact_bulk_cache,
         .bulk_ram_window = state->compact_bulk_enabled && !priv &&
             state->compact_bulk_ram_window.read_host == m->ram &&
             state->compact_bulk_ram_window.base == m->ram_base &&
@@ -2488,6 +2499,7 @@ void s5l8900_static_a64_dispose(s5l8900_t *m) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     static_a64_state_t *state = static_state(m);
     if (state) free(state->compact_ram_map);
+    if (state) arm_bulk_cache_destroy(state->compact_bulk_cache);
     free(m->static_a64_state);
 #endif
     m->static_a64_state = NULL;

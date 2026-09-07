@@ -5,6 +5,15 @@
 #include "arm.h"
 #include <stddef.h>
 
+/* Derived, bounded data summaries; never executable or serialized. Every hit
+ * re-proves current READ mappings and compares all captured load bytes. No
+ * write observer, dirty-bit discipline or retained host pointer is trusted. */
+typedef struct arm_bulk_cache arm_bulk_cache_t;
+arm_bulk_cache_t *arm_bulk_cache_create(void);
+void arm_bulk_cache_destroy(arm_bulk_cache_t *cache);
+void arm_bulk_cache_reset(arm_bulk_cache_t *cache);
+uint64_t arm_bulk_cache_hits(const arm_bulk_cache_t *cache);
+
 typedef struct {
     /* The caller owns a live FETCH witness for this complete code span. */
     const uint8_t *code;
@@ -19,6 +28,7 @@ typedef struct {
      * Cached mappings/faults still take precedence. No bus access or cache
      * publication is allowed while speculating about an entire iteration. */
     const arm_ram_window_t *ram_window;
+    arm_bulk_cache_t *cache;
 } arm_bulk_memory_t;
 
 /* Returns the exact number of original instructions represented, bounded by

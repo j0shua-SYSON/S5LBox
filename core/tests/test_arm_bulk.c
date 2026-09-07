@@ -787,6 +787,139 @@ static void test_thumb_filtered_paths(void) {
     puts("arm_bulk filtered paths: mixed 15/19/22/26 instruction cycles executed");
 }
 
+static void test_chain_reuse(void) {
+    arm_bulk_cache_t *cache = arm_bulk_cache_create();
+    CHECK(cache != NULL, "search cache allocation");
+    if (!cache) return;
+    static const unsigned budgets[] = {
+        0u, 9u, 10u, 319u, 320u, 321u, 479u, 480u, 481u,
+        607u, 608u, 609u, 703u, 704u, 705u, 831u, 832u, 833u, 4096u,
+    };
+    for (unsigned shape = 0u; shape < 7u; shape++) {
+        unsigned kind = shape ? 1u : 0u;
+        arm_cpu_t initial; arm_bulk_memory_t memory;
+        chain_setup(&initial, &memory, kind, 0u, 128u, ARM_CPSR_Q);
+        if (shape) filtered_paths_install(&initial, &memory,
+            shape > 3u, (shape - 1u) % 3u, 128u, false);
+        memory.cache = cache;
+        arm_bulk_cache_reset(cache);
+        arm_cpu_t cpu = initial;
+        unsigned full = chain_differential(&cpu, &memory, 4096u, shape ? 2u : 0u);
+        CHECK(full >= 320u, "reuse fixture did not traverse long chain");
+        cpu = initial;
+        CHECK(chain_differential(&cpu, &memory, 4096u, shape ? 2u : 0u) == full,
+              "cached prefix changed length");
+        CHECK(arm_bulk_cache_hits(cache) != 0u, "shape %u cache never hit", shape);
+        uint64_t hits = arm_bulk_cache_hits(cache);
+        /* The first node's key is an input register, not a load in this span.
+         * Changing it must not invalidate the other proved words on its page. */
+        ram[DATA + (shape ? 0u : 4u)] ^= 1u;
+        cpu = initial;
+        (void)chain_differential(&cpu, &memory, 4096u, shape ? 2u : 0u);
+        CHECK(arm_bulk_cache_hits(cache) == hits + 3u,
+              "unread-word change discarded summaries");
+        for (unsigned flags = 0u; flags < 16u; flags++)
+            for (unsigned b = 0u; b < sizeof budgets / sizeof budgets[0]; b++) {
+                cpu = initial;
+                cpu.cpsr |= flags << 28;
+                (void)chain_differential(&cpu, &memory, budgets[b], shape ? 2u : 0u);
+            }
+        /* Inputs that were overwritten by a full segment need not match the
+         * old call. Query ranges still prove every skipped branch separately. */
+        for (unsigned scenario = 0u; scenario < 8u; scenario++) {
+            cpu = initial;
+            if (!shape) {
+                if (scenario == 0u) cpu.r[4] ^= 0x5500u;
+                else cpu.r[5] = (uint32_t[]){0u, 0u, 0x80000004u, 0x80000020u,
+                    0x80000021u, 0x8000003fu, 0xfffffff0u, UINT32_MAX}[scenario];
+            } else {
+                if (scenario == 0u) cpu.r[2] = 0u;
+                if (scenario == 1u) cpu.r[12] = cpu.r[2];
+                if (scenario == 2u) cpu.r[12] = 0x80000004u;
+                if (scenario == 3u) cpu.r[12] = UINT32_MAX;
+                if (scenario >= 4u && shape <= 3u)
+                    w32(NULL, 0x3100u, 0x80000000u + 16u * (scenario - 4u));
+            }
+            (void)chain_differential(&cpu, &memory, 4096u, shape ? 2u : 0u);
+        }
+        /* Writes intentionally do not use an invalidation API: direct native,
+         * bridge and restore writes must all be detected from actual bytes. */
+        for (unsigned scenario = 0u; scenario < 5u; scenario++) {
+            cpu = initial;
+            if (shape <= 3u && shape) w32(NULL, 0x3100u, 0xfffffff0u);
+            w32(NULL, DATA + 16u * 7u + (shape ? 8u : 0u),
+                scenario == 0u ? 0u : DATA + 16u * (8u + scenario));
+            if (scenario == 2u) ram[DATA + 16u * 12u + (shape ? 0u : 4u)] ^= 0x61u;
+            if (scenario == 3u) ram[0x3f00u] ^= 0xffu;
+            if (scenario == 4u) ram[DATA + 16u * 5u + 15u] ^= 0x80u;
+            (void)chain_differential(&cpu, &memory, 4096u, shape ? 2u : 0u);
+        }
+        cpu = initial;
+        ram[CODE + 1u] ^= 0x80u;
+        refusal(&cpu, &memory, 4096u);
+    }
+    /* Revalidate current mappings, not just the original generation. Warm
+     * translations, cold descriptor walks and exact cached faults all win. */
+    for (unsigned kind = 0u; kind < 2u; kind++)
+        for (unsigned scenario = 0u; scenario < 8u; scenario++) {
+            arm_cpu_t initial; arm_bulk_memory_t memory; arm_ram_window_t window;
+            chain_tlb_setup(&initial, &memory, &window, kind);
+            memory.cache = cache;
+            arm_bulk_cache_reset(cache);
+            arm_cpu_t cpu = initial;
+            (void)chain_differential(&cpu, &memory, 4096u, kind);
+            cpu = initial;
+            unsigned slot = (DATA >> 10) & (ARM_TLB_ENTRIES - 1u);
+            if (scenario == 0u) memset(cpu.tlb, 0, sizeof cpu.tlb);
+            if (scenario == 1u) {
+                w32(NULL, 0x804u, 0x1012u); /* Stale valid READ still wins. */
+            }
+            if (scenario == 2u) cpu.tlb[slot].fsr = 13u;
+            if (scenario == 3u) {
+                memset(cpu.tlb, 0, sizeof cpu.tlb);
+                w32(NULL, 0x804u, 0x1012u); /* Cold READ must now fault. */
+            }
+            if (scenario == 4u) {
+                memcpy(ram + 0x3800u, ram + DATA, 1024u);
+                cpu.tlb[slot].pa = 0x3800u; /* Changed PA, identical data. */
+            }
+            if (scenario == 5u) {
+                memcpy(ram + 0x3800u, ram + DATA, 1024u);
+                cpu.tlb[slot].pa = 0x3800u;
+                w32(NULL, 0x3800u + (kind ? 8u : 0u), 0u);
+            }
+            if (scenario == 6u) cpu.cp15.context_id++;
+            if (scenario == 7u) {
+                cpu = initial;
+                arm_bulk_cache_reset(cache); /* Host reset/restore lifecycle. */
+            }
+            if (scenario == 2u || scenario == 3u || scenario == 6u)
+                refusal(&cpu, &memory, 4096u);
+            else {
+                (void)chain_differential(&cpu, &memory, 4096u, kind);
+                if (scenario <= 1u || scenario == 4u)
+                    CHECK(arm_bulk_cache_hits(cache) != 0u, "live mapping was not reused");
+            }
+        }
+    /* A segment spanning more than the bounded page capacity stays literal. */
+    arm_cpu_t initial; arm_bulk_memory_t memory;
+    chain_setup(&initial, &memory, 0u, 0u, 128u, 0u);
+    for (unsigned i = 0u; i < 12u; i++) {
+        w32(NULL, DATA + i * 1024u, DATA + ((i + 1u) % 12u) * 1024u);
+        w32(NULL, DATA + i * 1024u + 4u, i);
+    }
+    memory.cache = cache;
+    arm_bulk_cache_reset(cache);
+    for (unsigned i = 0u; i < 2u; i++) {
+        arm_cpu_t cpu = initial;
+        CHECK(chain_differential(&cpu, &memory, 4096u, 0u) == 4090u,
+              "page-capacity fallback changed execution");
+    }
+    CHECK(arm_bulk_cache_hits(cache) == 0u, "over-capacity segment was cached");
+    arm_bulk_cache_destroy(cache);
+    puts("arm_bulk search reuse: live bytes, query ranges, mappings and budgets checked");
+}
+
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 typedef struct {
     arm_cpu_t *cpu;
@@ -823,6 +956,7 @@ static uint64_t native_differential(arm_cpu_t *cpu,
     memcpy(before_ram, ram, sizeof ram);
     const a64_compact_raw_options_t options = {
         .bulk_enabled = enabled, .bulk_ram_window = memory->ram_window,
+        .bulk_cache = memory->cache,
     };
     bool ok = a64_compact_raw_run_code_window_resident_options(cpu, memory->code,
         memory->code_base, memory->code_bytes, budget, native_fallback, &context,
@@ -933,6 +1067,27 @@ static void test_native_integration(void) {
                 }
     CHECK(alternate_calls == 12u, "native alternate search paths did not execute");
     calls += alternate_calls;
+    arm_bulk_cache_t *cache = arm_bulk_cache_create();
+    CHECK(cache != NULL, "native summary cache allocation");
+    if (cache) {
+        for (unsigned shape = 0u; shape < 7u; shape++) {
+            arm_cpu_t initial; arm_bulk_memory_t memory; arm_ram_window_t window;
+            chain_tlb_setup(&initial, &memory, &window, shape ? 1u : 0u);
+            if (shape) filtered_paths_install(&initial, &memory,
+                shape > 3u, (shape - 1u) % 3u, 128u, true);
+            memory.cache = cache;
+            arm_bulk_cache_reset(cache);
+            unsigned budget = shape ? filtered_paths_prefix(shape > 3u,
+                (shape - 1u) % 3u, 65u, 4096u) : 640u;
+            for (unsigned repeat = 0u; repeat < 3u; repeat++) {
+                arm_cpu_t cpu = initial;
+                if (repeat == 2u) memset(cpu.tlb, 0, sizeof cpu.tlb);
+                calls += native_differential(&cpu, &memory, budget, true);
+            }
+            CHECK(arm_bulk_cache_hits(cache) > 0u, "native summary reuse never executed");
+        }
+        arm_bulk_cache_destroy(cache);
+    }
     CHECK(calls > 0u, "native bulk integration never executed");
     printf("arm_bulk native integration: %llu bulk calls\n", (unsigned long long)calls);
 }
@@ -952,6 +1107,7 @@ int main(void) {
     test_thumb_chain_tlb();
     test_thumb_chain_cold();
     test_thumb_filtered_paths();
+    test_chain_reuse();
     test_native_integration();
     printf("arm_bulk: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;

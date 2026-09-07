@@ -70,6 +70,22 @@ pages, changed/truncated branch targets and precise refusal after a prefix.
 Native integration requires the entire chosen budget in one batch on both
 warm and cold pages. This expands execution coverage, not the physical gate.
 
+The same opt-in path retains up to 256 summaries of 32 read-only search
+iterations, with at most eight 1 KiB RAM pages per summary (about 2 MiB total).
+Reuse rechecks the live instruction shape, query bounds, current User READ
+mapping of every page, and exact loaded values with byte comparisons. It does
+not rely on hashes, page generations, write callbacks or saved host pointers.
+This covers direct CPU/graphics/bridge writes and changed mappings without
+instrumenting stores. Equal pages pass a single comparison; changed pages are
+checked against the exact loaded-word mask so unrelated stores do not discard
+useful work. Over-capacity spans and partial budgets stay literal.
+Original instruction/load counts and final registers/flags remain exact;
+the existing device budget is unchanged. Summaries are derived host data,
+reset with the engine and freed on disable/disposal, never checkpoint bytes.
+The regression requires actual reuse, then changes inputs, data, mappings,
+permissions and code and compares against ordinary instruction execution.
+No application wall-time improvement has yet been established for this path.
+
 ## First physical result
 
 Build `cd6f350` passed all eight core CI jobs (including native ARM64 execution
