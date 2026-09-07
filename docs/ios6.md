@@ -267,20 +267,25 @@ Tests independently construct the constant bytes for every immediate/mode
 combination and cover all register indices, permissions, conditionals,
 host FP preservation, split fetch faults and guest enable/retry.
 
-NEON register VMUL.F32 now multiplies two or four lanes across the full D/Q
-bank, using exact integer products and nearest-even rounding. ARM standard
-NEON arithmetic fixes default-NaN and flush-to-zero behavior independently
+NEON register VMUL.F32, VADD.F32 and VSUB.F32 operate on two or four lanes
+across the full D/Q bank, using integer arithmetic and nearest-even rounding.
+Multiplication retains an exact 48-bit product; addition and subtraction
+retain guard, round and sticky bits through alignment and normalization.
+ARM standard NEON arithmetic fixes default-NaN and flush-to-zero behavior independently
 of FPSCR rounding/FZ/DN controls. Both inputs are unpacked before NaN
 selection, and a tiny nonzero result flushes to signed zero before rounding,
 setting UFC without IXC. Overflow sets OFC/IXC; denormal inputs and invalid
 operations set their sticky flags. Existing FPSCR flags and controls, ARM
 flags and host FP state are preserved. See
-[DDI0406C.b, A2.7 and A8.8.351](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
-Tests compare an independent binary64 product/conversion oracle with raw
-boundary cases, all register aliases, sampled finite products, guest/host
+[DDI0406C.b, A2.7 and A8.8.283/351/415](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Tests compare independent binary64 numeric oracles with raw
+boundary cases, all register aliases, sampled finite inputs, guest/host
 rounding controls, access denials, conditional execution and split fetches.
+The addition oracle retains a residual to detect inexact results across
+large exponent gaps. Tests also cover cancellation, signed zeros and
+sticky flags across an exceptional result, an exact result and VMRS.
 Odd Q operands and the reserved size encoding stop before access checks.
-Other NEON arithmetic and full-bank Cortex-A8 VFP multiplication remain
+Other NEON arithmetic and full-bank Cortex-A8 VFP arithmetic remain
 separate work.
 
 The matching cache's unchanged `fmodf` now returns the expected raw results
@@ -288,8 +293,8 @@ for eight normal-input cases in an isolated User-mode fixture. These cover
 smaller/equal/greater magnitudes, both operand signs and signed zero, with
 exact stack contents and access counts, callee-register preservation and
 NEON stack save/restore. Before Boolean support, the same fixture stopped
-at its first VORR. Special inputs and helper paths remain untested; this
-fixture does not establish process launch or a complete firmware boot.
+at its first VORR. This fixture does not establish process launch or a
+complete firmware boot.
 
 A separate fixture completes eight tiny-result paths from the same unchanged
 entry, including the multiply at `0x3929abd2`. Each returns the signed zero
@@ -297,6 +302,14 @@ required by NEON flush-to-zero, with UFC set and exact stack accesses and
 register restoration. The earlier prefix fixture established D16/D17 at
 the multiply; the full-function baseline stopped on that instruction.
 These remain isolated host fixtures without a loaded guest process.
+
+A third fixture executes 16 special-input cases through the matching
+six-byte Thumb `fabsf` helper on a separate User code page. Signed zeros,
+infinities, zero divisors, quiet/signaling NaNs and NaNs paired with
+denormals return the expected bits, flags, stack accesses and preserved
+registers. The NaN paths execute the formerly unsupported VADD, retaining
+the earlier VCMPE status and adding IDC when NEON flushes a denormal input.
+Only this exact helper and the original function are prepared for execution.
 
 ARM and Thumb VLDR/VSTR now move one S or D register through the translating
 memory accessors, including D16-D31. They use signed, scaled immediate
@@ -800,7 +813,7 @@ establish that result.
   VFP copies, immediate constants and sign operations with short vectors,
   scalar comparisons across the full register bank, and the bounded
   32/64-bit NEON VLD1/VST1 memory forms, register Boolean operations and
-  immediate constants and register VMUL.F32 described above.
+  immediate constants and register VMUL/VADD/VSUB.F32 described above.
   Upper-bank VFP arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Shared lower-bank arithmetic
   still derives from VFP11 and requires a complete Cortex-A8 semantic audit.

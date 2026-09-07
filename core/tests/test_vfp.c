@@ -1155,32 +1155,83 @@ static uint32_t a8_neon_mul_expected(uint32_t a, uint32_t b, uint32_t *flags) {
     return bits;
 }
 
-static void a8_neon_mul_check(arm_cpu_t *c, unsigned thumb, unsigned quad, unsigned dst,
-                              unsigned left, unsigned right, unsigned host) {
+static uint32_t a8_neon_add(unsigned thumb, unsigned subtract, unsigned quad,
+                            unsigned dst, unsigned left, unsigned right) {
+    return (thumb ? 0xef000d00u : 0xf2000d00u) | (subtract << 21) | (quad << 6) |
+        ((dst & 15u) << 12) | ((dst >> 4) << 22) |
+        ((left & 15u) << 16) | ((left >> 4) << 7) | (right & 15u) | ((right >> 4) << 5);
+}
+
+static uint32_t a8_neon_add_expected(uint32_t a, uint32_t b, bool subtract, uint32_t *flags) {
+    if (subtract) b ^= 0x80000000u;
+    uint32_t aa = a & 0x7fffffffu, bb = b & 0x7fffffffu;
+    if (aa && aa < 0x00800000u) { *flags |= ARM_FPSCR_IDC; aa = 0u; }
+    if (bb && bb < 0x00800000u) { *flags |= ARM_FPSCR_IDC; bb = 0u; }
+    if (aa > 0x7f800000u || bb > 0x7f800000u) {
+        if ((aa > 0x7f800000u && !(aa & 0x00400000u)) || (bb > 0x7f800000u && !(bb & 0x00400000u))) *flags |= ARM_FPSCR_IOC;
+        return 0x7fc00000u;
+    }
+    if (aa == 0x7f800000u || bb == 0x7f800000u) {
+        if (aa == bb && ((a ^ b) & 0x80000000u)) { *flags |= ARM_FPSCR_IOC; return 0x7fc00000u; }
+        return aa == 0x7f800000u ? a : b;
+    }
+    if (!aa && !bb) return a & b & 0x80000000u;
+    if (!aa) return b;
+    if (!bb) return a;
+    /* TwoSum retains the residual lost from the binary64 sum. A plain
+     * double-sum equality check loses IXC when one input is much smaller.
+     * Near a binary32 rounding boundary, both binary32 inputs fit exactly
+     * in binary64; use a numeric cast, independent of production bit shifts. */
+    double x = (double)u2f(a), y = (double)u2f(b);
+    volatile double high = x + y, z = high - x;
+    double residual = (x - (high - z)) + (y - z);
+    if (high == 0.0) return 0u;
+    uint32_t sign = high < 0.0 ? 0x80000000u : 0u;
+    double magnitude = high < 0.0 ? -high : high;
+    if (magnitude < 0x1p-126) { *flags |= ARM_FPSCR_UFC; return sign; }
+    volatile float rounded = (float)high;
+    uint32_t bits = f2u(rounded);
+    if ((bits & 0x7fffffffu) == 0x7f800000u) *flags |= ARM_FPSCR_OFC | ARM_FPSCR_IXC;
+    else if ((double)rounded != high || residual != 0.0) *flags |= ARM_FPSCR_IXC;
+    return bits;
+}
+
+static uint32_t a8_neon_arithmetic_expected(unsigned kind, uint32_t a, uint32_t b, uint32_t *flags) {
+    return kind ? a8_neon_add_expected(a, b, kind == 2u, flags) : a8_neon_mul_expected(a, b, flags);
+}
+
+static void a8_neon_arithmetic_check(arm_cpu_t *c, unsigned thumb, unsigned quad, unsigned dst,
+                                     unsigned left, unsigned right, unsigned host, unsigned kind) {
     static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
-    CHECK(fesetround(FE_TONEAREST) == 0, "prepare exact multiply oracle");
+    CHECK(fesetround(FE_TONEAREST) == 0, "prepare arithmetic oracle");
     uint64_t expected[32], results[2];
     for (unsigned d = 0; d < 32u; d++) expected[d] = vfp_get_d(c, d);
     uint32_t exceptions = 0;
     for (unsigned r = 0; r <= quad; r++) {
-        uint32_t lo = a8_neon_mul_expected((uint32_t)expected[left + r], (uint32_t)expected[right + r], &exceptions);
-        uint32_t hi = a8_neon_mul_expected((uint32_t)(expected[left + r] >> 32), (uint32_t)(expected[right + r] >> 32), &exceptions);
+        uint32_t lo = a8_neon_arithmetic_expected(kind, (uint32_t)expected[left + r], (uint32_t)expected[right + r], &exceptions);
+        uint32_t hi = a8_neon_arithmetic_expected(kind, (uint32_t)(expected[left + r] >> 32), (uint32_t)(expected[right + r] >> 32), &exceptions);
         results[r] = (uint64_t)hi << 32 | lo;
     }
     for (unsigned r = 0; r <= quad; r++) expected[dst + r] = results[r];
     uint32_t flags = c->cpsr, fpscr = c->vfp_fpscr;
     c->excl_valid = true; c->excl_addr = 0x2468u;
     CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 && feraiseexcept(FE_DIVBYZERO) == 0,
-          "prepare multiply host FP state");
+          "prepare arithmetic host FP state");
     int host_flags = fetestexcept(FE_ALL_EXCEPT);
-    CHECK(a8_move_step(c, thumb, a8_neon_mul(thumb, quad, dst, left, right)) == ARM_OK && c->r[15] == 0x104u &&
+    uint32_t insn = kind ? a8_neon_add(thumb, kind == 2u, quad, dst, left, right) : a8_neon_mul(thumb, quad, dst, left, right);
+    CHECK(a8_move_step(c, thumb, insn) == ARM_OK && c->r[15] == 0x104u &&
           c->cpsr == flags && c->vfp_fpscr == (fpscr | exceptions) && c->excl_valid && c->excl_addr == 0x2468u,
-          "NEON multiply disposition/flags T=%u Q=%u d=%u n=%u m=%u", thumb, quad, dst, left, right);
+          "NEON arithmetic disposition/flags kind=%u T=%u Q=%u d=%u n=%u m=%u", kind, thumb, quad, dst, left, right);
     bool same = true;
     for (unsigned d = 0; d < 32u; d++) same &= vfp_get_d(c, d) == expected[d];
     for (unsigned r = 0; r < 15u; r++) same &= c->r[r] == 0u;
-    CHECK(same, "NEON multiply result or register preservation");
-    CHECK(fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == host_flags, "NEON multiply changed host FP environment");
+    CHECK(same, "NEON arithmetic result or register preservation");
+    CHECK(fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == host_flags, "NEON arithmetic changed host FP environment");
+}
+
+static void a8_neon_mul_check(arm_cpu_t *c, unsigned thumb, unsigned quad, unsigned dst,
+                              unsigned left, unsigned right, unsigned host) {
+    a8_neon_arithmetic_check(c, thumb, quad, dst, left, right, host, 0u);
 }
 
 static void test_a8_neon_multiply_results(void) {
@@ -1318,6 +1369,183 @@ static void test_a8_neon_multiply_access_and_invalid(void) {
         CHECK(a8_move_step(&c, thumb, 0xeef1fa10u) == ARM_OK && c.r[15] == 0x10cu &&
               c.cpsr == ((flags & ~0xf0000000u) | 0x50000000u) && c.vfp_fpscr == (ARM_FPSCR_QC | 0x50000001u),
               "VMRS after multiply did not preserve the existing FPSCR comparison flags");
+    }
+}
+
+static void test_a8_neon_add_results(void) {
+    /* a,b,add result/flags,subtract result/flags. Includes cancellation,
+     * signed zero, both tie directions, binade edges and large exponent gaps. */
+    static const uint32_t cases[][6] = {
+        {0x3f800000u,0x3f800000u,0x40000000u,0u,0u,0u},
+        {0x3f800000u,0xbf800000u,0u,0u,0x40000000u,0u},
+        {0x80000000u,0x80000000u,0x80000000u,0u,0u,0u},
+        {0u,0x80000000u,0u,0u,0u,0u},{0x80000000u,0u,0u,0u,0x80000000u,0u},
+        {0x7f800000u,0x7f800000u,0x7f800000u,0u,0x7fc00000u,1u},
+        {0x7f800000u,0xff800000u,0x7fc00000u,1u,0x7f800000u,0u},
+        {0x7fc12345u,0x3f800000u,0x7fc00000u,0u,0x7fc00000u,0u},
+        {0xff800001u,1u,0x7fc00000u,0x81u,0x7fc00000u,0x81u},
+        {1u,0x3f800000u,0x3f800000u,0x80u,0xbf800000u,0x80u},
+        {0x00800000u,0x00800001u,0x01000000u,0x10u,0x80000000u,8u},
+        {0x00800001u,0x00800000u,0x01000000u,0x10u,0u,8u},
+        {0x01000000u,0x00800000u,0x01400000u,0u,0x00800000u,0u},
+        {0x7f7fffffu,0x7f7fffffu,0x7f800000u,0x14u,0u,0u},
+        {0x7f7fffffu,0x73000000u,0x7f800000u,0x14u,0x7f7ffffeu,0x10u},
+        {0x7f7fffffu,0x72800000u,0x7f7fffffu,0x10u,0x7f7fffffu,0x10u},
+        {0x3f800000u,0x33800000u,0x3f800000u,0x10u,0x3f7fffffu,0u},
+        {0x3f800001u,0x33800000u,0x3f800002u,0x10u,0x3f800000u,0x10u},
+        {0x3f800000u,0x33000000u,0x3f800000u,0x10u,0x3f800000u,0x10u},
+        {0x3f800000u,0x32ffffffu,0x3f800000u,0x10u,0x3f800000u,0x10u},
+        {0x3f800000u,0x33000001u,0x3f800000u,0x10u,0x3f7fffffu,0x10u},
+        {0x3f800000u,0x00800000u,0x3f800000u,0x10u,0x3f800000u,0x10u},
+        {0x3f800000u,0x80000001u,0x3f800000u,0x80u,0x3f800000u,0x80u},
+        {1u,0x80000001u,0u,0x80u,0u,0x80u},{0x80000001u,1u,0u,0x80u,0x80000000u,0x80u},
+        {0x3f800000u,0x3f7fffffu,0x40000000u,0x10u,0x33800000u,0u},
+        {0x3f800001u,0x3f800000u,0x40000000u,0x10u,0x34000000u,0u},
+        {0x3f800002u,0x3f800000u,0x40000001u,0u,0x34800000u,0u}
+    };
+    const unsigned count = sizeof cases / sizeof cases[0];
+    fenv_t saved;
+    CHECK(fegetenv(&saved) == 0 && fesetround(FE_TONEAREST) == 0, "save addition FP environment");
+    CHECK(a8_neon_add(1u, 0u, 0u, 0u, 8u, 9u) == 0xef080d09u &&
+          a8_neon_add(0u, 0u, 0u, 0u, 8u, 9u) == 0xf2080d09u, "firmware addition encoding anchors");
+    for (unsigned sub = 0; sub < 2u; sub++) for (unsigned i = 0; i < count; i++) {
+        uint32_t exceptions = 0;
+        CHECK(a8_neon_add_expected(cases[i][0], cases[i][1], sub != 0u, &exceptions) == cases[i][2u + 2u * sub] &&
+              exceptions == cases[i][3u + 2u * sub], "addition oracle disagrees with raw anchor sub=%u row=%u", sub, i);
+    }
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned quad = 0; quad < 2u; quad++)
+      for (unsigned sub = 0; sub < 2u; sub++)
+       for (unsigned control = 0; control < 16u; control++)
+        for (unsigned i = 0; i < count; i++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.cpsr |= ARM_CPSR_E;
+            c.vfp_fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC | ARM_FPSCR_LEN | ARM_FPSCR_STRIDE |
+                ((control & 3u) << 22) | ((control & 4u) ? ARM_FPSCR_FZ : 0u) | ((control & 8u) ? ARM_FPSCR_DN : 0u);
+            for (unsigned r = 0; r <= quad; r++) {
+                vfp_set_d(&c, 16u + r, (uint64_t)cases[(i + r) % count][0] << 32 | cases[i][0]);
+                vfp_set_d(&c, r, (uint64_t)cases[(i + r) % count][1] << 32 | cases[i][1]);
+            }
+            a8_neon_arithmetic_check(&c, thumb, quad, 30u, 16u, 0u, control & 3u, sub + 1u);
+        }
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned quad = 0; quad < 2u; quad++)
+      for (unsigned sub = 0; sub < 2u; sub++)
+       for (unsigned left = 0; left < 32u; left += quad + 1u)
+        for (unsigned right = 0; right < 32u; right += quad + 1u)
+         for (unsigned alias = 0; alias < 4u; alias++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.vfp_fpscr = ARM_FPSCR_QC | ARM_FPSCR_DZC;
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c, d,
+                (uint64_t)cases[(d * 3u + alias) % count][1] << 32 | cases[(d + alias) % count][0]);
+            unsigned dst = alias == 0u ? left : alias == 1u ? right : alias == 2u ?
+                ((left + right + 10u) & (quad ? 30u : 31u)) : (quad ? 30u : 31u);
+            a8_neon_arithmetic_check(&c, thumb, quad, dst, left, right, (left + right + alias) % 4u, sub + 1u);
+         }
+    uint32_t random = 0x2468ace1u;
+    for (unsigned sample = 0; sample < 4096u; sample++) {
+        unsigned thumb = sample & 1u, quad = (sample >> 1) & 1u, sub = (sample >> 2) & 1u;
+        arm_cpu_t c;
+        a8_move_reset(&c, thumb);
+        c.vfp_fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC;
+        for (unsigned r = 0; r <= quad; r++) for (unsigned which = 0; which < 2u; which++) {
+            uint64_t value = 0;
+            for (unsigned e = 0; e < 2u; e++) {
+                random = random * 1664525u + 1013904223u;
+                uint32_t bits = (random & 0x807fffffu) | (((random >> 16) % 254u + 1u) << 23);
+                value |= (uint64_t)bits << (e * 32u);
+            }
+            vfp_set_d(&c, (which ? 16u : 0u) + r, value);
+        }
+        a8_neon_arithmetic_check(&c, thumb, quad, 30u, 16u, 0u, (sample >> 3) & 3u, sub + 1u);
+    }
+    /* Exercise alignment boundaries explicitly, including machine-word and
+     * binary64-precision gaps where discarded bits must still set IXC. */
+    static const unsigned gaps[] = {0u,1u,2u,3u,4u,23u,24u,25u,26u,31u,32u,53u,54u,253u};
+    static const uint32_t fractions[] = {0u,1u,0x007ffffeu,0x007fffffu};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned sub = 0; sub < 2u; sub++)
+      for (unsigned gap = 0; gap < sizeof gaps / sizeof gaps[0]; gap++)
+       for (unsigned variant = 0; variant < 4u; variant++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, thumb);
+        c.vfp_fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC;
+        for (unsigned r = 0; r < 2u; r++) {
+            uint32_t a = 0x7f000000u | fractions[(variant + r) % 4u];
+            uint32_t b = ((254u - gaps[gap]) << 23) | fractions[(variant + r + 1u) % 4u] |
+                ((variant & 1u) ? 0x80000000u : 0u);
+            vfp_set_d(&c, 16u + r, (uint64_t)(a ^ 0x80000000u) << 32 | a);
+            vfp_set_d(&c, r, (uint64_t)b << 32 | b);
+        }
+        a8_neon_arithmetic_check(&c, thumb, 1u, 30u, 16u, 0u, variant, sub + 1u);
+       }
+    CHECK(fesetenv(&saved) == 0, "restore addition FP environment");
+}
+
+static void test_a8_neon_add_access_and_invalid(void) {
+    const unsigned permissions[] = {0u,1u,3u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned sub = 0; sub < 2u; sub++)
+      for (unsigned user = 0; user < 2u; user++)
+       for (unsigned access = 0; access < 3u; access++)
+        for (unsigned enabled = 0; enabled < 2u; enabled++)
+         for (unsigned variant = 0; variant < 9u; variant++)
+          for (unsigned skip = 0; skip < (thumb ? 2u : 1u); skip++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permissions[access] * 0x00500000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            if (thumb) { m_w16(NULL, 0x100u, skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK, "addition IT setup"); }
+            unsigned odd = variant < 8u ? variant : 0u;
+            uint32_t insn = a8_neon_add(thumb, sub, 1u, 30u + (odd & 1u), 16u + ((odd >> 1) & 1u), (odd >> 2) & 1u);
+            if (variant == 8u) insn |= 1u << 20;
+            uint32_t pc = c.r[15], flags = c.cpsr, fpscr = c.vfp_fpscr;
+            bool valid = variant == 0u, allowed = enabled && (permissions[access] == 3u || (permissions[access] == 1u && !user));
+            CHECK(a8_move_step(&c, thumb, insn) == (skip || valid ? ARM_OK : ARM_UNDEFINED) && c.vfp_fpscr == fpscr,
+                  "addition access/validation disposition");
+            CHECK(skip ? c.r[15] == pc + 4u && c.cpsr == (flags & ~0x0600fc00u) :
+                  !valid ? c.r[15] == pc && c.cpsr == flags : allowed ? c.r[15] == pc + 4u && c.cpsr == (flags & ~0x0600fc00u) :
+                  c.r[15] == ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND] == flags && c.r[14] == pc + (thumb ? 2u : 4u),
+                  "addition access priority/IT retirement");
+            bool same = true;
+            for (unsigned d = 0; d < 32u; d++) same &= vfp_get_d(&c, d) == 0u;
+            CHECK(same, "addition invalid/denied/zero inputs changed FP registers");
+          }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++) for (unsigned sub = 0; sub < 2u; sub++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, legacy[profile]), "legacy addition reset");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        CHECK(a8_move_step(&c, 0u, a8_neon_add(0u, sub, 0u, 0u, 8u, 9u)) == ARM_UNDEFINED && c.r[15] == 0u,
+              "NEON addition leaked to legacy profile");
+    }
+    static const uint32_t toggles[] = {0x00800000u,0x00000100u,0x00000200u,0x00000400u,0x00000010u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned sub = 0; sub < 2u; sub++)
+      for (unsigned field = 0; field < sizeof toggles / sizeof toggles[0]; field++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, thumb);
+        CHECK(a8_move_step(&c, thumb, a8_neon_add(thumb, sub, 0u, 31u, 16u, 16u) ^ toggles[field]) == ARM_UNDEFINED &&
+              c.r[15] == 0x100u && vfp_get_d(&c, 31u) == 0u, "NEON addition swallowed neighboring allocation");
+      }
+    for (unsigned thumb = 0; thumb < 2u; thumb++) for (unsigned sub = 0; sub < 2u; sub++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, thumb);
+        c.vfp_fpscr = ARM_FPSCR_QC | 0x50000000u;
+        uint32_t flags = c.cpsr;
+        vfp_set_d(&c, 16u, UINT64_C(0x7f8000007f800000));
+        vfp_set_d(&c, 0u, sub ? UINT64_C(0x7f8000007f800000) : UINT64_C(0xff800000ff800000));
+        CHECK(a8_move_step(&c, thumb, a8_neon_add(thumb, sub, 0u, 31u, 16u, 0u)) == ARM_OK &&
+              c.vfp_fpscr == (ARM_FPSCR_QC | 0x50000001u) && c.cpsr == flags, "addition invalid-op sticky sequence");
+        vfp_set_d(&c, 16u, UINT64_C(0x3f8000003f800000)); vfp_set_d(&c, 0u, UINT64_C(0x4000000040000000));
+        CHECK(a8_move_step(&c, thumb, a8_neon_add(thumb, sub, 0u, 31u, 16u, 0u)) == ARM_OK &&
+              vfp_get_d(&c, 31u) == (sub ? UINT64_C(0xbf800000bf800000) : UINT64_C(0x4040000040400000)) &&
+              c.vfp_fpscr == (ARM_FPSCR_QC | 0x50000001u) && c.cpsr == flags, "addition exact result cleared sticky flags");
+        CHECK(a8_move_step(&c, thumb, 0xeef1fa10u) == ARM_OK && c.r[15] == 0x10cu &&
+              c.cpsr == ((flags & ~0xf0000000u) | 0x50000000u) && c.vfp_fpscr == (ARM_FPSCR_QC | 0x50000001u),
+              "VMRS after addition changed existing comparison flags");
     }
 }
 
@@ -3445,6 +3673,8 @@ int main(void) {
     test_a8_neon_immediate_invalid_and_it();
     test_a8_neon_multiply_results();
     test_a8_neon_multiply_access_and_invalid();
+    test_a8_neon_add_results();
+    test_a8_neon_add_access_and_invalid();
     test_a8_neon_memory_registers();
     test_a8_neon_memory_alignment_and_access();
     test_a8_neon_memory_invalid_and_it();

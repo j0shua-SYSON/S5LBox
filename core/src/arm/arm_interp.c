@@ -867,6 +867,87 @@ static arm_status_t exec_a8_neon_multiply(arm_cpu_t *c, uint32_t insn) {
     return ARM_OK;
 }
 
+/* VADD/VSUB.F32 A1/T1 (DDI0406C.b A8.8.283/415), including reserved sz. */
+static bool a8_neon_add_space(const arm_cpu_t *c, uint32_t insn) {
+    uint32_t prefix = (c->cpsr & ARM_CPSR_T) ? 0xef000d00u : 0xf2000d00u;
+    return c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn & 0xff800f10u) == prefix;
+}
+
+static uint32_t a8_neon_shift_right_jam(uint32_t value, unsigned distance) {
+    if (!distance) return value;
+    if (distance >= 32u) return value != 0u;
+    return (value >> distance) | ((value & ((1u << distance) - 1u)) != 0u);
+}
+
+/* Standard NEON FPAdd/FPSub: keep guard/round/sticky bits during alignment,
+ * then normalize and round once. FPSCR controls and host FP are not used. */
+static uint32_t a8_neon_add_f32(uint32_t left, uint32_t right, bool subtract, uint32_t *exceptions) {
+    if (subtract) right ^= 0x80000000u;
+    uint32_t a = left & 0x7fffffffu, b = right & 0x7fffffffu;
+    uint32_t sign_a = left & 0x80000000u, sign_b = right & 0x80000000u;
+    if (a && a < 0x00800000u) { *exceptions |= ARM_FPSCR_IDC; a = 0u; }
+    if (b && b < 0x00800000u) { *exceptions |= ARM_FPSCR_IDC; b = 0u; }
+    if (a > 0x7f800000u || b > 0x7f800000u) {
+        if ((a > 0x7f800000u && !(a & 0x00400000u)) || (b > 0x7f800000u && !(b & 0x00400000u)))
+            *exceptions |= ARM_FPSCR_IOC;
+        return 0x7fc00000u;
+    }
+    if (a == 0x7f800000u || b == 0x7f800000u) {
+        if (a == b && sign_a != sign_b) { *exceptions |= ARM_FPSCR_IOC; return 0x7fc00000u; }
+        return a == 0x7f800000u ? sign_a | a : sign_b | b;
+    }
+    if (!a && !b) return sign_a & sign_b;
+    if (!a) return sign_b | b;
+    if (!b) return sign_a | a;
+    if (a < b) {
+        uint32_t swap = a; a = b; b = swap;
+        swap = sign_a; sign_a = sign_b; sign_b = swap;
+    }
+    int exponent = (int)(a >> 23);
+    unsigned distance = (a >> 23) - (b >> 23);
+    uint32_t significand = ((a & 0x007fffffu) | 0x00800000u) << 3;
+    uint32_t smaller = a8_neon_shift_right_jam(((b & 0x007fffffu) | 0x00800000u) << 3, distance);
+    if (sign_a == sign_b) {
+        significand += smaller;
+        if (significand & 0x08000000u) { significand = a8_neon_shift_right_jam(significand, 1u); exponent++; }
+    } else {
+        significand -= smaller;
+        if (!significand) return 0u; /* exact cancellation under nearest-even */
+        while (!(significand & 0x04000000u)) { significand <<= 1; exponent--; }
+    }
+    if (exponent <= 0) { *exceptions |= ARM_FPSCR_UFC; return sign_a; }
+    unsigned tail = significand & 7u;
+    significand >>= 3;
+    if (tail > 4u || (tail == 4u && (significand & 1u))) significand++;
+    if (significand == 0x01000000u) { significand >>= 1; exponent++; }
+    if (exponent >= 255) {
+        *exceptions |= ARM_FPSCR_OFC | ARM_FPSCR_IXC;
+        return sign_a | 0x7f800000u;
+    }
+    if (tail) *exceptions |= ARM_FPSCR_IXC;
+    return sign_a | ((uint32_t)exponent << 23) | (significand & 0x007fffffu);
+}
+
+static arm_status_t exec_a8_neon_add(arm_cpu_t *c, uint32_t insn) {
+    unsigned d = ((insn >> 12) & 15u) | ((insn >> 18) & 16u);
+    unsigned n = ((insn >> 16) & 15u) | ((insn >> 3) & 16u);
+    unsigned m = (insn & 15u) | ((insn >> 1) & 16u), quad = (insn >> 6) & 1u;
+    if ((insn & (1u << 20)) || (quad && ((d | n | m) & 1u))) return ARM_UNDEFINED;
+    if (!vfp_cpacr_permits(c) || !vfp_enabled(c)) return ARM_GUEST_UNDEFINED;
+    bool subtract = (insn & (1u << 21)) != 0u;
+    uint64_t result[2];
+    uint32_t exceptions = 0;
+    for (unsigned r = 0; r <= quad; r++) {
+        uint64_t a = vfp_get_d(c, n + r), b = vfp_get_d(c, m + r);
+        uint32_t lo = a8_neon_add_f32((uint32_t)a, (uint32_t)b, subtract, &exceptions);
+        uint32_t hi = a8_neon_add_f32((uint32_t)(a >> 32), (uint32_t)(b >> 32), subtract, &exceptions);
+        result[r] = (uint64_t)hi << 32 | lo;
+    }
+    for (unsigned r = 0; r <= quad; r++) vfp_set_d(c, d + r, result[r]);
+    c->vfp_fpscr |= exceptions;
+    return ARM_OK;
+}
+
 /* vfp_cpacr_permits() and vfp_enabled() live in vfp.c (declared in vfp.h):
  * they are half of the availability gate the VFP unit itself applies, and one
  * copy of that rule is the only safe number of copies.
@@ -877,7 +958,7 @@ static bool vfp_lazy_enable_trap(const arm_cpu_t *c, uint32_t insn) {
      * ARM_GUEST_UNDEFINED. An unsupported ID or invalid encoding is still
      * a capability stop when EN=0, not a fault the guest can fix by enabling. */
     if (a8_neon_single_elements_space(c, insn) || a8_neon_bitwise_space(c, insn) ||
-        a8_neon_immediate_space(c, insn) || a8_neon_multiply_space(c, insn)) return false;
+        a8_neon_immediate_space(c, insn) || a8_neon_multiply_space(c, insn) || a8_neon_add_space(c, insn)) return false;
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 &&
         (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn) ||
          vfp_is_memory_transfer(insn) || vfp_is_bitwise_data(insn) || vfp_is_compare_data(insn))) return false;
@@ -3319,6 +3400,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
     if (a8_neon_bitwise_space(c, insn)) return exec_a8_neon_bitwise(c, insn);
     if (a8_neon_immediate_space(c, insn)) return exec_a8_neon_immediate(c, insn);
     if (a8_neon_multiply_space(c, insn)) return exec_a8_neon_multiply(c, insn);
+    if (a8_neon_add_space(c, insn)) return exec_a8_neon_add(c, insn);
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn >> 28) == 0xeu &&
         (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn) ||
          vfp_is_memory_transfer(insn) || vfp_is_bitwise_data(insn) || vfp_is_compare_data(insn)))
@@ -3958,9 +4040,11 @@ arm_status_t arm_step(arm_cpu_t *c) {
             c->r[15] = next;
             return ARM_OK;
         }
-        if (a8_neon_bitwise_space(c, insn) || a8_neon_immediate_space(c, insn) || a8_neon_multiply_space(c, insn)) {
+        if (a8_neon_bitwise_space(c, insn) || a8_neon_immediate_space(c, insn) ||
+            a8_neon_multiply_space(c, insn) || a8_neon_add_space(c, insn)) {
             arm_status_t status = a8_neon_bitwise_space(c, insn) ? exec_a8_neon_bitwise(c, insn) :
-                a8_neon_immediate_space(c, insn) ? exec_a8_neon_immediate(c, insn) : exec_a8_neon_multiply(c, insn);
+                a8_neon_immediate_space(c, insn) ? exec_a8_neon_immediate(c, insn) :
+                a8_neon_multiply_space(c, insn) ? exec_a8_neon_multiply(c, insn) : exec_a8_neon_add(c, insn);
             if (status == ARM_GUEST_UNDEFINED) return take_undefined_instruction(c, pc);
             if (status != ARM_OK) return status;
             c->r[15] = next;
