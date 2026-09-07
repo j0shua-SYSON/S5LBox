@@ -251,6 +251,47 @@ static void test_small_register_load_and_retry(void) {
       }
 }
 
+static void test_unprivileged_transfer_and_retry(void) {
+    static const struct { uint16_t first; unsigned size; bool load, sign; } cases[]={
+        {0xf810u,1u,true,false},{0xf830u,2u,true,false},{0xf910u,1u,true,true},{0xf930u,2u,true,true},
+        {0xf850u,4u,true,false},{0xf800u,1u,false,false},{0xf820u,2u,false,false},{0xf840u,4u,false,false}
+    };
+    for (unsigned kind=0;kind<8u;kind++)
+     for (unsigned host=0;host<2u;host++)
+      for (unsigned phase=0;phase<(cases[kind].size>1u ? cases[kind].size+2u : 1u);phase++) {
+        fixture_t f; arm_bus_t bus; arm_cpu_t c;
+        setup(&f,&bus,&c,true,host!=0u); map_pages(&f,&c);
+        unsigned size=cases[kind].size, prefix=phase ? phase>size ? size-1u : phase-1u : 0u;
+        bool load=cases[kind].load, walk=phase==size+1u;
+        c.cpsr|=0x1800u; c.r[1]=phase ? 0x2000u-(size-1u) : 0x1000u;
+        c.excl_valid=true; c.excl_addr=0x2340u;
+        put16(&f,0x8000u,(uint16_t)(cases[kind].first|1u)); put16(&f,0x8002u,0x2e00u);
+        uint32_t physical[4];
+        for (unsigned i=0;i<size;i++) {
+            physical[i]=phase ? i==size-1u ? 0xc000u : 0xb000u-(size-1u)+i : 0xa000u+i;
+            f.ram[physical[i]]=(uint8_t)(0x80u+i);
+        }
+        f.fail_address=walk ? 0x6008u : physical[prefix];
+        f.fail_size=walk ? 4u : phase ? 1u : size; f.fail_write=!load && !walk;
+        uint32_t flags=c.cpsr, before[16]; memcpy(before,c.r,sizeof before);
+        CHECK(arm_step(&c)==ARM_HALT && memcmp(before,c.r,sizeof before)==0 && c.excl_valid && c.excl_addr==0x2340u,
+              "failed unprivileged transfer changed registers or exclusive state");
+        CHECK(f.successful_byte_reads==(load ? prefix : 0u),"failed unprivileged load lost or extended its completed prefix");
+        for (unsigned i=0;i<size;i++) CHECK(f.ram[physical[i]]==(!load && i<prefix ? (uint8_t)(0x87654321u>>(i*8u)) : 0x80u+i),
+              "failed unprivileged store lost or extended its completed prefix");
+        check_stop(&f,&c,0u,flags);
+        f.failed=false; f.fail_size=0u;
+        if (load) f.ram[physical[0]]=0x84u; else c.r[2]=0x44332215u;
+        uint32_t mask=size==4u ? UINT32_MAX : (1u<<(size*8u))-1u, expected=0x83828184u&mask;
+        if (cases[kind].sign) expected|=~mask;
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==4u && c.r[1]==before[1] &&
+              c.r[2]==(load ? expected : 0x44332215u) && c.cycles==1u && c.cpsr==(flags & ~0x0600fc00u) && c.excl_valid,
+              "unprivileged retry used stale partial data or changed base/IT before success");
+        if (!load) for (unsigned i=0;i<size;i++) CHECK(f.ram[physical[i]]==(uint8_t)(0x44332215u>>(i*8u)),
+              "unprivileged retry did not rewrite its completed prefix and finish the store");
+      }
+}
+
 static void test_partial_transfers_and_vfp(void) {
     for (unsigned write = 0; write < 2u; write++) {
         fixture_t f; arm_bus_t bus; arm_cpu_t c;
@@ -450,6 +491,7 @@ int main(void) {
     test_fetch_and_latched_cache();
     test_walk_failures();
     test_small_register_load_and_retry();
+    test_unprivileged_transfer_and_retry();
     test_partial_transfers_and_vfp();
     test_exception_and_host_hook_paths();
     test_second_halfword_walk_failure();

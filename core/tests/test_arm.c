@@ -7329,6 +7329,7 @@ static void test_thumb2_indexed_transfers(void) {
       for (unsigned op = 0; op < 4; op++) {
        for (unsigned puw = 0; puw < 8; puw++) {
         for (unsigned imm = 0; imm < 3; imm++) {
+            if (puw == 6u) continue; /* Dedicated unprivileged-transfer tests below. */
             arm_bus_t bus = g_bus;
             if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
             arm_cpu_t c;
@@ -7368,7 +7369,7 @@ static void test_thumb2_indexed_transfers(void) {
          * cases exercise the unprivileged and P=W=0 encodings instead. */
         unsigned rt = bad == 0 ? 4u : bad == 1 ? 15u : 13u;
         unsigned puw = 7u;
-        if (op == 3u && bad) { rt = 8u; puw = bad == 1 ? 6u : 0u; }
+        if (op == 3u && bad) { rt = bad == 1 ? 13u : 8u; puw = bad == 1 ? 6u : 0u; }
         if (op == 2u && bad == 2u) continue; /* STR permits SP as source. */
         if (bad == 3u) {
             if (op == 3u) continue; /* Rn=PC is the separately tested LDR literal. */
@@ -7380,7 +7381,7 @@ static void test_thumb2_indexed_transfers(void) {
         uint32_t cpsr = c.cpsr;
         CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.r[4] == 0x100u &&
               c.cpsr == cpsr && m_r32(NULL, 0x104u) == 0xeeeeeeeeu,
-              "indexed transfer accepted restricted source, overlap or unprivileged alias");
+              "indexed transfer accepted restricted source, overlap or invalid addressing");
      }
     }
     /* Actual single-register PUSH and POP encodings, with SP writeback. */
@@ -8737,7 +8738,7 @@ static void test_thumb2_small_loads(void) {
               c.r[4] == 0x80010000u && c.excl_valid && !c.abort_pending,
               "small-load hint alias issued a load or changed architectural state");
      }
-     static const uint16_t bad[] = {0xdf01u,0x4f01u,0xff01u,0x3e01u,0x3a01u,0x3801u};
+     static const uint16_t bad[] = {0xdf01u,0x4f01u,0xff01u,0xde01u,0x3a01u,0x3801u};
      for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++) {
         arm_cpu_t c;
         CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
@@ -8746,7 +8747,7 @@ static void test_thumb2_small_loads(void) {
         uint32_t flags = c.cpsr;
         CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.cpsr == flags &&
               c.r[4] == 0x200u && c.r[3] == 0x12345678u,
-              "small indexed load accepted bad registers/addressing or unsupported unprivileged alias");
+              "small indexed load accepted bad registers/addressing");
      }
      for (unsigned literal = 0; literal < 2; literal++) {
         arm_cpu_t c;
@@ -9670,6 +9671,278 @@ static void test_thumb2_small_register_fetch(void) {
         else CHECK(c.r[15]==ARM_VEC_PREFETCH && c.r[14]==0x1002u && c.cp15.ifar==0x1000u && c.spsr[ARM_BANK_ABT]==flags &&
             (c.cp15.ifsr&15u)==(fault==1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION),"small register split fetch fault");
         g_watch_addr=UINT32_MAX;
+      }
+}
+
+static const struct { uint16_t first; unsigned size; bool load, sign; } thumb_unpriv[] = {
+    {0xf810u,1u,true,false}, {0xf830u,2u,true,false},
+    {0xf910u,1u,true,true}, {0xf930u,2u,true,true},
+    {0xf850u,4u,true,false}, {0xf800u,1u,false,false},
+    {0xf820u,2u,false,false}, {0xf840u,4u,false,false}
+};
+
+static void put_thumb_unpriv(uint32_t pc, unsigned kind, unsigned rn, unsigned rt, unsigned offset) {
+    m_w16(NULL,pc,(uint16_t)(thumb_unpriv[kind].first|rn));
+    m_w16(NULL,pc+2u,(uint16_t)((rt<<12)|0xe00u|offset));
+}
+
+static uint32_t expected_thumb_unpriv(unsigned kind, uint32_t value) {
+    unsigned size=thumb_unpriv[kind].size;
+    uint32_t mask=size==4u ? UINT32_MAX : (1u<<(size*8u))-1u;
+    value&=mask;
+    if (thumb_unpriv[kind].sign && (value & ((mask+1u)/2u))) value|=~mask;
+    return value;
+}
+
+static void check_thumb_unpriv_banks(const arm_cpu_t *c, const arm_cpu_t *before) {
+    CHECK(memcmp(c->spsr,before->spsr,sizeof c->spsr)==0 &&
+          memcmp(c->bank_r13,before->bank_r13,sizeof c->bank_r13)==0 &&
+          memcmp(c->bank_r14,before->bank_r14,sizeof c->bank_r14)==0 &&
+          memcmp(c->fiq_r8_12,before->fiq_r8_12,sizeof c->fiq_r8_12)==0 &&
+          memcmp(c->usr_r8_12,before->usr_r8_12,sizeof c->usr_r8_12)==0,
+          "unprivileged transfer changed inactive register banks or saved status");
+}
+
+static void test_thumb2_unprivileged_values(void) {
+    const arm_arch_t profiles[]={ARM_ARCH_V7_CORTEX_A8,ARM_ARCH_V7_SWIFT};
+    const uint32_t modes[]={ARM_MODE_USR,ARM_MODE_SYS,ARM_MODE_SVC,ARM_MODE_FIQ};
+    const uint32_t values[]={0u,0x7f7f7f7fu,0x80808080u,UINT32_MAX};
+    const unsigned offsets[]={0u,1u,255u};
+    for (unsigned p=0;p<2u;p++)
+     for (unsigned host=0;host<2u;host++)
+      for (unsigned mode=0;mode<4u;mode++)
+       for (unsigned kind=0;kind<8u;kind++)
+        for (unsigned off=0;off<3u;off++)
+         for (unsigned v=0;v<4u;v++)
+          for (unsigned align=0;align<(p ? 1u : thumb_unpriv[kind].size);align++) {
+            arm_bus_t bus=g_bus;
+            if (host) { bus.host_ram=m_host_ram; bus.host_ram_write=m_host_ram_write; }
+            arm_cpu_t c; CHECK(arm_reset_profile(&c,&bus,profiles[p]),"reset");
+            c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+            m_w32(NULL,0x4000u,0xc0eu); /* Normal, full User access, identity section. */
+            c.cpsr=modes[mode]|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_C|ARM_CPSR_V|ARM_CPSR_Q;
+            for (unsigned b=0;b<ARM_BANK_COUNT;b++) {
+                c.bank_r13[b]=0x11000000u+b; c.bank_r14[b]=0x22000000u+b; c.spsr[b]=0x33000000u+b;
+            }
+            for (unsigned b=0;b<5u;b++) { c.fiq_r8_12[b]=0x44000000u+b; c.usr_r8_12[b]=0x55000000u+b; }
+            uint32_t address=(off==2u ? 0x80u : 0x21000u)+align;
+            c.r[10]=address-offsets[off]; c.excl_valid=true; c.excl_addr=0x2340u;
+            put_thumb_unpriv(0u,kind,10u,8u,offsets[off]);
+            for (unsigned warm=0;warm<2u;warm++) {
+                c.r[15]=0u; c.r[8]=thumb_unpriv[kind].load ? 0x12345678u : values[v] ^ warm;
+                memset(g_ram+address-1u,0xee,6u);
+                if (thumb_unpriv[kind].load) m_w32(NULL,address,values[v]^warm);
+                arm_cpu_t before=c;
+                uint32_t expected=expected_thumb_unpriv(kind,values[v]^warm);
+                before.r[15]=4u; if (thumb_unpriv[kind].load) before.r[8]=expected;
+                CHECK(arm_step(&c)==ARM_OK && memcmp(c.r,before.r,sizeof c.r)==0 &&
+                      c.cpsr==before.cpsr && c.cycles==warm+1u && c.excl_valid && c.excl_addr==0x2340u,
+                      "unprivileged value/mode/offset p=%u kind=%u mode=%u align=%u",p,kind,mode,align);
+                check_thumb_unpriv_banks(&c,&before);
+                for (unsigned i=0;i<4u;i++) {
+                    uint8_t byte=thumb_unpriv[kind].load || i<thumb_unpriv[kind].size ?
+                        (uint8_t)((values[v]^warm)>>(i*8u)) : 0xeeu;
+                    CHECK(g_ram[address+i]==byte,"unprivileged store width or load modified memory");
+                }
+                CHECK(g_ram[address-1u]==0xeeu && g_ram[address+4u]==0xeeu,"unprivileged transfer crossed its width");
+            }
+          }
+}
+
+static void test_thumb2_unprivileged_permissions(void) {
+    for (unsigned p=0;p<2u;p++)
+     for (unsigned host=0;host<2u;host++)
+      for (unsigned kind=0;kind<8u;kind++)
+       for (unsigned ap=0;ap<8u;ap++)
+        for (unsigned warm=0;warm<2u;warm++) {
+            memset(g_ram,0,sizeof g_ram);
+            arm_bus_t bus=g_bus;
+            if (host) { bus.host_ram=m_host_ram; bus.host_ram_write=m_host_ram_write; }
+            arm_cpu_t c; CHECK(arm_reset_profile(&c,&bus,p ? ARM_ARCH_V7_SWIFT : ARM_ARCH_V7_CORTEX_A8),"reset");
+            c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+            c.cpsr=ARM_MODE_SVC|ARM_CPSR_T|ARM_CPSR_C;
+            c.r[10]=0x2004u; c.r[8]=0x44332211u;
+            m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x803eu);
+            m_w32(NULL,0x6008u,0xa00eu|((ap&3u)<<4)|((ap&4u)<<7));
+            m_w32(NULL,0xa004u,0x83828180u);
+            bool load=thumb_unpriv[kind].load;
+            bool privileged=load ? ap!=0u && ap!=4u : ap>=1u && ap<=3u;
+            if (warm && privileged) {
+                /* Populate the actual privileged data cache through an ordinary instruction. */
+                m_w16(NULL,0x8000u,(uint16_t)(thumb_unpriv[kind].first|0x8au));
+                m_w16(NULL,0x8002u,0x8000u);
+                CHECK(arm_step(&c)==ARM_OK && c.r[15]==4u,"privileged cache preparation");
+            }
+            c.r[15]=0u; c.r[8]=0x44332211u; c.cycles=0u;
+            m_w32(NULL,0xa004u,0x83828180u); put_thumb_unpriv(0x8000u,kind,10u,8u,0u);
+            g_watch_addr=0xa004u;
+            g_watch_reads8=g_watch_reads16=g_watch_reads32=0u;
+            g_watch_writes8=g_watch_writes16=g_watch_writes32=0u;
+            uint32_t flags=c.cpsr;
+            bool allowed=load ? ap==2u || ap==3u || ap==6u || ap==7u : ap==3u;
+            CHECK(arm_step(&c)==ARM_OK && c.r[10]==0x2004u,"unprivileged permission disposition/base");
+            if (allowed) CHECK(c.r[15]==4u && c.cpsr==flags &&
+                c.r[8]==(load ? expected_thumb_unpriv(kind,0x83828180u) : 0x44332211u),"allowed User transfer");
+            else CHECK(c.r[15]==ARM_VEC_DATA_ABORT && c.r[14]==8u && c.cp15.dfar==0x2004u &&
+                c.cp15.dfsr==(ARM_FSR_PAGE_PERMISSION|(load ? 0u : 1u<<11)) && c.spsr[ARM_BANK_ABT]==flags &&
+                c.r[8]==0x44332211u && !g_watch_reads8 && !g_watch_reads16 && !g_watch_reads32 &&
+                !g_watch_writes8 && !g_watch_writes16 && !g_watch_writes32,
+                "unprivileged transfer reused privileged permissions or accessed denied memory");
+            g_watch_addr=UINT32_MAX;
+            for (unsigned i=0;i<4u;i++) CHECK(g_ram[0xa004u+i]==
+                (uint8_t)(((allowed && !load && i<thumb_unpriv[kind].size) ? 0x44332211u : 0x83828180u)>>(i*8u)),
+                "User permission failure committed a store or success used wrong width");
+        }
+}
+
+static void test_thumb2_unprivileged_operands_and_it(void) {
+    const unsigned states[]={0u,0x18u,0x1cu,0x08u,0x0cu};
+    const unsigned operands[][2]={{10u,8u},{13u,8u},{14u,14u},{8u,8u},{10u,13u},{10u,15u},{15u,8u}};
+    for (unsigned kind=0;kind<8u;kind++)
+     for (unsigned pair=0;pair<7u;pair++)
+      for (unsigned it=0;it<5u;it++) {
+        memset(g_ram,0,sizeof g_ram);
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cpsr=ARM_MODE_FIQ|ARM_CPSR_T|ARM_CPSR_C|test_it_bits(states[it]);
+        c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+        m_w32(NULL,0x4000u,0xc0eu);
+        unsigned rn=operands[pair][0], rt=operands[pair][1];
+        c.r[15]=0x2000u; c.r[rt]=0x44332211u; c.r[rn]=0x1100u;
+        c.r[15]=0x2000u;
+        uint32_t address=rn==15u ? 0x1200u : 0x1104u;
+        m_w32(NULL,address,0x83828180u); put_thumb_unpriv(0x2000u,kind,rn,rt,4u);
+        bool execute=it<3u, valid=rt!=13u && rt!=15u && (rn!=15u || thumb_unpriv[kind].load);
+        bool success=!execute || valid;
+        arm_cpu_t before=c;
+        if (success) {
+            before.r[15]=0x2004u;
+            if (execute && thumb_unpriv[kind].load) before.r[rt]=expected_thumb_unpriv(kind,0x83828180u);
+        }
+        uint32_t flags=(success && states[it]) ? (c.cpsr & ~TEST_IT_MASK)|test_it_bits((states[it]&7u) ? 0x18u : 0u) : c.cpsr;
+        CHECK(arm_step(&c)==(success ? ARM_OK : ARM_UNDEFINED) &&
+              memcmp(c.r,before.r,sizeof c.r)==0 && c.cpsr==flags,
+              "unprivileged operands/IT kind=%u pair=%u it=%u",kind,pair,it);
+        check_thumb_unpriv_banks(&c,&before);
+        if (!execute || !valid || thumb_unpriv[kind].load)
+            CHECK(m_r32(NULL,address)==0x83828180u,"unprivileged skipped/refused/load changed data");
+      }
+    for (unsigned kind=0;kind<8u;kind++) {
+        arm_cpu_t c; arm_reset(&c,&g_bus); c.cpsr=ARM_MODE_SYS|ARM_CPSR_T;
+        c.r[15]=0x100u; c.r[14]=0x500u; put_thumb_unpriv(0x100u,kind,10u,8u,4u);
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==0x500u+((thumb_unpriv[kind].first|10u)&0x7ffu)*2u && c.r[14]==0x103u,
+              "unprivileged first halfword changed ARM1176 BL suffix framing");
+    }
+}
+
+static void test_thumb2_unprivileged_literal_alias(void) {
+    const unsigned registers[]={8u,13u,15u}, states[]={0u,0x18u,0x1cu,0x0cu};
+    for (unsigned kind=0;kind<5u;kind++)
+     for (unsigned reg=0;reg<3u;reg++)
+      for (unsigned it=0;it<4u;it++) {
+        memset(g_ram,0,sizeof g_ram);
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cpsr=ARM_MODE_SYS|ARM_CPSR_T|ARM_CPSR_C|test_it_bits(states[it]);
+        c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6004u,0xa01eu); /* Privileged-only literal data. */
+        m_w32(NULL,0x6008u,0xb03eu); m_w32(NULL,0xa200u,0x7001u);
+        unsigned rt=registers[reg]; c.r[rt]=0x12345678u; c.r[15]=0x2000u;
+        put_thumb_unpriv(0xb000u,kind,15u,rt,4u); /* LDR literal from 0x2004 - 0xe04. */
+        bool execute=it<3u, word=kind==4u, branch=word && rt==15u;
+        bool refused=(branch && it>=2u) || (execute && !word && rt==13u);
+        uint32_t flags=c.cpsr, before=c.r[rt];
+        g_watch_addr=0xa200u; g_watch_reads8=g_watch_reads16=g_watch_reads32=0u;
+        CHECK(arm_step(&c)==(refused ? ARM_UNDEFINED : ARM_OK),"PC base did not retain literal allocation/IT placement");
+        if (refused) CHECK(c.r[15]==0x2000u && c.r[rt]==before && c.cpsr==flags &&
+            !g_watch_reads8 && !g_watch_reads16 && !g_watch_reads32,"refused literal issued a data read");
+        else {
+            CHECK(c.r[15]==(branch && execute ? 0x7000u : 0x2004u) && !c.cp15.dfsr &&
+                  c.cpsr==((flags & ~TEST_IT_MASK)|test_it_bits(it>=2u ? 0x18u : 0u)),"literal alias was forced to User permissions or misbranched");
+            if (rt!=15u) CHECK(c.r[rt]==(execute ? expected_thumb_unpriv(kind,0x7001u) : before),"literal alias destination");
+            bool read=execute && (word || rt!=15u);
+            CHECK(g_watch_reads8==(read && thumb_unpriv[kind].size==1u ? 1u : 0u) &&
+                  g_watch_reads16==(read && thumb_unpriv[kind].size==2u ? 1u : 0u) &&
+                  g_watch_reads32==(read && word ? 1u : 0u),"literal alias read/hint width");
+        }
+        g_watch_addr=UINT32_MAX;
+      }
+}
+
+static void test_thumb2_unprivileged_data_faults(void) {
+    for (unsigned host=0;host<2u;host++)
+     for (unsigned kind=0;kind<8u;kind++)
+      for (unsigned fault=0;fault<15u;fault++) {
+        memset(g_ram,0,sizeof g_ram);
+        arm_bus_t bus=g_bus;
+        if (host) { bus.host_ram=m_host_ram; bus.host_ram_write=m_host_ram_write; }
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&bus,fault==14u ? ARM_ARCH_V7_SWIFT : ARM_ARCH_V7_CORTEX_A8),"reset");
+        unsigned size=thumb_unpriv[kind].size;
+        bool load=thumb_unpriv[kind].load, multi=size>1u;
+        bool crossing=fault==4u || fault==5u || fault==9u || fault==13u;
+        bool odd=crossing || fault==1u || fault==6u || fault==7u || fault==8u || fault==10u || fault==14u;
+        unsigned prefix=multi ? size-1u : 1u;
+        uint32_t address=crossing ? 0x3000u-prefix : 0x2010u+(odd ? 1u : 0u);
+        c.cp15.sctlr=fault==10u ? 0u : ARM_SCTLR_M|ARM_SCTLR_XP;
+        if (fault==6u) c.cp15.sctlr|=ARM_SCTLR_A;
+        if (fault==12u || fault==13u) c.cp15.sctlr|=ARM_SCTLR_FA;
+        c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+        c.cpsr=ARM_MODE_SVC|ARM_CPSR_T|ARM_CPSR_C|test_it_bits(0x18u)|(fault==11u ? ARM_CPSR_E : 0u);
+        c.r[15]=0x100u; c.r[10]=address-255u; c.r[8]=0x44332211u;
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x803eu);
+        m_w32(NULL,0x6008u,fault==3u || fault==6u ? 0u : fault==2u ? 0xa01eu :
+            fault==7u ? 0xa036u : fault==8u ? 0xa032u : fault==12u ? 0xa02eu : 0xa03eu);
+        m_w32(NULL,0x600cu,fault==4u ? 0xd01eu : fault==5u ? 0u : fault==9u ? 0xd036u : fault==13u ? 0xd02eu : 0xd03eu);
+        uint32_t physical[4];
+        for (unsigned i=0;i<4u;i++) {
+            physical[i]=fault==10u ? address+i : crossing && i>=prefix ? 0xd000u+i-prefix : 0xa000u+(address&0xfffu)+i;
+            m_w8(NULL,physical[i],(uint8_t)(0x80u+i));
+        }
+        put_thumb_unpriv(fault==10u ? 0x100u : 0x8100u,kind,10u,8u,255u);
+        uint32_t flags=c.cpsr;
+        bool refused=multi && (fault==7u || fault==8u || fault==9u || fault==10u || fault==11u || fault==14u);
+        bool aborted=fault==2u || fault==3u || fault==6u || fault==12u || (multi && (fault==4u || fault==5u || fault==13u));
+        CHECK(arm_step(&c)==(refused ? ARM_UNDEFINED : ARM_OK) && c.r[10]==address-255u,
+              "unprivileged data disposition/base kind=%u fault=%u",kind,fault);
+        if (refused) CHECK(c.r[15]==0x100u && c.r[8]==0x44332211u && c.cpsr==flags && !c.cp15.dfsr,
+            "unsupported unprivileged memory committed state or invented a fault");
+        else if (aborted) {
+            uint32_t fsr=fault==2u || fault==4u ? ARM_FSR_PAGE_PERMISSION :
+                fault==6u && multi ? ARM_FSR_ALIGNMENT : fault==12u || fault==13u ? ARM_FSR_PAGE_ACCESS_FLAG : ARM_FSR_PAGE_TRANSLATION;
+            CHECK(c.r[15]==ARM_VEC_DATA_ABORT && c.r[14]==0x108u && c.r[8]==0x44332211u &&
+                  c.cp15.dfar==(crossing ? 0x3000u : address) && c.cp15.dfsr==(fsr|(load ? 0u : 1u<<11)) &&
+                  c.spsr[ARM_BANK_ABT]==flags,"unprivileged fault address/WnR/saved state");
+        } else CHECK(c.r[15]==0x104u && c.cpsr==(flags & ~TEST_IT_MASK) &&
+            c.r[8]==(load ? expected_thumb_unpriv(kind,0x83828180u) : 0x44332211u),"unprivileged data value/IT");
+        unsigned written=load ? 0u : !refused && !aborted ? size : crossing && multi ? prefix : 0u;
+        for (unsigned i=0;i<4u;i++) CHECK(g_ram[physical[i]]==(i<written ? (uint8_t)(0x44332211u>>(i*8u)) : 0x80u+i),
+            "unprivileged store lost or extended a completed prefix, or load modified memory");
+      }
+}
+
+static void test_thumb2_unprivileged_fetch(void) {
+    for (unsigned kind=0;kind<8u;kind++)
+     for (unsigned fault=0;fault<4u;fault++)
+      for (unsigned execute=0;execute<2u;execute++) {
+        memset(g_ram,0,sizeof g_ram);
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_C|test_it_bits(execute ? 0x1cu : 0x0cu);
+        c.r[15]=0xffeu; c.r[10]=0x3000u; c.r[8]=0x44332211u;
+        uint32_t flags=c.cpsr;
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x803eu);
+        m_w32(NULL,0x6004u,fault==1u ? 0u : fault==2u ? 0xa03fu : fault==3u ? 0xa01eu : 0xa03eu);
+        m_w32(NULL,0x600cu,0xe03eu); m_w32(NULL,0xe004u,0x83828180u);
+        put_thumb_unpriv(0x8ffeu,kind,10u,8u,4u);
+        m_w16(NULL,0xa000u,m_r16(NULL,0x9000u)); m_w16(NULL,0x9000u,0xffffu);
+        CHECK(arm_step(&c)==ARM_OK && c.r[10]==0x3000u,"unprivileged split fetch disposition/base");
+        bool transferred=!fault && execute, load=thumb_unpriv[kind].load;
+        CHECK(c.r[8]==(transferred && load ? expected_thumb_unpriv(kind,0x83828180u) : 0x44332211u),
+              "unprivileged load used incomplete fetch or failed condition");
+        for (unsigned i=0;i<4u;i++) CHECK(g_ram[0xe004u+i]==(uint8_t)(
+            ((transferred && !load && i<thumb_unpriv[kind].size) ? 0x44332211u : 0x83828180u)>>(i*8u)),
+            "unprivileged store used incomplete fetch or failed condition");
+        if (!fault) CHECK(c.r[15]==0x1002u && c.cpsr==((flags & ~TEST_IT_MASK)|test_it_bits(0x18u)),"unprivileged fetch/IT advance");
+        else CHECK(c.r[15]==ARM_VEC_PREFETCH && c.r[14]==0x1002u && c.cp15.ifar==0x1000u && c.spsr[ARM_BANK_ABT]==flags &&
+            (c.cp15.ifsr&15u)==(fault==1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION),"unprivileged split fetch fault");
       }
 }
 
@@ -10875,6 +11148,12 @@ int main(void) {
     test_thumb2_small_register_operands_and_hints();
     test_thumb2_small_register_data_faults();
     test_thumb2_small_register_fetch();
+    test_thumb2_unprivileged_values();
+    test_thumb2_unprivileged_permissions();
+    test_thumb2_unprivileged_operands_and_it();
+    test_thumb2_unprivileged_literal_alias();
+    test_thumb2_unprivileged_data_faults();
+    test_thumb2_unprivileged_fetch();
     test_thumb2_register_word_load_operands();
     test_thumb2_register_word_load_pc();
     test_thumb2_register_word_load_aborts();

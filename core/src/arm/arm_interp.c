@@ -2980,8 +2980,13 @@ static bool thumb_it_placement(unsigned state, uint16_t first, uint16_t second,
             if (((first >> 6) & 15u) < 14u) return false;  /* conditional B */
         }
         if (((first & 0xfff0u) == 0xf8d0u || (first & 0xfff0u) == 0xf850u) &&
-            (second >> 12) == 15u)
-            return last;
+            (second >> 12) == 15u) {
+            /* Nonliteral LDRT forbids Rt=PC inside ConditionPassed; it is
+             * not a branch. Rn=PC still selects the ordinary literal load. */
+            bool unpriv = (first & 0xfff0u) == 0xf850u &&
+                          (first & 15u) != 15u && (second & 0xf00u) == 0xe00u;
+            if (!unpriv) return last;
+        }
         if ((first & 0xfff0u) == 0xe8d0u && (second & 0xffe0u) == 0xf000u)
             return last; /* TBB/TBH */
         if (((first & 0xffc0u) == 0xe880u || (first & 0xffc0u) == 0xe900u) &&
@@ -2991,34 +2996,40 @@ static bool thumb_it_placement(unsigned state, uint16_t first, uint16_t second,
     return true;
 }
 
-/* Bounded MemU halfword path for newly implemented Thumb forms. Each byte
+/* Bounded unaligned MemU path for newly implemented Thumb forms. Each byte
  * must have a validated Normal-memory translation on Cortex-A8. Existing
- * shared load/store paths have not yet adopted this memory-type boundary. */
-static arm_status_t thumb_read_unaligned_halfword(arm_cpu_t *c, uint32_t address,
-                                                 uint32_t *value) {
+ * shared load/store paths have not yet adopted this memory-type boundary.
+ * Callers supply size 2 or 4; privilege does not change CPU register banks. */
+static arm_status_t thumb_unaligned_transfer(arm_cpu_t *c, uint32_t address,
+        unsigned size, bool write, bool priv, uint32_t *value) {
     if (c->cpsr & ARM_CPSR_E) return ARM_UNDEFINED;
     if (c->cp15.sctlr & ARM_SCTLR_A) {
-        note_alignment_abort(c, address, false);
+        note_alignment_abort(c, address, write);
         return ARM_OK;
     }
     if (c->arch != ARM_ARCH_V7_CORTEX_A8) return ARM_UNDEFINED;
     /* A8's unaligned Device/SO case is UNPREDICTABLE, not the alignment
      * fault required by virtualization extensions (DDI0406C.b A3.2.2).
-     * Stop before that byte's data access, retaining a prior Normal read.
+     * Stop before that byte's data access, retaining completed transfers.
      * Direct data caches do not yet enforce memory types, so bypass them. */
     uint32_t result = 0u;
-    for (unsigned i = 0; i < 2u; i++) {
+    for (unsigned i = 0; i < size; i++) {
         uint32_t va = address + i, pa;
         arm_memory_type_t type;
-        uint32_t fsr = arm_mmu_translate_type(c, va, ARM_ACCESS_READ,
-            (c->cpsr & 0x1fu) != ARM_MODE_USR, &pa, &type);
+        uint32_t fsr = arm_mmu_translate_type(c, va,
+            write ? ARM_ACCESS_WRITE : ARM_ACCESS_READ, priv, &pa, &type);
         if (fsr) { note_abort(c, fsr, va); return ARM_OK; }
         if (type != ARM_MEMORY_NORMAL) return ARM_UNDEFINED;
-        uint32_t byte = c->bus->read8(c->bus->ctx, pa);
-        if (note_bus_failure(c, va)) return ARM_OK;
-        result |= byte << (8u * i);
+        if (write) {
+            c->bus->write8(c->bus->ctx, pa, (uint8_t)(*value >> (8u * i)));
+            if (note_bus_failure(c, va)) return ARM_OK;
+        } else {
+            uint32_t byte = c->bus->read8(c->bus->ctx, pa);
+            if (note_bus_failure(c, va)) return ARM_OK;
+            result |= byte << (8u * i);
+        }
     }
-    *value = result;
+    if (!write) *value = result;
     return ARM_OK;
 }
 
@@ -3087,7 +3098,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         uint32_t address = base + (c->r[rm] << (half ? 1u : 0u));
         uint32_t entry = 0u;
         if (half && (address & 1u)) {
-            arm_status_t status = thumb_read_unaligned_halfword(c, address, &entry);
+            arm_status_t status = thumb_unaligned_transfer(c, address, 2u, false, cpu_is_priv(c), &entry);
             if (status != ARM_OK) return status;
         } else entry = half ? mem_r16(c, address) : mem_r8(c, address);
         if (!c->abort_pending) *next = pc + 4u + 2u * entry;
@@ -3163,6 +3174,35 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         }
         return ARM_OK;
     }
+    /* LDRT/BT/HT/SBT/SHT and STRT/BT/HT T1 (A8.8.71/83/87/91/92,
+     * 209/219/220). These add imm8 without writeback and translate as User
+     * while using the current register bank. Load Rn=PC is a literal alias. */
+    uint16_t unpriv = first & 0xfff0u;
+    if ((second & 0xf00u) == 0xe00u &&
+        ((first & 0xfed0u) == 0xf810u || unpriv == 0xf850u ||
+         unpriv == 0xf800u || unpriv == 0xf820u || unpriv == 0xf840u) &&
+        (!(first & 0x10u) || (first & 15u) != 15u)) {
+        unsigned rn = first & 15u, rt = second >> 12;
+        bool load = (first & 0x10u) != 0u, sign = (first & 0x100u) != 0u;
+        unsigned size = (first & 0x40u) ? 4u : (first & 0x20u) ? 2u : 1u;
+        if (rn == 15u || rt == 13u || rt == 15u || (size > 1u && (c->cpsr & ARM_CPSR_E)))
+            return ARM_UNDEFINED;
+        uint32_t address = c->r[rn] + (second & 0xffu), value = c->r[rt];
+        if (address & (size - 1u)) {
+            arm_status_t status = thumb_unaligned_transfer(c, address, size, !load, false, &value);
+            if (status != ARM_OK || c->abort_pending) return status;
+        } else if (load) {
+            value = size == 4u ? mem_r32_as(c, address, false) :
+                    size == 2u ? mem_r16_as(c, address, false) : mem_r8_as(c, address, false);
+        } else if (size == 4u) mem_w32_as(c, address, value, false);
+        else if (size == 2u) mem_w16_as(c, address, (uint16_t)value, false);
+        else mem_w8_as(c, address, (uint8_t)value, false);
+        if (load && !c->abort_pending) {
+            if (sign) value = size == 2u ? (uint32_t)(int32_t)(int16_t)value : (uint32_t)(int32_t)(int8_t)value;
+            c->r[rt] = value;
+        }
+        return ARM_OK;
+    }
     /* LDRB/H/SB/SH register T2 (A6.3.8/9). Rn=PC belongs to the literal
      * decoder below. Full-width LSL #0..3 offsets add without writeback. */
     if ((first & 0xfed0u) == 0xf810u && (first & 15u) != 15u &&
@@ -3178,7 +3218,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         uint32_t address = c->r[rn] + (c->r[rm] << ((second >> 4) & 3u));
         if (half && (address & 1u)) {
             uint32_t value = 0u;
-            arm_status_t status = thumb_read_unaligned_halfword(c, address, &value);
+            arm_status_t status = thumb_unaligned_transfer(c, address, 2u, false, cpu_is_priv(c), &value);
             if (status == ARM_OK && !c->abort_pending)
                 c->r[rt] = sign ? (uint32_t)(int32_t)(int16_t)value : value;
             return status;
@@ -3187,7 +3227,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
     }
     /* LDRB/H/SB/SH immediate and literal (A6.3.8/9). Rn=PC always
      * selects a literal before interpreting bits11:8 as indexing controls.
-     * Unprivileged aliases remain a separate unsupported family. */
+     * Unprivileged aliases were handled above. */
     if ((first & 0xfe50u) == 0xf810u) {
         unsigned rn = first & 15u, rt = second >> 12;
         bool literal = rn == 15u, imm12 = (first & 0x80u) != 0u;

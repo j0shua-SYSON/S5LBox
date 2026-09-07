@@ -393,8 +393,9 @@ on a data abort; previously completed stores remain visible.
 
 Indexed wide LDR/STR and STRB/STRH implement signed imm8 offsets, pre/post
 indexing and single-register PUSH/POP. Writeback waits for a successful
-access; base/register overlap, invalid source registers and the separate
-unprivileged encodings are refused before accessing data. PC loads use the
+access; base/register overlap and invalid source registers are refused
+before accessing data. Unprivileged encodings use their separate decoder.
+PC loads use the
 same alignment and interworking checks as unsigned-offset loads. Tests cover
 all P/U/W combinations, offset limits, stack aliases, invalid loaded targets
 and preserved base/result state after first/second-page faults.
@@ -423,8 +424,8 @@ limits, SP bases, literal alignment, page crossings, permission/alignment
 faults and saved IT state. Halfword forms refuse the unsupported CPSR.E
 mode; byte loads are endian-independent. PC-destination aliases encode
 PLD/PLDW/PLI or unallocated hints and perform no data access, including when
-the hinted address is unmapped. Register-offset and unprivileged forms
-remain unsupported.
+the hinted address is unmapped. Register-offset and unprivileged forms are
+described below.
 
 Wide signed/unsigned extend and extend-and-add instructions support bytes,
 halfwords and independent paired-byte lanes, with rotations of 0/8/16/24
@@ -501,8 +502,8 @@ Tests cover all 32 attribute encodings in all four descriptor forms, cached
 mapping changes, profile/control changes, faults and invalidation, plus TBH
 byte ordering and retry. Derived metadata is cleared on reset/restore and
 omitted from ARM1176 snapshots; the version and serialized fields are unchanged.
-This type check serves unaligned TBH and the new register-offset halfword
-loads. Other shared load/store
+This type check serves unaligned TBH, register-offset halfword loads and
+unprivileged halfword/word transfers. Other shared load/store
 paths do not yet enforce these memory types, and cache timing, shareability
 and the complete Cortex-A8 MMU remain separate work.
 
@@ -597,6 +598,27 @@ Checks verify the entire destination buffer, unchanged source, return/stack
 state, and exact data-access and executed register-load counts. Every
 unprepared bus access stops. This is isolated real guest code; it does not
 establish kernel boot, device behavior or physical execution.
+
+Thumb LDRT/LDRBT/LDRHT/LDRSBT/LDRSHT and STRT/STRBT/STRHT now add an
+unsigned byte offset without writeback. Their memory accesses use User
+permissions, including when privileged direct-data caches have been populated;
+the current CPU mode and register banks stay unchanged. SP is a valid base,
+but SP/PC data registers are refused. PC load bases retain their ordinary
+literal interpretation and actual privilege; PC store bases are undefined.
+Invalid nonliteral LDRT-to-PC encodings are checked only when the IT condition
+passes, while literal PC loads retain their final-slot requirement. These
+rules follow [DDI0406C.b, A8.8.71/83/87/91/92/209/219/220](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Unaligned transfers use the same bounded Cortex-A8 Normal-memory path as
+TBH. Each byte is translated with User permissions in address order. A later
+fault leaves completed store bytes visible and preserves load destinations,
+base registers and saved IT state. Unsupported memory types stop before the
+affected data access. Swift unaligned transfers and multibyte big-endian
+transfers remain unsupported. Tests cover both profiles, User/SVC/System/FIQ
+modes, cached permission checks, AP/APX combinations, offsets and wrap,
+register aliases, literal precedence, split instruction fetches, access-flag
+and alignment faults, partial stores, and explicit checked-bus retry.
+ARM1176 framing and A32 unprivileged addressing remain unchanged.
 
 Thumb UBFX/SBFX and BFI/BFC implement bitfield extraction, sign extension,
 insertion and clearing. They validate ranges before shifting and preserve
