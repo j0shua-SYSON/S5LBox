@@ -7799,6 +7799,81 @@ static void test_cortex_a8_vfp_multiple_memory_aborts(void) {
     }
 }
 
+static void test_cortex_a8_neon_memory_faults(void) {
+    for (unsigned host = 0; host < 2u; host++)
+     for (unsigned thumb = 0; thumb < 2u; thumb++)
+      for (unsigned load = 0; load < 2u; load++)
+       for (unsigned size = 2u; size <= 3u; size++)
+        for (unsigned fault = 0; fault < 5u; fault++) {
+            memset(g_ram, 0xee, sizeof g_ram);
+            arm_bus_t bus = g_bus;
+            if (host) { bus.host_ram = m_host_ram; bus.host_ram_write = m_host_ram_write; }
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "NEON reset");
+            c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP;
+            c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u; c.cp15.cpacr = 0x00f00000u;
+            c.vfp_fpexc = ARM_FPEXC_EN; c.vfp_fpscr = 0x0bc00080u;
+            c.cpsr = ARM_MODE_USR | ARM_CPSR_N | ARM_CPSR_C |
+                (thumb ? ARM_CPSR_T | test_it_bits(0x18u) : 0u);
+            uint32_t base = size == 2u ? 0x1ffcu : 0x1ff8u;
+            c.r[4] = base;
+            for (unsigned d = 0; d < 4u; d++) c.a8_vfp_hi[12u + d] =
+                (UINT64_C(0xdead0001) + 2u * d) << 32 | (UINT64_C(0xdead0000) + 2u * d);
+            m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x803eu);
+            m_w32(NULL, 0x6004u, fault == 1u ? 0u : fault == 3u ? 0xa01eu : 0xa03eu);
+            m_w32(NULL, 0x6008u, fault == 2u ? 0u : fault == 4u ? 0xc01eu : 0xc03eu);
+            uint32_t insn = (thumb ? 0xf944c20du : 0xf444c20du) | (load << 21) | (size << 6);
+            if (thumb) { m_w16(NULL, 0x8000u, (uint16_t)(insn >> 16)); m_w16(NULL, 0x8002u, (uint16_t)insn); }
+            else m_w32(NULL, 0x8000u, insn);
+            uint32_t physical[8];
+            for (unsigned word = 0; word < 8u; word++) {
+                uint32_t va = base + word * 4u;
+                physical[word] = va < 0x2000u ? 0xa000u + (va & 0xfffu) : 0xc000u + (va & 0xfffu);
+                m_w32(NULL, physical[word], 0xabcdef00u + word);
+            }
+            g_watch_addr = 0xc000u; g_watch_reads32 = g_watch_writes32 = 0u;
+            uint32_t flags = c.cpsr;
+            CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u && c.vfp_fpscr == 0x0bc00080u,
+                  "NEON MMU disposition");
+            unsigned completed = !fault ? 8u : fault == 1u || fault == 3u ? 0u : (0x2000u - base) / 4u;
+            if (fault) CHECK(c.r[15] == ARM_VEC_DATA_ABORT && c.r[14] == 8u && c.spsr[ARM_BANK_ABT] == flags &&
+                c.r[4] == base && c.cp15.dfar == (fault == 1u || fault == 3u ? base : 0x2000u) &&
+                c.cp15.dfsr == ((fault < 3u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION) | (load ? 0u : 0x800u)) &&
+                g_watch_reads32 == 0u && g_watch_writes32 == 0u, "NEON MMU abort did not restore base or preserve first fault");
+            else CHECK(c.r[15] == 4u && c.r[4] == base + 32u && c.cpsr == (flags & ~TEST_IT_MASK),
+                "NEON MMU success/IT state");
+            for (unsigned word = 0; word < 8u; word++) {
+                uint32_t value = (uint32_t)(c.a8_vfp_hi[12u + word / 2u] >> (32u * (word & 1u)));
+                CHECK(value == (load && word < completed ? 0xabcdef00u + word : 0xdead0000u + word),
+                      "NEON MMU load did not preserve completed element boundary");
+                CHECK(m_r32(NULL, physical[word]) == (!load && word < completed ? 0xdead0000u + word : 0xabcdef00u + word),
+                      "NEON MMU store did not preserve completed prefix");
+            }
+            g_watch_addr = UINT32_MAX;
+        }
+    for (unsigned host = 0; host < 2u; host++)
+     for (unsigned load = 0; load < 2u; load++)
+      for (unsigned fault = 1u; fault <= 3u; fault++) {
+        memset(g_ram, 0, sizeof g_ram);
+        arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "NEON split fetch reset");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP; c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N | test_it_bits(0x1cu);
+        c.r[15] = 0xffeu; c.r[4] = 0x3000u;
+        c.a8_vfp_hi[15] = UINT64_C(0x123456789abcdef0); c.vfp_fpscr = 0x0bc00080u;
+        uint32_t insn = 0xf944f7dfu | (load << 21), flags = c.cpsr;
+        m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x8032u);
+        m_w32(NULL, 0x6004u, fault == 1u ? 0u : fault == 2u ? 0xa033u : 0xa012u);
+        m_w16(NULL, 0x8ffeu, (uint16_t)(insn >> 16)); m_w16(NULL, 0xa000u, (uint16_t)insn);
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == ARM_VEC_PREFETCH && c.r[14] == 0x1002u &&
+              c.spsr[ARM_BANK_ABT] == flags && c.cp15.ifar == 0x1000u &&
+              (c.cp15.ifsr & 15u) == (fault == 1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION) &&
+              c.r[4] == 0x3000u && c.vfp_fpscr == 0x0bc00080u && c.vfp_fpexc == 0u &&
+              c.a8_vfp_hi[15] == UINT64_C(0x123456789abcdef0), "NEON availability/effects preceded full Thumb fetch");
+     }
+}
+
 static void test_cortex_a8_vfp_data_fetch_and_retry(void) {
     static const uint32_t insns[] = {
         0xeef7fb00u,0xeef0fb60u,0xeef0fbe0u,0xeef1fb60u,
@@ -11217,6 +11292,7 @@ int main(void) {
     test_cortex_a8_vfp_core_registers();
     test_cortex_a8_vfp_undefined_retry();
     test_cortex_a8_vfp_data_fetch_and_retry();
+    test_cortex_a8_neon_memory_faults();
     test_cortex_a8_vfp_single_memory_aborts();
     test_cortex_a8_vfp_multiple_memory_aborts();
     test_cortex_a8_vfp_fetch_and_refusals();

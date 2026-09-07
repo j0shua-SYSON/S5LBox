@@ -646,6 +646,153 @@ static void test_a8_vfp_compare_invalid_and_conditional(void) {
     }
 }
 
+static uint32_t a8_neon_memory(unsigned thumb, unsigned load, unsigned type, unsigned size,
+                                 unsigned align, unsigned first, unsigned rn, unsigned rm) {
+    return (thumb ? 0xf9000000u : 0xf4000000u) | (load << 21) | ((first >> 4) << 22) |
+        (rn << 16) | ((first & 15u) << 12) | (type << 8) | (size << 6) | (align << 4) | rm;
+}
+
+static void test_a8_neon_memory_registers(void) {
+    static const unsigned types[] = {7u,10u,6u,2u}, offsets[] = {15u,13u,6u,5u};
+    CHECK(a8_neon_memory(1u, 0u, 10u, 3u, 2u, 8u, 4u, 15u) == 0xf9048aefu &&
+          a8_neon_memory(0u, 1u, 10u, 3u, 2u, 8u, 4u, 15u) == 0xf4248aefu,
+          "NEON memory encoding anchors from matching fmodf");
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned load_ = 0; load_ < 2u; load_++)
+      for (unsigned size = 2u; size <= 3u; size++)
+       for (unsigned count = 1u; count <= 4u; count++)
+        for (unsigned first = 0; first < 32u; first++)
+         for (unsigned align = 0; align < 4u; align++)
+          for (unsigned post = 0; post < 4u; post++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.r[5] = 0x2040u; c.r[6] = 0xfffffff0u;
+            unsigned rm = offsets[post];
+            bool valid = first + count <= 32u && (count == 4u ||
+                (count == 2u ? align != 3u : align < 2u));
+            uint64_t before[32];
+            for (unsigned d = 0; d < 32u; d++) {
+                before[d] = UINT64_C(0xff01234567890000) + d * UINT64_C(0x1234567);
+                vfp_set_d(&c, d, before[d]);
+            }
+            uint8_t expected[64];
+            memset(g_ram + 0x2030u, 0xa5, sizeof expected);
+            for (unsigned word = 0; word < 8u; word++) m_w32(NULL, 0x2040u + word * 4u, 0xabcdef01u + word * 0x87654321u);
+            memcpy(expected, g_ram + 0x2030u, sizeof expected);
+            if (valid) for (unsigned d = 0; d < count; d++) {
+                if (load_) memcpy(&before[first + d], expected + 16u + d * 8u, 8u);
+                else memcpy(expected + 16u + d * 8u, &before[first + d], 8u);
+            }
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            uint32_t updated = rm == 15u ? 0x2040u : rm == 13u ? 0x2040u + count * 8u : rm == 5u ? 0x4080u : 0x2030u;
+            CHECK(a8_move_step(&c, thumb, a8_neon_memory(thumb, load_, types[count - 1u], size, align, first, 5u, rm)) ==
+                  (valid ? ARM_OK : ARM_UNDEFINED) && c.r[15] == (valid ? 0x104u : 0x100u) &&
+                  c.r[5] == (valid ? updated : 0x2040u) && c.cpsr == flags && c.vfp_fpscr == fpscr,
+                  "NEON memory disposition T=%u L=%u size=%u count=%u first=%u align=%u rm=%u",
+                  thumb, load_, size, count, first, align, rm);
+            bool same = !memcmp(g_ram + 0x2030u, expected, sizeof expected);
+            for (unsigned d = 0; d < 32u; d++) same &= vfp_get_d(&c, d) == before[d];
+            CHECK(same, "NEON memory register/byte order or guard region changed");
+          }
+}
+
+static void test_a8_neon_memory_alignment_and_access(void) {
+    static const unsigned types[] = {7u,10u,6u,2u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned load_ = 0; load_ < 2u; load_++)
+      for (unsigned size = 2u; size <= 3u; size++)
+       for (unsigned count = 1u; count <= 4u; count++)
+        for (unsigned align = 0; align < 4u; align++)
+         for (unsigned a = 0; a < 2u; a++)
+          for (unsigned offset = 0; offset < 32u; offset++) {
+            if (count != 4u && (count == 2u ? align == 3u : align >= 2u)) continue;
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.cp15.sctlr = (c.cp15.sctlr & ~ARM_SCTLR_A) | (a ? ARM_SCTLR_A : 0u);
+            c.r[13] = 0x2040u + offset;
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            unsigned alignment = align ? 4u << align : 1u << size;
+            bool misaligned = (offset % alignment) != 0u;
+            bool abort = misaligned && (align || a), unsupported = misaligned && !abort;
+            uint32_t insn = a8_neon_memory(thumb, load_, types[count - 1u], size, align, 28u, 13u, 13u);
+            CHECK(a8_move_step(&c, thumb, insn) == (unsupported ? ARM_UNDEFINED : ARM_OK) && c.vfp_fpscr == fpscr,
+                  "NEON alignment disposition");
+            if (abort) CHECK(c.r[15] == ARM_VEC_DATA_ABORT && c.r[14] == 0x108u &&
+                c.spsr[ARM_BANK_ABT] == flags && c.bank_r13[ARM_BANK_USR] == 0x2040u + offset &&
+                c.cp15.dfar == 0x2040u + offset && c.cp15.dfsr == (1u | (load_ ? 0u : 0x800u)),
+                "NEON alignment abort state");
+            else CHECK(c.r[15] == (unsupported ? 0x100u : 0x104u) && c.cpsr == flags &&
+                c.r[13] == 0x2040u + offset + (unsupported ? 0u : count * 8u), "NEON SP/writeback alignment state");
+          }
+    static const unsigned permissions[] = {0u,1u,3u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned load_ = 0; load_ < 2u; load_++)
+      for (unsigned user = 0; user < 2u; user++)
+       for (unsigned enabled = 0; enabled < 2u; enabled++)
+        for (unsigned access = 0; access < 3u; access++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permissions[access] * 0x00500000u;
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            c.r[5] = 0x2040u;
+            bool allowed = enabled && (permissions[access] == 3u || (permissions[access] == 1u && !user));
+            uint32_t flags = c.cpsr;
+            CHECK(a8_move_step(&c, thumb, a8_neon_memory(thumb, load_, 10u, 3u, 2u, 16u, 5u, 13u)) == ARM_OK &&
+                  c.r[5] == (allowed ? 0x2050u : 0x2040u), "NEON access disposition");
+            CHECK(allowed ? c.r[15] == 0x104u && c.cpsr == flags :
+                  c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == (thumb ? 0x102u : 0x104u) &&
+                  c.spsr[ARM_BANK_UND] == flags, "NEON access exception state");
+        }
+}
+
+static void test_a8_neon_memory_invalid_and_it(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned enabled = 0; enabled < 2u; enabled++)
+      for (unsigned skip = 0; skip < (thumb ? 2u : 1u); skip++)
+       for (unsigned kind = 0; kind < 13u; kind++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, thumb);
+        c.r[5] = 0x2040u;
+        c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+        if (skip) c.cp15.cpacr = 0u;
+        if (kind == 7u) c.cpsr |= ARM_CPSR_E;
+        uint32_t insn = a8_neon_memory(thumb, 0u, 10u, kind == 0u ? 2u : 3u, 2u, 31u, 5u, 13u);
+        /* Keep D31 in unsupported neighboring forms to catch the former
+         * broad A32 preload-hint alias. Valid cases use D28-D29. */
+        if (kind < 3u || kind == 7u) insn = a8_neon_memory(thumb, 0u, 10u, kind == 0u ? 2u : 3u, 2u, 28u,
+            kind == 2u ? 15u : 5u, 13u);
+        if (kind == 4u) insn = a8_neon_memory(thumb, 0u, 10u, 3u, 3u, 28u, 5u, 13u);
+        if (kind == 5u || kind == 6u) insn = a8_neon_memory(thumb, 0u, 7u, kind - 5u, 0u, 31u, 5u, 13u);
+        if (kind == 8u) insn |= 1u << 23; /* single-lane/replicate space */
+        if (kind >= 9u) insn = a8_neon_memory(thumb, 0u, kind == 12u ? 15u : kind - 9u, 3u, 0u, 31u, 5u, 13u);
+        if (thumb) { m_w16(NULL, 0x100u, skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK, "NEON IT setup"); }
+        memset(g_ram + 0x2040u, 0xa5, 32u);
+        uint32_t pc = c.r[15], flags = c.cpsr, fpscr = c.vfp_fpscr;
+        bool denied = !enabled && (kind < 2u || kind == 7u), valid = kind < 2u;
+        CHECK(a8_move_step(&c, thumb, insn) == (skip || valid || denied ? ARM_OK : ARM_UNDEFINED),
+              "NEON invalid/IT disposition T=%u EN=%u skip=%u kind=%u", thumb, enabled, skip, kind);
+        if (skip || (!valid && !denied)) {
+            CHECK(c.r[5] == 0x2040u && c.r[15] == (skip ? pc + 4u : pc) && c.vfp_fpscr == fpscr &&
+                  c.cpsr == (skip ? flags & ~0x0600fc00u : flags), "NEON refused/skipped state changed");
+            bool same = true;
+            for (unsigned i = 0; i < 32u; i++) same &= g_ram[0x2040u + i] == 0xa5u;
+            CHECK(same, "NEON refused/skipped store wrote memory");
+        } else if (denied) CHECK(c.r[15] == ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND] == flags &&
+            c.r[5] == 0x2040u, "NEON disabled valid transfer did not enter guest Undefined");
+        else CHECK(c.r[15] == pc + 4u && c.r[5] == 0x2050u && c.cpsr == (flags & ~0x0600fc00u),
+            "NEON valid IT slot did not retire");
+       }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, legacy[profile]), "legacy NEON reset");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        CHECK(a8_move_step(&c, 0u, a8_neon_memory(0u, 0u, 10u, 3u, 2u, 8u, 5u, 15u)) == ARM_UNDEFINED &&
+              c.r[15] == 0u, "NEON memory leaked into a legacy profile");
+    }
+}
+
 static void test_a8_vfp_full_bank_core_moves(void) {
     for (unsigned thumb = 0; thumb < 2u; thumb++) {
         arm_cpu_t c;
@@ -2762,6 +2909,9 @@ static void test_condition_codes_apply(void) {
 
 /* --------------------------------------------------------------- main ---- */
 int main(void) {
+    test_a8_neon_memory_registers();
+    test_a8_neon_memory_alignment_and_access();
+    test_a8_neon_memory_invalid_and_it();
     test_a8_vfp_compare_registers_and_values();
     test_a8_vfp_compare_access_and_host_state();
     test_a8_vfp_compare_status_sequence();

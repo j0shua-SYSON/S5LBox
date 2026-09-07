@@ -226,6 +226,28 @@ both NaN classes, FZ/DN controls, host rounding/exception preservation,
 conditional execution, split Thumb fetch faults and guest enable/retry.
 These are host instruction tests; no complete firmware boot follows from them.
 
+ARM and Thumb NEON VLD1/VST1 multiple-single-element forms now transfer
+one to four consecutive D registers with 32-bit or 64-bit elements. They
+support naturally aligned little-endian accesses, optional 8/16/32-byte
+alignment assertions, and immediate or register post-index writeback.
+An assertion failure, or a standard alignment failure with SCTLR.A set,
+enters the guest Data Abort handler. Standard unaligned accesses with A=0,
+8/16-bit elements, big-endian accesses and other structure forms remain
+unsupported. See [DDI0406C.b, A3.2.1, A7.7.1 and A8.8.320/404](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Transfers use the current guest memory permissions. Writeback occurs only
+after completion, preserving the required base-restored abort behavior.
+Completed store words remain in memory; loads publish completed 32-bit
+elements or complete 64-bit register pairs. Checked host-bus failures stop
+without entering a guest exception and allow retry from the original base.
+Tests cover all register lists, alignment fields, post-index aliases,
+permissions, conditional execution, MMU and bus faults, and split Thumb
+fetch faults. The A8 ARM decoder handles NEON memory before its broad preload
+hint check, so D15/D31 transfers and unsupported structure forms cannot be
+swallowed as hints. The matching cache's unchanged `fmodf` now executes its
+NEON stack save in an isolated User-mode fixture and stops at the later
+VORR instruction. Full function execution remains unverified.
+
 ARM and Thumb VLDR/VSTR now move one S or D register through the translating
 memory accessors, including D16-D31. They use signed, scaled immediate
 offsets and require word alignment even for doubleword registers. Thumb
@@ -726,7 +748,8 @@ establish that result.
   Cortex-A8 MRC/MCR transfers cover the currently implemented CP15 registers.
 - Cortex-A8 stores d0-d31 and supports system/core/memory transfers plus
   VFP copies, immediate constants and sign operations with short vectors,
-  and scalar comparisons across the full register bank.
+  scalar comparisons across the full register bank, and the bounded
+  32/64-bit NEON VLD1/VST1 memory forms described above.
   Upper-bank arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Shared lower-bank arithmetic
   still derives from VFP11 and requires a complete Cortex-A8 semantic audit.

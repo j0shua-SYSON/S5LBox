@@ -1,6 +1,7 @@
 /* Checked physical-bus failures must stop before fabricated guest effects.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "arm.h"
+#include "vfp.h"
 #include <stdio.h>
 #include <string.h>
 #ifdef S5LBOX_STATIC_A64_ENGINE
@@ -79,6 +80,46 @@ static void check_stop(fixture_t *f, arm_cpu_t *c, uint32_t pc, uint32_t flags) 
     CHECK(arm_step(c) == ARM_HALT && f->accesses == accesses && c->r[15] == pc && c->cycles == cycles,
           "latched failure did not stop a second step before fetch or IRQ");
     c->irq_line = false;
+}
+
+static void test_neon_memory_and_retry(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned host = 0; host < 2u; host++)
+      for (unsigned load = 0; load < 2u; load++)
+       for (unsigned size = 2u; size <= 3u; size++)
+        for (unsigned stop = 0; stop < 8u; stop++) {
+            fixture_t f; arm_bus_t bus; arm_cpu_t c;
+            setup(&f, &bus, &c, thumb != 0u, host != 0u);
+            if (thumb) c.cpsr |= 0x1800u;
+            c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN; c.vfp_fpscr = 0x0bc00080u;
+            uint32_t insn = (thumb ? 0xf941c20du : 0xf441c20du) | (load << 21) | (size << 6);
+            if (thumb) { put16(&f, 0u, (uint16_t)(insn >> 16)); put16(&f, 2u, (uint16_t)insn); }
+            else put32(&f, 0u, insn);
+            for (unsigned word = 0; word < 8u; word++) put32(&f, 0x1000u + word * 4u, 0xabcdef00u + word);
+            for (unsigned d = 0; d < 4u; d++) vfp_set_d(&c, 28u + d,
+                (UINT64_C(0xdead0001) + 2u * d) << 32 | (UINT64_C(0xdead0000) + 2u * d));
+            f.fail_address = 0x1000u + stop * 4u; f.fail_size = 4u; f.fail_write = !load;
+            uint32_t flags = c.cpsr;
+            CHECK(arm_step(&c) == ARM_HALT, "NEON failed data callback did not halt");
+            check_stop(&f, &c, 0u, flags);
+            CHECK(c.r[1] == 0x1000u && c.vfp_fpscr == 0x0bc00080u, "NEON failed writeback or FPSCR changed");
+            for (unsigned word = 0; word < 8u; word++) {
+                uint32_t value = (uint32_t)(vfp_get_d(&c, 28u + word / 2u) >> (32u * (word & 1u)));
+                unsigned published = size == 2u ? stop : stop & ~1u;
+                CHECK(value == (load && word < published ? 0xabcdef00u + word : 0xdead0000u + word),
+                      "NEON load published a failed element or lost completed elements");
+                CHECK(get32(&f, 0x1000u + word * 4u) == (!load && word < stop ? 0xdead0000u + word : 0xabcdef00u + word),
+                      "NEON store lost completed words or published a failed write");
+            }
+            f.failed = false; f.fail_size = 0u;
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u && c.r[1] == 0x1020u &&
+                  c.cpsr == (flags & ~0x0600fc00u), "NEON retry did not finish exactly once");
+            for (unsigned word = 0; word < 8u; word++) {
+                uint32_t value = load ? (uint32_t)(vfp_get_d(&c, 28u + word / 2u) >> (32u * (word & 1u))) :
+                    get32(&f, 0x1000u + word * 4u);
+                CHECK(value == (load ? 0xabcdef00u + word : 0xdead0000u + word), "NEON retry produced wrong data");
+            }
+        }
 }
 
 static void test_data_and_retry(void) {
@@ -485,6 +526,7 @@ static void test_signed_runner_entry_guards(void) {
 #endif
 
 int main(void) {
+    test_neon_memory_and_retry();
     test_data_and_retry();
     test_table_branch_and_retry();
     test_unaligned_table_branch_and_retry();
