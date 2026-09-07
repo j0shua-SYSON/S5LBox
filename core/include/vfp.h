@@ -6,7 +6,8 @@
  * no d16-d31 and there is no Advanced SIMD/NEON on this part.
  *
  * Cortex-A8 adds D16-D31, checked system/core/memory transfers and raw-bit
- * data operations. Its remaining VFPv3/NEON families are not complete here.
+ * data operations and scalar comparisons. Its remaining VFPv3/NEON families
+ * are not complete here.
  *
  * Everything about WHY this exists, and every floating-point semantic this
  * implementation does and does not model, is documented at the top of
@@ -23,7 +24,7 @@
  * The VFP status and control register. Bit positions are architectural
  * (ARM DDI 0100I, C1.2 / ARM DDI 0301H, 20.1.2).
  */
-#define ARM_FPSCR_N      (1u << 31)  /* comparison: less-than or unordered   */
+#define ARM_FPSCR_N      (1u << 31)  /* comparison: less-than                */
 #define ARM_FPSCR_Z      (1u << 30)  /* comparison: equal                    */
 #define ARM_FPSCR_C      (1u << 29)  /* comparison: >=, or unordered         */
 #define ARM_FPSCR_V      (1u << 28)  /* comparison: unordered                */
@@ -142,6 +143,12 @@ static inline bool vfp_is_bitwise_data(uint32_t insn) {
     return (insn & 0x0fb00e10u) == 0x0eb00a00u &&
            (!(insn & 0x40u) || (insn & 0x000f0000u) == 0u ||
             (insn & 0x000f0080u) == 0x00010000u);
+}
+
+/* VCMP/VCMPE register and #0.0 forms. The zero form's reserved Vm/M bits
+ * stay in this space for the checked decoder to reject before access checks. */
+static inline bool vfp_is_compare_data(uint32_t insn) {
+    return (insn & 0x0fbe0e50u) == 0x0eb40a40u;
 }
 
 /*

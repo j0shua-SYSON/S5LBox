@@ -7799,14 +7799,19 @@ static void test_cortex_a8_vfp_multiple_memory_aborts(void) {
     }
 }
 
-static void test_cortex_a8_vfp_bitwise_fetch_and_retry(void) {
-    static const uint32_t insns[] = {0xeef7fb00u,0xeef0fb60u,0xeef0fbe0u,0xeef1fb60u};
+static void test_cortex_a8_vfp_data_fetch_and_retry(void) {
+    static const uint32_t insns[] = {
+        0xeef7fb00u,0xeef0fb60u,0xeef0fbe0u,0xeef1fb60u,
+        0xeef4fb60u,0xeef4fbe0u,0xeef5fb40u,0xeef5fbc0u
+    };
     static const uint64_t expected[] = {
         UINT64_C(0x3ff0000000000000), UINT64_C(0xfff0000000000001),
         UINT64_C(0x7ff0000000000001), UINT64_C(0x7ff0000000000001)
     };
+    static const uint32_t compare_fetch_flags[] = {0x3bc00081u,0x3bc00081u,0x2bc00080u,0x2bc00080u};
+    static const uint32_t compare_retry_flags[] = {0x30000001u,0x30000001u,0x60000000u,0x60000000u};
     for (unsigned host = 0; host < 2u; host++)
-     for (unsigned op = 0; op < 4u; op++)
+     for (unsigned op = 0; op < 8u; op++)
       for (unsigned fault = 0; fault < 4u; fault++) {
         memset(g_ram, 0, sizeof g_ram);
         arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
@@ -7825,11 +7830,11 @@ static void test_cortex_a8_vfp_bitwise_fetch_and_retry(void) {
         m_w16(NULL, 0x8ffeu, (uint16_t)(insns[op] >> 16));
         m_w16(NULL, 0xa000u, (uint16_t)insns[op]);
         m_w16(NULL, 0x9000u, 0u); /* unrelated physical neighbor */
-        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u, "Thumb raw FP fetch disposition");
-        CHECK(c.vfp_fpscr == 0x4bc00080u && c.a8_vfp_hi[0] == UINT64_C(0xfff0000000000001),
-              "Thumb raw FP fetch changed controls/source");
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u, "Thumb FP data fetch disposition");
+        CHECK(c.vfp_fpscr == (!fault && op >= 4u ? compare_fetch_flags[op - 4u] : 0x4bc00080u) &&
+              c.a8_vfp_hi[0] == UINT64_C(0xfff0000000000001), "Thumb FP data fetch changed controls/source");
         if (!fault) {
-            CHECK(c.r[15] == 0x1002u && c.a8_vfp_hi[15] == expected[op] &&
+            CHECK(c.r[15] == 0x1002u && c.a8_vfp_hi[15] == (op < 4u ? expected[op] : UINT64_C(0x123456789abcdef0)) &&
                   c.cpsr == ((flags & ~TEST_IT_MASK) | test_it_bits(0x18u)),
                   "Thumb raw FP used physical neighbor or lost IT retirement");
         } else {
@@ -7840,7 +7845,7 @@ static void test_cortex_a8_vfp_bitwise_fetch_and_retry(void) {
                   "Thumb raw FP availability/effects preceded second-half fetch");
         }
       }
-    for (unsigned op = 0; op < 4u; op++) {
+    for (unsigned op = 0; op < 8u; op++) {
         arm_cpu_t c;
         CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
         c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_Z | ARM_CPSR_Q;
@@ -7856,10 +7861,13 @@ static void test_cortex_a8_vfp_bitwise_fetch_and_retry(void) {
         CHECK(arm_step(&c) == ARM_OK, "raw FP retry IT setup");
         uint32_t interrupted = c.cpsr;
         CHECK(arm_step(&c) == ARM_OK && c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == 0x104u &&
-              c.spsr[ARM_BANK_UND] == interrupted && c.a8_vfp_hi[15] == 0u, "raw FP lazy exception");
+              c.spsr[ARM_BANK_UND] == interrupted && c.a8_vfp_hi[15] == 0u && c.vfp_fpscr == 0u,
+              "FP data lazy exception changed comparison flags");
         CHECK(arm_step(&c) == ARM_OK && c.vfp_fpexc == ARM_FPEXC_EN, "raw FP handler enable");
         CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x102u && c.cpsr == interrupted, "raw FP exception return");
-        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x106u && c.a8_vfp_hi[15] == expected[op] &&
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x106u &&
+              c.a8_vfp_hi[15] == (op < 4u ? expected[op] : 0u) &&
+              c.vfp_fpscr == (op < 4u ? 0u : compare_retry_flags[op - 4u]) &&
               c.cpsr == ((interrupted & ~TEST_IT_MASK) | test_it_bits(0x08u)), "raw FP exact retry/IT retirement");
         CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x108u && c.r[2] == 1u &&
               c.cpsr == (interrupted & ~TEST_IT_MASK) && c.cycles == 6u, "raw FP changed following IT condition");
@@ -11208,7 +11216,7 @@ int main(void) {
     test_cortex_a8_vfp_control_fields();
     test_cortex_a8_vfp_core_registers();
     test_cortex_a8_vfp_undefined_retry();
-    test_cortex_a8_vfp_bitwise_fetch_and_retry();
+    test_cortex_a8_vfp_data_fetch_and_retry();
     test_cortex_a8_vfp_single_memory_aborts();
     test_cortex_a8_vfp_multiple_memory_aborts();
     test_cortex_a8_vfp_fetch_and_refusals();

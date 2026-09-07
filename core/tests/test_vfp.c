@@ -415,6 +415,237 @@ static void test_a8_vfp_bitwise_invalid_and_conditional(void) {
      }
 }
 
+/* VCMP/VCMPE A1/T1 and A2/T2, DDI0406C.b A8.8.303. */
+static uint32_t a8_fp_compare(unsigned dbl, unsigned signaling, unsigned zero,
+                               unsigned left, unsigned right) {
+    return 0xeeb40a40u | (dbl << 8) | (signaling << 7) | (zero << 16) |
+        (dbl ? ((left & 15u) << 12) | ((left >> 4) << 22) |
+               (right & 15u) | ((right >> 4) << 5) :
+               ((left >> 1) << 12) | ((left & 1u) << 22) |
+               (right >> 1) | ((right & 1u) << 5));
+}
+
+/* Explicit numeric ordering and classes are the oracle, independent of the
+ * production bit ordering. Zero has rank 8; NaNs have no numeric rank. */
+static const struct {
+    uint32_t single;
+    uint64_t dual;
+    int rank;
+    bool denormal, nan, signaling;
+} a8_compare_values[] = {
+    {0xff800000u, UINT64_C(0xfff0000000000000), 0, false, false, false},
+    {0xff7fffffu, UINT64_C(0xffefffffffffffff), 1, false, false, false},
+    {0xbf800001u, UINT64_C(0xbff0000000000001), 2, false, false, false},
+    {0xbf800000u, UINT64_C(0xbff0000000000000), 3, false, false, false},
+    {0xbf7fffffu, UINT64_C(0xbfefffffffffffff), 4, false, false, false},
+    {0x80800000u, UINT64_C(0x8010000000000000), 5, false, false, false},
+    {0x807fffffu, UINT64_C(0x800fffffffffffff), 6, true,  false, false},
+    {0x80000001u, UINT64_C(0x8000000000000001), 7, true,  false, false},
+    {0x80000000u, UINT64_C(0x8000000000000000), 8, false, false, false},
+    {0x00000000u, UINT64_C(0x0000000000000000), 8, false, false, false},
+    {0x00000001u, UINT64_C(0x0000000000000001), 9, true,  false, false},
+    {0x007fffffu, UINT64_C(0x000fffffffffffff),10, true,  false, false},
+    {0x00800000u, UINT64_C(0x0010000000000000),11, false, false, false},
+    {0x3f7fffffu, UINT64_C(0x3fefffffffffffff),12, false, false, false},
+    {0x3f800000u, UINT64_C(0x3ff0000000000000),13, false, false, false},
+    {0x3f800001u, UINT64_C(0x3ff0000000000001),14, false, false, false},
+    {0x7f7fffffu, UINT64_C(0x7fefffffffffffff),15, false, false, false},
+    {0x7f800000u, UINT64_C(0x7ff0000000000000),16, false, false, false},
+    {0x7fc12345u, UINT64_C(0x7ff8123456789abc), 0, false, true,  false},
+    {0xffc00000u, UINT64_C(0xfff8000000000000), 0, false, true,  false},
+    {0x7f800001u, UINT64_C(0x7ff0000000000001), 0, false, true,  true},
+    {0xffbfffffu, UINT64_C(0xfff7ffffffffffff), 0, false, true,  true}
+};
+
+static uint32_t a8_compare_flags(unsigned x, unsigned y, unsigned signaling, bool fz) {
+    bool nan = a8_compare_values[x].nan || a8_compare_values[y].nan;
+    int a = fz && a8_compare_values[x].denormal ? 8 : a8_compare_values[x].rank;
+    int b = fz && a8_compare_values[y].denormal ? 8 : a8_compare_values[y].rank;
+    uint32_t flags = nan ? 0x30000000u : a == b ? 0x60000000u : a < b ? 0x80000000u : 0x20000000u;
+    if (a8_compare_values[x].signaling || a8_compare_values[y].signaling || (signaling && nan)) flags |= 1u;
+    if (fz && (a8_compare_values[x].denormal || a8_compare_values[y].denormal)) flags |= 0x80u;
+    return flags;
+}
+
+static void a8_compare_value_set(arm_cpu_t *c, unsigned dbl, unsigned reg, unsigned value) {
+    a8_fp_value_set(c, dbl, reg, dbl ? a8_compare_values[value].dual : a8_compare_values[value].single);
+}
+
+static void test_a8_vfp_compare_registers_and_values(void) {
+    CHECK(a8_fp_compare(0u, 0u, 0u, 0u, 0u) == 0xeeb40a40u &&
+          a8_fp_compare(1u, 0u, 0u, 31u, 16u) == 0xeef4fb60u &&
+          a8_fp_compare(1u, 1u, 1u, 31u, 0u) == 0xeef5fbc0u, "VCMP encoding anchors");
+    unsigned count = sizeof a8_compare_values / sizeof a8_compare_values[0];
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned signaling = 0; signaling < 2u; signaling++)
+       for (unsigned zero = 0; zero < 2u; zero++)
+        for (unsigned left = 0; left < 32u; left++)
+         for (unsigned right = 0; right < (zero ? 1u : 32u); right++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c, d, UINT64_C(0xdead1234beef0000) + d);
+            unsigned x = (left * 3u + right) % count, y = zero ? 9u : (left + right * 5u) % count;
+            if (!zero && left == right) x = y;
+            a8_compare_value_set(&c, dbl, left, x);
+            if (!zero) a8_compare_value_set(&c, dbl, right, y);
+            uint64_t before[32];
+            for (unsigned d = 0; d < 32u; d++) before[d] = vfp_get_d(&c, d);
+            c.excl_valid = true; c.excl_addr = 0x12340u;
+            c.vfp_fpscr |= ((left & 7u) << 16) | ((right & 3u) << 20) | ARM_FPSCR_N | ARM_FPSCR_DZC;
+            uint32_t flags = c.cpsr, fpscr = (c.vfp_fpscr & ~ARM_FPSCR_NZCV) |
+                a8_compare_flags(x, y, signaling, true);
+            CHECK(a8_move_step(&c, thumb, a8_fp_compare(dbl, signaling, zero, left, right)) == ARM_OK &&
+                  c.r[15] == 0x104u && c.cycles == 1u && c.cpsr == flags && c.vfp_fpscr == fpscr &&
+                  c.excl_valid && c.excl_addr == 0x12340u,
+                  "VCMP register/state T=%u D=%u E=%u Z=%u left=%u right=%u", thumb, dbl, signaling, zero, left, right);
+            bool unchanged = true;
+            for (unsigned d = 0; d < 32u; d++) unchanged &= vfp_get_d(&c, d) == before[d];
+            for (unsigned r = 0; r < 15u; r++) unchanged &= c.r[r] == 0u;
+            CHECK(unchanged, "VCMP changed a core/extension register");
+         }
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned signaling = 0; signaling < 2u; signaling++)
+       for (unsigned controls = 0; controls < 4u; controls++)
+        for (unsigned x = 0; x < count; x++)
+         for (unsigned y = 0; y < count; y++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.vfp_fpscr = ARM_FPSCR_QC | ARM_FPSCR_RMODE | ARM_FPSCR_LEN | ARM_FPSCR_STRIDE |
+                ARM_FPSCR_NZCV | ARM_FPSCR_DZC | (controls & 1u ? ARM_FPSCR_FZ : 0u) |
+                (controls & 2u ? ARM_FPSCR_DN : 0u);
+            c.cpsr |= ARM_CPSR_E;
+            a8_compare_value_set(&c, dbl, 31u, x); a8_compare_value_set(&c, dbl, 16u, y);
+            uint32_t flags = c.cpsr, fpscr = (c.vfp_fpscr & ~ARM_FPSCR_NZCV) |
+                a8_compare_flags(x, y, signaling, (controls & 1u) != 0u);
+            CHECK(a8_move_step(&c, thumb, a8_fp_compare(dbl, signaling, 0u, 31u, 16u)) == ARM_OK &&
+                  c.vfp_fpscr == fpscr && c.cpsr == flags,
+                  "VCMP classes T=%u D=%u E=%u controls=%u x=%u y=%u", thumb, dbl, signaling, controls, x, y);
+         }
+}
+
+static void test_a8_vfp_compare_access_and_host_state(void) {
+    static const unsigned permissions[] = {0u, 1u, 3u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned signaling = 0; signaling < 2u; signaling++)
+       for (unsigned zero = 0; zero < 2u; zero++)
+        for (unsigned user = 0; user < 2u; user++)
+         for (unsigned enabled = 0; enabled < 2u; enabled++)
+          for (unsigned access = 0; access < 3u; access++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permissions[access] * 0x00500000u;
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            a8_compare_value_set(&c, dbl, 31u, 18u); a8_compare_value_set(&c, dbl, 16u, 20u);
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            bool allowed = enabled && (permissions[access] == 3u || (permissions[access] == 1u && !user));
+            uint32_t want = allowed ? (fpscr & ~ARM_FPSCR_NZCV) |
+                a8_compare_flags(18u, zero ? 9u : 20u, signaling, true) : fpscr;
+            CHECK(a8_move_step(&c, thumb, a8_fp_compare(dbl, signaling, zero, 31u, zero ? 0u : 16u)) == ARM_OK &&
+                  c.vfp_fpscr == want, "VCMP access/exception flags");
+            CHECK(allowed ? c.r[15] == 0x104u && c.cpsr == flags :
+                  c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == (thumb ? 0x102u : 0x104u) &&
+                  c.spsr[ARM_BANK_UND] == flags && (c.cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_UND,
+                  "VCMP access exception state");
+          }
+    fenv_t saved;
+    CHECK(fegetenv(&saved) == 0, "save comparison host FP environment");
+    static const int rounds[] = {FE_TONEAREST, FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned host = 0; host < 4u; host++)
+       for (unsigned guest = 0; guest < 4u; guest++)
+        for (unsigned signaling = 0; signaling < 2u; signaling++)
+         for (unsigned pending = 0; pending < 2u; pending++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.vfp_fpscr = (c.vfp_fpscr & ~ARM_FPSCR_RMODE) | (guest << 22);
+            a8_compare_value_set(&c, dbl, 31u, 20u); a8_compare_value_set(&c, dbl, 16u, 7u);
+            CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
+                  (!pending || feraiseexcept(FE_INVALID | FE_DIVBYZERO) == 0), "prepare comparison host FP state");
+            int exceptions = fetestexcept(FE_ALL_EXCEPT);
+            CHECK(a8_move_step(&c, thumb, a8_fp_compare(dbl, signaling, 0u, 31u, 16u)) == ARM_OK &&
+                  fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == exceptions,
+                  "VCMP changed host FP environment T=%u D=%u host=%u guest=%u E=%u pending=%u",
+                  thumb, dbl, host, guest, signaling, pending);
+         }
+    CHECK(fesetenv(&saved) == 0, "restore comparison host FP environment");
+}
+
+static void test_a8_vfp_compare_status_sequence(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, thumb);
+        c.vfp_fpscr = ARM_FPSCR_QC | ARM_FPSCR_FZ | ARM_FPSCR_DZC;
+        uint32_t flags = c.cpsr, controls = c.vfp_fpscr;
+        a8_compare_value_set(&c, dbl, 31u, 20u); a8_compare_value_set(&c, dbl, 16u, 7u);
+        CHECK(a8_move_step(&c, thumb, a8_fp_compare(dbl, 0u, 0u, 31u, 16u)) == ARM_OK &&
+              c.vfp_fpscr == (controls | 0x30000081u) && c.cpsr == flags, "VCMP accumulated IOC and IDC");
+        a8_compare_value_set(&c, dbl, 31u, 14u); a8_compare_value_set(&c, dbl, 16u, 14u);
+        CHECK(a8_move_step(&c, thumb, a8_fp_compare(dbl, 0u, 0u, 31u, 16u)) == ARM_OK &&
+              c.vfp_fpscr == (controls | 0x60000081u) && c.cpsr == flags,
+              "finite VCMP did not replace NZCV while retaining cumulative exceptions");
+        CHECK(a8_move_step(&c, thumb, VMRS(15u, 1u)) == ARM_OK && c.r[15] == 0x10cu && c.cycles == 3u &&
+              c.vfp_fpscr == (controls | 0x60000081u) && c.cpsr == ((flags & ~ARM_FPSCR_NZCV) | 0x60000000u),
+              "VMRS did not publish comparison flags without changing controls");
+     }
+}
+
+static void test_a8_vfp_compare_invalid_and_conditional(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned signaling = 0; signaling < 2u; signaling++)
+       for (unsigned enabled = 0; enabled < 2u; enabled++)
+        for (unsigned skip = 0; skip < 2u; skip++)
+         for (unsigned invalid = 0; invalid < 64u; invalid++) {
+            /* 0 is a valid comparison. 1..31 cover every forbidden Vm/M
+             * combination in #0.0; 32..63 cover unrepresentable FPSCR bits. */
+            if (invalid >= 32u && (ARM_FPSCR_A8_WMASK & (1u << (invalid - 32u)))) continue;
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            a8_compare_value_set(&c, dbl, 31u, 20u);
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            if (skip) c.cp15.cpacr = 0u;
+            if (invalid >= 32u) c.vfp_fpscr |= 1u << (invalid - 32u);
+            if (thumb) { m_w16(NULL, 0x100u, skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK, "VCMP IT setup"); }
+            uint32_t insn = a8_fp_compare(dbl, signaling, 1u, 31u, invalid < 32u ? invalid : 0u);
+            if (!thumb && skip) insn &= 0x0fffffffu;
+            uint32_t pc = c.r[15], flags = c.cpsr, fpscr = c.vfp_fpscr;
+            bool valid = invalid == 0u;
+            CHECK(a8_move_step(&c, thumb, insn) == (skip || valid ? ARM_OK : ARM_UNDEFINED),
+                  "VCMP conditional/invalid disposition T=%u D=%u E=%u EN=%u skip=%u invalid=%u",
+                  thumb, dbl, signaling, enabled, skip, invalid);
+            if (skip || !valid) CHECK(c.vfp_fpscr == fpscr && c.r[15] == (skip ? pc + 4u : pc) &&
+                c.cpsr == (thumb && skip ? flags & ~0x0600fc00u : flags), "VCMP invalid/skip changed state");
+            else if (!enabled) CHECK(c.vfp_fpscr == fpscr && c.r[15] == ARM_VEC_UNDEFINED &&
+                c.spsr[ARM_BANK_UND] == flags, "VCMP denied valid encoding was not a guest fault");
+            else CHECK(c.vfp_fpscr == ((fpscr & ~ARM_FPSCR_NZCV) | 0x30000001u) &&
+                c.cpsr == (thumb ? flags & ~0x0600fc00u : flags) && c.r[15] == pc + 4u,
+                "VCMP valid conditional execution");
+         }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++)
+     for (unsigned signaling = 0; signaling < 2u; signaling++)
+      for (unsigned zero = 0; zero < 2u; zero++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, legacy[profile]), "legacy compare reset");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        CHECK(a8_move_step(&c, 0u, a8_fp_compare(1u, signaling, zero, 31u, zero ? 0u : 16u)) == ARM_UNDEFINED &&
+              c.r[15] == 0u && c.vfp_fpscr == 0u, "upper-bank comparison leaked into legacy profile");
+      }
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, thumb);
+        c.vfp_fpexc = 0u;
+        CHECK(a8_move_step(&c, thumb, 0xfef4fb60u) == ARM_UNDEFINED && c.r[15] == 0x100u,
+              "VCMP admitted an unconditional coprocessor encoding");
+    }
+}
+
 static void test_a8_vfp_full_bank_core_moves(void) {
     for (unsigned thumb = 0; thumb < 2u; thumb++) {
         arm_cpu_t c;
@@ -2531,6 +2762,10 @@ static void test_condition_codes_apply(void) {
 
 /* --------------------------------------------------------------- main ---- */
 int main(void) {
+    test_a8_vfp_compare_registers_and_values();
+    test_a8_vfp_compare_access_and_host_state();
+    test_a8_vfp_compare_status_sequence();
+    test_a8_vfp_compare_invalid_and_conditional();
     test_a8_vfp_bitwise_scalar_registers();
     test_a8_vfp_all_immediate_constants();
     test_a8_vfp_bitwise_vectors();

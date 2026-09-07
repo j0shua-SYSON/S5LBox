@@ -1,7 +1,9 @@
 /*
  * S5LBox — VFPv2 (the ARM1176JZF-S's VFP11 unit).
  *
- * Cortex-A8 transfers and raw-bit data operations use checked paths with D0-D31. The
+ * Cortex-A8 transfers, raw-bit data operations and scalar comparisons use
+ * checked paths with D0-D31. Comparisons use integer classification/ordering
+ * and preserve the host floating-point environment. The
  * register-file and arithmetic descriptions below concern the legacy VFP11
  * implementation; they do not establish complete Cortex-A8 VFPv3/NEON support.
  *
@@ -687,6 +689,48 @@ static arm_status_t vfp_a8_bitwise_data(arm_cpu_t *c, uint32_t pc, uint32_t insn
         if (dbl) vfp_set_d(c, dr, result[lane]);
         else vfp_set_s(c, dr, (uint32_t)result[lane]);
     }
+    return ARM_OK;
+}
+
+/* DDI0406C.b A8.8.303, FPUnpack/FPCompare (A2.7.8), K.1.1;
+ * DDI0344K 13.3.2. Comparisons are scalar regardless of LEN/STRIDE. Classify
+ * and order raw IEEE bits so NaNs and denormals never reach the host FPU. */
+static arm_status_t vfp_a8_compare_data(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
+    g_reason = NULL;
+    bool dbl = BIT(8), signaling = BIT(7), zero = BIT(16);
+    if (zero && (insn & 0x2fu))
+        return vfp_trap(pc, insn, "VCMP #0.0 with a non-zero Vm field");
+    if (c->vfp_fpscr & ~ARM_FPSCR_A8_WMASK)
+        return vfp_trap(pc, insn, "nonzero Cortex-A8 FPSCR DNM/SBZP fields");
+    if (!vfp_cpacr_permits(c) || !vfp_enabled(c))
+        return vfp_guest_undefined("Cortex-A8 VFP comparison requires CPACR access and FPEXC.EN");
+
+    unsigned rd = dbl ? FIELD(12) | (BIT(22) << 4) : SREG(FIELD(12), BIT(22));
+    unsigned rm = dbl ? (insn & 15u) | (BIT(5) << 4) : SREG(insn & 15u, BIT(5));
+    uint64_t a = dbl ? vfp_get_d(c, rd) : vfp_get_s(c, rd);
+    uint64_t b = zero ? 0u : dbl ? vfp_get_d(c, rm) : vfp_get_s(c, rm);
+    uint64_t sign = dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+    uint64_t infinity = dbl ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
+    uint64_t quiet = dbl ? UINT64_C(0x0008000000000000) : UINT64_C(0x00400000);
+    uint64_t normal = dbl ? F64_MIN_NORMAL : F32_MIN_NORMAL;
+    uint64_t ma = a & (sign - 1u), mb = b & (sign - 1u);
+    uint32_t exc = 0u;
+    /* Both operands are unpacked even when the other is a NaN. Thus IDC and
+     * IOC can accumulate together. Flushing preserves the sign of zero. */
+    if (c->vfp_fpscr & ARM_FPSCR_FZ) {
+        if (ma && ma < normal) { a &= sign; ma = 0u; exc |= ARM_FPSCR_IDC; }
+        if (mb && mb < normal) { b &= sign; mb = 0u; exc |= ARM_FPSCR_IDC; }
+    }
+    bool nan_a = ma > infinity, nan_b = mb > infinity;
+    int order;
+    if (nan_a || nan_b) {
+        order = 2;
+        if (signaling || (nan_a && !(a & quiet)) || (nan_b && !(b & quiet))) exc |= ARM_FPSCR_IOC;
+    } else if (a == b || (!ma && !mb)) order = 0;
+    else if ((a ^ b) & sign) order = a & sign ? -1 : 1;
+    else if (ma < mb) order = a & sign ? 1 : -1;
+    else order = a & sign ? -1 : 1;
+    c->vfp_fpscr = (c->vfp_fpscr & ~ARM_FPSCR_NZCV) | cmp_flags_ordered(order) | exc;
     return ARM_OK;
 }
 
@@ -1524,6 +1568,8 @@ arm_status_t vfp_execute(arm_cpu_t *c, uint32_t pc, uint32_t insn,
         return vfp_a8_memory(c, pc, insn, bus);
     if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_bitwise_data(insn))
         return vfp_a8_bitwise_data(c, pc, insn);
+    if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_compare_data(insn))
+        return vfp_a8_compare_data(c, pc, insn);
     if (!c || (c->vfp_fpscr & ARM_FPSCR_RMODE) == 0u)
         return vfp_execute_inner(c, pc, insn, bus);
 

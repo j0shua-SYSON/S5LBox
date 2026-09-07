@@ -207,6 +207,25 @@ execution and access checks. Thumb tests cross unrelated physical pages and
 verify a guest handler enabling VFP and retrying the original IT slot.
 Other upper-bank arithmetic and Advanced SIMD encodings remain separate work.
 
+ARM and Thumb VCMP/VCMPE now compare any S0-S31 or D0-D31 pair, or one
+register against positive zero. The checked A8 path classifies and orders
+the raw IEEE bit patterns without using host floating-point operations.
+Signed zeros compare equal; NaNs are unordered; signaling NaNs, and any
+NaN for VCMPE, accumulate IOC. FZ flushes either denormal input to signed
+zero and accumulates IDC, including when the other operand is a NaN.
+Comparisons replace FPSCR.NZCV, retain cumulative flags and leave ARM flags
+unchanged until VMRS explicitly copies them. See
+[DDI0406C.b, A2.7.8 and A8.8.303](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Comparisons remain scalar regardless of LEN/STRIDE, as specified by
+[DDI0344K, 13.3.2](https://documentation-service.arm.com/static/5e8e1ac688295d1e18d35fde)
+and DDI0406C.b K.1.1. Reserved zero-form operand fields and unsupported
+FPSCR state stop before execution; valid access denials enter the guest
+Undefined handler. Tests cover all register pairs, ordered boundary values,
+both NaN classes, FZ/DN controls, host rounding/exception preservation,
+conditional execution, split Thumb fetch faults and guest enable/retry.
+These are host instruction tests; no complete firmware boot follows from them.
+
 ARM and Thumb VLDR/VSTR now move one S or D register through the translating
 memory accessors, including D16-D31. They use signed, scaled immediate
 offsets and require word alignment even for doubleword registers. Thumb
@@ -272,7 +291,7 @@ Thumb additionally forbids SP in the transfer register. Refused accesses leave
 flags and IT state unchanged. IT conditions, privileged
 state changes and permitted User thread-ID/barrier accesses retain their
 normal semantics. CP14 and Swift CP15 transfers remain unsupported in
-Thumb; supported VFP instructions cover the A8 transfers and raw data operations above.
+Thumb; supported VFP instructions cover the A8 transfers, raw data operations and comparisons above.
 CP15 MRC2/MCR2 encodings are undefined and refused. The ARM1176
 instruction path is unchanged.
 See [DDI0406C.b, A8.8.98/107](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
@@ -706,7 +725,8 @@ establish that result.
   and conditional execution are implemented for the supported Thumb families.
   Cortex-A8 MRC/MCR transfers cover the currently implemented CP15 registers.
 - Cortex-A8 stores d0-d31 and supports system/core/memory transfers plus
-  VFP copies, immediate constants and sign operations with short vectors.
+  VFP copies, immediate constants and sign operations with short vectors,
+  and scalar comparisons across the full register bank.
   Upper-bank arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Shared lower-bank arithmetic
   still derives from VFP11 and requires a complete Cortex-A8 semantic audit.
