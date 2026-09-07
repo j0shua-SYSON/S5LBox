@@ -1116,11 +1116,72 @@ static uint64_t native_differential(arm_cpu_t *cpu,
     return stats.calls;
 }
 
+static void test_native_resident_bulk_transitions(void) {
+    static const unsigned budgets[] = {
+        1u, 2u, 3u, 4u, 5u, 6u, 9u, 13u, 14u, 15u,
+        22u, 23u, 24u, 25u, 41u, 64u, 97u,
+    };
+    uint64_t accepted = 0u;
+    for (unsigned kind = 0u; kind < 2u; kind++)
+        for (unsigned scenario = 0u; scenario < 3u; scenario++)
+            for (unsigned flags = 0u; flags < 16u; flags++)
+                for (unsigned enabled = 0u; enabled < 2u; enabled++)
+                    for (unsigned b = 0u; b < sizeof budgets / sizeof budgets[0]; b++) {
+                        arm_cpu_t cpu; arm_bulk_memory_t memory;
+                        chain_setup(&cpu, &memory, kind, 0u, 17u, flags << 28);
+                        /* Start inside ordinary resident code. The candidate
+                         * must see the registers and CPSR it has just changed,
+                         * not their stale values in the architectural array. */
+                        const uint16_t prefix[] = {
+                            kind ? 0x464bu : 0x464cu, /* MOV r3/r4,r9 */
+                            kind ? 0x2404u : 0x464eu, /* MOVS r4,#4 / MOV r6,r9 */
+                            0x2700u,                 /* MOVS r7,#0 */
+                            0x2f01u,                 /* CMP r7,#1 */
+                        };
+                        cpu.r[9] = DATA;
+                        cpu.r[4] = 0u;
+                        cpu.r[kind ? 3u : 6u] = 0u;
+                        cpu.r[7] = UINT32_MAX;
+                        for (unsigned i = 0u; i < 4u; i++)
+                            w16(NULL, CODE - sizeof prefix + 2u * i, prefix[i]);
+                        memory.code_base -= sizeof prefix;
+                        memory.code -= sizeof prefix;
+                        memory.code_bytes += sizeof prefix;
+                        cpu.r[15] = memory.code_base;
+                        if (scenario == 1u)
+                            /* Still valid guest code, but no recognized loop.
+                             * Refusal must execute the candidate exactly once. */
+                            w16(NULL, CODE + (kind ? 2u : 4u),
+                                kind ? 0x2901u : 0x2c01u);
+                        if (scenario == 2u)
+                            /* No readable next halfword in this FETCH window. */
+                            memory.code_bytes = sizeof prefix + 2u;
+                        memory.flat_ram = NULL; memory.data_cache = true;
+                        CHECK(arm_data_cache_try_refill(&cpu, DATA,
+                              ARM_ACCESS_READ, false), "resident chain DATA map");
+                        CHECK(arm_data_cache_try_refill(&cpu, 0x3000u,
+                              ARM_ACCESS_READ, false), "resident chain stack map");
+                        uint64_t calls = native_differential(&cpu, &memory,
+                            budgets[b], enabled != 0u);
+                        bool eligible = enabled && scenario == 0u &&
+                            budgets[b] >= 4u + (kind ? 19u : 10u);
+                        CHECK((calls > 0u) == eligible,
+                              "resident bulk transition kind=%u scenario=%u budget=%u enabled=%u calls=%llu",
+                              kind, scenario, budgets[b], enabled,
+                              (unsigned long long)calls);
+                        accepted += calls;
+                    }
+    CHECK(accepted > 0u, "resident-to-bulk transitions never executed");
+    printf("arm_bulk resident transitions: %llu accepted bulk calls\n",
+           (unsigned long long)accepted);
+}
+
 static void test_native_integration(void) {
     if (!a64_static_host_available()) {
         printf("arm_bulk native integration: SKIP (host has no signed A64 runner)\n");
         return;
     }
+    test_native_resident_bulk_transitions();
     uint64_t calls = 0u;
     static const unsigned lengths[] = {0u, 1u, 7u, 31u, 127u, 511u};
     static const unsigned budgets[] = {1u, 5u, 16u, 64u, 256u};

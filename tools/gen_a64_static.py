@@ -3575,7 +3575,9 @@ def compact_register_thumb() -> tuple[list[str], list[str]]:
     Operand registers are specialized at build time. Large immediate families
     share bodies to avoid duplicating text for each literal. x0-x7 hold guest
     r0-r7, w28 holds CPSR, and the surrounding raw loop's other pinned state
-    stays unchanged. No helper in this region may call C or use x18.
+    stays unchanged. No helper in this region may call C or use x18. Bulk
+    candidates spill through the existing raw decoder before calling C;
+    refusal executes that instruction once before re-entering this tier.
     """
     prefix = ".La64rr_"
     sequential = [f"    b {prefix}sequential"]
@@ -3671,6 +3673,18 @@ def compact_register_thumb() -> tuple[list[str], list[str]]:
                 return None
             body, source = read(rm, 10)
             if operation == 2:
+                # A possible ordered-search header may appear anywhere in a
+                # resident region, not only at its first instruction. Probe
+                # the live next halfword without touching guest registers;
+                # the old decoder owns full validation and the C bridge.
+                body = ["    ldr x14, [x27, #344]", "    cbz x14, 1f",
+                        "    sub w15, w26, w23", "    add w15, w15, #4",
+                        "    cmp w15, w24", "    b.hi 1f",
+                        "    sub w15, w15, #2",
+                        "    ldrh w15, [x22, w15, uxtw]",
+                        "    and w15, w15, #0xfe00", "    mov w14, #0x5800",
+                        "    cmp w15, w14", f"    b.eq {prefix}decode",
+                        "1:", *body]
                 if rd < 8:
                     body += [f"    mov w{rd}, {source}"]
                 else:
@@ -3694,7 +3708,12 @@ def compact_register_thumb() -> tuple[list[str], list[str]]:
             ro, operation = (insn >> 6) & 7, (insn >> 9) & 7
             op, width = (("str", 4), ("strh", 2), ("strb", 1), ("ldrsb", 1),
                          ("ldr", 4), ("ldrh", 2), ("ldrb", 1), ("ldrsh", 2))[operation]
-            return memory([f"    add w10, w{rm}, w{ro}"], rd, op, width)
+            body = memory([f"    add w10, w{rm}, w{ro}"], rd, op, width)
+            if insn == 0x5919:
+                # The other read-only search starts with this exact LDR.
+                body = ["    ldr x14, [x27, #344]",
+                        f"    cbnz x14, {prefix}decode", *body]
+            return body
         if 0x6000 <= insn < 0x9000:
             width = 2 if insn >= 0x8000 else 1 if insn & 0x1000 else 4
             shift = {1: 0, 2: 1, 4: 2}[width]
@@ -3978,11 +3997,9 @@ def compact_raw_function() -> list[str]:
         "    cmp w11, w24",
         "    b.hi .La64cr_fallback",
         "    ldrh w9, [x22, w8, uxtw]",
-        # Keep the separately controlled bulk experiment on its original path.
-        # Ordinary execution enters the live-byte register-resident tier.
-        "    ldr x14, [x27, #344]",
-        "    cbz x14, .La64rr_enter",
-        "    b .La64cr_thumb_decode",
+        # Bulk candidates leave from their resident handlers. Enabling bulk
+        # must not force all ordinary Thumb code through the older decoder.
+        "    b .La64rr_enter",
         "",
         ".globl A64S_CSYM(a64_compact_raw_profile_dp)",
         "A64S_CSYM(a64_compact_raw_profile_dp):",
