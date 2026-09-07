@@ -960,6 +960,169 @@ static void test_a8_neon_bitwise_invalid_and_it(void) {
      }
 }
 
+static uint32_t a8_neon_imm(unsigned thumb, unsigned op, unsigned mode, unsigned quad,
+                            unsigned dst, unsigned imm) {
+    return (thumb ? 0xef800010u : 0xf2800010u) | ((imm >> 7) << (thumb ? 28u : 24u)) |
+        ((imm & 0x70u) << 12) | (imm & 15u) | (op << 5) | (quad << 6) | (mode << 8) |
+        ((dst & 15u) << 12) | ((dst >> 4) << 22);
+}
+
+static bool a8_neon_imm_valid(unsigned op, unsigned mode, unsigned imm) {
+    /* Table A7-15 marks zero as UNPREDICTABLE except cmode 0/1/8/9/14/15. */
+    return !(op && mode == 15u) && (imm || ((0xc303u >> mode) & 1u));
+}
+
+static uint64_t a8_neon_imm_expected(unsigned op, unsigned mode, unsigned imm, uint64_t old) {
+    /* Build the manual's byte columns, separately from production shifts
+     * and replication. F32 base values are 2/4/8/16 and 1/8,1/4,1/2,1. */
+    uint8_t bytes[8] = {0};
+    if (mode < 8u) bytes[mode / 2u] = bytes[mode / 2u + 4u] = (uint8_t)imm;
+    else if (mode < 12u) for (unsigned b = 0; b < 8u; b++) {
+        if ((b & 1u) == (mode / 2u - 4u)) bytes[b] = (uint8_t)imm;
+    } else if (mode < 14u) for (unsigned b = 0; b < 8u; b++) {
+        unsigned position = b % 4u, filled = mode - 11u;
+        bytes[b] = position < filled ? 255u : position == filled ? (uint8_t)imm : 0u;
+    } else if (mode == 14u) for (unsigned b = 0; b < 8u; b++)
+        bytes[b] = op ? (imm & (1u << b) ? 255u : 0u) : (uint8_t)imm;
+    else {
+        static const uint32_t bases[] = {0x40000000u,0x40800000u,0x41000000u,0x41800000u,
+            0x3e000000u,0x3e800000u,0x3f000000u,0x3f800000u};
+        uint32_t bits = bases[(imm >> 4) & 7u] + (imm % 16u) * 0x80000u + (imm >= 128u ? 0x80000000u : 0u);
+        for (unsigned b = 0; b < 8u; b++) bytes[b] = (uint8_t)(bits >> ((b % 4u) * 8u));
+    }
+    uint64_t expanded = 0;
+    for (unsigned b = 0; b < 8u; b++) expanded += (uint64_t)bytes[b] << (b * 8u);
+    if (mode < 12u && (mode & 1u)) return op ? old & ~expanded : old | expanded;
+    return op && mode != 14u ? ~expanded : expanded;
+}
+
+static void test_a8_neon_immediate_constants(void) {
+    CHECK(a8_neon_imm(1u, 0u, 4u, 0u, 16u, 0x80u) == 0xffc00410u &&
+          a8_neon_imm(0u, 0u, 4u, 0u, 16u, 0x80u) == 0xf3c00410u, "firmware NEON immediate encoding anchors");
+    CHECK(a8_neon_imm_expected(0u, 15u, 0x70u, 0u) == UINT64_C(0x3f8000003f800000) &&
+          a8_neon_imm_expected(1u, 14u, 0x80u, 0u) == UINT64_C(0xff00000000000000) &&
+          a8_neon_imm_expected(0u, 13u, 1u, 0u) == UINT64_C(0x0001ffff0001ffff), "NEON immediate value anchors");
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned quad = 0; quad < 2u; quad++)
+      for (unsigned op = 0; op < 2u; op++)
+       for (unsigned mode = 0; mode < 16u; mode++)
+        for (unsigned imm = 0; imm < 256u; imm++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.cpsr |= ARM_CPSR_E;
+            c.vfp_fpscr |= ARM_FPSCR_LEN | ARM_FPSCR_STRIDE | ARM_FPSCR_NZCV;
+            c.excl_valid = true; c.excl_addr = 0x2468u;
+            unsigned dst = imm & (quad ? 30u : 31u);
+            uint64_t expected[32];
+            for (unsigned d = 0; d < 32u; d++) {
+                expected[d] = UINT64_C(0x0123456789abcdef) ^ (d * UINT64_C(0x0102040810204080));
+                vfp_set_d(&c, d, expected[d]);
+            }
+            bool valid = a8_neon_imm_valid(op, mode, imm);
+            if (valid) for (unsigned r = 0; r <= quad; r++)
+                expected[dst + r] = a8_neon_imm_expected(op, mode, imm, expected[dst + r]);
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c, thumb, a8_neon_imm(thumb, op, mode, quad, dst, imm)) == (valid ? ARM_OK : ARM_UNDEFINED) &&
+                  c.r[15] == (valid ? 0x104u : 0x100u) && c.cpsr == flags && c.vfp_fpscr == fpscr &&
+                  c.excl_valid && c.excl_addr == 0x2468u, "NEON immediate disposition T=%u Q=%u op=%u cmode=%u imm=%u",
+                  thumb, quad, op, mode, imm);
+            bool same = true;
+            for (unsigned d = 0; d < 32u; d++) same &= vfp_get_d(&c, d) == expected[d];
+            for (unsigned r = 0; r < 15u; r++) same &= c.r[r] == 0u;
+            CHECK(same, "NEON immediate value or untouched register mismatch");
+        }
+}
+
+static void test_a8_neon_immediate_access(void) {
+    static const unsigned permissions[] = {0u,1u,3u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned quad = 0; quad < 2u; quad++)
+      for (unsigned op = 0; op < 2u; op++)
+       for (unsigned mode = 0; mode < 16u; mode++)
+        for (unsigned user = 0; user < 2u; user++)
+         for (unsigned enabled = 0; enabled < 2u; enabled++)
+          for (unsigned access = 0; access < 3u; access++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permissions[access] * 0x00500000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            bool valid = a8_neon_imm_valid(op, mode, 0x81u);
+            bool allowed = valid && enabled && (permissions[access] == 3u || (permissions[access] == 1u && !user));
+            uint64_t expected[2];
+            for (unsigned r = 0; r <= quad; r++) {
+                uint64_t old = UINT64_C(0x7ff00000a5a50000) + r;
+                vfp_set_d(&c, 30u + r, old);
+                expected[r] = allowed ? a8_neon_imm_expected(op, mode, 0x81u, old) : old;
+            }
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c, thumb, a8_neon_imm(thumb, op, mode, quad, 30u, 0x81u)) == (valid ? ARM_OK : ARM_UNDEFINED) &&
+                  c.vfp_fpscr == fpscr, "NEON immediate access disposition");
+            CHECK(!valid ? c.r[15] == 0x100u && c.cpsr == flags : allowed ? c.r[15] == 0x104u && c.cpsr == flags :
+                  c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == (thumb ? 0x102u : 0x104u) && c.spsr[ARM_BANK_UND] == flags,
+                  "NEON immediate validation/access priority");
+            for (unsigned r = 0; r <= quad; r++) CHECK(vfp_get_d(&c, 30u + r) == expected[r], "NEON immediate access destination");
+          }
+    fenv_t saved;
+    CHECK(fegetenv(&saved) == 0, "save immediate host FP state");
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned quad = 0; quad < 2u; quad++)
+      for (unsigned mode = 0; mode < 16u; mode++)
+       for (unsigned host = 0; host < 4u; host++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 && feraiseexcept(FE_DIVBYZERO) == 0,
+                  "prepare immediate host FP state");
+            int exceptions = fetestexcept(FE_ALL_EXCEPT);
+            CHECK(a8_move_step(&c, thumb, a8_neon_imm(thumb, 0u, mode, quad, 30u, 0x81u)) == ARM_OK &&
+                  fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == exceptions, "immediate touched host FP state");
+       }
+    CHECK(fesetenv(&saved) == 0, "restore immediate host FP state");
+}
+
+static void test_a8_neon_immediate_invalid_and_it(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned op = 0; op < 2u; op++)
+      for (unsigned mode = 0; mode < 16u; mode++)
+       for (unsigned enabled = 0; enabled < 2u; enabled++)
+        for (unsigned skip = 0; skip < (thumb ? 2u : 1u); skip++)
+         for (unsigned variant = 0; variant < 3u; variant++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            if (skip) c.cp15.cpacr = 0u;
+            if (thumb) { m_w16(NULL, 0x100u, skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK, "immediate IT setup"); }
+            unsigned imm = variant == 1u ? 0u : 0x81u, dst = variant == 2u ? 31u : 30u;
+            bool valid = variant != 2u && a8_neon_imm_valid(op, mode, imm);
+            uint32_t pc = c.r[15], flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c, thumb, a8_neon_imm(thumb, op, mode, 1u, dst, imm)) == (skip || valid ? ARM_OK : ARM_UNDEFINED),
+                  "NEON immediate invalid/IT disposition");
+            if (skip || !valid) {
+                CHECK(c.r[15] == (skip ? pc + 4u : pc) && c.cpsr == (skip ? flags & ~0x0600fc00u : flags) &&
+                      c.vfp_fpscr == fpscr, "NEON invalid immediate mutated state or retired");
+                bool same = true;
+                for (unsigned d = 0; d < 32u; d++) same &= vfp_get_d(&c, d) == 0u;
+                CHECK(same, "NEON skipped/invalid immediate changed FP registers");
+            } else if (!enabled) CHECK(c.r[15] == ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND] == flags, "immediate lazy enable");
+            else CHECK(c.r[15] == pc + 4u && c.cpsr == (flags & ~0x0600fc00u), "immediate IT retirement");
+         }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, legacy[profile]), "legacy immediate reset");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        CHECK(a8_move_step(&c, 0u, 0xf3c00410u) == ARM_UNDEFINED && c.r[15] == 0u, "NEON immediate leaked to legacy profile");
+    }
+    static const uint32_t toggles[] = {0x00080000u,0x00100000u,0x00200000u,0x00000080u,0x00000010u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned field = 0; field < sizeof toggles / sizeof toggles[0]; field++) {
+        arm_cpu_t c;
+        a8_move_reset(&c, thumb);
+        CHECK(a8_move_step(&c, thumb, a8_neon_imm(thumb, 0u, 4u, 0u, 31u, 0x80u) ^ toggles[field]) == ARM_UNDEFINED &&
+              c.r[15] == 0x100u && vfp_get_d(&c, 31u) == 0u, "NEON immediate swallowed neighboring allocation");
+     }
+}
+
 static void test_a8_vfp_full_bank_core_moves(void) {
     for (unsigned thumb = 0; thumb < 2u; thumb++) {
         arm_cpu_t c;
@@ -3079,6 +3242,9 @@ int main(void) {
     test_a8_neon_bitwise_registers();
     test_a8_neon_bitwise_access_and_host_state();
     test_a8_neon_bitwise_invalid_and_it();
+    test_a8_neon_immediate_constants();
+    test_a8_neon_immediate_access();
+    test_a8_neon_immediate_invalid_and_it();
     test_a8_neon_memory_registers();
     test_a8_neon_memory_alignment_and_access();
     test_a8_neon_memory_invalid_and_it();

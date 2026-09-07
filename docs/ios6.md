@@ -255,7 +255,17 @@ denials enter the guest Undefined handler. These rules follow
 [DDI0406C.b, A8.8.287/289/290/315/358/360](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 Tests use independent bit truth tables and cover register aliases, denied
 access, conditional execution, neighboring encodings, split Thumb fetch
-faults and guest enable/retry. Immediate forms remain separate work.
+faults and guest enable/retry.
+
+NEON immediate VMOV, VMVN, VORR and VBIC also cover the full D/Q bank.
+The decoder expands the encoded integer or F32 constant as raw bits,
+including byte masks for VMOV.I64 and the trailing-one forms. It rejects
+the reserved cmode=15/op=1 allocation, odd Q destinations and the zero
+immediates marked UNPREDICTABLE before checking access. These rules follow
+[DDI0406C.b, A7.4.6 and A8.8.288/339/353/359](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Tests independently construct the constant bytes for every immediate/mode
+combination and cover all register indices, permissions, conditionals,
+host FP preservation, split fetch faults and guest enable/retry.
 
 The matching cache's unchanged `fmodf` now returns the expected raw results
 for eight normal-input cases in an isolated User-mode fixture. These cover
@@ -264,6 +274,11 @@ exact stack contents and access counts, callee-register preservation and
 NEON stack save/restore. Before Boolean support, the same fixture stopped
 at its first VORR. Special inputs and helper paths remain untested; this
 fixture does not establish process launch or a complete firmware boot.
+
+A separate fixture follows eight tiny-result paths from the same unchanged
+entry to the multiply at `0x3929abd2`. The immediate load supplies the exact
+`0x0080000000800000` value in D16, with expected D17 factors and stack bytes.
+These fixtures stop before the multiply; returned tiny results are unverified.
 
 ARM and Thumb VLDR/VSTR now move one S or D register through the translating
 memory accessors, including D16-D31. They use signed, scaled immediate
@@ -766,8 +781,8 @@ establish that result.
 - Cortex-A8 stores d0-d31 and supports system/core/memory transfers plus
   VFP copies, immediate constants and sign operations with short vectors,
   scalar comparisons across the full register bank, and the bounded
-  32/64-bit NEON VLD1/VST1 memory forms and register Boolean operations
-  described above.
+  32/64-bit NEON VLD1/VST1 memory forms, register Boolean operations and
+  immediate constants described above.
   Upper-bank arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Shared lower-bank arithmetic
   still derives from VFP11 and requires a complete Cortex-A8 semantic audit.
