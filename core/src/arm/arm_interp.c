@@ -3371,6 +3371,27 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         alu_logic_flags(c, value, carry, (first & 0x10u) != 0u);
         return ARM_OK;
     }
+    /* CLZ/RBIT T1 (A8.8.33/144). Rm is encoded twice; inconsistent
+     * copies and SP/PC are unpredictable. Neither operation sets flags. */
+    bool count_zeroes = (first & 0xfff0u) == 0xfab0u && (second & 0xf0f0u) == 0xf080u;
+    bool reverse_bits = (first & 0xfff0u) == 0xfa90u && (second & 0xf0f0u) == 0xf0a0u;
+    if (count_zeroes || reverse_bits) {
+        unsigned rm = first & 15u, rd = (second >> 8) & 15u;
+        if (rm != (second & 15u) || rm == 13u || rm == 15u || rd == 13u || rd == 15u)
+            return ARM_UNDEFINED;
+        uint32_t value = c->r[rm], result = 0u;
+        if (count_zeroes) {
+            if (!value) result = 32u;
+            else while (!(value & 0x80000000u)) { value <<= 1; result++; }
+        } else {
+            for (unsigned bit = 0; bit < 32u; bit++) {
+                result = (result << 1) | (value & 1u);
+                value >>= 1;
+            }
+        }
+        c->r[rd] = result;
+        return ARM_OK;
+    }
     /* Thumb extend/extend-and-add (A8.8.230..235/271..276). The A32
      * operation has identical rotation, extension and lane arithmetic,
      * but Thumb additionally forbids SP in every operand position. */

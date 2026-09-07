@@ -451,6 +451,24 @@ Tests compare every count against repeated one-bit operations and cover
 overlapping operands, conditional skips, complete instruction fetch and
 legacy framing.
 
+Thumb CLZ and RBIT now count leading zero bits and reverse a 32-bit word,
+respectively. They preserve flags, support overlapping operands, and validate
+both encoded copies of the source register before changing state. SP/PC and
+inconsistent source fields are refused, following
+[DDI0406C.b, A8.8.33/144](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Tests cover zero, every single-bit position, mixed patterns, IT conditions,
+separately mapped instruction halves and ARM1176's existing framing.
+
+A private fixture executes the unchanged matching AppleSamsungSerial baud
+method with explicit synthetic objects, MMU mappings and clock inputs. It
+captures only the method's four expected writes and refuses every UART read;
+there is no UART device behind this fixture. With a 100 MHz input argument
+and baud argument 230400, the first unsupported instruction was Thumb CLZ
+at `0x8083cbaa`, after 59 steps. The new operations carry this fixture to
+Thumb PKHBT at `0x8083c59c`, after 1,148 steps. Only the initial FIFO-control
+write has occurred there. This is an isolated arithmetic/driver-prefix result,
+not completed baud initialization, selected board clocks, UART traffic or boot.
+
 Thumb register-offset STRB/STRH/STR add the full offset register shifted
 left by 0..3, with no writeback or flag changes. Valid operands can alias;
 SP is allowed as the base and as a word-store source, but never as the
@@ -558,8 +576,8 @@ establish that result.
   and arithmetic (also with shifted registers), immediate LDR/STR and
   byte/halfword transfers (including signed loads and pre/post indexing),
   literals, doubleword transfers, extend/add forms, bitfields and word/long
-  multiply/accumulate. Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple transfers are
-  also implemented. Other instruction families remain to implement. IT state
+  multiply/accumulate, CLZ and RBIT. Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple
+  transfers are also implemented. Other instruction families remain to implement. IT state
   and conditional execution are implemented for the supported Thumb families.
   Cortex-A8 MRC/MCR transfers cover the currently implemented CP15 registers.
 - Cortex-A8 stores d0-d31 and supports system/core/memory transfers plus
@@ -567,8 +585,9 @@ establish that result.
   Upper-bank arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Shared lower-bank arithmetic
   still derives from VFP11 and requires a complete Cortex-A8 semantic audit.
-- The SoC, interrupt wiring, storage, graphics, input and power devices are
-  currently S5L8900-specific. Build them from the N88 firmware requirements.
+- The partial S5L8920 RAM and interrupt fabric does not yet supply its UART,
+  clocks, storage, graphics, input or power devices. Build those components
+  from the N88 firmware requirements.
 - Boot arguments, device-tree relocation, importer/storage selection, and
   any compatibility patches need explicit target/version guards. Existing
   iPhone OS 3 patches are not evidence of iOS 6 compatibility.

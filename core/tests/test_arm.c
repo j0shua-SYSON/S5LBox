@@ -9012,6 +9012,133 @@ static void test_thumb2_register_shift_fetch(void) {
      }
 }
 
+static void put_thumb_bitop(uint32_t pc, bool reverse, unsigned rd, unsigned rm) {
+    m_w16(NULL,pc,(uint16_t)((reverse ? 0xfa90u : 0xfab0u) | rm));
+    m_w16(NULL,pc+2u,(uint16_t)((reverse ? 0xf0a0u : 0xf080u) | (rd<<8) | rm));
+}
+
+static void test_thumb2_clz_rbit_values(void) {
+    static const struct { uint32_t value, clz, reversed; } cases[] = {
+        {0u,32u,0u},{UINT32_MAX,0u,UINT32_MAX},{0x80000001u,0u,0x80000001u},
+        {0x01234567u,7u,0xe6a2c480u},{0xdeadbeefu,0u,0xf77db57bu},{0x00038400u,14u,0x0021c000u}
+    };
+    const arm_arch_t profiles[]={ARM_ARCH_V7_CORTEX_A8,ARM_ARCH_V7_SWIFT};
+    for (unsigned p=0;p<2u;p++)
+     for (unsigned reverse=0;reverse<2u;reverse++)
+      for (unsigned n=0;n<32u+sizeof cases/sizeof cases[0];n++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,profiles[p]),"reset");
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_Z|ARM_CPSR_C|
+               ARM_CPSR_V|ARM_CPSR_Q|(9u<<16);
+        uint32_t value=n<32u ? 1u<<n : cases[n-32u].value;
+        uint32_t want=n<32u ? (reverse ? 1u<<(31u-n) : 31u-n) :
+            (reverse ? cases[n-32u].reversed : cases[n-32u].clz);
+        c.r[14]=value; c.r[8]=0x13579bdfu;
+        c.excl_valid=true; c.excl_addr=0x4560u;
+        uint32_t flags=c.cpsr;
+        put_thumb_bitop(0u,reverse!=0u,8u,14u);
+        CHECK(arm_step(&c)==ARM_OK && c.r[8]==want && c.r[14]==value && c.r[15]==4u &&
+              c.cpsr==flags && c.cycles==1u && c.excl_valid && c.excl_addr==0x4560u,
+              "Thumb bit operation profile=%u reverse=%u value=%08x got=%08x want=%08x",p,reverse,value,c.r[8],want);
+      }
+}
+
+static void test_thumb2_clz_rbit_operands(void) {
+    const arm_arch_t profiles[]={ARM_ARCH_V7_CORTEX_A8,ARM_ARCH_V7_SWIFT};
+    const unsigned states[]={0u,0x18u,0x1cu,0x0cu}, advanced[]={0u,0u,0x18u,0x18u};
+    for (unsigned p=0;p<2u;p++)
+     for (unsigned reverse=0;reverse<2u;reverse++)
+      for (unsigned role=0;role<2u;role++)
+       for (unsigned reg=0;reg<16u;reg++)
+        for (unsigned it=0;it<4u;it++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c,&g_bus,profiles[p]),"reset");
+            c.cpsr=(p ? ARM_MODE_SVC : ARM_MODE_USR)|ARM_CPSR_T|ARM_CPSR_N|
+                   ARM_CPSR_V|ARM_CPSR_Q|(5u<<16)|test_it_bits(states[it]);
+            for (unsigned r=0;r<15u;r++) c.r[r]=1u<<r;
+            c.r[15]=0x100u;
+            unsigned rd=role ? 8u : reg, rm=role ? reg : 8u;
+            uint32_t before[16]; memcpy(before,c.r,sizeof before);
+            uint32_t flags=c.cpsr;
+            bool passed=it!=3u, valid=reg!=13u && reg!=15u, ok=!passed || valid;
+            uint32_t want=reverse ? 1u<<(31u-rm) : 31u-rm;
+            put_thumb_bitop(0x100u,reverse!=0u,rd,rm);
+            CHECK(arm_step(&c)==(ok ? ARM_OK : ARM_UNDEFINED) && c.cycles==1u &&
+                  c.r[15]==(ok ? 0x104u : 0x100u) &&
+                  c.cpsr==(ok ? (flags & ~TEST_IT_MASK)|test_it_bits(advanced[it]) : flags),
+                  "Thumb bit operands profile=%u reverse=%u role=%u reg=%u IT=%u",p,reverse,role,reg,it);
+            for (unsigned r=0;r<15u;r++) CHECK(c.r[r]==(passed && valid && r==rd ? want : before[r]),
+                "Thumb bit operation changed wrong register r=%u reverse=%u role=%u reg=%u IT=%u",r,reverse,role,reg,it);
+        }
+    /* Rm occurs twice in T1. Both copies must agree even if they name valid
+     * registers; no arbitrary choice of one copy may alter the destination. */
+    for (unsigned reverse=0;reverse<2u;reverse++)
+     for (unsigned low=0;low<16u;low++)
+      for (unsigned high=0;high<16u;high++) {
+        if (low==high) continue;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cpsr=ARM_MODE_SYS|ARM_CPSR_T|ARM_CPSR_C;
+        for (unsigned r=0;r<15u;r++) c.r[r]=1u<<r;
+        uint32_t before[16]; memcpy(before,c.r,sizeof before);
+        uint32_t flags=c.cpsr;
+        put_thumb_bitop(0u,reverse!=0u,8u,low);
+        m_w16(NULL,0u,(uint16_t)((reverse ? 0xfa90u : 0xfab0u)|high));
+        CHECK(arm_step(&c)==ARM_UNDEFINED && c.cpsr==flags && memcmp(c.r,before,sizeof before)==0,
+              "Thumb bit operation accepted inconsistent Rm copies %u/%u",low,high);
+      }
+    /* Other unary/DSP instructions stay separate. These exact neighbors are
+     * currently unsupported; fixed top-nibble changes are undefined. */
+    static const uint16_t neighbors[][2]={{0xfab2u,0xf892u},{0xfab2u,0xf8a2u},
+        {0xfab2u,0xf8b2u},{0xfab2u,0xe882u},{0xfa92u,0xe8a2u},
+        {0xfa92u,0xf882u},{0xfa92u,0xf892u},{0xfa92u,0xf8b2u},{0xfaa2u,0xf882u}};
+    for (unsigned n=0;n<sizeof neighbors/sizeof neighbors[0];n++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cpsr=ARM_MODE_SYS|ARM_CPSR_T; c.r[2]=1u; c.r[8]=0x12345678u;
+        m_w16(NULL,0u,neighbors[n][0]); m_w16(NULL,2u,neighbors[n][1]);
+        CHECK(arm_step(&c)==ARM_UNDEFINED && c.r[15]==0u && c.r[8]==0x12345678u,
+              "Thumb bit operation swallowed neighboring encoding %u",n);
+    }
+    for (unsigned reverse=0;reverse<2u;reverse++) {
+        arm_cpu_t c;
+        arm_reset(&c,&g_bus);
+        c.cpsr=ARM_MODE_SYS|ARM_CPSR_T|ARM_CPSR_C;
+        c.r[15]=0x100u; c.r[14]=0x200u; c.r[2]=1u; c.r[8]=0x12345678u;
+        uint32_t flags=c.cpsr;
+        put_thumb_bitop(0x100u,reverse!=0u,8u,2u);
+        uint32_t target=0x200u+(((reverse ? 0xfa92u : 0xfab2u)&0x7ffu)*2u);
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==target && c.r[14]==0x103u &&
+              c.r[8]==0x12345678u && c.cpsr==flags,"Thumb bit operation changed ARM1176 framing");
+    }
+}
+
+static void test_thumb2_clz_rbit_fetch(void) {
+    for (unsigned reverse=0;reverse<2u;reverse++)
+     for (unsigned host=0;host<2u;host++)
+      for (unsigned fault=0;fault<4u;fault++) {
+        memset(g_ram,0,sizeof g_ram);
+        arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_V|test_it_bits(0x1cu);
+        c.r[15]=0xffeu; c.r[2]=1u; c.r[8]=0x12345678u;
+        uint32_t flags=c.cpsr;
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x8032u);
+        m_w32(NULL,0x6004u,fault==1u ? 0u : fault==2u ? 0xa033u : fault==3u ? 0xa012u : 0xa032u);
+        put_thumb_bitop(0x8ffeu,reverse!=0u,8u,2u);
+        m_w16(NULL,0xa000u,m_r16(NULL,0x9000u)); m_w16(NULL,0x9000u,0xf992u);
+        CHECK(arm_step(&c)==ARM_OK && c.cycles==1u,"Thumb bit operation fetch disposition");
+        if (!fault) CHECK(c.r[15]==0x1002u && c.r[8]==(reverse ? 0x80000000u : 31u) &&
+            c.cpsr==((flags & ~TEST_IT_MASK)|test_it_bits(0x18u)),"Thumb bit operation wrong second half/flags/IT");
+        else CHECK(c.r[15]==ARM_VEC_PREFETCH && c.r[14]==0x1002u && c.cp15.ifar==0x1000u &&
+            c.spsr[ARM_BANK_ABT]==flags && c.r[8]==0x12345678u &&
+            (c.cp15.ifsr&15u)==(fault==1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION),
+            "Thumb bit operation effects preceded complete fetch");
+      }
+}
+
 static void test_thumb2_barrier_options_and_it(void) {
     const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
     const unsigned states[] = {0u, 0x1cu, 0x08u}, next_states[] = {0u, 0x18u, 0u};
@@ -10148,6 +10275,9 @@ int main(void) {
     test_thumb2_register_shift_values();
     test_thumb2_register_shift_operands_and_it();
     test_thumb2_register_shift_fetch();
+    test_thumb2_clz_rbit_values();
+    test_thumb2_clz_rbit_operands();
+    test_thumb2_clz_rbit_fetch();
     test_thumb2_register_store_values();
     test_thumb2_register_store_operands();
     test_thumb2_register_store_aborts();
