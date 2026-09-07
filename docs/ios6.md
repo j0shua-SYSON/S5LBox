@@ -267,6 +267,22 @@ Tests independently construct the constant bytes for every immediate/mode
 combination and cover all register indices, permissions, conditionals,
 host FP preservation, split fetch faults and guest enable/retry.
 
+NEON register VMUL.F32 now multiplies two or four lanes across the full D/Q
+bank, using exact integer products and nearest-even rounding. ARM standard
+NEON arithmetic fixes default-NaN and flush-to-zero behavior independently
+of FPSCR rounding/FZ/DN controls. Both inputs are unpacked before NaN
+selection, and a tiny nonzero result flushes to signed zero before rounding,
+setting UFC without IXC. Overflow sets OFC/IXC; denormal inputs and invalid
+operations set their sticky flags. Existing FPSCR flags and controls, ARM
+flags and host FP state are preserved. See
+[DDI0406C.b, A2.7 and A8.8.351](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Tests compare an independent binary64 product/conversion oracle with raw
+boundary cases, all register aliases, sampled finite products, guest/host
+rounding controls, access denials, conditional execution and split fetches.
+Odd Q operands and the reserved size encoding stop before access checks.
+Other NEON arithmetic and full-bank Cortex-A8 VFP multiplication remain
+separate work.
+
 The matching cache's unchanged `fmodf` now returns the expected raw results
 for eight normal-input cases in an isolated User-mode fixture. These cover
 smaller/equal/greater magnitudes, both operand signs and signed zero, with
@@ -275,10 +291,12 @@ NEON stack save/restore. Before Boolean support, the same fixture stopped
 at its first VORR. Special inputs and helper paths remain untested; this
 fixture does not establish process launch or a complete firmware boot.
 
-A separate fixture follows eight tiny-result paths from the same unchanged
-entry to the multiply at `0x3929abd2`. The immediate load supplies the exact
-`0x0080000000800000` value in D16, with expected D17 factors and stack bytes.
-These fixtures stop before the multiply; returned tiny results are unverified.
+A separate fixture completes eight tiny-result paths from the same unchanged
+entry, including the multiply at `0x3929abd2`. Each returns the signed zero
+required by NEON flush-to-zero, with UFC set and exact stack accesses and
+register restoration. The earlier prefix fixture established D16/D17 at
+the multiply; the full-function baseline stopped on that instruction.
+These remain isolated host fixtures without a loaded guest process.
 
 ARM and Thumb VLDR/VSTR now move one S or D register through the translating
 memory accessors, including D16-D31. They use signed, scaled immediate
@@ -315,7 +333,7 @@ both original halves. Tests cover complete register lists, both stack
 aliases, invalid modes/ranges, access/conditional behavior and faults after
 partial progress, including with host memory shortcuts enabled. A separate
 test places the odd-length trailing gap on an unmapped page. Upper-bank
-arithmetic and the remaining NEON instruction families are still unfinished.
+VFP arithmetic and the remaining NEON instruction families are still unfinished.
 
 An isolated host fixture executed the matching kernel's
 `_enable_kernel_vfp_context` routine with unchanged instructions and synthetic
@@ -782,8 +800,8 @@ establish that result.
   VFP copies, immediate constants and sign operations with short vectors,
   scalar comparisons across the full register bank, and the bounded
   32/64-bit NEON VLD1/VST1 memory forms, register Boolean operations and
-  immediate constants described above.
-  Upper-bank arithmetic, the remaining NEON families, and full
+  immediate constants and register VMUL.F32 described above.
+  Upper-bank VFP arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Shared lower-bank arithmetic
   still derives from VFP11 and requires a complete Cortex-A8 semantic audit.
 - The partial S5L8920 RAM and interrupt fabric does not yet supply its UART,

@@ -7880,7 +7880,7 @@ static void test_cortex_a8_vfp_data_fetch_and_retry(void) {
         0xeef4fb60u,0xeef4fbe0u,0xeef5fb40u,0xeef5fbc0u,
         0xef40f1b0u,0xef50f1b0u,0xef60f1b0u,0xef70f1b0u,
         0xff40f1b0u,0xff50f1b0u,0xff60f1b0u,0xff70f1b0u,
-        0xffc0f410u,0xffc0f430u,0xffc0f510u,0xffc0f530u
+        0xffc0f410u,0xffc0f430u,0xffc0f510u,0xffc0f530u,0xff40fdb0u
     };
     static const uint64_t expected[] = {
         UINT64_C(0x3ff0000000000000), UINT64_C(0xfff0000000000001),
@@ -7892,15 +7892,16 @@ static void test_cortex_a8_vfp_data_fetch_and_retry(void) {
         UINT64_C(0xfff0000000000001),0u,UINT64_C(0xfff0000000000001),UINT64_MAX,
         0u,UINT64_C(0xfff0000000000001),UINT64_C(0xfff456789abcdef1),UINT64_C(0x1230000000000000),
         UINT64_C(0x0080000000800000),UINT64_C(0xff7fffffff7fffff),
-        UINT64_C(0x12b456789abcdef0),UINT64_C(0x123456789a3cdef0)
+        UINT64_C(0x12b456789abcdef0),UINT64_C(0x123456789a3cdef0),UINT64_C(0x7fc0000000000000)
     };
     static const uint64_t neon_retry_values[] = {
         UINT64_C(0xfff0000000000001),0u,UINT64_C(0xfff0000000000001),UINT64_MAX,
         0u,UINT64_C(0xfff0000000000001),UINT64_C(0xfff0000000000001),0u,
-        UINT64_C(0x0080000000800000),UINT64_C(0xff7fffffff7fffff),UINT64_C(0x0080000000800000),0u
+        UINT64_C(0x0080000000800000),UINT64_C(0xff7fffffff7fffff),UINT64_C(0x0080000000800000),0u,
+        UINT64_C(0x7fc0000000000000)
     };
     for (unsigned host = 0; host < 2u; host++)
-     for (unsigned op = 0; op < 20u; op++)
+     for (unsigned op = 0; op < 21u; op++)
       for (unsigned fault = 0; fault < 4u; fault++) {
         memset(g_ram, 0, sizeof g_ram);
         arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
@@ -7935,7 +7936,7 @@ static void test_cortex_a8_vfp_data_fetch_and_retry(void) {
                   "Thumb raw FP availability/effects preceded second-half fetch");
         }
       }
-    for (unsigned op = 0; op < 20u; op++) {
+    for (unsigned op = 0; op < 21u; op++) {
         arm_cpu_t c;
         CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
         c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_Z | ARM_CPSR_Q;
@@ -7958,7 +7959,7 @@ static void test_cortex_a8_vfp_data_fetch_and_retry(void) {
         uint64_t want = op < 4u ? expected[op] : op < 8u ? 0u : neon_retry_values[op - 8u];
         CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x106u &&
               c.a8_vfp_hi[15] == want &&
-              c.vfp_fpscr == (op >= 4u && op < 8u ? compare_retry_flags[op - 4u] : 0u) &&
+              c.vfp_fpscr == (op >= 4u && op < 8u ? compare_retry_flags[op - 4u] : op == 20u ? 0x80u : 0u) &&
               c.cpsr == ((interrupted & ~TEST_IT_MASK) | test_it_bits(0x08u)), "raw FP exact retry/IT retirement");
         CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x108u && c.r[2] == 1u &&
               c.cpsr == (interrupted & ~TEST_IT_MASK) && c.cycles == 6u, "raw FP changed following IT condition");

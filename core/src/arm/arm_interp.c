@@ -804,6 +804,69 @@ static arm_status_t exec_a8_neon_immediate(arm_cpu_t *c, uint32_t insn) {
     return ARM_OK;
 }
 
+/* VMUL.F32 A1/T1 (DDI0406C.b A8.8.351). sz=1 remains in the checked
+ * allocation so an invalid encoding cannot become a lazy-enable fault. */
+static bool a8_neon_multiply_space(const arm_cpu_t *c, uint32_t insn) {
+    uint32_t prefix = (c->cpsr & ARM_CPSR_T) ? 0xff000d10u : 0xf3000d10u;
+    return c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn & 0xffa00f10u) == prefix;
+}
+
+/* A2.7 FPMul with StandardFPSCRValue: nearest-even, default NaNs, FZ on,
+ * traps off. Use an exact 48-bit integer product, without host FP state. */
+static uint32_t a8_neon_multiply_f32(uint32_t left, uint32_t right, uint32_t *exceptions) {
+    uint32_t sign = (left ^ right) & 0x80000000u;
+    uint32_t a = left & 0x7fffffffu, b = right & 0x7fffffffu;
+    /* Both inputs are unpacked even when one of them is a NaN. */
+    if (a && a < 0x00800000u) { *exceptions |= ARM_FPSCR_IDC; a = 0u; }
+    if (b && b < 0x00800000u) { *exceptions |= ARM_FPSCR_IDC; b = 0u; }
+    if (a > 0x7f800000u || b > 0x7f800000u) {
+        if ((a > 0x7f800000u && !(a & 0x00400000u)) || (b > 0x7f800000u && !(b & 0x00400000u)))
+            *exceptions |= ARM_FPSCR_IOC;
+        return 0x7fc00000u;
+    }
+    if (a == 0x7f800000u || b == 0x7f800000u) {
+        if (!a || !b) { *exceptions |= ARM_FPSCR_IOC; return 0x7fc00000u; }
+        return sign | 0x7f800000u;
+    }
+    if (!a || !b) return sign;
+
+    uint64_t product = (uint64_t)((a & 0x007fffffu) | 0x00800000u) * ((b & 0x007fffffu) | 0x00800000u);
+    unsigned shift = (product & (UINT64_C(1) << 47)) ? 24u : 23u;
+    int exponent = (int)(a >> 23) + (int)(b >> 23) - 127 + (shift == 24u);
+    /* FZ precedes rounding, including a tiny value which would round to
+     * min-normal. A flushed output sets UFC, without setting IXC. */
+    if (exponent <= 0) { *exceptions |= ARM_FPSCR_UFC; return sign; }
+    uint64_t significand = product >> shift;
+    uint64_t tail = product & ((UINT64_C(1) << shift) - 1u), halfway = UINT64_C(1) << (shift - 1u);
+    if (tail > halfway || (tail == halfway && (significand & 1u))) significand++;
+    if (significand == 0x01000000u) { significand >>= 1; exponent++; }
+    if (exponent >= 255) {
+        *exceptions |= ARM_FPSCR_OFC | ARM_FPSCR_IXC;
+        return sign | 0x7f800000u;
+    }
+    if (tail) *exceptions |= ARM_FPSCR_IXC;
+    return sign | ((uint32_t)exponent << 23) | ((uint32_t)significand & 0x007fffffu);
+}
+
+static arm_status_t exec_a8_neon_multiply(arm_cpu_t *c, uint32_t insn) {
+    unsigned d = ((insn >> 12) & 15u) | ((insn >> 18) & 16u);
+    unsigned n = ((insn >> 16) & 15u) | ((insn >> 3) & 16u);
+    unsigned m = (insn & 15u) | ((insn >> 1) & 16u), quad = (insn >> 6) & 1u;
+    if ((insn & (1u << 20)) || (quad && ((d | n | m) & 1u))) return ARM_UNDEFINED;
+    if (!vfp_cpacr_permits(c) || !vfp_enabled(c)) return ARM_GUEST_UNDEFINED;
+    uint64_t result[2];
+    uint32_t exceptions = 0;
+    for (unsigned r = 0; r <= quad; r++) {
+        uint64_t a = vfp_get_d(c, n + r), b = vfp_get_d(c, m + r);
+        uint32_t lo = a8_neon_multiply_f32((uint32_t)a, (uint32_t)b, &exceptions);
+        uint32_t hi = a8_neon_multiply_f32((uint32_t)(a >> 32), (uint32_t)(b >> 32), &exceptions);
+        result[r] = (uint64_t)hi << 32 | lo;
+    }
+    for (unsigned r = 0; r <= quad; r++) vfp_set_d(c, d + r, result[r]);
+    c->vfp_fpscr |= exceptions;
+    return ARM_OK;
+}
+
 /* vfp_cpacr_permits() and vfp_enabled() live in vfp.c (declared in vfp.h):
  * they are half of the availability gate the VFP unit itself applies, and one
  * copy of that rule is the only safe number of copies.
@@ -814,7 +877,7 @@ static bool vfp_lazy_enable_trap(const arm_cpu_t *c, uint32_t insn) {
      * ARM_GUEST_UNDEFINED. An unsupported ID or invalid encoding is still
      * a capability stop when EN=0, not a fault the guest can fix by enabling. */
     if (a8_neon_single_elements_space(c, insn) || a8_neon_bitwise_space(c, insn) ||
-        a8_neon_immediate_space(c, insn)) return false;
+        a8_neon_immediate_space(c, insn) || a8_neon_multiply_space(c, insn)) return false;
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 &&
         (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn) ||
          vfp_is_memory_transfer(insn) || vfp_is_bitwise_data(insn) || vfp_is_compare_data(insn))) return false;
@@ -3255,6 +3318,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
     if (a8_neon_single_elements_space(c, insn)) return exec_a8_neon_single_elements(c, insn);
     if (a8_neon_bitwise_space(c, insn)) return exec_a8_neon_bitwise(c, insn);
     if (a8_neon_immediate_space(c, insn)) return exec_a8_neon_immediate(c, insn);
+    if (a8_neon_multiply_space(c, insn)) return exec_a8_neon_multiply(c, insn);
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn >> 28) == 0xeu &&
         (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn) ||
          vfp_is_memory_transfer(insn) || vfp_is_bitwise_data(insn) || vfp_is_compare_data(insn)))
@@ -3894,8 +3958,9 @@ arm_status_t arm_step(arm_cpu_t *c) {
             c->r[15] = next;
             return ARM_OK;
         }
-        if (a8_neon_bitwise_space(c, insn) || a8_neon_immediate_space(c, insn)) {
-            arm_status_t status = a8_neon_bitwise_space(c, insn) ? exec_a8_neon_bitwise(c, insn) : exec_a8_neon_immediate(c, insn);
+        if (a8_neon_bitwise_space(c, insn) || a8_neon_immediate_space(c, insn) || a8_neon_multiply_space(c, insn)) {
+            arm_status_t status = a8_neon_bitwise_space(c, insn) ? exec_a8_neon_bitwise(c, insn) :
+                a8_neon_immediate_space(c, insn) ? exec_a8_neon_immediate(c, insn) : exec_a8_neon_multiply(c, insn);
             if (status == ARM_GUEST_UNDEFINED) return take_undefined_instruction(c, pc);
             if (status != ARM_OK) return status;
             c->r[15] = next;
