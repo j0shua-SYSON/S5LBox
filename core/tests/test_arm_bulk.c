@@ -993,6 +993,67 @@ static void test_chain_write_witnesses(void) {
     arm_bulk_cache_destroy(cache); arm_ram_watch_destroy(watch);
 }
 
+static void test_joined_search_dependencies(void) {
+    arm_bulk_cache_t *cache = arm_bulk_cache_create();
+    arm_ram_watch_t *watch = arm_ram_watch_create(ram, 0u, sizeof ram);
+    CHECK(cache && watch, "joined search allocation");
+    if (!cache || !watch) {
+        arm_bulk_cache_destroy(cache); arm_ram_watch_destroy(watch); return;
+    }
+    arm_cpu_t initial; arm_bulk_memory_t memory;
+    chain_setup(&initial, &memory, 0u, 0u, 128u, ARM_CPSR_Q | ARM_CPSR_V);
+    memory.cache = cache; memory.watch = watch;
+    for (unsigned pass = 0u; pass < 3u; pass++) {
+        arm_cpu_t cpu = initial;
+        unsigned done = 0u, ceiling = pass ? 250u : 20u;
+        while (done < 1200u) {
+            unsigned budget = 1200u - done < ceiling ? 1200u - done : ceiling;
+            unsigned n = chain_differential(&cpu, &memory, budget, 0u);
+            CHECK(n == budget, "joined search warm-up stopped early");
+            if (!n) break;
+            done += n;
+        }
+    }
+    for (unsigned node = 1u; node <= 32u; node++) {
+        arm_cpu_t cpu = initial;
+        cpu.r[5] = r32(NULL, DATA + node * 16u + 4u);
+        unsigned n = chain_differential(&cpu, &memory, 250u, 0u);
+        unsigned prefix = (node - 1u) * 10u;
+        CHECK(n == (prefix < 250u ? prefix : 250u),
+              "joined range skipped an interior search exit");
+    }
+    /* This cached span starts on one page and depends on a link on the next.
+     * A composite must retain the latter page's write witness too. */
+    arm_ram_watch_changed(watch, DATA + 70u * 16u, 4u);
+    w32(NULL, DATA + 70u * 16u, 0u);
+    arm_cpu_t cpu = initial;
+    cpu.r[4] = cpu.r[6] = DATA + 50u * 16u;
+    CHECK(chain_differential(&cpu, &memory, 250u, 0u) == 200u,
+          "joined search lost a later-page dependency");
+
+    arm_bulk_cache_reset(cache); arm_ram_watch_reset(watch);
+    chain_setup(&initial, &memory, 0u, 0u, 128u, 0u);
+    memory.cache = cache; memory.watch = watch;
+    for (unsigned i = 0u; i < 12u; i++) {
+        w32(NULL, DATA + i * 1024u, DATA + ((i + 1u) % 12u) * 1024u);
+        w32(NULL, DATA + i * 1024u + 4u, i);
+    }
+    for (unsigned pass = 0u; pass < 4u; pass++) {
+        cpu = initial;
+        for (unsigned batch = 0u; batch < 6u; batch++) {
+            unsigned budget = pass ? 250u : 20u;
+            CHECK(chain_differential(&cpu, &memory, budget, 0u) == budget,
+                  "joined page-capacity fallback changed execution");
+        }
+    }
+    arm_ram_watch_changed(watch, DATA + 8u * 1024u, 4u);
+    w32(NULL, DATA + 8u * 1024u, 0u);
+    cpu = initial;
+    CHECK(chain_differential(&cpu, &memory, 250u, 0u) == 80u,
+          "joined page-capacity overflow lost a dependency");
+    arm_bulk_cache_destroy(cache); arm_ram_watch_destroy(watch);
+}
+
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 typedef struct {
     arm_cpu_t *cpu;
@@ -1228,13 +1289,14 @@ static unsigned long_chain_batch(arm_cpu_t *cpu, const arm_bulk_memory_t *memory
     return retired;
 }
 
-static void test_long_chain_index(void) {
+static void test_long_chain_index(bool fragmented) {
     unsigned modes = 1u;
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     if (a64_static_host_available()) modes = 2u;
 #endif
     for (unsigned native = 0u; native < modes; native++) {
-        const unsigned nodes = 32769u, steps = (nodes - 1u) * 10u;
+        const unsigned nodes = fragmented ? 4097u : 32769u;
+        const unsigned steps = (nodes - 1u) * 10u;
         const uint32_t data = 0x10000u;
         arm_cpu_t shape; arm_bulk_memory_t pattern;
         chain_setup(&shape, &pattern, 0u, 0u, 128u, ARM_CPSR_Q | ARM_CPSR_V);
@@ -1272,19 +1334,29 @@ static void test_long_chain_index(void) {
             .watch = machine.ram_watch,
         };
         const arm_cpu_t initial = machine.cpu;
-        for (unsigned pass = 0u; pass < 2u; pass++) {
+        for (unsigned pass = 0u; pass < (fragmented ? 5u : 2u); pass++) {
             machine.cpu = initial;
             unsigned done = 0u;
             uint64_t hits = arm_bulk_cache_hits(cache);
             while (done < steps) {
-                unsigned budget = steps - done < 250u ? steps - done : 250u;
+                unsigned ceiling = fragmented && (pass == 0u || pass == 3u) ? 20u : 250u;
+                unsigned budget = steps - done < ceiling ? steps - done : ceiling;
                 unsigned retired = long_chain_batch(&machine.cpu, &memory, budget, native != 0u);
                 if (!retired) break;
                 done += retired;
             }
             CHECK(done == steps && machine.cpu.r[4] == data + (nodes - 1u) * 16u,
                   "long search did not reach its exact final node");
-            if (pass) {
+            if (fragmented && (pass == 2u || pass == 4u)) {
+                uint64_t reused = arm_bulk_cache_hits(cache) - hits;
+                /* Short warm-up and short tail budgets must not permanently
+                 * turn each later full-budget run into tiny summary lookups. */
+                CHECK(reused && reused <= 2u * ((nodes - 1u) / 25u + 1u),
+                      "fragmented search retained %llu tiny summaries (pass %u)",
+                      (unsigned long long)reused, pass);
+                printf("arm_bulk fragmented search: native=%u pass=%u reused=%llu\n",
+                       native, pass, (unsigned long long)reused);
+            } else if (!fragmented && pass) {
                 uint64_t reused = arm_bulk_cache_hits(cache) - hits;
                 CHECK(reused > 1024u, "long search retained only %llu segments",
                       (unsigned long long)reused);
@@ -1295,6 +1367,9 @@ static void test_long_chain_index(void) {
         /* The starting entry has left the small byte cache. A real bus store,
          * owner reset, or loss of the write contract must not trust its compact
          * descriptor or the unrelated bytes still occupying a primary slot. */
+        machine.bus.write32(&machine, data + 16u * 9u, data + 16u * 33u);
+        machine.cpu = initial;
+        (void)long_chain_batch(&machine.cpu, &memory, 250u, native != 0u);
         machine.bus.write32(&machine, data, data + 16u * 17u);
         machine.cpu = initial;
         (void)long_chain_batch(&machine.cpu, &memory, 250u, native != 0u);
@@ -1324,7 +1399,9 @@ int main(void) {
     test_chain_reuse();
     test_chain_reuse_at_machine_budgets();
     test_chain_write_witnesses();
-    test_long_chain_index();
+    test_joined_search_dependencies();
+    test_long_chain_index(false);
+    test_long_chain_index(true);
     test_native_integration();
     printf("arm_bulk: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;

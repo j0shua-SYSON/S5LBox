@@ -10,7 +10,9 @@
  * re-proves current READ mappings and unchanged load bytes, using an optional
  * owned write witness or exact comparisons. No old host pointer is followed.
  * An owned witness also admits a bounded compact-descriptor index for longer
- * traversals; allocation failure retains the smaller byte-validated cache. */
+ * traversals; allocation failure retains the smaller byte-validated cache.
+ * Adjacent witnessed ordered-search spans can compose within one read-only
+ * invocation, preserving all dependencies and original instruction budgets. */
 typedef struct arm_bulk_cache arm_bulk_cache_t;
 arm_bulk_cache_t *arm_bulk_cache_create(void);
 void arm_bulk_cache_destroy(arm_bulk_cache_t *cache);

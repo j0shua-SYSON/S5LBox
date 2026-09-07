@@ -185,7 +185,7 @@ static bool result_key(const bulk_result_t *result, unsigned kind,
 
 static bulk_segment_t *segment_slot(const arm_bulk_memory_t *memory,
                                      unsigned kind, uint32_t start,
-                                     const uint32_t offsets[4]) {
+                                     const uint32_t offsets[4], unsigned budget) {
     arm_bulk_cache_t *cache = memory->cache;
     if (!cache || (memory->flat_ram && memory->flat_size < 1024u)) return NULL;
     uint32_t hash = segment_hash(kind, start, offsets);
@@ -195,13 +195,19 @@ static bulk_segment_t *segment_slot(const arm_bulk_memory_t *memory,
         cache->index = calloc(BULK_INDEX_SETS * BULK_INDEX_WAYS, sizeof *cache->index);
         /* Allocation failure keeps the existing byte-validated cache. */
     }
-    if (!memory->watch || !cache->index ||
-        result_key(&entry->result, kind, start, offsets)) return entry;
+    if (!memory->watch || !cache->index) return entry;
+    bool primary = result_key(&entry->result, kind, start, offsets) &&
+        entry->result.watch == memory->watch;
     unsigned set = hash & (BULK_INDEX_SETS - 1u);
     for (unsigned way = 0u; way < BULK_INDEX_WAYS; way++) {
         const bulk_index_entry_t *indexed = &cache->index[set * BULK_INDEX_WAYS + way];
         if (indexed->result.watch != memory->watch ||
             !result_key(&indexed->result, kind, start, offsets)) continue;
+        /* A short tail can occupy the primary slot without replacing a longer
+         * indexed span. Prefer the longest matching span this budget admits. */
+        if (primary && (indexed->result.retired > budget ||
+            (entry->result.retired <= budget &&
+             entry->result.retired >= indexed->result.retired))) continue;
         entry->result = indexed->result;
         entry->stamps_only = true;
         for (unsigned i = 0u; i < entry->result.pages; i++) {
@@ -215,8 +221,8 @@ static bulk_segment_t *segment_slot(const arm_bulk_memory_t *memory,
     return entry;
 }
 
-static void segment_index(const arm_bulk_memory_t *memory,
-                            const bulk_segment_t *entry) {
+static void segment_index_store(const arm_bulk_memory_t *memory,
+                                  const bulk_index_entry_t *entry) {
     arm_bulk_cache_t *cache = memory->cache;
     if (!entry->result.watch || !cache->index) return;
     for (unsigned i = 0u; i < entry->result.pages; i++)
@@ -228,6 +234,10 @@ static void segment_index(const arm_bulk_memory_t *memory,
         bulk_index_entry_t *slot = &cache->index[set * BULK_INDEX_WAYS + way];
         if (result_key(&slot->result, entry->result.kind,
                         entry->result.start, entry->result.offsets)) {
+            /* Do not let a short budget fragment an already longer span.
+             * Failed live validation explicitly invalidates stale summaries. */
+            if (slot->result.watch == entry->result.watch &&
+                slot->result.retired >= entry->result.retired) return;
             target = slot;
             break;
         }
@@ -237,12 +247,91 @@ static void segment_index(const arm_bulk_memory_t *memory,
         unsigned way = cache->replace[set]++ & (BULK_INDEX_WAYS - 1u);
         target = &cache->index[set * BULK_INDEX_WAYS + way];
     }
+    *target = *entry;
+}
+
+static void segment_descriptor(bulk_index_entry_t *target,
+                                 const bulk_segment_t *entry) {
     target->result = entry->result;
     for (unsigned i = 0u; i < entry->result.pages; i++) {
         target->page[i].address = entry->page[i].address;
         target->page[i].reads = entry->page[i].reads;
         target->page[i].stamp = entry->page[i].stamp;
     }
+}
+
+static void segment_index(const arm_bulk_memory_t *memory,
+                            const bulk_segment_t *entry) {
+    if (!memory->watch || !memory->cache->index) return;
+    bulk_index_entry_t descriptor = {0};
+    segment_descriptor(&descriptor, entry);
+    segment_index_store(memory, &descriptor);
+}
+
+static void segment_forget(const arm_bulk_memory_t *memory,
+                             const bulk_segment_t *entry) {
+    arm_bulk_cache_t *cache = memory->cache;
+    if (!cache || !cache->index) return;
+    unsigned set = segment_hash(entry->result.kind, entry->result.start,
+                                 entry->result.offsets) & (BULK_INDEX_SETS - 1u);
+    for (unsigned way = 0u; way < BULK_INDEX_WAYS; way++) {
+        bulk_index_entry_t *slot = &cache->index[set * BULK_INDEX_WAYS + way];
+        if (result_key(&slot->result, entry->result.kind,
+                        entry->result.start, entry->result.offsets))
+            slot->result.valid = false;
+    }
+}
+
+/* Compose only contiguous ordered-search spans already proved in this single
+ * serialized, read-only call. Short-budget warmups otherwise remain tiny
+ * forever, paying a hash lookup and mapping validation for every few nodes.
+ * The combined descriptor retains every dependency and the original bounds;
+ * it never permits a larger execution budget or a speculative guest load. */
+static void segment_join(const arm_bulk_memory_t *memory,
+                           bulk_index_entry_t *joined, unsigned *pieces,
+                           const bulk_segment_t *entry) {
+    if (!memory->watch || !memory->cache || !memory->cache->index ||
+        !entry || !entry->result.valid || entry->result.watch != memory->watch)
+        return;
+    for (unsigned i = 0u; i < entry->result.pages; i++)
+        if (!entry->page[i].stamp) return;
+    if (!*pieces) {
+        segment_descriptor(joined, entry);
+        *pieces = 1u;
+        return;
+    }
+    bulk_index_entry_t next = *joined;
+    if (next.result.current != entry->result.start ||
+        next.result.iterations + entry->result.iterations > BULK_SEGMENT)
+        goto separate;
+    for (unsigned i = 0u; i < entry->result.pages; i++) {
+        unsigned at = 0u;
+        while (at < next.result.pages &&
+               next.page[at].address != entry->page[i].address) at++;
+        if (at == next.result.pages) {
+            if (at == BULK_PAGES) goto separate;
+            next.result.pages++;
+            next.page[at].address = entry->page[i].address;
+            next.page[at].stamp = entry->page[i].stamp;
+            next.page[at].reads = 0u;
+        } else if (next.page[at].stamp != entry->page[i].stamp) goto separate;
+        next.page[at].reads += entry->page[i].reads;
+    }
+    next.result.retired += entry->result.retired;
+    next.result.loads += entry->result.loads;
+    next.result.iterations += entry->result.iterations;
+    if (entry->result.low < next.result.low) next.result.low = entry->result.low;
+    if (entry->result.high > next.result.high) next.result.high = entry->result.high;
+    next.result.previous = entry->result.previous;
+    next.result.current = entry->result.current;
+    next.result.value = entry->result.value;
+    *joined = next;
+    (*pieces)++;
+    return;
+separate:
+    if (*pieces > 1u) segment_index_store(memory, joined);
+    segment_descriptor(joined, entry);
+    *pieces = 1u;
 }
 
 static bool segment_key(const bulk_segment_t *entry, unsigned kind,
@@ -317,12 +406,12 @@ static bool segment_validate(arm_cpu_t *cpu,
         bulk_page_t *page = &entry->page[i];
         unsigned read = 0u, walk = 0u;
         const uint8_t *p = chain_word_at(cpu, memory, page->address, &read, &walk);
-        if (!p) return false;
+        if (!p) goto invalid;
         uint64_t stamp = arm_ram_watch_capture(memory->watch, cpu, p);
         bool unchanged = stamp && entry->result.watch == memory->watch && page->stamp == stamp;
         /* A compact descriptor has no byte snapshot or dependency mask.
          * Lost ownership, changed mappings and writes require literal rebuild. */
-        if (entry->stamps_only && !unchanged) return false;
+        if (entry->stamps_only && !unchanged) goto invalid;
         if (!unchanged && memcmp(p, page->bytes, 1024u) != 0) {
             for (unsigned group = 0u; group < 8u; group++) {
                 uint32_t words = page->words[group];
@@ -334,7 +423,7 @@ static bool segment_validate(arm_cpu_t *cpu,
                     while (!(words & (UINT32_C(1) << bit))) bit++;
 #endif
                     unsigned at = (group * 32u + bit) * 4u;
-                    if (read32(p + at) != read32(page->bytes + at)) return false;
+                    if (read32(p + at) != read32(page->bytes + at)) goto invalid;
                     words &= words - 1u;
                 }
             }
@@ -348,6 +437,9 @@ static bool segment_validate(arm_cpu_t *cpu,
     entry->result.watch = memory->watch;
     memory->cache->hits++;
     return true;
+invalid:
+    segment_forget(memory, entry);
+    return false;
 }
 
 static void segment_range(uint32_t value, uint32_t *low, uint32_t *high) {
@@ -397,12 +489,16 @@ static unsigned thumb_ordered_chain(arm_cpu_t *cpu,
     const uint32_t offsets[4] = {cpu->r[next_offset], cpu->r[key_offset], 0u, 0u};
     unsigned part = 0u;
     bulk_segment_t *building = NULL;
+    bulk_index_entry_t joined = {0};
+    unsigned pieces = 0u;
     while (count < budget / 10u) {
         if (part == 0u) {
-            bulk_segment_t *entry = segment_slot(memory, 1u, walker, offsets);
+            bulk_segment_t *entry = segment_slot(memory, 1u, walker, offsets,
+                                                  budget - count * 10u);
             if (segment_key(entry, 1u, walker, offsets, budget - count * 10u) &&
                 wanted > entry->result.high &&
                 segment_validate(cpu, memory, entry, &tlb_reads, &walk_reads)) {
+                segment_join(memory, &joined, &pieces, entry);
                 prev = entry->result.previous; cur = walker = entry->result.current;
                 key = entry->result.value; count += entry->result.iterations;
                 continue;
@@ -434,10 +530,15 @@ static unsigned thumb_ordered_chain(arm_cpu_t *cpu,
         }
         if (++part == BULK_SEGMENT) {
             segment_finish(cpu, memory, building, prev, cur, key);
+            segment_join(memory, &joined, &pieces, building);
             part = 0u;
         }
     }
-    if (part) segment_finish(cpu, memory, building, prev, cur, key);
+    if (part) {
+        segment_finish(cpu, memory, building, prev, cur, key);
+        segment_join(memory, &joined, &pieces, building);
+    }
+    if (pieces > 1u) segment_index_store(memory, &joined);
     if (!count) return 0u;
     cpu->r[previous] = prev; cpu->r[current] = cur;
     cpu->r[walk] = walker; cpu->r[value] = key;
@@ -514,7 +615,8 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
     bulk_segment_t *building = NULL;
     while (budget - retired >= stride) {
         if (part == 0u) {
-            bulk_segment_t *entry = segment_slot(memory, kind, current, offsets);
+            bulk_segment_t *entry = segment_slot(memory, kind, current, offsets,
+                                                  budget - retired);
             if (segment_key(entry, kind, current, offsets, budget - retired) &&
                 value != cpu->r[12] &&
                 outside(cpu->r[12], entry->result.head_low, entry->result.head_high) &&
