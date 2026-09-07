@@ -1549,6 +1549,147 @@ static void test_a8_neon_add_access_and_invalid(void) {
     }
 }
 
+/* A8.8.314: VDUP from a core register has D in bit7, Q in bit21,
+ * and its destination in bits19:16, unlike the SIMD data-processing forms. */
+static uint32_t a8_core_duplicate(unsigned size, unsigned quad, unsigned dst, unsigned rt) {
+    return 0xee800b10u | (size == 8u ? 1u << 22 : size == 16u ? 1u << 5 : 0u) |
+        (quad << 21) | ((dst & 15u) << 16) | ((dst >> 4) << 7) | (rt << 12);
+}
+
+static uint64_t a8_duplicate_expected(uint32_t source, unsigned size) {
+    uint64_t result = 0;
+    for (unsigned bit = 0; bit < 64u; bit++)
+        if ((source >> (bit % size)) & 1u) result |= UINT64_C(1) << bit;
+    return result;
+}
+
+static void test_a8_neon_core_duplicate_registers(void) {
+    CHECK(a8_core_duplicate(8u, 1u, 0u, 1u) == 0xeee01b10u &&
+          a8_core_duplicate(16u, 0u, 31u, 2u) == 0xee8f2bb0u &&
+          a8_core_duplicate(32u, 1u, 30u, 14u) == 0xeeaeeb90u, "VDUP core encoding anchors");
+    static const uint32_t patterns[] = {0u,UINT32_MAX,1u,0x80000000u,0xdead1280u,0x12345678u,0x7f800001u,0x00ff00ffu};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned quad = 0; quad < 2u; quad++)
+      for (unsigned size = 8u; size <= 32u; size *= 2u)
+       for (unsigned dst = 0; dst < 32u; dst += 1u + quad)
+        for (unsigned rt = 0; rt < 15u; rt++) {
+            if (thumb && rt == 13u) continue;
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c, d, UINT64_C(0x7ff01234dead0000) + d);
+            for (unsigned r = 0; r < 15u; r++) c.r[r] = 0xa5100000u + r;
+            c.r[rt] = patterns[(dst + rt + size / 8u) % 8u];
+            uint32_t before[15]; memcpy(before, c.r, sizeof before);
+            c.vfp_fpscr |= ((dst & 7u) << 16) | ((rt & 3u) << 20) | ARM_FPSCR_N | ARM_FPSCR_DZC;
+            if (rt & 1u) c.cpsr |= ARM_CPSR_E;
+            c.excl_valid = true; c.excl_addr = 0x12340u;
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            uint64_t expected = a8_duplicate_expected(c.r[rt], size);
+            CHECK(a8_move_step(&c, thumb, a8_core_duplicate(size, quad, dst, rt)) == ARM_OK &&
+                  c.r[15] == 0x104u && c.cycles == 1u && c.cpsr == flags && c.vfp_fpscr == fpscr &&
+                  c.vfp_fpexc == ARM_FPEXC_EN && c.excl_valid && c.excl_addr == 0x12340u &&
+                  !memcmp(before, c.r, sizeof before), "VDUP core register/state T=%u Q=%u size=%u D=%u Rt=%u", thumb, quad, size, dst, rt);
+            for (unsigned d = 0; d < 32u; d++) CHECK(vfp_get_d(&c, d) ==
+                (d >= dst && d <= dst + quad ? expected : UINT64_C(0x7ff01234dead0000) + d),
+                "VDUP core destination D%u", d);
+        }
+}
+
+static void test_a8_neon_core_duplicate_access(void) {
+    static const unsigned permissions[] = {0u,1u,3u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned quad = 0; quad < 2u; quad++)
+      for (unsigned size = 8u; size <= 32u; size *= 2u)
+       for (unsigned user = 0; user < 2u; user++)
+        for (unsigned enabled = 0; enabled < 2u; enabled++)
+         for (unsigned access = 0; access < 3u; access++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permissions[access] * 0x00500000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            c.r[2] = 0xabcdef01u;
+            vfp_set_d(&c, 30u, UINT64_C(0x7ff0000000000001));
+            vfp_set_d(&c, 31u, UINT64_C(0x8000000000000000));
+            bool allowed = enabled && (permissions[access] == 3u || (permissions[access] == 1u && !user));
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            uint64_t expected = a8_duplicate_expected(c.r[2], size);
+            CHECK(a8_move_step(&c, thumb, a8_core_duplicate(size, quad, 30u, 2u)) == ARM_OK &&
+                  c.r[2] == 0xabcdef01u && c.vfp_fpscr == fpscr, "VDUP core access disposition");
+            CHECK(allowed ? c.r[15] == 0x104u && c.cpsr == flags :
+                  c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == (thumb ? 0x102u : 0x104u) && c.spsr[ARM_BANK_UND] == flags,
+                  "VDUP core access exception state");
+            CHECK(vfp_get_d(&c, 30u) == (allowed ? expected : UINT64_C(0x7ff0000000000001)) &&
+                  vfp_get_d(&c, 31u) == (allowed && quad ? expected : UINT64_C(0x8000000000000000)),
+                  "VDUP core access destination");
+         }
+    fenv_t saved;
+    CHECK(fegetenv(&saved) == 0, "save duplicate host FP state");
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned quad = 0; quad < 2u; quad++)
+      for (unsigned size = 8u; size <= 32u; size *= 2u)
+       for (unsigned host = 0; host < 4u; host++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb); c.r[2] = 0xff800001u;
+            CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 && feraiseexcept(FE_DIVBYZERO) == 0,
+                  "prepare duplicate host FP state");
+            int exceptions = fetestexcept(FE_ALL_EXCEPT);
+            CHECK(a8_move_step(&c, thumb, a8_core_duplicate(size, quad, 30u, 2u)) == ARM_OK &&
+                  fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == exceptions, "duplicate touched host FP state");
+       }
+    CHECK(fesetenv(&saved) == 0, "restore duplicate host FP state");
+}
+
+static void test_a8_neon_core_duplicate_invalid_and_it(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned enabled = 0; enabled < 2u; enabled++)
+      for (unsigned skip = 0; skip < 2u; skip++)
+       for (unsigned kind = 0; kind < 22u; kind++) {
+            arm_cpu_t c;
+            a8_move_reset(&c, thumb);
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            if (skip) c.cp15.cpacr = 0u;
+            c.r[2] = 0xabcdef01u; c.r[13] = 0x12345678u;
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c, d, UINT64_C(0x7ff01234dead0000) + d);
+            uint32_t insn = a8_core_duplicate(32u, 1u, kind == 1u ? 31u : 30u,
+                kind == 2u ? 15u : kind == 3u ? 13u : 2u);
+            if (kind == 0u) insn |= 0x00400020u; /* B:E=11 */
+            if (kind >= 4u && kind < 19u) insn |= kind - 3u; /* every nonzero reserved low nibble */
+            if (kind == 19u) insn |= 0x40u; /* neighboring allocation */
+            if (kind == 20u) insn |= 1u << 20; /* read direction, not duplicate */
+            if (kind == 21u) insn ^= 0x100u; /* CP10, not SIMD */
+            bool valid = kind == 3u && !thumb;
+            if (thumb) { m_w16(NULL, 0x100u, skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK, "duplicate IT setup"); }
+            else if (skip) insn &= 0x0fffffffu;
+            uint32_t pc = c.r[15], flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c, thumb, insn) == (skip || valid ? ARM_OK : ARM_UNDEFINED),
+                  "VDUP core invalid/IT disposition T=%u EN=%u skip=%u kind=%u", thumb, enabled, skip, kind);
+            if (skip || !valid) CHECK(c.r[15] == (skip ? pc + 4u : pc) &&
+                c.cpsr == (thumb && skip ? flags & ~0x0600fc00u : flags) && c.vfp_fpscr == fpscr,
+                "VDUP core invalid/skipped state changed");
+            else if (!enabled) CHECK(c.r[15] == ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND] == flags, "duplicate lazy enable");
+            else CHECK(c.r[15] == pc + 4u && c.cpsr == flags, "ARM VDUP from SP did not retire");
+            uint64_t expected = a8_duplicate_expected(0x12345678u, 32u);
+            for (unsigned d = 0; d < 32u; d++) CHECK(vfp_get_d(&c, d) ==
+                (valid && enabled && !skip && d >= 30u ? expected : UINT64_C(0x7ff01234dead0000) + d),
+                "VDUP core invalid/IT destination");
+       }
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned enabled = 0; enabled < 2u; enabled++) {
+        arm_cpu_t c; a8_move_reset(&c, thumb); c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+        CHECK(a8_move_step(&c, thumb, 0xfea02b10u) == ARM_UNDEFINED && c.r[15] == 0x100u,
+              "VDUP core swallowed MCR2 instruction-set prefix");
+     }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &g_bus, legacy[profile]), "legacy duplicate reset");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        CHECK(a8_move_step(&c, 0u, 0xeee01b10u) == ARM_UNDEFINED && c.r[15] == 0u,
+              "NEON duplicate leaked to legacy profile");
+    }
+}
+
 static void test_a8_vfp_full_bank_core_moves(void) {
     for (unsigned thumb = 0; thumb < 2u; thumb++) {
         arm_cpu_t c;
@@ -3696,6 +3837,9 @@ int main(void) {
     test_a8_vfp_single_memory_permissions();
     test_a8_vfp_single_memory_decode_boundaries();
     test_a8_vfp_core_move_refusals_and_it();
+    test_a8_neon_core_duplicate_registers();
+    test_a8_neon_core_duplicate_access();
+    test_a8_neon_core_duplicate_invalid_and_it();
     test_a8_vfp_full_bank_core_moves();
     test_a8_vfp_core_move_permissions_and_registers();
     printf("VFPv2 (VFP11) tests\n");

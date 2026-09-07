@@ -939,7 +939,26 @@ static arm_status_t vfp_a8_core_transfer(arm_cpu_t *c, uint32_t pc, uint32_t ins
     unsigned fp, hi = 0u;
     g_reason = NULL;
     if (rt == 15u || ((c->cpsr & ARM_CPSR_T) && rt == 13u))
-        return vfp_trap(pc, insn, "unpredictable Cortex-A8 VMOV core register");
+        return vfp_trap(pc, insn, "unpredictable Cortex-A8 transfer core register");
+    /* VDUP (ARM core register), A1/T1, DDI0406C.b A8.8.314. This CP11
+     * allocation shares the checked core-transfer route and its conditional
+     * execution/access rules. B:E selects 32,16,8 bits; 11 is undefined. */
+    if (!pair && (insn & 0x0f900f50u) == 0x0e800b10u) {
+        unsigned dst = rt2 | ((insn >> 3) & 16u), quad = (insn >> 21) & 1u;
+        bool byte = (insn & (1u << 22)) != 0u, half = (insn & (1u << 5)) != 0u;
+        if ((insn & 15u) || (quad && (dst & 1u)) || (byte && half))
+            return vfp_trap(pc, insn, "reserved Cortex-A8 VDUP size, Q register or low bits");
+        if (!vfp_cpacr_permits(c) || !vfp_enabled(c))
+            return vfp_guest_undefined("Cortex-A8 VDUP requires CPACR access and FPEXC.EN");
+        uint32_t word = c->r[rt];
+        if (byte) word = (word & 255u) * 0x01010101u;
+        else if (half) word = (word & 65535u) * 0x00010001u;
+        uint64_t value = (uint64_t)word << 32 | word;
+        for (unsigned r = 0; r <= quad; r++) vfp_set_d(c, dst + r, value);
+        /* Raw duplication ignores FPSCR controls and CPSR.E and preserves
+         * all status, core registers and the host FP environment. */
+        return ARM_OK;
+    }
     if (pair) {
         if ((insn & 0xd0u) != 0x10u || rt2 == 15u ||
             ((c->cpsr & ARM_CPSR_T) && rt2 == 13u) || (load && rt == rt2))

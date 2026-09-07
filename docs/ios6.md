@@ -176,7 +176,7 @@ S registers. NaN payloads and other bit patterns are preserved without
 consulting host rounding. Encoding, SP/PC and duplicate destination
 restrictions follow
 [DDI0406C.b, A8.8.341-345](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
-Byte/halfword SIMD scalar transfers remain unsupported. CPACR/EN denials
+Byte/halfword VMOV lane transfers remain unsupported. CPACR/EN denials
 enter the guest Undefined handler; reserved encodings stop without mutation.
 
 Tests fill and read every D register through different VMOV forms, verify
@@ -185,6 +185,16 @@ and cover permissions, register overlaps, reset and conditional execution.
 The extra 128 bytes are inactive on legacy profiles. Snapshot version 32
 still accepts only ARM1176, omits the inactive A8 bank and clears it on
 restore. Its byte stream is unchanged.
+
+ARM and Thumb VDUP from a core register duplicate the low 8, 16 or 32 bits
+across any D or Q destination. The checked core-transfer path preserves
+FPSCR, CPSR and the host floating-point environment. Odd Q destinations,
+the reserved size/low bits, PC sources and Thumb SP sources stop before
+access checks; ARM SP sources are valid. Conditional execution and Thumb
+fetch/retry rules apply as for the other checked transfers. Tests cover
+all register indices, raw bit patterns, permission combinations and
+nondefault controls. See
+[DDI0406C.b, A8.8.314](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 
 ARM and Thumb VFP VMOV register/immediate, VABS and VNEG now operate on
 all 32 S or D registers through a checked A8 path. Copies preserve raw bits;
@@ -310,6 +320,15 @@ denormals return the expected bits, flags, stack accesses and preserved
 registers. The NaN paths execute the formerly unsupported VADD, retaining
 the earlier VCMPE status and adding IDC when NEON flushes a denormal input.
 Only this exact helper and the original function are prepared for execution.
+
+The cache's Cortex-A8-selected `memset` body now completes 21 bounded cases
+from its unchanged Thumb entry at `0x391ce5f8`. Tests check every destination
+byte and access count, untouched surrounding bytes, saved registers and
+exact stack accesses across empty, short, misaligned, vector and large-block
+fills. The baseline stopped at VDUP on its first vector case. Selection is
+a static resolver/pointer audit using Apple's
+[Cortex-A8 to ARM_13 mapping](https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.41.3/osfmk/arm/cpuid.c);
+the fixture calls the selected body directly without a commpage or dyld.
 
 ARM and Thumb VLDR/VSTR now move one S or D register through the translating
 memory accessors, including D16-D31. They use signed, scaled immediate
@@ -813,7 +832,8 @@ establish that result.
   VFP copies, immediate constants and sign operations with short vectors,
   scalar comparisons across the full register bank, and the bounded
   32/64-bit NEON VLD1/VST1 memory forms, register Boolean operations and
-  immediate constants and register VMUL/VADD/VSUB.F32 described above.
+  immediate constants, core-register VDUP and register VMUL/VADD/VSUB.F32
+  described above.
   Upper-bank VFP arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Shared lower-bank arithmetic
   still derives from VFP11 and requires a complete Cortex-A8 semantic audit.
