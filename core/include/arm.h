@@ -401,6 +401,10 @@ static inline bool arm_arch_has_a32_barriers(arm_arch_t arch) {
     return arch == ARM_ARCH_V7_SWIFT || arch == ARM_ARCH_V7_CORTEX_A8;
 }
 
+static inline bool arm_arch_has_a32_bitfield(arm_arch_t arch) {
+    return arch == ARM_ARCH_V7_SWIFT || arch == ARM_ARCH_V7_CORTEX_A8;
+}
+
 /* Instruction framing, not a claim that every Thumb-2 operation is implemented.
  * ARM1176 retains its legacy two-step BL/BLX handling. */
 static inline bool arm_arch_uses_thumb2_encoding(arm_arch_t arch) {

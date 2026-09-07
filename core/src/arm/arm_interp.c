@@ -1877,8 +1877,27 @@ static arm_status_t exec_block_transfer(arm_cpu_t *c, uint32_t pc, uint32_t insn
     return ARM_OK;
 }
 
+/* Shared A32/T32 bit selection after their distinct operand restrictions.
+ * The encoded limit is width-1 for extraction, inclusive MSB for insertion.
+ * Validate before shifting, including the full-width case. */
+static arm_status_t exec_bitfield(arm_cpu_t *c, unsigned rd, unsigned rn,
+        unsigned lsb, unsigned limit, bool insert, bool sign) {
+    if (insert ? limit < lsb : lsb + limit >= 32u) return ARM_UNDEFINED;
+    unsigned width = insert ? limit - lsb + 1u : limit + 1u;
+    uint32_t mask = UINT32_MAX >> (32u - width);
+    uint32_t source = rn == 15u ? 0u : c->r[rn]; /* Insertion Rn=PC selects BFC. */
+    uint32_t result;
+    if (insert) result = (c->r[rd] & ~(mask << lsb)) | ((source & mask) << lsb);
+    else {
+        result = (source >> lsb) & mask;
+        if (sign && (result & (1u << (width - 1u)))) result |= ~mask;
+    }
+    c->r[rd] = result;
+    return ARM_OK;
+}
+
 /*
- * ARMv6 media space: the extend and byte-reverse families. Real XNU and its
+ * ARM media space, including profile-gated ARMv6T2 bitfields. Real XNU and its
  * userland use these in ordinary compiled code, so they are not optional.
  *
  *   extend: cccc 0110 1 op nnnn dddd rr00 0111 mmmm
@@ -1886,6 +1905,18 @@ static arm_status_t exec_block_transfer(arm_cpu_t *c, uint32_t pc, uint32_t insn
  *           rr rotates the source right by rr*8 before extracting.
  */
 static arm_status_t exec_media(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
+    /* BFC/BFI/SBFX/UBFX A1 (DDI0406C.b A8.8.19/20/164/246).
+     * Unlike T32, A32 permits SP operands. Rn=PC selects BFC for insertion
+     * and is unpredictable for extraction; Rd=PC is always unpredictable. */
+    uint32_t bitfield = insn & 0x0fe00070u;
+    if (bitfield == 0x07c00010u || bitfield == 0x07a00050u || bitfield == 0x07e00050u) {
+        if (!arm_arch_has_a32_bitfield(c->arch)) return ARM_UNDEFINED;
+        unsigned rd = (insn >> 12) & 15u, rn = insn & 15u;
+        bool insert = bitfield == 0x07c00010u;
+        if (rd == 15u || (!insert && rn == 15u)) return ARM_UNDEFINED;
+        return exec_bitfield(c, rd, rn, (insn >> 7) & 31u, (insn >> 16) & 31u,
+                             insert, bitfield == 0x07a00050u);
+    }
     if ((insn & 0x0f8003f0u) == 0x06800070u) {
         unsigned op  = (insn >> 20) & 0xfu;
         unsigned rn  = (insn >> 16) & 0xfu;
@@ -3459,18 +3490,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         bool insert = field_operation == 0xf360u;
         if (rd == 13u || rd == 15u || rn == 13u || (!insert && rn == 15u))
             return ARM_UNDEFINED;
-        if (insert ? limit < lsb : lsb + limit >= 32u) return ARM_UNDEFINED;
-        unsigned width = insert ? limit - lsb + 1u : limit + 1u;
-        uint32_t mask = UINT32_MAX >> (32u - width);
-        uint32_t source = rn == 15u ? 0u : c->r[rn]; /* Rn=PC selects BFC. */
-        uint32_t result;
-        if (insert) result = (c->r[rd] & ~(mask << lsb)) | ((source & mask) << lsb);
-        else {
-            result = (source >> lsb) & mask;
-            if (field_operation == 0xf340u && (result & (1u << (width - 1u)))) result |= ~mask;
-        }
-        c->r[rd] = result;
-        return ARM_OK;
+        return exec_bitfield(c, rd, rn, lsb, limit, insert, field_operation == 0xf340u);
     }
     /* MOVW T3 / MOVT T1: imm4:i:imm3:imm8, no flag changes. ARMv7 forbids
      * SP and PC here (DDI0406C.b A8.8.102/106). Check before any register write. */

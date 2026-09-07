@@ -624,8 +624,20 @@ Thumb UBFX/SBFX and BFI/BFC implement bitfield extraction, sign extension,
 insertion and clearing. They validate ranges before shifting and preserve
 flags and unrelated destination bits. Tests compare every encoded field
 range against a bit-by-bit reference, including full-width fields, register
-overlaps, invalid SP/PC operands and reserved encoding bits. A32 bitfield
-instructions remain a separate unimplemented family.
+overlaps, invalid SP/PC operands and reserved encoding bits.
+
+A32 BFC/BFI/SBFX/UBFX now use the same bit-selection arithmetic behind an
+explicit Cortex-A8/Swift feature gate. ARM1176 continues to refuse them.
+The ARM forms permit SP operands, reject PC destinations and extraction
+sources, and interpret an insertion source of PC as BFC. Failed conditions
+suppress even invalid fields or operands. Tests cover all field encodings,
+source/destination overlap, sign boundaries, register roles, condition skips,
+flags and exclusive-state preservation, with host fetch caches enabled and
+disabled. These distinctions follow
+[DDI0406C.b, A8.8.19/20/164/246](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+The matching kernel's `initcode` contains `BFC r0,#8,#8` (`0xe7cf041f`) at
+`0x802b9adc`; that exact encoding is covered by the regression. This is
+instruction-level evidence, not execution of the enclosing boot routine.
 
 Thumb MUL/MLA/MLS, SMULL/UMULL, SMLAL/UMLAL and UMAAL preserve flags and
 support source/destination overlaps. Standard long forms reuse the existing

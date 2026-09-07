@@ -10673,6 +10673,95 @@ static void test_thumb2_table_branch_fetch(void) {
           c.spsr[ARM_BANK_ABT]==flags,"table branch destination fault lost the actual next PC");
 }
 
+static uint32_t reference_arm_bitfield(unsigned op, uint32_t dest, uint32_t source,
+                                      unsigned lsb, unsigned encoded) {
+    unsigned width=op<2u ? encoded+1u : encoded-lsb+1u;
+    uint32_t expected=0u;
+    for (unsigned bit=0;bit<32u;bit++) {
+        unsigned value;
+        if (op<2u) value=bit<width ? (source>>(lsb+bit))&1u :
+            op==0u ? (source>>(lsb+width-1u))&1u : 0u;
+        else if (bit<lsb || bit>encoded) value=(dest>>bit)&1u;
+        else value=op==3u ? 0u : (source>>(bit-lsb))&1u;
+        expected|=(uint32_t)value<<bit;
+    }
+    return expected;
+}
+
+static uint32_t arm_bitfield_insn(unsigned op, unsigned rd, unsigned rn,
+                                  unsigned lsb, unsigned encoded) {
+    const uint32_t base[]={0xe7a00050u,0xe7e00050u,0xe7c00010u,0xe7c00010u};
+    return base[op]|(encoded<<16)|(rd<<12)|(lsb<<7)|(op==3u ? 15u : rn);
+}
+
+static void test_arm_bitfield_values(void) {
+    const arm_arch_t profiles[]={ARM_ARCH_V7_CORTEX_A8,ARM_ARCH_V7_SWIFT,ARM_ARCH_V6_ARM1176};
+    const uint32_t values[]={0u,UINT32_MAX,0x80ff7f01u,0x12345678u};
+    for (unsigned p=0;p<3u;p++)
+     for (unsigned host=0;host<2u;host++)
+      for (unsigned op=0;op<4u;op++)
+       for (unsigned lsb=0;lsb<32u;lsb++)
+        for (unsigned encoded=0;encoded<32u;encoded++)
+         for (unsigned v=0;v<4u;v++) {
+            arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
+            arm_cpu_t c; CHECK(arm_reset_profile(&c,&bus,profiles[p]),"reset");
+            c.cpsr=ARM_MODE_SYS|ARM_CPSR_N|ARM_CPSR_C|ARM_CPSR_V|ARM_CPSR_Q|0xa0000u;
+            c.r[14]=values[v]; c.r[8]=~values[v]; c.excl_valid=true; c.excl_addr=0x1234u;
+            unsigned rd=((lsb^encoded)&1u) ? 14u : 8u;
+            uint32_t before[16], flags=c.cpsr; memcpy(before,c.r,sizeof before);
+            bool valid=p<2u && (op<2u ? lsb+encoded<32u : encoded>=lsb);
+            if (valid) {
+                before[rd]=reference_arm_bitfield(op,c.r[rd],c.r[14],lsb,encoded);
+                before[15]=4u;
+            }
+            m_w32(NULL,0u,arm_bitfield_insn(op,rd,14u,lsb,encoded));
+            CHECK(arm_step(&c)==(valid ? ARM_OK : ARM_UNDEFINED) && memcmp(before,c.r,sizeof before)==0 &&
+                  c.cpsr==flags && c.cycles==1u && c.excl_valid && c.excl_addr==0x1234u,
+                  "A32 bitfield p=%u op=%u lsb=%u field=%u value=%u lost range/profile/bit/state",p,op,lsb,encoded,v);
+         }
+}
+
+static void test_arm_bitfield_operands_and_conditions(void) {
+    for (unsigned p=0;p<2u;p++)
+     for (unsigned op=0;op<4u;op++)
+      for (unsigned role=0;role<(op==3u ? 1u : 2u);role++)
+       for (unsigned reg=0;reg<16u;reg++)
+        for (unsigned execute=0;execute<2u;execute++) {
+            arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,p ? ARM_ARCH_V7_SWIFT : ARM_ARCH_V7_CORTEX_A8),"reset");
+            c.cpsr=ARM_MODE_USR|ARM_CPSR_N|ARM_CPSR_C|ARM_CPSR_Q|0x50000u;
+            for (unsigned r=0;r<15u;r++) c.r[r]=0x81f023a5u+r;
+            unsigned rd=role ? 8u : reg, rn=role ? reg : 14u;
+            uint32_t before[16], flags=c.cpsr; memcpy(before,c.r,sizeof before);
+            bool valid=rd!=15u && (op>=2u || rn!=15u);
+            if (!execute || valid) {
+                if (execute) before[rd]=reference_arm_bitfield(op==2u && rn==15u ? 3u : op,c.r[rd],c.r[rn],4u,15u);
+                before[15]=4u;
+            }
+            uint32_t insn=arm_bitfield_insn(op,rd,rn,4u,15u);
+            if (!execute) insn&=0x0fffffffu; /* Failed EQ, including bad PC operands. */
+            m_w32(NULL,0u,insn);
+            CHECK(arm_step(&c)==(!execute || valid ? ARM_OK : ARM_UNDEFINED) &&
+                  memcmp(before,c.r,sizeof before)==0 && c.cpsr==flags,
+                  "A32 bitfield SP/PC roles, clear alias or failed condition");
+        }
+    /* A failed condition also suppresses out-of-range fields on every legacy
+     * and new profile; it does not reach the architecture-feature check. */
+    const arm_arch_t profiles[]={ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_CORTEX_A8,ARM_ARCH_V7_SWIFT};
+    for (unsigned p=0;p<3u;p++)
+     for (unsigned op=0;op<4u;op++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,profiles[p]),"reset");
+        c.cpsr=ARM_MODE_SYS|ARM_CPSR_C; c.r[8]=0x12345678u;
+        m_w32(NULL,0u,arm_bitfield_insn(op,8u,14u,31u,1u)&0x0fffffffu);
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==4u && c.r[8]==0x12345678u && c.cpsr==(ARM_MODE_SYS|ARM_CPSR_C),
+              "failed-condition A32 bitfield checked invalid fields/profile");
+     }
+    arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+    c.cpsr=ARM_MODE_SYS|ARM_CPSR_C; c.r[0]=0x12345678u; c.r[15]=0x802b9adcu;
+    m_w32(NULL,0x802b9adcu,0xe7cf041fu); /* Matching kernel initcode BFC r0,#8,#8. */
+    CHECK(arm_step(&c)==ARM_OK && c.r[15]==0x802b9ae0u && c.r[0]==0x12340078u && c.cpsr==(ARM_MODE_SYS|ARM_CPSR_C),
+          "matching kernel A32 BFC encoding");
+}
+
 static void test_thumb2_bitfields(void) {
     const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
     const uint16_t first[] = {0xf340u,0xf3c0u,0xf360u,0xf36fu}; /* SBFX, UBFX, BFI, BFC */
@@ -11202,6 +11291,8 @@ int main(void) {
     test_thumb2_table_branch_unaligned();
     test_thumb2_table_branch_fetch();
     test_thumb2_bitfields();
+    test_arm_bitfield_values();
+    test_arm_bitfield_operands_and_conditions();
     test_thumb2_multiply();
     test_thumb2_multiply_long();
     test_thumb2_multiply_constraints();
