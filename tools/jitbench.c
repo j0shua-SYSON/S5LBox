@@ -5840,8 +5840,12 @@ static bool compact_raw_thumb_program_compare(
     capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
 
     seed_compact_raw_thumb(&compact, program, insns, pc);
-    if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, insns * 2u,
-                             budget, g_ram, sizeof g_ram, &completed)) {
+    const bool accepted = a64_compact_raw_run(
+        &compact, &g_ram[pc], pc, insns * 2u, budget,
+        g_ram, sizeof g_ram, &completed);
+    /* Zero is a public-contract refusal, with zero retirement and no state
+     * change; positive budgets must actually enter the native executor. */
+    if (accepted != (budget != 0u)) {
         fprintf(stderr,
                 "jitbench: compact raw Thumb program %s contract refused\n",
                 name);
@@ -6484,7 +6488,7 @@ static bool validate_compact_raw_thumb_register_oracle(void) {
         return false;
     }
     printf("COMPACT-RAW-THUMB-REGISTER-ORACLE exact=yes scalar-cases=454144 "
-           "memory-cases=22528 flags=all operand-aliases=all chains=15 "
+           "memory-cases=22528 flags=all operand-aliases=all budgets=15 "
            "live-store=yes raw-reentry=yes runtime-codegen=no\n");
     return true;
 }
