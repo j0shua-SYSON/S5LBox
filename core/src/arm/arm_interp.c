@@ -3214,6 +3214,18 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         if (wb && !c->abort_pending) c->r[rn] = adjusted;
         return ARM_OK;
     }
+    /* PKHBT/PKHTB T1 (A8.8.125) occupy a separate shifted-register
+     * opcode. S and T must be zero; Thumb also forbids every SP operand.
+     * Reuse A32 packing, including its encoded-zero ASR32 semantics. */
+    if ((first & 0xffe0u) == 0xeac0u && !(second & 0x8000u)) {
+        unsigned rn = first & 15u, rd = (second >> 8) & 15u, rm = second & 15u;
+        unsigned amount = ((second >> 10) & 0x1cu) | ((second >> 6) & 3u);
+        if ((first & 0x10u) || (second & 0x10u) || rn == 13u || rn == 15u ||
+            rd == 13u || rd == 15u || rm == 13u || rm == 15u)
+            return ARM_UNDEFINED;
+        return exec_media(c, pc, 0xe6800010u | (rn << 16) | (rd << 12) |
+                          (amount << 7) | ((second & 0x20u) << 1) | rm);
+    }
     /* Modified-immediate and shifted-register data processing share their
      * operations (A6.3.1/2/11). Logical flags use the expansion/shifter carry;
      * arithmetic uses the original C input and its own carry/overflow output.

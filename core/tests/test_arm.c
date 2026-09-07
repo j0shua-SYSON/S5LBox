@@ -9799,17 +9799,143 @@ static void test_thumb2_shifted_register_constraints(void) {
         } else CHECK(!memcmp(before, c.r, sizeof before) && c.cpsr == flags, "invalid shifted form changed state");
     }
     for (unsigned op = 0; op < 16; op++) {
-        if (op != 5u && op != 6u && op != 7u && op != 9u && op != 12u && op != 15u) continue;
+        if (op != 5u && op != 7u && op != 9u && op != 12u && op != 15u) continue;
         arm_cpu_t c;
         CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset"); c.cpsr |= ARM_CPSR_T;
         write_thumb2_shifted(op, false, 1u, 0u, 2u, 0u, 0u);
-        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u, "shifted ALU overmatched PKH or unallocated op");
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u, "shifted ALU overmatched an unallocated op");
     }
     arm_cpu_t c;
     arm_reset(&c, &g_bus); c.cpsr |= ARM_CPSR_T; c.r[14] = 0x1000u; c.r[0] = 0x12345678u;
     m_w16(NULL, 0, 0xeb08u); m_w16(NULL, 2, 0x0004u);
     CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x1610u && c.r[14] == 3u &&
           !(c.cpsr & ARM_CPSR_T) && c.r[0] == 0x12345678u, "ARM1176 BLX suffix framing changed");
+}
+
+static void put_thumb_pack(uint32_t pc, bool top, unsigned amount, unsigned rd, unsigned rn, unsigned rm) {
+    m_w16(NULL,pc,(uint16_t)(0xeac0u|rn));
+    m_w16(NULL,pc+2u,(uint16_t)(((amount&28u)<<10)|(rd<<8)|((amount&3u)<<6)|(top ? 0x20u : 0u)|rm));
+}
+
+static uint32_t pack_halfword_reference(uint32_t n, uint32_t m, bool top, unsigned amount) {
+    /* Extract each desired source bit independently. In the top form, bits
+     * beyond Rm's top bit repeat its sign; encoded zero means ASR32. */
+    uint32_t result=top ? n & 0xffff0000u : n & 0xffffu;
+    unsigned shift=top && !amount ? 32u : amount;
+    for (unsigned bit=0;bit<16u;bit++) {
+        unsigned destination=top ? bit : bit+16u;
+        bool value;
+        if (top) value=((m>>(bit+shift<32u ? bit+shift : 31u))&1u)!=0u;
+        else value=destination>=shift && ((m>>(destination-shift))&1u)!=0u;
+        if (value) result |= 1u<<destination;
+    }
+    return result;
+}
+
+static void test_thumb2_pack_halfwords(void) {
+    const arm_arch_t profiles[]={ARM_ARCH_V7_CORTEX_A8,ARM_ARCH_V7_SWIFT};
+    const uint32_t values[]={0u,UINT32_MAX,0x80000001u,0x7fffffffu,0x89abcdefu,0x00010035u};
+    for (unsigned p=0;p<2u;p++)
+     for (unsigned top=0;top<2u;top++)
+      for (unsigned amount=0;amount<32u;amount++)
+       for (unsigned v=0;v<sizeof values/sizeof values[0];v++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,profiles[p]),"reset");
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_Z|ARM_CPSR_C|
+               ARM_CPSR_V|ARM_CPSR_Q|(9u<<16);
+        c.r[2]=0xa55ac33cu; c.r[14]=values[v]; c.r[8]=0x13579bdfu;
+        c.excl_valid=true; c.excl_addr=0x4560u;
+        uint32_t flags=c.cpsr, want=pack_halfword_reference(c.r[2],c.r[14],top!=0u,amount);
+        put_thumb_pack(0u,top!=0u,amount,8u,2u,14u);
+        CHECK(arm_step(&c)==ARM_OK && c.r[8]==want && c.r[2]==0xa55ac33cu && c.r[14]==values[v] &&
+              c.r[15]==4u && c.cpsr==flags && c.cycles==1u && c.excl_valid && c.excl_addr==0x4560u,
+              "Thumb pack profile=%u top=%u amount=%u value=%08x got=%08x want=%08x",p,top,amount,values[v],c.r[8],want);
+       }
+    /* The observed baud-method operands: low divisor bits are retained and
+     * the sample-rate field comes from the other word's low half. */
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+    c.cpsr=ARM_MODE_SVC|ARM_CPSR_T; c.r[1]=0x00010035u; c.r[4]=0u;
+    m_w16(NULL,0u,0xeac1u); m_w16(NULL,2u,0x4804u);
+    CHECK(arm_step(&c)==ARM_OK && c.r[8]==0x35u && c.r[15]==4u,"observed Thumb PKHBT encoding");
+}
+
+static void test_thumb2_pack_operands(void) {
+    const unsigned states[]={0u,0x18u,0x1cu,0x0cu}, advanced[]={0u,0u,0x18u,0x18u};
+    for (unsigned top=0;top<2u;top++)
+     for (unsigned role=0;role<3u;role++)
+      for (unsigned reg=0;reg<16u;reg++)
+       for (unsigned it=0;it<4u;it++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cpsr=ARM_MODE_SYS|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_V|ARM_CPSR_Q|(5u<<16)|test_it_bits(states[it]);
+        for (unsigned r=0;r<15u;r++) c.r[r]=0x80012340u+r;
+        c.r[15]=0x100u;
+        unsigned rd=role==0u ? reg : 8u, rn=role==1u ? reg : 2u, rm=role==2u ? reg : 14u;
+        uint32_t before[16]; memcpy(before,c.r,sizeof before);
+        uint32_t flags=c.cpsr, want=pack_halfword_reference(before[rn],before[rm],top!=0u,17u);
+        bool passed=it!=3u, valid=reg!=13u && reg!=15u, ok=!passed || valid;
+        put_thumb_pack(0x100u,top!=0u,17u,rd,rn,rm);
+        CHECK(arm_step(&c)==(ok ? ARM_OK : ARM_UNDEFINED) && c.cycles==1u &&
+              c.r[15]==(ok ? 0x104u : 0x100u) &&
+              c.cpsr==(ok ? (flags & ~TEST_IT_MASK)|test_it_bits(advanced[it]) : flags),
+              "Thumb pack operands top=%u role=%u reg=%u IT=%u",top,role,reg,it);
+        for (unsigned r=0;r<15u;r++) CHECK(c.r[r]==(passed && valid && r==rd ? want : before[r]),
+            "Thumb pack changed wrong register r=%u top=%u role=%u reg=%u IT=%u",r,top,role,reg,it);
+       }
+    /* All-equal operands need both halves to be sampled before the result is
+     * written, including the ASR32 special case. */
+    for (unsigned top=0;top<2u;top++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_SWIFT),"reset");
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T; c.r[14]=0x89abcdefu;
+        put_thumb_pack(0u,top!=0u,0u,14u,14u,14u);
+        CHECK(arm_step(&c)==ARM_OK && c.r[14]==(top ? 0x89abffffu : 0x89abcdefu),"Thumb pack all operands alias");
+    }
+    static const uint16_t invalid[][2]={{0xead2u,0x080eu},{0xeac2u,0x081eu},
+        {0xead2u,0x083eu},{0xeac2u,0x082fu},{0xeac2u,0x880eu},{0xf0c2u,0x080eu}};
+    for (unsigned n=0;n<sizeof invalid/sizeof invalid[0];n++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cpsr=ARM_MODE_SYS|ARM_CPSR_T|ARM_CPSR_C; c.r[2]=1u; c.r[8]=0x12345678u; c.r[14]=UINT32_MAX;
+        uint32_t before[16]; memcpy(before,c.r,sizeof before);
+        uint32_t flags=c.cpsr;
+        m_w16(NULL,0u,invalid[n][0]); m_w16(NULL,2u,invalid[n][1]);
+        CHECK(arm_step(&c)==ARM_UNDEFINED && c.cpsr==flags && memcmp(c.r,before,sizeof before)==0,
+              "Thumb pack accepted invalid S/T/fixed field or immediate neighbor %u",n);
+    }
+    arm_cpu_t c;
+    arm_reset(&c,&g_bus); c.cpsr=ARM_MODE_SYS|ARM_CPSR_T|ARM_CPSR_C;
+    c.r[15]=0x100u; c.r[14]=0x200u; c.r[8]=0x12345678u;
+    uint32_t flags=c.cpsr;
+    put_thumb_pack(0x100u,false,16u,8u,1u,4u);
+    CHECK(arm_step(&c)==ARM_OK && c.r[15]==0x780u && c.r[14]==0x103u && c.r[8]==0x12345678u &&
+          c.cpsr==(flags & ~ARM_CPSR_T),"Thumb pack changed ARM1176 BLX suffix framing");
+}
+
+static void test_thumb2_pack_fetch(void) {
+    for (unsigned host=0;host<2u;host++)
+     for (unsigned fault=0;fault<4u;fault++) {
+        memset(g_ram,0,sizeof g_ram);
+        arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_V|test_it_bits(0x1cu);
+        c.r[15]=0xffeu; c.r[2]=0xaaaa1234u; c.r[14]=0x1234ffffu; c.r[8]=0xdeadbeefu;
+        uint32_t flags=c.cpsr;
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x8032u);
+        m_w32(NULL,0x6004u,fault==1u ? 0u : fault==2u ? 0xa033u : fault==3u ? 0xa012u : 0xa032u);
+        put_thumb_pack(0x8ffeu,false,16u,8u,2u,14u);
+        m_w16(NULL,0xa000u,m_r16(NULL,0x9000u)); m_w16(NULL,0x9000u,0x482eu);
+        CHECK(arm_step(&c)==ARM_OK && c.cycles==1u,"Thumb pack fetch disposition");
+        if (!fault) CHECK(c.r[15]==0x1002u && c.r[8]==0xffff1234u &&
+            c.cpsr==((flags & ~TEST_IT_MASK)|test_it_bits(0x18u)),"Thumb pack wrong second half/flags/IT");
+        else CHECK(c.r[15]==ARM_VEC_PREFETCH && c.r[14]==0x1002u && c.cp15.ifar==0x1000u &&
+            c.spsr[ARM_BANK_ABT]==flags && c.r[8]==0xdeadbeefu &&
+            (c.cp15.ifsr&15u)==(fault==1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION),
+            "Thumb pack effects preceded complete fetch");
+     }
 }
 
 static void test_thumb2_bitfields(void) {
@@ -10322,6 +10448,9 @@ int main(void) {
     test_thumb2_shifted_data_processing();
     test_thumb2_immediate_shift_aliases();
     test_thumb2_shifted_register_constraints();
+    test_thumb2_pack_halfwords();
+    test_thumb2_pack_operands();
+    test_thumb2_pack_fetch();
     test_thumb2_bitfields();
     test_thumb2_multiply();
     test_thumb2_multiply_long();

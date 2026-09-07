@@ -459,15 +459,25 @@ inconsistent source fields are refused, following
 Tests cover zero, every single-bit position, mixed patterns, IT conditions,
 separately mapped instruction halves and ARM1176's existing framing.
 
+Thumb PKHBT/PKHTB combine halfwords after shifting the second operand.
+The dedicated decode validates S/T fields and excludes SP/PC, then uses the
+existing A32 packing arithmetic. Encoded zero means no shift for PKHBT and
+ASR by 32 for PKHTB. All shifts, sign boundaries, aliases, IT behavior and
+split instruction fetches are tested against individual source-bit selection.
+See [DDI0406C.b, A8.8.125](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
 A private fixture executes the unchanged matching AppleSamsungSerial baud
 method with explicit synthetic objects, MMU mappings and clock inputs. It
 captures only the method's four expected writes and refuses every UART read;
 there is no UART device behind this fixture. With a 100 MHz input argument
 and baud argument 230400, the first unsupported instruction was Thumb CLZ
-at `0x8083cbaa`, after 59 steps. The new operations carry this fixture to
-Thumb PKHBT at `0x8083c59c`, after 1,148 steps. Only the initial FIFO-control
-write has occurred there. This is an isolated arithmetic/driver-prefix result,
-not completed baud initialization, selected board clocks, UART traffic or boot.
+at `0x8083cbaa`, after 59 steps; adding CLZ/RBIT exposed Thumb PKHBT at
+`0x8083c59c`, after 1,148 steps. With packing implemented, that method returns
+after 1,760 steps and writes UFCON `0x1c1`, UBRDIV `0x35`, and both offset
+registers `0x1000`. All six combinations of input clocks 100/24 MHz and baud
+arguments 230400/19200/921600 return with the four expected writes in order.
+These are recorded method outputs from prepared inputs. They do not establish
+complete driver setup, selected board clocks, UART traffic or boot.
 
 Thumb register-offset STRB/STRH/STR add the full offset register shifted
 left by 0..3, with no writeback or flag changes. Valid operands can alias;
@@ -576,7 +586,7 @@ establish that result.
   and arithmetic (also with shifted registers), immediate LDR/STR and
   byte/halfword transfers (including signed loads and pre/post indexing),
   literals, doubleword transfers, extend/add forms, bitfields and word/long
-  multiply/accumulate, CLZ and RBIT. Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple
+  multiply/accumulate, CLZ, RBIT and PKH. Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple
   transfers are also implemented. Other instruction families remain to implement. IT state
   and conditional execution are implemented for the supported Thumb families.
   Cortex-A8 MRC/MCR transfers cover the currently implemented CP15 registers.
