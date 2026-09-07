@@ -1153,9 +1153,14 @@ static void test_native_resident_bulk_transitions(void) {
                              * Refusal must execute the candidate exactly once. */
                             w16(NULL, CODE + (kind ? 2u : 4u),
                                 kind ? 0x2901u : 0x2c01u);
-                        if (scenario == 2u)
-                            /* No readable next halfword in this FETCH window. */
-                            memory.code_bytes = sizeof prefix + 2u;
+                        if (scenario == 2u) {
+                            /* Place the candidate in the final halfword of a
+                             * valid word-aligned FETCH window. */
+                            uint16_t candidate = r16(NULL, CODE);
+                            w16(NULL, CODE, 0x46c0u); /* MOV r8,r8 */
+                            w16(NULL, CODE + 2u, candidate);
+                            memory.code_bytes = sizeof prefix + 4u;
+                        }
                         memory.flat_ram = NULL; memory.data_cache = true;
                         CHECK(arm_data_cache_try_refill(&cpu, DATA,
                               ARM_ACCESS_READ, false), "resident chain DATA map");
