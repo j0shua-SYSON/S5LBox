@@ -114,6 +114,31 @@ static void test_data_and_retry(void) {
       }
 }
 
+static void test_table_branch_and_retry(void) {
+    for (unsigned kind=0;kind<3u;kind++)
+     for (unsigned host=0;host<2u;host++) {
+        fixture_t f; arm_bus_t bus; arm_cpu_t c;
+        setup(&f,&bus,&c,true,host!=0u);
+        c.cpsr |= 0x1800u; /* Last IT NE slot. */
+        c.r[0]=0u; c.r[1]=kind==2u ? 0xfffu : 0x1000u;
+        put16(&f,0u,0xe8d1u); put16(&f,2u,kind ? 0xf010u : 0xf000u);
+        uint32_t entry=kind==2u ? 0x1234u : 7u;
+        put16(&f,c.r[1],(uint16_t)entry);
+        f.fail_address=0x1000u; f.fail_size=kind==1u ? 2u : 1u;
+        uint32_t flags=c.cpsr, before[16]; memcpy(before,c.r,sizeof before);
+        if (kind==2u) {
+            CHECK(arm_step(&c)==ARM_UNDEFINED && !f.failed && c.cpsr==flags &&
+                  memcmp(c.r,before,sizeof before)==0,"unsupported unaligned TBH issued a partial table read");
+            continue;
+        }
+        CHECK(arm_step(&c)==ARM_HALT && memcmp(c.r,before,sizeof before)==0,"failed table read changed PC/registers");
+        check_stop(&f,&c,0u,flags);
+        f.failed=false; f.fail_size=0u;
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==4u+2u*entry && c.cycles==1u &&
+              c.cpsr==(flags & ~0x0600fc00u),"table branch retry failed or advanced IT before successful read");
+     }
+}
+
 static void test_fetch_and_latched_cache(void) {
     for (unsigned kind = 0; kind < 3u; kind++)
      for (unsigned second = 0; second < (kind == 2u ? 2u : 1u); second++)
@@ -364,6 +389,7 @@ static void test_signed_runner_entry_guards(void) {
 
 int main(void) {
     test_data_and_retry();
+    test_table_branch_and_retry();
     test_fetch_and_latched_cache();
     test_walk_failures();
     test_partial_transfers_and_vfp();

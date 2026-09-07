@@ -466,6 +466,20 @@ ASR by 32 for PKHTB. All shifts, sign boundaries, aliases, IT behavior and
 split instruction fetches are tested against individual source-bit selection.
 See [DDI0406C.b, A8.8.125](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 
+Thumb TBB and aligned TBH read an unsigned byte or halfword from a table and
+branch by twice that value. A PC table base means the instruction address
+plus four without rounding to a word boundary. Index and destination
+arithmetic wrap at 32 bits. Within an IT block they require its final slot;
+failed conditions suppress table reads. Guest faults save the current IT
+state for retry, and checked-bus failures halt without retirement.
+The target is fetched on the following step. Tests cover
+these boundaries, translated tables, permissions and checked-bus retry.
+See [DDI0406C.b, A8.8.236](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Unaligned TBH raises an alignment abort when SCTLR.A is set; otherwise it
+stops as unsupported because the shared translator does not yet expose the
+memory-type attributes needed to distinguish permitted unaligned RAM reads
+from forbidden Device accesses. Big-endian TBH is also explicitly unsupported.
+
 A private fixture executes the unchanged matching AppleSamsungSerial baud
 method with explicit synthetic objects, MMU mappings and clock inputs. It
 captures only the method's four expected writes and refuses every UART read;
@@ -478,6 +492,14 @@ registers `0x1000`. All six combinations of input clocks 100/24 MHz and baud
 arguments 230400/19200/921600 return with the four expected writes in order.
 These are recorded method outputs from prepared inputs. They do not establish
 complete driver setup, selected board clocks, UART traffic or boot.
+
+A separate fixture enters its unchanged enclosing line-configuration method
+at `0x8083c388`, with prepared UCON `0x405` and ULCON `3` input values. Before
+TBB support it stopped after 14 steps at `0x8083c3ac`. All five parity-argument
+cases now return through the real baud method with the expected two reads and
+seven writes, including line-control values `0x23/0x2b/0x33/0x3b/3` and restored
+control `0x405`. The fixture supplies synthetic objects and the exact two
+input reads, refuses other accesses, and does not implement a UART device.
 
 Thumb register-offset STRB/STRH/STR add the full offset register shifted
 left by 0..3, with no writeback or flag changes. Valid operands can alias;
@@ -587,7 +609,8 @@ establish that result.
   byte/halfword transfers (including signed loads and pre/post indexing),
   literals, doubleword transfers, extend/add forms, bitfields and word/long
   multiply/accumulate, CLZ, RBIT and PKH. Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple
-  transfers are also implemented. Other instruction families remain to implement. IT state
+  transfers, TBB and aligned TBH are also implemented. Other instruction
+  families remain to implement. IT state
   and conditional execution are implemented for the supported Thumb families.
   Cortex-A8 MRC/MCR transfers cover the currently implemented CP15 registers.
 - Cortex-A8 stores d0-d31 and supports system/core/memory transfers plus

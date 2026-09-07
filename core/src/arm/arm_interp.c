@@ -2980,6 +2980,8 @@ static bool thumb_it_placement(unsigned state, uint16_t first, uint16_t second,
         if (((first & 0xfff0u) == 0xf8d0u || (first & 0xfff0u) == 0xf850u) &&
             (second >> 12) == 15u)
             return last;
+        if ((first & 0xfff0u) == 0xe8d0u && (second & 0xffe0u) == 0xf000u)
+            return last; /* TBB/TBH */
         if (((first & 0xffc0u) == 0xe880u || (first & 0xffc0u) == 0xe900u) &&
             (first & 0x10u) && (second & 0x8000u))
             return last;
@@ -3039,6 +3041,29 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         if (c->arch != ARM_ARCH_V7_CORTEX_A8 || (second >> 12) == 13u)
             return ARM_UNDEFINED;
         return exec_coprocessor(c, pc, ((uint32_t)first << 16) | second);
+    }
+    /* TBB/TBH T1 (A8.8.236). PC means this instruction +4, without
+     * word alignment; the unsigned table entry counts halfwords from PC.
+     * Complete the table read before publishing the branch destination. */
+    if ((first & 0xfff0u) == 0xe8d0u && (second & 0xffe0u) == 0xf000u) {
+        unsigned rn = first & 15u, rm = second & 15u;
+        bool half = (second & 0x10u) != 0u;
+        if (rn == 13u || rm == 13u || rm == 15u || (half && (c->cpsr & ARM_CPSR_E)))
+            return ARM_UNDEFINED;
+        uint32_t base = rn == 15u ? pc + 4u : c->r[rn];
+        uint32_t address = base + (c->r[rm] << (half ? 1u : 0u));
+        if (half && (address & 1u)) {
+            if (c->cp15.sctlr & ARM_SCTLR_A) {
+                note_alignment_abort(c, address, false);
+                return ARM_OK;
+            }
+            /* The shared translator does not expose memory-type attributes.
+             * Do not admit unaligned Device reads as ordinary RAM accesses. */
+            return ARM_UNDEFINED;
+        }
+        uint32_t entry = half ? mem_r16(c, address) : mem_r8(c, address);
+        if (!c->abort_pending) *next = pc + 4u + 2u * entry;
+        return ARM_OK;
     }
     /* LDRD/STRD immediate T1 and LDRD literal T1 (A8.8.72/73/210).
      * T32 names two independent data registers; only a load forbids equal

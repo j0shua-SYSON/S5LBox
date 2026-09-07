@@ -9938,6 +9938,192 @@ static void test_thumb2_pack_fetch(void) {
      }
 }
 
+static void put_thumb_table_branch(uint32_t pc, bool half, unsigned rn, unsigned rm) {
+    m_w16(NULL,pc,(uint16_t)(0xe8d0u|rn));
+    m_w16(NULL,pc+2u,(uint16_t)(0xf000u|(half ? 16u : 0u)|rm));
+}
+
+static void test_thumb2_table_branch_values(void) {
+    const arm_arch_t profiles[]={ARM_ARCH_V7_CORTEX_A8,ARM_ARCH_V7_SWIFT};
+    const uint32_t entries[]={0u,1u,0x7fu,0x80u,0xffu,0x100u,0x7fffu,0x8000u,0xffffu};
+    static const uint32_t addresses[][2]={{0x300u,7u},{0xfffffff0u,0x21u},
+        {0x312u,0x80000001u},{0x300u,0xffffff80u}};
+    for (unsigned p=0;p<2u;p++)
+     for (unsigned half=0;half<2u;half++)
+      for (unsigned mode=0;mode<6u;mode++)
+       for (unsigned n=0;n<sizeof entries/sizeof entries[0];n++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,profiles[p]),"reset");
+        c.cp15.sctlr=0u;
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_C|ARM_CPSR_V|ARM_CPSR_Q|(5u<<16);
+        uint32_t pc=mode==5u ? 0x102u : 0x100u;
+        c.r[15]=pc; c.r[2]=mode<4u ? addresses[mode][0] : 0xdeadbeefu;
+        c.r[14]=mode<4u ? addresses[mode][1] : 7u;
+        c.excl_valid=true; c.excl_addr=0x1234u;
+        uint32_t base=mode<4u ? c.r[2] : pc+4u;
+        uint32_t address=base+(c.r[14]<<half), entry=entries[n] & (half ? 0xffffu : 0xffu);
+        uint32_t flags=c.cpsr, before[15]; memcpy(before,c.r,sizeof before);
+        put_thumb_table_branch(pc,half!=0u,mode<4u ? 2u : 15u,14u);
+        if (half) m_w16(NULL,address,(uint16_t)entry);
+        else { m_w8(NULL,address,(uint8_t)entry); m_w8(NULL,address+1u,0x5au); }
+        g_watch_addr=address; g_watch_reads8=0u; g_watch_reads16=0u; g_watch_reads32=0u;
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==pc+4u+2u*entry && c.cycles==1u && c.cpsr==flags &&
+              memcmp(c.r,before,sizeof before)==0 && c.excl_valid && c.excl_addr==0x1234u &&
+              g_watch_reads8==(half ? 0u : 1u) && g_watch_reads16==(half ? 1u : 0u) && g_watch_reads32==0u,
+              "table branch profile=%u half=%u mode=%u entry=%x target=%08x",p,half,mode,entry,c.r[15]);
+        g_watch_addr=UINT32_MAX;
+       }
+}
+
+static void test_thumb2_table_branch_operands(void) {
+    const unsigned states[]={0u,0x18u,0x08u,0x1cu,0x0cu};
+    for (unsigned half=0;half<2u;half++)
+     for (unsigned role=0;role<2u;role++)
+      for (unsigned reg=0;reg<16u;reg++)
+       for (unsigned it=0;it<5u;it++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cp15.sctlr=0u;
+        c.cpsr=ARM_MODE_SYS|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_V|ARM_CPSR_Q|test_it_bits(states[it]);
+        for (unsigned r=0;r<15u;r++) c.r[r]=0x300u+2u*r;
+        c.r[15]=0x100u;
+        unsigned rn=role ? 2u : reg, rm=role ? reg : 14u;
+        uint32_t address=(rn==15u ? 0x104u : c.r[rn])+(c.r[rm]<<half);
+        put_thumb_table_branch(0x100u,half!=0u,rn,rm);
+        if (half) m_w16(NULL,address,7u); else m_w8(NULL,address,7u);
+        uint32_t before[15]; memcpy(before,c.r,sizeof before);
+        uint32_t flags=c.cpsr;
+        bool placement=it<3u, passed=it!=2u && it!=4u;
+        bool valid=reg!=13u && !(role && reg==15u), ok=placement && (!passed || valid);
+        g_watch_addr=address; g_watch_reads8=0u; g_watch_reads16=0u;
+        CHECK(arm_step(&c)==(ok ? ARM_OK : ARM_UNDEFINED) && c.cycles==1u &&
+              c.r[15]==(ok ? (passed ? 0x112u : 0x104u) : 0x100u) &&
+              c.cpsr==(ok ? flags & ~TEST_IT_MASK : flags) && memcmp(c.r,before,sizeof before)==0 &&
+              g_watch_reads8==(ok && passed && !half ? 1u : 0u) &&
+              g_watch_reads16==(ok && passed && half ? 1u : 0u),
+              "table branch operands half=%u role=%u reg=%u IT=%u",half,role,reg,it);
+        g_watch_addr=UINT32_MAX;
+       }
+    for (unsigned half=0;half<2u;half++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cpsr=ARM_MODE_SVC|ARM_CPSR_T|ARM_CPSR_E; c.r[2]=0x300u; c.r[14]=0u;
+        put_thumb_table_branch(0u,half!=0u,2u,14u); m_w16(NULL,0x300u,3u);
+        g_watch_addr=0x300u; g_watch_reads8=0u; g_watch_reads16=0u;
+        CHECK(arm_step(&c)==(half ? ARM_UNDEFINED : ARM_OK) && c.r[15]==(half ? 0u : 10u) &&
+              g_watch_reads8==(half ? 0u : 1u) && !g_watch_reads16,"table halfword must refuse unsupported big endian before access");
+        g_watch_addr=UINT32_MAX;
+    }
+    static const uint16_t invalid[][2]={{0xe8d2u,0xf02eu},{0xe8d2u,0xf04eu},
+        {0xe8d2u,0xe00eu},{0xe8c2u,0xf00eu},{0xe8d2u,0xf10eu},{0xe8d2u,0xf40eu}};
+    for (unsigned n=0;n<sizeof invalid/sizeof invalid[0];n++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cpsr=ARM_MODE_SYS|ARM_CPSR_T; c.r[2]=0x300u; c.r[14]=0u;
+        m_w16(NULL,0u,invalid[n][0]); m_w16(NULL,2u,invalid[n][1]);
+        g_watch_addr=0x300u; g_watch_reads8=0u; g_watch_reads16=0u; g_watch_writes32=0u;
+        CHECK(arm_step(&c)==ARM_UNDEFINED && c.r[15]==0u && !g_watch_reads8 && !g_watch_reads16 && !g_watch_writes32,
+              "table branch consumed separate exclusive/reserved encoding %u",n);
+        g_watch_addr=UINT32_MAX;
+    }
+    arm_cpu_t c;
+    arm_reset(&c,&g_bus); c.cpsr=ARM_MODE_SYS|ARM_CPSR_T; c.r[14]=0x200u; c.r[15]=0x100u;
+    put_thumb_table_branch(0x100u,false,2u,14u);
+    CHECK(arm_step(&c)==ARM_OK && c.r[15]==0x3a4u && c.r[14]==0x103u && !(c.cpsr & ARM_CPSR_T),
+          "table branch changed ARM1176 BLX suffix framing");
+    for (unsigned half=0;half<2u;half++) {
+        CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_C;
+        c.r[15]=0xffffff00u; c.r[2]=0x300u; c.r[14]=0u;
+        put_thumb_table_branch(c.r[15],half!=0u,2u,14u); m_w16(NULL,0x300u,0x80u);
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==4u && c.cpsr==(ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_C),
+              "table branch destination must wrap in the 32-bit address space");
+    }
+}
+
+static void test_thumb2_table_branch_data_faults(void) {
+    for (unsigned half=0;half<2u;half++)
+     for (unsigned host=0;host<2u;host++)
+      for (unsigned fault=0;fault<8u;fault++) {
+        memset(g_ram,0,sizeof g_ram);
+        arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP|(fault==5u ? ARM_SCTLR_A : 0u);
+        c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_C|test_it_bits(0x18u);
+        bool odd=fault==4u || fault==5u || fault==7u;
+        c.r[15]=0x100u; c.r[2]=fault==3u ? 0x100000u : 0x1000u+(odd ? 1u : 0u); c.r[14]=0u;
+        uint32_t flags=c.cpsr, base=c.r[2];
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x803eu);
+        m_w32(NULL,0x6004u,fault==1u ? 0u : fault==2u ? 0xa01eu : fault>=6u ? 0xa032u : 0xa03eu);
+        put_thumb_table_branch(0x8100u,half!=0u,2u,14u);
+        uint32_t pa=0xa000u+(base & 0xfffu);
+        m_w8(NULL,pa,0x23u); m_w8(NULL,pa+1u,0x81u);
+        g_watch_addr=pa; g_watch_reads8=0u; g_watch_reads16=0u;
+        bool refused=half && odd && fault!=5u;
+        bool aborted=(fault>=1u && fault<=3u) || (half && fault==5u);
+        CHECK(arm_step(&c)==(refused ? ARM_UNDEFINED : ARM_OK) && c.cycles==1u && c.r[2]==base,
+              "table branch data disposition/base half=%u fault=%u",half,fault);
+        if (refused) CHECK(c.r[15]==0x100u && c.cpsr==flags && !g_watch_reads8 && !g_watch_reads16,
+            "unaligned TBH must stop until memory-type attributes are available");
+        else if (!aborted) CHECK(c.r[15]==(half ? 0x1034au : 0x14au) && c.cpsr==(flags & ~TEST_IT_MASK) &&
+            g_watch_reads8==(half ? 0u : 1u) && g_watch_reads16==(half ? 1u : 0u),"table branch translated table width/value");
+        else {
+            uint32_t fsr=fault==1u ? ARM_FSR_PAGE_TRANSLATION : fault==2u ? ARM_FSR_PAGE_PERMISSION :
+                fault==3u ? ARM_FSR_SECTION_TRANSLATION : ARM_FSR_ALIGNMENT;
+            CHECK(c.r[15]==ARM_VEC_DATA_ABORT && c.r[14]==0x108u && c.cp15.dfar==base &&
+                  (c.cp15.dfsr&15u)==fsr && !(c.cp15.dfsr & (1u<<11)) && c.spsr[ARM_BANK_ABT]==flags &&
+                  !g_watch_reads8 && !g_watch_reads16,
+                  "table branch bad abort address/state or access before alignment/permission fault=%u",fault);
+        }
+        g_watch_addr=UINT32_MAX;
+     }
+}
+
+static void test_thumb2_table_branch_fetch(void) {
+    for (unsigned host=0;host<2u;host++)
+     for (unsigned fault=0;fault<4u;fault++) {
+        memset(g_ram,0,sizeof g_ram);
+        arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_V|test_it_bits(0x18u);
+        c.r[15]=0xffeu; c.r[2]=0x3000u; c.r[14]=1u;
+        uint32_t flags=c.cpsr;
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x8032u);
+        m_w32(NULL,0x6004u,fault==1u ? 0u : fault==2u ? 0xa033u : fault==3u ? 0xa012u : 0xa032u);
+        m_w32(NULL,0x600cu,0xe03eu);
+        put_thumb_table_branch(0x8ffeu,false,2u,14u);
+        m_w16(NULL,0xa000u,m_r16(NULL,0x9000u)); m_w16(NULL,0x9000u,0xf01eu);
+        m_w8(NULL,0xe001u,5u);
+        g_watch_addr=0xe001u; g_watch_reads8=0u;
+        CHECK(arm_step(&c)==ARM_OK && c.cycles==1u,"table branch fetch disposition");
+        if (!fault) CHECK(c.r[15]==0x100cu && c.cpsr==(flags & ~TEST_IT_MASK) && g_watch_reads8==1u,
+            "table branch used wrong instruction half or lost IT");
+        else CHECK(c.r[15]==ARM_VEC_PREFETCH && c.r[14]==0x1002u && c.cp15.ifar==0x1000u &&
+            c.spsr[ARM_BANK_ABT]==flags && !g_watch_reads8 &&
+            (c.cp15.ifsr&15u)==(fault==1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION),
+            "table branch accessed its table before complete instruction fetch");
+        g_watch_addr=UINT32_MAX;
+     }
+    /* A successful table load retires its branch before a separate fault
+     * fetching the destination. No speculative target fetch belongs to TBH. */
+    memset(g_ram,0,sizeof g_ram);
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+    c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+    c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_C; c.r[2]=0x300u; c.r[14]=0u;
+    m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x803eu);
+    put_thumb_table_branch(0x8000u,true,2u,14u); m_w16(NULL,0x8300u,0x8000u);
+    uint32_t flags=c.cpsr;
+    CHECK(arm_step(&c)==ARM_OK && c.r[15]==0x10004u && c.cycles==1u && c.cpsr==flags,"table branch target fetched too early");
+    CHECK(arm_step(&c)==ARM_OK && c.r[15]==ARM_VEC_PREFETCH && c.r[14]==0x10008u &&
+          c.cp15.ifar==0x10004u && (c.cp15.ifsr&15u)==ARM_FSR_PAGE_TRANSLATION &&
+          c.spsr[ARM_BANK_ABT]==flags,"table branch destination fault lost the actual next PC");
+}
+
 static void test_thumb2_bitfields(void) {
     const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
     const uint16_t first[] = {0xf340u,0xf3c0u,0xf360u,0xf36fu}; /* SBFX, UBFX, BFI, BFC */
@@ -10451,6 +10637,10 @@ int main(void) {
     test_thumb2_pack_halfwords();
     test_thumb2_pack_operands();
     test_thumb2_pack_fetch();
+    test_thumb2_table_branch_values();
+    test_thumb2_table_branch_operands();
+    test_thumb2_table_branch_data_faults();
+    test_thumb2_table_branch_fetch();
     test_thumb2_bitfields();
     test_thumb2_multiply();
     test_thumb2_multiply_long();
