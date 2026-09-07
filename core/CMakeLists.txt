@@ -29,6 +29,7 @@ add_library(emucore STATIC
     src/soc/uart.c
     src/soc/vic.c
     src/soc/pl192.c
+    src/soc/s5l8920.c
     src/soc/timer.c
     src/soc/mbx.c
     src/soc/power.c
@@ -206,6 +207,10 @@ if(S5LBOX_STATIC_A64_ENGINE)
     target_include_directories(test_bus_failure PRIVATE ../tools)
 endif()
 add_test(NAME arm_bus_failure COMMAND test_bus_failure)
+
+add_executable(test_s5l8920 tests/test_s5l8920.c)
+target_link_libraries(test_s5l8920 PRIVATE emucore)
+add_test(NAME s5l8920_machine COMMAND test_s5l8920)
 
 add_executable(test_vfp tests/test_vfp.c)
 target_link_libraries(test_vfp PRIVATE emucore)

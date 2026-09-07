@@ -1,8 +1,9 @@
 # iPhone 3GS / iOS 6 bring-up
 
-The initial iOS 6 target is iPhone 3GS running 6.1.6. The current change adds
-an instruction-profile boundary for its Cortex-A8. A complete S5L8920 machine,
-kernel boot, and SpringBoard have not been demonstrated. The existing iPhone
+The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
+a distinct Cortex-A8 instruction profile and a partial S5L8920 memory and
+interrupt fabric. A complete machine, kernel boot, and SpringBoard have not
+been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
 ## Target evidence
@@ -307,6 +308,35 @@ The existing S5L8900 controller is unchanged. A host regression executes
 guest vector programming, WFI, three-controller IRQ dispatch, source masking,
 end-of-interrupt and exception return. This is component execution evidence,
 not an iOS kernel boot.
+
+The separate `s5l8920` fabric now supplies the matching 256 MiB RAM aperture
+at `0x40000000` and connects all three PL192 banks to its Cortex-A8 IRQ/FIQ
+inputs. It exposes only each controller's first 4 KiB; the gaps between banks,
+legacy S5L8900 addresses and other peripherals stop through the checked bus.
+The first failure retains physical address, width, direction, write value and
+CPU PC. RAM access is little-endian and bounded against address/size overflow.
+Functional reset preserves RAM and external input levels while resetting CPU
+and controller state. Reset PC remains zero, so missing ROM stops explicitly.
+
+The standalone PL192 protection logic is not enabled in this fabric: the CPU
+bus has no privilege sideband for unprivileged transfer instructions or page
+walks, so inferring access privilege from CPSR would be incorrect. Protection
+register accesses and unverified board identity registers stop. Timing, power
+sequencing, CPU revision/ECC selection, firmware handoff, snapshots, storage
+and the remaining devices still require implementation or evidence. This
+fabric is not selected by the existing application. Synthetic host tests cover
+CPU IRQ/FIQ entry, translated guest acknowledgement/EOI and exception return;
+they do not establish a complete firmware boot.
+
+An isolated matching-firmware fixture also runs the unchanged N88 vector
+initialization, unmask and unregistered-handler methods through this fabric.
+Prepared page tables map the original virtual code/object addresses into its
+physical RAM. All 96 sources pass both held and withdrawn-at-acknowledgement
+cases, with 62/81/119 handler steps and 2/3/5 MMIO accesses by source bank.
+The fixture checks descending EOI writes, cleared service levels and final
+CPU IRQ line state. It uses synthetic objects, explicit method entry and masked
+interrupts; it does not demonstrate kernel driver instantiation, a registered
+callback, a firmware IRQ-vector path or physical controller timing.
 
 Cortex-A8 access-flag faults are not cached. After an AF-clear descriptor
 faults, software can set its flag and retry without a TLB invalidation, as
