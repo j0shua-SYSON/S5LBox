@@ -465,11 +465,14 @@ static unsigned chain_differential(arm_cpu_t *cpu,
     expected.cpsr = slow.cpsr;
     if (!memory->flat_ram) {
         uint64_t tlb_reads = cpu->tlb_hits - expected.tlb_hits;
+        uint64_t walk_reads = cpu->tlb_misses - expected.tlb_misses;
         unsigned loads = n / stride * (kind ? 5u : 2u);
-        CHECK(tlb_reads <= loads && (memory->ram_window || !tlb_reads),
+        CHECK(tlb_reads + walk_reads <= loads &&
+                  (memory->ram_window || !(tlb_reads + walk_reads)),
               "chain READ witness accounting");
-        expected.dread_hits += loads - tlb_reads;
+        expected.dread_hits += loads - tlb_reads - walk_reads;
         expected.tlb_hits += tlb_reads;
+        expected.tlb_misses += walk_reads;
     }
     CHECK(memcmp(cpu, &expected, sizeof expected) == 0,
           "chain state differs kind=%u n=%u cpsr=%08x/%08x",
@@ -627,9 +630,50 @@ static void test_thumb_chain_tlb(void) {
             case 8: window.bytes = 1024u; break;
             case 9: cpu.tlb[slot].tag ^= 2u; break; /* Wrong access kind. */
             }
+            if (scenario == 0u || scenario == 1u || scenario == 9u) {
+                /* A missing User READ entry is no longer a refusal by itself.
+                 * It must obtain fresh permission from the actual tables,
+                 * never borrow the wrong-privilege/access/stale cache entry. */
+                CHECK(chain_differential(&cpu, &memory, 4096u, kind) ==
+                          127u * stride, "cold READ walk did not complete chain");
+            } else {
+                refusal(&cpu, &memory, 4096u);
+            }
+        }
+    }
+}
+
+static void test_thumb_chain_cold(void) {
+    for (unsigned kind = 0u; kind < 2u; kind++) {
+        const unsigned stride = kind ? 19u : 10u;
+        for (unsigned budget = 0u; budget <= 4096u; budget += 7u) {
+            arm_cpu_t cpu; arm_bulk_memory_t memory; arm_ram_window_t window;
+            chain_tlb_setup(&cpu, &memory, &window, kind);
+            memset(cpu.tlb, 0, sizeof cpu.tlb);
+            memset(cpu.dread, 0, sizeof cpu.dread);
+            const uint64_t misses = cpu.tlb_misses;
+            unsigned iterations = budget / stride;
+            if (iterations > 127u) iterations = 127u;
+            CHECK(chain_differential(&cpu, &memory, budget, kind) ==
+                      iterations * stride, "fully cold chain budget");
+            CHECK(cpu.tlb_misses - misses == iterations * (kind ? 5u : 2u),
+                  "cold logical reads must not be reported as cache hits");
+        }
+        for (unsigned scenario = 0u; scenario < 5u; scenario++) {
+            arm_cpu_t cpu; arm_bulk_memory_t memory; arm_ram_window_t window;
+            chain_tlb_setup(&cpu, &memory, &window, kind);
+            memset(cpu.tlb, 0, sizeof cpu.tlb);
+            switch (scenario) {
+            case 0: w32(NULL, 0x804u, 0x1012u); break; /* Privileged only. */
+            case 1: w32(NULL, 0x804u, 0x4032u); break; /* Target outside RAM. */
+            case 2: w32(NULL, 0u, 0x4001u); break; /* L2 table outside RAM. */
+            case 3: window.base = 0x4000u; break; /* L1 table outside RAM. */
+            case 4: w32(NULL, 0x804u, 0u); break; /* Translation fault. */
+            }
             refusal(&cpu, &memory, 4096u);
         }
     }
+    puts("arm_bulk cold READ chains: exact budgets, permissions, no bus or cache writes");
 }
 
 #if defined(S5LBOX_STATIC_A64_ENGINE)
@@ -750,9 +794,14 @@ static void test_native_integration(void) {
     CHECK(thumb_calls > 0u, "native Thumb chain integration never executed");
     calls += thumb_calls;
     for (unsigned kind = 0u; kind < 2u; kind++)
+        for (unsigned cold = 0u; cold < 2u; cold++)
         for (unsigned enabled = 0u; enabled < 2u; enabled++) {
             arm_cpu_t cpu; arm_bulk_memory_t memory; arm_ram_window_t window;
             chain_tlb_setup(&cpu, &memory, &window, kind);
+            if (cold) {
+                memset(cpu.tlb, 0, sizeof cpu.tlb);
+                memset(cpu.dread, 0, sizeof cpu.dread);
+            }
             calls += native_differential(&cpu, &memory, (kind ? 19u : 10u) * 60u,
                                           enabled != 0u);
         }
@@ -773,6 +822,7 @@ int main(void) {
     test_compare_prefixes();
     test_thumb_chains();
     test_thumb_chain_tlb();
+    test_thumb_chain_cold();
     test_native_integration();
     printf("arm_bulk: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;

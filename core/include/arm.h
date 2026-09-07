@@ -609,6 +609,18 @@ uint8_t *arm_ram_window_tlb_lookup(const arm_ram_window_t *window,
                                   const arm_cpu_t *cpu, uint32_t va,
                                   arm_access_t access, bool priv);
 
+/* Resolve a User READ for a bounded read-only region. An exact current TLB
+ * mapping/fault remains authoritative. On a miss, use the ordinary permission
+ * decoder with descriptor reads restricted to the captured plain RAM. Return
+ * a complete 1KiB block only if both tables and target are safe; never access
+ * the bus, publish a translation, change counters/CPU state or raise a fault.
+ * walked identifies a successful cold translation, not a TLB/DREAD hit.
+ * The owner must not allow guest writes, callbacks or device work in the
+ * region; a later invocation re-resolves against its current context. */
+const uint8_t *arm_ram_window_read_resolve(const arm_ram_window_t *window,
+                                          const arm_cpu_t *cpu, uint32_t va,
+                                          bool *walked);
+
 /*
  * Translate a virtual address. Returns 0 on success (writing the physical
  * address to *pa) or a non-zero ARMv6 fault status register value.

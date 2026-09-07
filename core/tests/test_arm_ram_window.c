@@ -269,6 +269,92 @@ static void test_persistent_map(void) {
     puts("PERSISTENT-RAM-MAP portable permission/lifetime checks executed");
 }
 
+static void test_cold_read_resolve(void) {
+    /* Both routes use the same permission decoder, but independent descriptor
+     * readers. Compare every format, AP/APX/domain and legacy 1KiB subpage. */
+    for (unsigned format = 0u; format < 5u; format++)
+    for (unsigned xp = 0u; xp < 2u; xp++)
+    for (unsigned ap = 0u; ap < 4u; ap++)
+    for (unsigned apx = 0u; apx < 2u; apx++)
+    for (unsigned dac = 0u; dac < 4u; dac++)
+    for (unsigned fa = 0u; fa < 2u; fa++)
+    for (unsigned sub = 0u; sub < 4u; sub++) {
+        arm_ram_window_t w;
+        setup();
+        cpu.cp15.sctlr = ARM_SCTLR_M | (xp ? ARM_SCTLR_XP : 0u) |
+            (fa ? ARM_SCTLR_FA : 0u);
+        cpu.cp15.dacr = dac;
+        const uint32_t va = DATA + sub * 1024u;
+        const uint32_t l1_address = BASE + (va >> 20) * 4u;
+        if (format < 2u) {
+            write32(NULL, l1_address, BASE | 2u | ap << 10 | apx << 15 |
+                      (format ? 1u << 18 : 0u));
+        } else {
+            write32(NULL, l1_address, (BASE + 0x4000u) | 1u);
+            const uint32_t type = format == 2u ? 1u : format == 3u ? 2u : 3u;
+            const uint32_t physical = format == 2u ? BASE : BASE + 0xc000u;
+            const unsigned ap_shift = xp || type == 3u ? 4u :
+                4u + 2u * ((va >> (type == 1u ? 14u : 10u)) & 3u);
+            write32(NULL, BASE + 0x4000u + ((va >> 12) & 255u) * 4u,
+                      physical | type | ap << ap_shift | apx << 9);
+        }
+        reference = cpu;
+        memset(reference.tlb, 0, sizeof reference.tlb);
+        uint32_t pa = UINT32_MAX;
+        const uint32_t fsr = arm_mmu_translate(&reference, va,
+                                               ARM_ACCESS_READ, false, &pa);
+        cpu.tlb_stamp = reference.tlb_stamp;
+        cpu.tlb_gen = reference.tlb_gen;
+        memset(cpu.tlb, 0, sizeof cpu.tlb);
+        CHECK(arm_ram_window_capture(&w, &cpu, BASE, SIZE), "cold RAM grant");
+        before = cpu;
+        const unsigned prior_reads = reads, prior_writes = writes, prior_grants = grants;
+        bool walked = true;
+        const uint8_t *p = arm_ram_window_read_resolve(&w, &cpu, va, &walked);
+        const uint8_t *expected = !fsr && pa >= BASE && pa - BASE < SIZE
+            ? ram + ((pa - BASE) & ~1023u) : NULL;
+        CHECK(p == expected && walked == (expected != NULL),
+              "cold permission format=%u xp=%u ap=%u apx=%u dac=%u fa=%u sub=%u fsr=%x",
+              format, xp, ap, apx, dac, fa, sub, fsr);
+        CHECK(!memcmp(&cpu, &before, sizeof cpu), "cold lookup mutated CPU/cache");
+        CHECK(reads == prior_reads && writes == prior_writes && grants == prior_grants,
+              "cold descriptor or data lookup touched bus");
+    }
+    for (unsigned scenario = 0u; scenario < 7u; scenario++) {
+        arm_ram_window_t w;
+        setup();
+        CHECK(arm_ram_window_capture(&w, &cpu, BASE, SIZE), "cold refusal grant");
+        switch (scenario) {
+        case 0: cpu.cp15.ttbr0 ^= 0x4000u; break;
+        case 1: bus.read32 = NULL; break;
+        case 2: w.base = BASE + SIZE; break; /* L1 not in granted RAM. */
+        case 3: write32(NULL, BASE + (DATA >> 20) * 4u,
+                          (BASE + SIZE) | 1u); break; /* L2 outside RAM. */
+        case 4: write32(NULL, BASE + (DATA >> 20) * 4u,
+                          (BASE + 0x100000u) | 0xc02u); break; /* Data outside RAM. */
+        case 5: prime(DATA, ARM_ACCESS_READ, false, BASE + 0xc000u);
+                cpu.tlb[slot(DATA, ARM_ACCESS_READ)].fsr = 15u; break;
+        case 6: cpu.tlb_gen = 0u; break;
+        }
+        before = cpu;
+        const unsigned prior_reads = reads, prior_writes = writes, prior_grants = grants;
+        bool walked = true;
+        CHECK(!arm_ram_window_read_resolve(&w, &cpu, DATA, &walked) && !walked,
+              "cold unsafe mapping accepted scenario=%u", scenario);
+        CHECK(!memcmp(&cpu, &before, sizeof cpu) && reads == prior_reads &&
+                  writes == prior_writes && grants == prior_grants,
+              "cold refusal has side effects");
+    }
+    arm_ram_window_t w;
+    setup();
+    CHECK(arm_ram_window_capture(&w, &cpu, BASE, SIZE), "cached precedence grant");
+    prime(DATA, ARM_ACCESS_READ, false, BASE + 0x8000u);
+    bool walked = true;
+    CHECK(arm_ram_window_read_resolve(&w, &cpu, DATA, &walked) == ram + 0x8000u &&
+              !walked, "cached mapping must win over live descriptor bytes");
+    puts("READ-ONLY-RAM-WALK permissions/cache-precedence/no-bus checks executed");
+}
+
 static void test_exact_lookup(void) {
     arm_ram_window_t w;
     setup();
@@ -1233,6 +1319,7 @@ static void test_native_map_machine(void) {
 int main(void) {
     test_capability();
     test_exact_lookup();
+    test_cold_read_resolve();
     test_persistent_map();
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     test_native();

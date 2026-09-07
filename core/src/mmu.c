@@ -167,8 +167,8 @@ static bool xn_forbids_fetch(const arm_cpu_t *c, arm_access_t acc, unsigned dac,
         && (c->cp15.sctlr & ARM_SCTLR_XP) != 0u;
 }
 
-static uint32_t mmu_walk(arm_cpu_t *c, uint32_t va, arm_access_t acc,
-                         bool priv, uint32_t *pa);
+static uint32_t mmu_walk(const arm_cpu_t *c, uint32_t va, arm_access_t acc,
+                         bool priv, uint32_t *pa, const arm_ram_window_t *ram);
 
 static inline uint32_t mmu_tlb_tag(uint32_t va, arm_access_t acc,
                                    bool priv) {
@@ -235,6 +235,31 @@ uint8_t *arm_ram_window_tlb_lookup(const arm_ram_window_t *w,
     if (!host || (pa & 1023u) || pa < w->base ||
         offset > w->bytes - 1024u) return NULL;
     return host + offset;
+}
+
+const uint8_t *arm_ram_window_read_resolve(const arm_ram_window_t *w,
+                                          const arm_cpu_t *c, uint32_t va,
+                                          bool *walked) {
+    if (walked) *walked = false;
+    if (!arm_ram_window_current(w, c) || !c->tlb_gen ||
+        !(c->cp15.sctlr & ARM_SCTLR_M) || !mmu_stamp_matches(c)) return NULL;
+    const unsigned i = mmu_tlb_slot(va, ARM_ACCESS_READ);
+    const bool hit = c->tlb[i].gen == c->tlb_gen &&
+        c->tlb[i].tag == mmu_tlb_tag(va, ARM_ACCESS_READ, false);
+    uint32_t pa;
+    if (hit) {
+        /* A cached fault or mapping wins over newer descriptor bytes, exactly
+         * as in arm_mmu_translate. Never walk around an existing denial. */
+        if (c->tlb[i].fsr) return NULL;
+        pa = c->tlb[i].pa;
+    } else if (mmu_walk(c, va & ~UINT32_C(1023), ARM_ACCESS_READ,
+                        false, &pa, w) != 0u) {
+        return NULL;
+    }
+    if ((pa & 1023u) || pa < w->base || pa - w->base > w->bytes - 1024u)
+        return NULL;
+    if (walked) *walked = !hit;
+    return w->read_host + (pa - w->base);
 }
 
 /*
@@ -351,7 +376,7 @@ uint32_t arm_mmu_translate(arm_cpu_t *c, uint32_t va, arm_access_t acc,
     c->tlb_misses++;
     /* Straight into the caller's pa, so the untouched-on-fault contract is the
      * walk's own rather than something restated here. */
-    uint32_t fsr = mmu_walk(c, va, acc, priv, pa);
+    uint32_t fsr = mmu_walk(c, va, acc, priv, pa, NULL);
     c->tlb[slot].gen = c->tlb_gen;
     c->tlb[slot].tag = tag;
     c->tlb[slot].fsr = fsr;
@@ -460,8 +485,26 @@ bool arm_data_cache_try_refill(arm_cpu_t *c, uint32_t va,
     return true;
 }
 
-static uint32_t mmu_walk(arm_cpu_t *c, uint32_t va, arm_access_t acc,
-                         bool priv, uint32_t *pa) {
+/* A read-only native region can use the very same descriptor/permission
+ * decoder without issuing speculative bus reads. With a RAM capability every
+ * descriptor must itself lie in that plain-RAM range; otherwise decline. The
+ * ordinary MMU route retains its existing bus reads and architectural faults. */
+static bool mmu_descriptor(const arm_cpu_t *c, const arm_ram_window_t *ram,
+                            uint32_t address, uint32_t *value) {
+    if (!ram) {
+        *value = c->bus->read32(c->bus->ctx, address);
+        return true;
+    }
+    if ((address & 3u) || address < ram->base ||
+        address - ram->base > ram->bytes - 4u) return false;
+    const uint8_t *p = ram->read_host + (address - ram->base);
+    *value = (uint32_t)p[0] | (uint32_t)p[1] << 8 |
+             (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+    return true;
+}
+
+static uint32_t mmu_walk(const arm_cpu_t *c, uint32_t va, arm_access_t acc,
+                         bool priv, uint32_t *pa, const arm_ram_window_t *ram) {
     /* Only a store sets WnR. A fetch is checked against XN, never against WnR:
      * IFSR has no such field. */
     bool write = (acc == ARM_ACCESS_WRITE);
@@ -503,7 +546,8 @@ static uint32_t mmu_walk(arm_cpu_t *c, uint32_t va, arm_access_t acc,
     if ((c->cp15.ttbcr & (1u << pd_bit)) != 0u)
         return fsr_make(ARM_FSR_SECTION_TRANSLATION, 0, write);
 
-    uint32_t l1      = c->bus->read32(c->bus->ctx, l1_addr);
+    uint32_t l1;
+    if (!mmu_descriptor(c, ram, l1_addr, &l1)) return UINT32_MAX;
     unsigned type    = l1 & 3u;
     unsigned domain  = (l1 >> 5) & 0xfu;
     bool xp = (c->cp15.sctlr & ARM_SCTLR_XP) != 0u;
@@ -564,7 +608,8 @@ static uint32_t mmu_walk(arm_cpu_t *c, uint32_t va, arm_access_t acc,
 
     if (type == 1u) {                       /* coarse second-level table */
         uint32_t l2_addr = (l1 & 0xfffffc00u) | (((va >> 12) & 0xffu) << 2);
-        uint32_t l2      = c->bus->read32(c->bus->ctx, l2_addr);
+        uint32_t l2;
+        if (!mmu_descriptor(c, ram, l2_addr, &l2)) return UINT32_MAX;
         unsigned t2      = l2 & 3u;
 
         if (t2 == 0u) return fsr_make(ARM_FSR_PAGE_TRANSLATION, domain, write);

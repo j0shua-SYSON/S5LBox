@@ -14,14 +14,16 @@ typedef struct {
     const uint8_t *flat_ram;
     size_t flat_size;
     bool data_cache;
-    /* Read-only loops may also consume exact current READ TLB witnesses.
-     * The owner captures and retains this immutable full-RAM capability. */
+    /* Read-only loops can resolve cold READ pages with the shared MMU decoder
+     * only when both descriptors and data fit this immutable RAM capability.
+     * Cached mappings/faults still take precedence. No bus access or cache
+     * publication is allowed while speculating about an entire iteration. */
     const arm_ram_window_t *ram_window;
 } arm_bulk_memory_t;
 
 /* Returns the exact number of original instructions represented, bounded by
  * budget. The caller owns cycle/device accounting. Zero changes no CPU state,
- * cache counters or guest bytes. No page walk, MMIO or executable write occurs.
+ * cache counters or guest bytes. No bus access, MMIO or executable write occurs.
  * Matching proves the witnessed instruction pattern and complete admitted
  * control flow, never a name or assumed PC.
  * A long loop may return an exact prefix at its header for bounded resumption.

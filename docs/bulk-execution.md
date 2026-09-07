@@ -13,12 +13,15 @@ modify the guest disk, guest code, checkpoint format, or stock-host policy.
 
 ## Execution contract
 
-- User-mode ARM1176, A32, little-endian execution only.
+- User-mode ARM1176, A32/Thumb, little-endian execution only.
 - Complete FETCH-window byte match before execution; changed/truncated code
   follows ordinary instruction execution.
-- Every load requires an existing current User DREAD RAM witness. Missing,
-  stale, wrong-privilege, or device mappings cannot be replaced by a page walk
-  or an assumed zero. The flat-memory alternative exists only in core tests.
+- Loads require current User READ permission and a plain-RAM grant. The Thumb
+  pointer loops may resolve a cold page through the shared MMU decoder when
+  both descriptor levels and the complete data block lie inside the captured
+  RAM range. Existing cached mappings/faults take precedence. No speculative
+  bus read, cache publication, fault or assumed zero is permitted. The flat
+  memory alternative exists only in core tests.
 - No stores, guest library patching, executable allocations, or generated
   runtime code. All native text is linked before signing.
 - Complete architectural register and flag results, not merely ABI return values.
@@ -44,6 +47,15 @@ Keep the control off until same-build physical runs from matched guest
 checkpoints demonstrate a substantial wall-clock improvement for real work,
 with identical resulting package/catalog contents and no lifecycle regression.
 Host correctness tests and successful invocation counters alone are insufficient.
+
+The cold-page experiment removes the earlier requirement that every traversed
+page already be resident in the small DREAD/TLB caches. Complete read-only
+iterations can now span cold but valid RAM pages without leaving the executor.
+The shared permission decoder retains section/page, AP/APX, domain, access-flag
+and translation-control semantics. Existing counters classify represented cold
+reads as TLB misses, not DREAD/TLB hits, including invariant reads whose proofs
+are reused within one read-only interval. Refused iterations commit no counters.
+This remains behind the existing bulk option; physical speedup is unverified.
 
 ## First physical result
 
