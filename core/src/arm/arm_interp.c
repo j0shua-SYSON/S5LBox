@@ -755,6 +755,36 @@ static arm_status_t exec_a8_neon_bitwise(arm_cpu_t *c, uint32_t insn) {
     return ARM_OK;
 }
 
+/* VEXT A1/T1 (DDI0406C.b A8.8.316). The four-bit immediate is measured
+ * in bytes; .16/.32/.64 spellings are assembler aliases, not size fields. */
+static bool a8_neon_extract_space(const arm_cpu_t *c, uint32_t insn) {
+    uint32_t prefix = (c->cpsr & ARM_CPSR_T) ? 0xefb00000u : 0xf2b00000u;
+    return c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn & 0xffb00010u) == prefix;
+}
+
+static arm_status_t exec_a8_neon_extract(arm_cpu_t *c, uint32_t insn) {
+    unsigned d = ((insn >> 12) & 15u) | ((insn >> 18) & 16u);
+    unsigned n = ((insn >> 16) & 15u) | ((insn >> 3) & 16u);
+    unsigned m = (insn & 15u) | ((insn >> 1) & 16u), quad = (insn >> 6) & 1u;
+    unsigned offset = (insn >> 8) & 15u;
+    if ((quad && ((d | n | m) & 1u)) || (!quad && offset >= 8u)) return ARM_UNDEFINED;
+    if (!vfp_cpacr_permits(c) || !vfp_enabled(c)) return ARM_GUEST_UNDEFINED;
+    uint64_t source[4], result[2];
+    for (unsigned r = 0; r <= quad; r++) {
+        source[r] = vfp_get_d(c, n + r);
+        source[1u + quad + r] = vfp_get_d(c, m + r);
+    }
+    unsigned word = offset / 8u, shift = (offset % 8u) * 8u;
+    for (unsigned r = 0; r <= quad; r++) {
+        result[r] = source[word + r] >> shift;
+        if (shift) result[r] |= source[word + r + 1u] << (64u - shift);
+    }
+    /* Read both full operands before an aliased write. A zero shift is a
+     * word copy, avoiding C's undefined shift by64. All flags are untouched. */
+    for (unsigned r = 0; r <= quad; r++) vfp_set_d(c, d + r, result[r]);
+    return ARM_OK;
+}
+
 /* One register and a modified immediate (DDI0406C.b A7.4.6): VMOV, VMVN,
  * VORR and VBIC share this allocation. Keep its reserved form checked. */
 static bool a8_neon_immediate_space(const arm_cpu_t *c, uint32_t insn) {
@@ -958,7 +988,8 @@ static bool vfp_lazy_enable_trap(const arm_cpu_t *c, uint32_t insn) {
      * ARM_GUEST_UNDEFINED. An unsupported ID or invalid encoding is still
      * a capability stop when EN=0, not a fault the guest can fix by enabling. */
     if (a8_neon_single_elements_space(c, insn) || a8_neon_bitwise_space(c, insn) ||
-        a8_neon_immediate_space(c, insn) || a8_neon_multiply_space(c, insn) || a8_neon_add_space(c, insn)) return false;
+        a8_neon_immediate_space(c, insn) || a8_neon_multiply_space(c, insn) || a8_neon_add_space(c, insn) ||
+        a8_neon_extract_space(c, insn)) return false;
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 &&
         (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn) ||
          vfp_is_memory_transfer(insn) || vfp_is_bitwise_data(insn) || vfp_is_compare_data(insn))) return false;
@@ -3401,6 +3432,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
     if (a8_neon_immediate_space(c, insn)) return exec_a8_neon_immediate(c, insn);
     if (a8_neon_multiply_space(c, insn)) return exec_a8_neon_multiply(c, insn);
     if (a8_neon_add_space(c, insn)) return exec_a8_neon_add(c, insn);
+    if (a8_neon_extract_space(c, insn)) return exec_a8_neon_extract(c, insn);
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn >> 28) == 0xeu &&
         (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn) ||
          vfp_is_memory_transfer(insn) || vfp_is_bitwise_data(insn) || vfp_is_compare_data(insn)))
@@ -4041,10 +4073,11 @@ arm_status_t arm_step(arm_cpu_t *c) {
             return ARM_OK;
         }
         if (a8_neon_bitwise_space(c, insn) || a8_neon_immediate_space(c, insn) ||
-            a8_neon_multiply_space(c, insn) || a8_neon_add_space(c, insn)) {
+            a8_neon_multiply_space(c, insn) || a8_neon_add_space(c, insn) || a8_neon_extract_space(c, insn)) {
             arm_status_t status = a8_neon_bitwise_space(c, insn) ? exec_a8_neon_bitwise(c, insn) :
                 a8_neon_immediate_space(c, insn) ? exec_a8_neon_immediate(c, insn) :
-                a8_neon_multiply_space(c, insn) ? exec_a8_neon_multiply(c, insn) : exec_a8_neon_add(c, insn);
+                a8_neon_multiply_space(c, insn) ? exec_a8_neon_multiply(c, insn) :
+                a8_neon_add_space(c, insn) ? exec_a8_neon_add(c, insn) : exec_a8_neon_extract(c, insn);
             if (status == ARM_GUEST_UNDEFINED) return take_undefined_instruction(c, pc);
             if (status != ARM_OK) return status;
             c->r[15] = next;

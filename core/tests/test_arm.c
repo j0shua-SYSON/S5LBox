@@ -7881,7 +7881,7 @@ static void test_cortex_a8_vfp_data_fetch_and_retry(void) {
         0xef40f1b0u,0xef50f1b0u,0xef60f1b0u,0xef70f1b0u,
         0xff40f1b0u,0xff50f1b0u,0xff60f1b0u,0xff70f1b0u,
         0xffc0f410u,0xffc0f430u,0xffc0f510u,0xffc0f530u,0xff40fdb0u,0xef40fda0u,0xef60fda0u,
-        0xeecf2b90u,0xee8f2bb0u,0xee8f2b90u
+        0xeecf2b90u,0xee8f2bb0u,0xee8f2b90u,0xeff0f080u,0xeff0f380u,0xeff0f780u
     };
     static const uint64_t expected[] = {
         UINT64_C(0x3ff0000000000000), UINT64_C(0xfff0000000000001),
@@ -7895,14 +7895,16 @@ static void test_cortex_a8_vfp_data_fetch_and_retry(void) {
         UINT64_C(0x0080000000800000),UINT64_C(0xff7fffffff7fffff),
         UINT64_C(0x12b456789abcdef0),UINT64_C(0x123456789a3cdef0),UINT64_C(0x7fc0000000000000),
         UINT64_C(0x7fc0000000000000),UINT64_C(0x7fc0000000000000),
-        UINT64_C(0xefefefefefefefef),UINT64_C(0xcdefcdefcdefcdef),UINT64_C(0x89abcdef89abcdef)
+        UINT64_C(0xefefefefefefefef),UINT64_C(0xcdefcdefcdefcdef),UINT64_C(0x89abcdef89abcdef),
+        UINT64_C(0xfff0000000000001),UINT64_C(0x000000fff0000000),UINT64_C(0x00000000000000ff)
     };
     static const uint64_t neon_retry_values[] = {
         UINT64_C(0xfff0000000000001),0u,UINT64_C(0xfff0000000000001),UINT64_MAX,
         0u,UINT64_C(0xfff0000000000001),UINT64_C(0xfff0000000000001),0u,
         UINT64_C(0x0080000000800000),UINT64_C(0xff7fffffff7fffff),UINT64_C(0x0080000000800000),0u,
         UINT64_C(0x7fc0000000000000),UINT64_C(0x7fc0000000000000),UINT64_C(0x7fc0000000000000),
-        UINT64_C(0x7878787878787878),UINT64_C(0x5678567856785678),UINT64_C(0x1234567812345678)
+        UINT64_C(0x7878787878787878),UINT64_C(0x5678567856785678),UINT64_C(0x1234567812345678),
+        UINT64_C(0xfff0000000000001),UINT64_C(0x000000fff0000000),UINT64_C(0x00000000000000ff)
     };
     for (unsigned host = 0; host < 2u; host++)
      for (unsigned op = 0; op < sizeof insns / sizeof insns[0]; op++)

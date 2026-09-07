@@ -267,6 +267,16 @@ Tests use independent bit truth tables and cover register aliases, denied
 access, conditional execution, neighboring encodings, split Thumb fetch
 faults and guest enable/retry.
 
+NEON VEXT extracts a byte window from two concatenated D or Q operands,
+including every byte offset and aliases between sources and destination.
+The implementation stages both complete inputs before publishing results
+and preserves status and host FP state. Invalid D offsets and odd Q
+operands stop before access checks. ARM uses its unconditional encoding;
+Thumb obeys IT and complete-fetch/retry rules. A byte-array oracle checks
+register indices, operand order and boundaries against the word-based
+implementation. See
+[DDI0406C.b, A8.8.316](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
 NEON immediate VMOV, VMVN, VORR and VBIC also cover the full D/Q bank.
 The decoder expands the encoded integer or F32 constant as raw bits,
 including byte masks for VMOV.I64 and the trailing-one forms. It rejects
@@ -329,6 +339,15 @@ fills. The baseline stopped at VDUP on its first vector case. Selection is
 a static resolver/pointer audit using Apple's
 [Cortex-A8 to ARM_13 mapping](https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.41.3/osfmk/arm/cpuid.c);
 the fixture calls the selected body directly without a commpage or dyld.
+
+The same static audit resolves `memcpy` and `memmove` to a shared Thumb body
+at `0x391ceb00`. Its unchanged bytes now complete 30 bounded cases covering
+empty copies, equal pointers, alignment, forward copying and both overlap directions.
+Unaligned vector paths execute VEXT and reproduce an independent initial-buffer
+copy, with one write to each destination byte and preserved surrounding data
+and registers. Source padding for the aligned vector reads is explicitly
+prepared and bounded. These cases use lengths below 1024 bytes and exclude
+the separate large-block/stack paths. They remain isolated User-mode fixtures.
 
 ARM and Thumb VLDR/VSTR now move one S or D register through the translating
 memory accessors, including D16-D31. They use signed, scaled immediate
@@ -831,7 +850,7 @@ establish that result.
 - Cortex-A8 stores d0-d31 and supports system/core/memory transfers plus
   VFP copies, immediate constants and sign operations with short vectors,
   scalar comparisons across the full register bank, and the bounded
-  32/64-bit NEON VLD1/VST1 memory forms, register Boolean operations and
+  32/64-bit NEON VLD1/VST1 memory forms, register Boolean operations, VEXT,
   immediate constants, core-register VDUP and register VMUL/VADD/VSUB.F32
   described above.
   Upper-bank VFP arithmetic, the remaining NEON families, and full

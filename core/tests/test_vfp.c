@@ -996,6 +996,140 @@ static uint64_t a8_neon_imm_expected(unsigned op, unsigned mode, unsigned imm, u
     return op && mode != 14u ? ~expanded : expanded;
 }
 
+/* A8.8.316: the immediate is a byte offset in the concatenated operands. */
+static uint32_t a8_neon_extract(unsigned thumb, unsigned quad, unsigned dst,
+                                  unsigned left, unsigned right, unsigned offset) {
+    return (thumb ? 0xefb00000u : 0xf2b00000u) | (quad << 6) | (offset << 8) |
+        ((dst & 15u) << 12) | ((dst >> 4) << 22) |
+        ((left & 15u) << 16) | ((left >> 4) << 7) | (right & 15u) | ((right >> 4) << 5);
+}
+
+static void a8_extract_check(arm_cpu_t *c, unsigned thumb, unsigned quad, unsigned dst,
+                             unsigned left, unsigned right, unsigned offset) {
+    uint64_t before[32], expected[2] = {0u,0u};
+    uint8_t joined[32];
+    for (unsigned d = 0; d < 32u; d++) before[d] = vfp_get_d(c, d);
+    for (unsigned byte = 0; byte < 8u * (1u + quad); byte++) {
+        joined[byte] = (uint8_t)(before[left + byte / 8u] >> (8u * (byte % 8u)));
+        joined[8u * (1u + quad) + byte] = (uint8_t)(before[right + byte / 8u] >> (8u * (byte % 8u)));
+    }
+    for (unsigned byte = 0; byte < 8u * (1u + quad); byte++)
+        expected[byte / 8u] |= (uint64_t)joined[offset + byte] << (8u * (byte % 8u));
+    uint32_t flags = c->cpsr, fpscr = c->vfp_fpscr, core[15]; memcpy(core, c->r, sizeof core);
+    c->excl_valid = true; c->excl_addr = 0x12340u;
+    CHECK(a8_move_step(c, thumb, a8_neon_extract(thumb, quad, dst, left, right, offset)) == ARM_OK &&
+          c->r[15] == 0x104u && c->cycles == 1u && c->cpsr == flags && c->vfp_fpscr == fpscr &&
+          c->vfp_fpexc == ARM_FPEXC_EN && c->excl_valid && c->excl_addr == 0x12340u && !memcmp(core, c->r, sizeof core),
+          "VEXT state T=%u Q=%u D=%u N=%u M=%u offset=%u", thumb, quad, dst, left, right, offset);
+    for (unsigned d = 0; d < 32u; d++) CHECK(vfp_get_d(c, d) ==
+        (d >= dst && d <= dst + quad ? expected[d - dst] : before[d]), "VEXT destination D%u", d);
+}
+
+static void test_a8_neon_extract_registers(void) {
+    CHECK(a8_neon_extract(1u, 0u, 0u, 2u, 3u, 1u) == 0xefb20103u &&
+          a8_neon_extract(0u, 0u, 31u, 16u, 0u, 3u) == 0xf2f0f380u &&
+          a8_neon_extract(1u, 1u, 30u, 0u, 30u, 15u) == 0xeff0ef6eu, "VEXT encoding anchors");
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned quad = 0; quad < 2u; quad++)
+      for (unsigned left = 0; left < 32u; left += 1u + quad)
+       for (unsigned right = 0; right < 32u; right += 1u + quad)
+        for (unsigned alias = 0; alias < 4u; alias++) {
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c, d,
+                UINT64_C(0x0011223344556677) ^ (UINT64_C(0x0101010101010101) * d));
+            unsigned dst = alias == 0u ? left : alias == 1u ? right : alias == 2u ? 30u :
+                ((left + right + 4u) & (quad ? 30u : 31u));
+            unsigned offset = (left + right + alias) % (8u * (1u + quad));
+            c.vfp_fpscr |= ((left & 7u) << 16) | ((right & 3u) << 20) | ARM_FPSCR_N | ARM_FPSCR_DZC;
+            if (alias & 1u) c.cpsr |= ARM_CPSR_E;
+            a8_extract_check(&c, thumb, quad, dst, left, right, offset);
+        }
+    /* Every byte boundary, including zero, the Q word boundary and the last
+     * byte, with both operand orders and both aliased destinations. */
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned quad = 0; quad < 2u; quad++)
+      for (unsigned offset = 0; offset < 8u * (1u + quad); offset++)
+       for (unsigned variant = 0; variant < 4u; variant++) {
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            vfp_set_d(&c, 0u, UINT64_C(0x0123456789abcdef)); vfp_set_d(&c, 1u, UINT64_C(0xff80000180000000));
+            vfp_set_d(&c, 30u, UINT64_C(0x0011223344556677)); vfp_set_d(&c, 31u, UINT64_C(0x8899aabbccddeeff));
+            a8_extract_check(&c, thumb, quad, (variant & 1u) ? 30u : 0u,
+                (variant & 2u) ? 30u : 0u, (variant & 2u) ? 0u : 30u, offset);
+       }
+}
+
+static void test_a8_neon_extract_access_and_invalid(void) {
+    static const unsigned permissions[] = {0u,1u,3u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned quad = 0; quad < 2u; quad++)
+      for (unsigned user = 0; user < 2u; user++)
+       for (unsigned enabled = 0; enabled < 2u; enabled++)
+        for (unsigned access = 0; access < 3u; access++) {
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permissions[access] * 0x00500000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            vfp_set_d(&c, 31u, UINT64_C(0x123456789abcdef0));
+            vfp_set_d(&c, quad ? 1u : 0u, UINT64_C(0xabcdef0123456789));
+            bool allowed = enabled && (permissions[access] == 3u || (permissions[access] == 1u && !user));
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c, thumb, a8_neon_extract(thumb, quad, 30u, 0u, 16u, quad ? 15u : 7u)) == ARM_OK &&
+                  c.vfp_fpscr == fpscr, "VEXT access disposition");
+            CHECK(allowed ? c.r[15] == 0x104u && c.cpsr == flags : c.r[15] == ARM_VEC_UNDEFINED &&
+                  c.r[14] == (thumb ? 0x102u : 0x104u) && c.spsr[ARM_BANK_UND] == flags, "VEXT access exception state");
+            CHECK(vfp_get_d(&c, 30u) == (allowed ? 0xabu : 0u) &&
+                  vfp_get_d(&c, 31u) == (allowed && quad ? 0u : UINT64_C(0x123456789abcdef0)), "VEXT access destination");
+        }
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned enabled = 0; enabled < 2u; enabled++)
+      for (unsigned skip = 0; skip < (thumb ? 2u : 1u); skip++)
+       for (unsigned kind = 0; kind < 6u; kind++) {
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            vfp_set_d(&c, 30u, UINT64_C(0x7ff0000000000001));
+            vfp_set_d(&c, 31u, UINT64_C(0x8000000000000000));
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            if (skip) c.cp15.cpacr = 0u;
+            if (thumb) { m_w16(NULL, 0x100u, skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK, "VEXT IT setup"); }
+            uint32_t pc = c.r[15], flags = c.cpsr, fpscr = c.vfp_fpscr;
+            uint32_t insn = a8_neon_extract(thumb, kind >= 3u && kind < 5u ? 0u : 1u,
+                kind == 0u ? 31u : 30u, kind == 1u ? 17u : 16u, kind == 2u ? 1u : 0u, kind == 3u ? 8u : 15u);
+            bool valid = kind == 5u;
+            CHECK(a8_move_step(&c, thumb, insn) == (skip || valid ? ARM_OK : ARM_UNDEFINED), "VEXT invalid/IT disposition");
+            if (skip || !valid) CHECK(c.r[15] == (skip ? pc + 4u : pc) &&
+                c.cpsr == (skip ? flags & ~0x0600fc00u : flags) && c.vfp_fpscr == fpscr, "VEXT invalid/skipped state changed");
+            else if (!enabled) CHECK(c.r[15] == ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND] == flags, "VEXT lazy enable");
+            else CHECK(c.r[15] == pc + 4u && c.cpsr == (flags & ~0x0600fc00u), "VEXT valid IT retirement");
+            for (unsigned d = 0; d < 32u; d++) CHECK(vfp_get_d(&c, d) ==
+                (valid && enabled && !skip ? 0u : d == 30u ? UINT64_C(0x7ff0000000000001) :
+                 d == 31u ? UINT64_C(0x8000000000000000) : 0u), "VEXT invalid/zero operand mutation");
+       }
+    static const uint32_t toggles[] = {1u << 24,1u << 23,1u << 21,1u << 20,1u << 4};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned field = 0; field < sizeof toggles / sizeof toggles[0]; field++) {
+        arm_cpu_t c; a8_move_reset(&c, thumb);
+        CHECK(a8_move_step(&c, thumb, a8_neon_extract(thumb, 0u, 31u, 16u, 0u, 3u) ^ toggles[field]) == ARM_UNDEFINED &&
+              c.r[15] == 0x100u, "VEXT swallowed neighboring allocation");
+     }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c, &g_bus, legacy[profile]), "legacy VEXT reset");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        CHECK(a8_move_step(&c, 0u, 0xf2b20103u) == ARM_UNDEFINED && c.r[15] == 0u, "VEXT leaked to legacy profile");
+    }
+    fenv_t saved; CHECK(fegetenv(&saved) == 0, "save extract host FP state");
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned quad = 0; quad < 2u; quad++)
+      for (unsigned host = 0; host < 4u; host++) {
+        arm_cpu_t c; a8_move_reset(&c, thumb); vfp_set_d(&c, 0u, UINT64_C(0x7ff0000000000001));
+        CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 && feraiseexcept(FE_DIVBYZERO) == 0,
+              "prepare extract host FP state");
+        int exceptions = fetestexcept(FE_ALL_EXCEPT);
+        CHECK(a8_move_step(&c, thumb, a8_neon_extract(thumb, quad, 30u, 0u, 0u, 3u)) == ARM_OK &&
+              fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == exceptions, "VEXT touched host FP state");
+      }
+    CHECK(fesetenv(&saved) == 0, "restore extract host FP state");
+}
+
 static void test_a8_neon_immediate_constants(void) {
     CHECK(a8_neon_imm(1u, 0u, 4u, 0u, 16u, 0x80u) == 0xffc00410u &&
           a8_neon_imm(0u, 0u, 4u, 0u, 16u, 0x80u) == 0xf3c00410u, "firmware NEON immediate encoding anchors");
@@ -3809,6 +3943,8 @@ int main(void) {
     test_a8_neon_bitwise_registers();
     test_a8_neon_bitwise_access_and_host_state();
     test_a8_neon_bitwise_invalid_and_it();
+    test_a8_neon_extract_registers();
+    test_a8_neon_extract_access_and_invalid();
     test_a8_neon_immediate_constants();
     test_a8_neon_immediate_access();
     test_a8_neon_immediate_invalid_and_it();
