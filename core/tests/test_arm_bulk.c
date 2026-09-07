@@ -456,17 +456,25 @@ static unsigned chain_differential(arm_cpu_t *cpu,
     memcpy(before_ram, ram, sizeof ram);
     unsigned n = arm_bulk_string_try(cpu, memory, budget);
     unsigned stride = kind ? 19u : 10u;
-    CHECK(n <= budget && n % stride == 0u, "chain prefix budget/count");
+    CHECK(n <= budget && (kind >= 2u || n % stride == 0u),
+          "chain prefix budget/count");
     CHECK(bus_reads == reads && bus_writes == writes, "chain touched bus");
     CHECK(memcmp(before_ram, ram, sizeof ram) == 0, "chain wrote RAM");
-    for (unsigned i = 0u; i < n; i++)
+    unsigned loads = 0u;
+    for (unsigned i = 0u; i < n; i++) {
+        /* Count the literal fixture's executed word loads, including repeated
+         * loads along alternate branches, independently of bulk accounting. */
+        uint16_t h;
+        memcpy(&h, mapped(slow.r[15]), sizeof h);
+        if ((h & 0xfe00u) == 0x5800u || (h & 0xf800u) == 0x6800u ||
+            (h & 0xf800u) == 0x9800u) loads++;
         CHECK(arm_step(&slow) == ARM_OK, "chain oracle fault");
+    }
     memcpy(expected.r, slow.r, sizeof expected.r);
     expected.cpsr = slow.cpsr;
     if (!memory->flat_ram) {
         uint64_t tlb_reads = cpu->tlb_hits - expected.tlb_hits;
         uint64_t walk_reads = cpu->tlb_misses - expected.tlb_misses;
-        unsigned loads = n / stride * (kind ? 5u : 2u);
         CHECK(tlb_reads + walk_reads <= loads &&
                   (memory->ram_window || !(tlb_reads + walk_reads)),
               "chain READ witness accounting");
@@ -676,6 +684,109 @@ static void test_thumb_chain_cold(void) {
     puts("arm_bulk cold READ chains: exact budgets, permissions, no bus or cache writes");
 }
 
+/* Synthetic placement is deliberately different from any surrounding binary:
+ * two instructions precede the header and the empty-payload detour is +96.
+ * A path is admitted from its witnessed edges, not an assumed address. */
+static void filtered_paths_install(arm_cpu_t *cpu, arm_bulk_memory_t *memory,
+                                   bool different_depth, unsigned empty,
+                                   unsigned nodes, bool nonidentity) {
+    memory->code = ram + CODE - 4u;
+    memory->code_base = CODE - 4u;
+    memory->code_bytes = 164u;
+    w16(NULL, CODE - 4u, 0x4641u);
+    w16(NULL, CODE - 2u, 0x585au);
+    for (unsigned at = 38u; at < 160u; at += 2u)
+        w16(NULL, CODE + at, 0x46c0u);
+    w16(NULL, CODE + 24u, 0xd1f0u); /* BNE header-4. */
+    w16(NULL, CODE + 4u, 0xd02cu);  /* BEQ header+96. */
+    const uint16_t detour[] = {
+        0x4649u, 0x5859u, 0x2900u, 0xd002u,
+        0x5959u, 0x2900u, 0xd1cbu, /* BNE header+6. */
+    };
+    for (unsigned i = 0u; i < sizeof detour / sizeof detour[0]; i++)
+        w16(NULL, CODE + 96u + 2u * i, detour[i]);
+    cpu->r[9] = 12u;
+    if (different_depth) {
+        cpu->r[10] = 0x7fffffffu;
+        cpu->r[0] = 0x80000000u;
+        cpu->r[13] = 0xfffffffdu; /* This path must not read the stack. */
+    }
+    for (unsigned i = 0u; i < nodes; i++) {
+        uint32_t pa = nonidentity
+            ? DATA + (i & 1u) * 0x1000u + (i >> 1) * 16u : DATA + i * 16u;
+        w32(NULL, pa + 4u, empty == 1u || (empty == 2u && (i & 1u)) ? 0u : 1u);
+        w32(NULL, pa + 12u, 1u);
+    }
+    bus_reads = bus_writes = 0u;
+}
+
+static unsigned filtered_paths_prefix(bool different_depth, unsigned empty,
+                                       unsigned nodes, unsigned budget) {
+    unsigned retired = 0u;
+    for (unsigned i = 0u; i + 1u < nodes; i++) {
+        unsigned cost = different_depth ? 15u : 19u;
+        if (empty == 1u || (empty == 2u && (i & 1u))) cost += 7u;
+        if (budget - retired < cost) break;
+        retired += cost;
+    }
+    return retired;
+}
+
+static void test_thumb_filtered_paths(void) {
+    for (unsigned depth = 0u; depth < 2u; depth++)
+        for (unsigned empty = 0u; empty < 3u; empty++) {
+            for (unsigned flags = 0u; flags < 16u; flags++)
+                for (unsigned budget = 0u; budget <= 512u; budget++) {
+                    arm_cpu_t cpu; arm_bulk_memory_t memory;
+                    chain_setup(&cpu, &memory, 1u, flags % 7u, 31u,
+                                flags << 28 | ARM_CPSR_Q | ARM_CPSR_A);
+                    filtered_paths_install(&cpu, &memory, depth != 0u, empty, 31u, false);
+                    CHECK(chain_differential(&cpu, &memory, budget, 2u) ==
+                              filtered_paths_prefix(depth != 0u, empty, 31u, budget),
+                          "filtered alternate path budget/depth=%u/empty=%u", depth, empty);
+                }
+            for (unsigned budget = 0u; budget <= 4096u; budget += 31u) {
+                arm_cpu_t cpu; arm_bulk_memory_t memory; arm_ram_window_t window;
+                chain_tlb_setup(&cpu, &memory, &window, 1u);
+                filtered_paths_install(&cpu, &memory, depth != 0u, empty, 128u, true);
+                memset(cpu.tlb, 0, sizeof cpu.tlb);
+                memset(cpu.dread, 0, sizeof cpu.dread);
+                CHECK(chain_differential(&cpu, &memory, budget, 2u) ==
+                          filtered_paths_prefix(depth != 0u, empty, 128u, budget),
+                      "cold nonidentity alternate search prefix");
+            }
+        }
+    for (unsigned scenario = 0u; scenario < 18u; scenario++) {
+        arm_cpu_t cpu; arm_bulk_memory_t memory; arm_ram_window_t window;
+        chain_tlb_setup(&cpu, &memory, &window, 1u);
+        filtered_paths_install(&cpu, &memory, true, 1u, 128u, true);
+        memset(cpu.tlb, 0, sizeof cpu.tlb);
+        switch (scenario) {
+        case 0: memory.code += 4u; memory.code_base += 4u; memory.code_bytes -= 4u; break;
+        case 1: w16(NULL, CODE - 4u, 0x4649u); break;
+        case 2: w16(NULL, CODE - 2u, 0x5859u); break;
+        case 3: w16(NULL, CODE + 24u, 0xd1efu); break;
+        case 4: w16(NULL, CODE + 4u, 0xd02bu); break;
+        case 5: w16(NULL, CODE + 4u, 0xd080u); break;
+        case 6: memory.code_bytes = 4u + 96u + 13u; break;
+        case 7: w32(NULL, DATA + 12u, 0u); break;
+        case 8: w32(NULL, DATA + 8u, 0u); break;
+        case 9: cpu.r[9]++; break;
+        case 10: cpu.r[9] = 0x3000u; break;
+        default: ram[CODE + 96u + 2u * (scenario - 11u) + 1u] ^= 0x80u; break;
+        }
+        refusal(&cpu, &memory, 4096u);
+    }
+    /* A later inadmissible detour must preserve the already completed prefix. */
+    arm_cpu_t cpu; arm_bulk_memory_t memory;
+    chain_setup(&cpu, &memory, 1u, 0u, 17u, 0u);
+    filtered_paths_install(&cpu, &memory, false, 2u, 17u, false);
+    w32(NULL, DATA + 16u + 12u, 0u);
+    CHECK(chain_differential(&cpu, &memory, 4096u, 2u) == 19u,
+          "late detour refusal lost exact completed prefix");
+    puts("arm_bulk filtered paths: mixed 15/19/22/26 instruction cycles executed");
+}
+
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 typedef struct {
     arm_cpu_t *cpu;
@@ -805,6 +916,23 @@ static void test_native_integration(void) {
             calls += native_differential(&cpu, &memory, (kind ? 19u : 10u) * 60u,
                                           enabled != 0u);
         }
+    uint64_t alternate_calls = 0u;
+    for (unsigned depth = 0u; depth < 2u; depth++)
+        for (unsigned empty = 0u; empty < 3u; empty++)
+            for (unsigned cold = 0u; cold < 2u; cold++)
+                for (unsigned enabled = 0u; enabled < 2u; enabled++) {
+                    arm_cpu_t cpu; arm_bulk_memory_t memory; arm_ram_window_t window;
+                    chain_tlb_setup(&cpu, &memory, &window, 1u);
+                    filtered_paths_install(&cpu, &memory, depth != 0u, empty, 128u, true);
+                    if (cold) {
+                        memset(cpu.tlb, 0, sizeof cpu.tlb);
+                        memset(cpu.dread, 0, sizeof cpu.dread);
+                    }
+                    unsigned budget = filtered_paths_prefix(depth != 0u, empty, 61u, 4096u);
+                    alternate_calls += native_differential(&cpu, &memory, budget, enabled != 0u);
+                }
+    CHECK(alternate_calls == 12u, "native alternate search paths did not execute");
+    calls += alternate_calls;
     CHECK(calls > 0u, "native bulk integration never executed");
     printf("arm_bulk native integration: %llu bulk calls\n", (unsigned long long)calls);
 }
@@ -823,6 +951,7 @@ int main(void) {
     test_thumb_chains();
     test_thumb_chain_tlb();
     test_thumb_chain_cold();
+    test_thumb_filtered_paths();
     test_native_integration();
     printf("arm_bulk: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;

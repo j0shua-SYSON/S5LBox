@@ -99,7 +99,7 @@ static const uint8_t *chain_word_at(const arm_cpu_t *cpu,
  * register-parametric: MOV previous,current; LDR current,[walk,next_offset];
  * CMP/BEQ null; LDR value,[current,key_offset]; MOVS walk,current;
  * CMP/BEQ equal; CMP needle,value; BHI header. Only the full back-edge path
- * is admitted. Exits, cold mappings and partial budgets stay literal. */
+ * is admitted. Exits, unproved mappings and partial budgets stay literal. */
 static unsigned thumb_ordered_chain(arm_cpu_t *cpu,
                                      const arm_bulk_memory_t *memory,
                                      uint32_t offset, unsigned budget) {
@@ -159,10 +159,28 @@ static unsigned thumb_ordered_chain(arm_cpu_t *cpu,
     return 10u * count;
 }
 
-/* A second read-only chain shape includes a depth comparison and a target
- * loaded through an invariant stack slot. Match every instruction in the
- * cycle, including the final backward branch. The other branch destinations
- * are irrelevant only because each admitted iteration proves them untaken. */
+/* The empty-payload detour can rejoin this read-only search, but only after
+ * proving both links nonzero. Witness the actual target and its return edge;
+ * an arbitrary BEQ destination is not evidence for this alternate path. */
+static bool thumb_filtered_empty_path(const arm_bulk_memory_t *memory,
+                                       uint32_t offset) {
+    int64_t target = (int64_t)offset + 8 +
+        (int8_t)read16(memory->code + offset + 4u) * 2;
+    if (target < 0 || (uint64_t)target > memory->code_bytes ||
+        memory->code_bytes - (uint32_t)target < 14u) return false;
+    const uint8_t *p = memory->code + (uint32_t)target;
+    return read16(p) == 0x4649u && read16(p + 2u) == 0x5859u &&
+           read16(p + 4u) == 0x2900u &&
+           (read16(p + 6u) & 0xff00u) == 0xd000u &&
+           read16(p + 8u) == 0x5959u && read16(p + 10u) == 0x2900u &&
+           (read16(p + 12u) & 0xff00u) == 0xd100u &&
+           target + 16 + (int8_t)read16(p + 12u) * 2 == (int64_t)offset + 6;
+}
+
+/* A second read-only chain includes two depth paths and an optional empty-
+ * payload detour. Every taken internal edge is matched to witnessed code.
+ * Exits which can descend, unlink, write or return remain ordinary execution.
+ * Each complete iteration has its own original instruction and load count. */
 static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
                                       const arm_bulk_memory_t *memory,
                                       uint32_t offset, unsigned budget) {
@@ -171,31 +189,57 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
         0x4562u, 0xd000u, 0x595bu, 0x2b00u, 0xd000u, 0x4582u,
         0xd100u, 0x4641u, 0x585au, 0x9900u, 0x6809u, 0x428au, 0xd1ecu,
     };
-    if (memory->code_bytes - offset < sizeof shape || budget < 19u ||
-        cpu->r[10] != cpu->r[0]) return 0u;
+    const bool same_depth = cpu->r[10] == cpu->r[0];
+    const unsigned stride = same_depth ? 19u : 15u;
+    if (memory->code_bytes - offset < sizeof shape || budget < stride) return 0u;
     for (unsigned i = 0u; i < sizeof shape / sizeof shape[0]; i++) {
         unsigned mask = (i == 2u || i == 7u || i == 10u || i == 12u || i == 15u)
             ? 0xff00u : 0xffffu;
         if ((read16(memory->code + offset + 2u * i) & mask) != shape[i])
             return 0u;
     }
-    uint32_t stack_offset = (read16(memory->code + offset + 30u) & 255u) * 4u;
+    if (!same_depth && (offset < 4u ||
+        read16(memory->code + offset + 24u) != 0xd1f0u ||
+        read16(memory->code + offset - 4u) != 0x4641u ||
+        read16(memory->code + offset - 2u) != 0x585au)) return 0u;
     unsigned invariant_reads = 0u, invariant_walks = 0u;
-    const uint8_t *slot = chain_word_at(cpu, memory,
-        cpu->r[13] + stack_offset, &invariant_reads, &invariant_walks);
-    if (!slot) return 0u;
-    const uint8_t *target = chain_word_at(cpu, memory, read32(slot),
-                                         &invariant_reads, &invariant_walks);
-    if (!target) return 0u;
-    const uint32_t wanted = read32(target);
+    uint32_t wanted = 0u;
+    if (same_depth) {
+        uint32_t stack_offset = (read16(memory->code + offset + 30u) & 255u) * 4u;
+        const uint8_t *slot = chain_word_at(cpu, memory,
+            cpu->r[13] + stack_offset, &invariant_reads, &invariant_walks);
+        if (!slot) return 0u;
+        const uint8_t *target = chain_word_at(cpu, memory, read32(slot),
+                                             &invariant_reads, &invariant_walks);
+        if (!target) return 0u;
+        wanted = read32(target);
+    }
     uint32_t current = cpu->r[3], value = cpu->r[2], previous = cpu->r[6];
-    unsigned count = 0u, tlb_reads = 0u, walk_reads = 0u;
-    while (count < budget / 19u) {
+    unsigned retired = 0u, loads = 0u, tlb_reads = 0u, walk_reads = 0u;
+    bool empty_path_witnessed = false;
+    while (budget - retired >= stride) {
+        unsigned cost = stride, iteration_loads = same_depth ? 5u : 3u;
         unsigned iteration_reads = invariant_reads;
         unsigned iteration_walks = invariant_walks;
         const uint8_t *payload = chain_word_at(cpu, memory,
             current + cpu->r[4], &iteration_reads, &iteration_walks);
-        if (!payload || !read32(payload) || value == cpu->r[12]) break;
+        if (!payload) break;
+        if (!read32(payload)) {
+            cost += 7u;
+            if (budget - retired < cost) break;
+            if (!empty_path_witnessed) {
+                if (!thumb_filtered_empty_path(memory, offset)) break;
+                empty_path_witnessed = true;
+            }
+            const uint8_t *child = chain_word_at(cpu, memory,
+                current + cpu->r[9], &iteration_reads, &iteration_walks);
+            if (!child || !read32(child)) break;
+            const uint8_t *sibling = chain_word_at(cpu, memory,
+                current + cpu->r[5], &iteration_reads, &iteration_walks);
+            if (!sibling || !read32(sibling)) break;
+            iteration_loads += 2u;
+        }
+        if (value == cpu->r[12]) break;
         const uint8_t *link = chain_word_at(cpu, memory,
             current + cpu->r[5], &iteration_reads, &iteration_walks);
         if (!link) break;
@@ -205,22 +249,25 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
             next + cpu->r[8], &iteration_reads, &iteration_walks);
         if (!key) break;
         uint32_t next_value = read32(key);
-        if (next_value == wanted) break;
+        if (same_depth && next_value == wanted) break;
         previous = current; current = next; value = next_value;
         tlb_reads += iteration_reads;
         walk_reads += iteration_walks;
-        count++;
+        loads += iteration_loads;
+        retired += cost;
     }
-    if (!count) return 0u;
-    cpu->r[1] = wanted; cpu->r[2] = value; cpu->r[3] = current;
+    if (!retired) return 0u;
+    cpu->r[1] = same_depth ? wanted : cpu->r[8];
+    cpu->r[2] = value; cpu->r[3] = current;
     cpu->r[6] = previous; cpu->r[11] = 0u;
-    cpu->cpsr = compare_flags(cpu->cpsr, value, wanted);
+    cpu->cpsr = same_depth ? compare_flags(cpu->cpsr, value, wanted)
+                          : compare_flags(cpu->cpsr, cpu->r[10], cpu->r[0]);
     if (!memory->flat_ram) {
-        cpu->dread_hits += 5u * count - tlb_reads - walk_reads;
+        cpu->dread_hits += loads - tlb_reads - walk_reads;
         cpu->tlb_hits += tlb_reads;
         cpu->tlb_misses += walk_reads;
     }
-    return 19u * count;
+    return retired;
 }
 
 static unsigned compare_loop(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,

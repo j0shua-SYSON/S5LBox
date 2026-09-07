@@ -1,7 +1,8 @@
 # Witnessed bulk execution experiment
 
-The compact engine can execute recognized string scans and signed-byte range
-comparisons as bounded native operations. It matches complete live instruction
+The compact engine can execute recognized string scans, signed-byte range
+comparisons and read-only pointer searches as bounded native operations.
+It matches complete live instruction
 sequences, not symbols, process names, fixed addresses, or installed versions.
 The purpose is to remove repeated instruction dispatch from CPU-heavy guest work.
 This is an experiment, not a measured application-speed improvement.
@@ -56,6 +57,18 @@ and translation-control semantics. Existing counters classify represented cold
 reads as TLB misses, not DREAD/TLB hits, including invariant reads whose proofs
 are reused within one read-only interval. Refused iterations commit no counters.
 This remains behind the existing bulk option; physical speedup is unverified.
+
+The filtered pointer search also admits its different-depth path and the
+empty-payload detour when both child and sibling are nonzero. Unlike untaken
+exit branches, every taken internal edge must lead to separately matched live
+instructions within the FETCH witness. Depth-only traversal does not read the
+unused stack target. Mixed iterations retain their individual 15, 19, 22 or 26
+instruction costs and literal logical-load counts. Descent, unlinking, stores,
+returns, unproved mappings and incomplete budgets remain ordinary execution.
+The differential tests cover mixed paths, all NZCV inputs, cold nonidentity
+pages, changed/truncated branch targets and precise refusal after a prefix.
+Native integration requires the entire chosen budget in one batch on both
+warm and cold pages. This expands execution coverage, not the physical gate.
 
 ## First physical result
 
