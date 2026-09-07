@@ -6,6 +6,8 @@
 #define BULK_SEGMENT 32u
 #define BULK_PAGES 8u
 #define BULK_ENTRIES 256u
+#define BULK_INDEX_SETS 4096u
+#define BULK_INDEX_WAYS 4u
 
 typedef struct {
     uint32_t address, reads;
@@ -24,23 +26,48 @@ typedef struct {
     uint32_t previous, current, value;
     uint32_t low, high, head_low, head_high;
     const arm_ram_watch_t *watch;
+} bulk_result_t;
+
+typedef struct {
+    bulk_result_t result;
+    bool stamps_only;
     bulk_page_t page[BULK_PAGES];
 } bulk_segment_t;
+
+/* Most cached segments share data pages. Do not retain another 8 KiB of page
+ * copies per segment merely to prove unchanged bytes: an owned write witness
+ * admits compact descriptors. A changed stamp rebuilds the segment literally.
+ * The smaller byte cache remains available without an owning write contract. */
+typedef struct {
+    bulk_result_t result;
+    struct { uint32_t address, reads; uint64_t stamp; } page[BULK_PAGES];
+} bulk_index_entry_t;
+_Static_assert(sizeof(bulk_index_entry_t) <= 256u,
+               "the optional search index must stay within 4 MiB");
 
 struct arm_bulk_cache {
     uint64_t hits;
     bulk_segment_t entry[BULK_ENTRIES];
+    bulk_index_entry_t *index;
+    uint8_t replace[BULK_INDEX_SETS];
+    bool index_attempted;
 };
 
 arm_bulk_cache_t *arm_bulk_cache_create(void) {
     return calloc(1u, sizeof(arm_bulk_cache_t));
 }
 
-void arm_bulk_cache_destroy(arm_bulk_cache_t *cache) { free(cache); }
+void arm_bulk_cache_destroy(arm_bulk_cache_t *cache) {
+    if (cache) free(cache->index);
+    free(cache);
+}
 
 void arm_bulk_cache_reset(arm_bulk_cache_t *cache) {
     if (!cache) return;
-    for (unsigned i = 0u; i < BULK_ENTRIES; i++) cache->entry[i].valid = false;
+    for (unsigned i = 0u; i < BULK_ENTRIES; i++) cache->entry[i].result.valid = false;
+    if (cache->index)
+        for (unsigned i = 0u; i < BULK_INDEX_SETS * BULK_INDEX_WAYS; i++)
+            cache->index[i].result.valid = false;
     cache->hits = 0u;
 }
 
@@ -142,32 +169,96 @@ static const uint8_t *chain_word_at(const arm_cpu_t *cpu,
     return p + (address & 1023u);
 }
 
-static bulk_segment_t *segment_slot(const arm_bulk_memory_t *memory,
-                                     unsigned kind, uint32_t start,
-                                     const uint32_t offsets[4]) {
-    if (!memory->cache || (memory->flat_ram && memory->flat_size < 1024u))
-        return NULL;
+static uint32_t segment_hash(unsigned kind, uint32_t start,
+                              const uint32_t offsets[4]) {
     uint32_t hash = start * UINT32_C(0x9e3779b1) + kind;
     for (unsigned i = 0u; i < 4u; i++)
         hash = (hash ^ offsets[i]) * UINT32_C(0x85ebca6b);
-    return &memory->cache->entry[(hash ^ (hash >> 16)) & (BULK_ENTRIES - 1u)];
+    return hash ^ (hash >> 16);
+}
+
+static bool result_key(const bulk_result_t *result, unsigned kind,
+                         uint32_t start, const uint32_t offsets[4]) {
+    return result->valid && result->kind == kind && result->start == start &&
+        memcmp(result->offsets, offsets, sizeof result->offsets) == 0;
+}
+
+static bulk_segment_t *segment_slot(const arm_bulk_memory_t *memory,
+                                     unsigned kind, uint32_t start,
+                                     const uint32_t offsets[4]) {
+    arm_bulk_cache_t *cache = memory->cache;
+    if (!cache || (memory->flat_ram && memory->flat_size < 1024u)) return NULL;
+    uint32_t hash = segment_hash(kind, start, offsets);
+    bulk_segment_t *entry = &cache->entry[hash & (BULK_ENTRIES - 1u)];
+    if (memory->watch && !cache->index_attempted) {
+        cache->index_attempted = true;
+        cache->index = calloc(BULK_INDEX_SETS * BULK_INDEX_WAYS, sizeof *cache->index);
+        /* Allocation failure keeps the existing byte-validated cache. */
+    }
+    if (!memory->watch || !cache->index ||
+        result_key(&entry->result, kind, start, offsets)) return entry;
+    unsigned set = hash & (BULK_INDEX_SETS - 1u);
+    for (unsigned way = 0u; way < BULK_INDEX_WAYS; way++) {
+        const bulk_index_entry_t *indexed = &cache->index[set * BULK_INDEX_WAYS + way];
+        if (indexed->result.watch != memory->watch ||
+            !result_key(&indexed->result, kind, start, offsets)) continue;
+        entry->result = indexed->result;
+        entry->stamps_only = true;
+        for (unsigned i = 0u; i < entry->result.pages; i++) {
+            entry->page[i].address = indexed->page[i].address;
+            entry->page[i].reads = indexed->page[i].reads;
+            entry->page[i].stamp = indexed->page[i].stamp;
+            entry->page[i].source = NULL;
+        }
+        break;
+    }
+    return entry;
+}
+
+static void segment_index(const arm_bulk_memory_t *memory,
+                            const bulk_segment_t *entry) {
+    arm_bulk_cache_t *cache = memory->cache;
+    if (!entry->result.watch || !cache->index) return;
+    for (unsigned i = 0u; i < entry->result.pages; i++)
+        if (!entry->page[i].stamp) return;
+    unsigned set = segment_hash(entry->result.kind, entry->result.start,
+                                 entry->result.offsets) & (BULK_INDEX_SETS - 1u);
+    bulk_index_entry_t *target = NULL;
+    for (unsigned way = 0u; way < BULK_INDEX_WAYS; way++) {
+        bulk_index_entry_t *slot = &cache->index[set * BULK_INDEX_WAYS + way];
+        if (result_key(&slot->result, entry->result.kind,
+                        entry->result.start, entry->result.offsets)) {
+            target = slot;
+            break;
+        }
+        if (!slot->result.valid && !target) target = slot;
+    }
+    if (!target) {
+        unsigned way = cache->replace[set]++ & (BULK_INDEX_WAYS - 1u);
+        target = &cache->index[set * BULK_INDEX_WAYS + way];
+    }
+    target->result = entry->result;
+    for (unsigned i = 0u; i < entry->result.pages; i++) {
+        target->page[i].address = entry->page[i].address;
+        target->page[i].reads = entry->page[i].reads;
+        target->page[i].stamp = entry->page[i].stamp;
+    }
 }
 
 static bool segment_key(const bulk_segment_t *entry, unsigned kind,
                           uint32_t start, const uint32_t offsets[4],
                           unsigned budget) {
-    return entry && entry->valid && entry->kind == kind &&
-        entry->start == start && entry->retired <= budget &&
-        memcmp(entry->offsets, offsets, sizeof entry->offsets) == 0;
+    return entry && entry->result.retired <= budget &&
+        result_key(&entry->result, kind, start, offsets);
 }
 
 static void segment_begin(bulk_segment_t *entry, unsigned kind,
                             uint32_t start, const uint32_t offsets[4]) {
     if (!entry) return;
     memset(entry, 0, offsetof(bulk_segment_t, page));
-    entry->kind = kind; entry->start = start;
-    memcpy(entry->offsets, offsets, sizeof entry->offsets);
-    entry->low = entry->head_low = UINT32_MAX;
+    entry->result.kind = kind; entry->result.start = start;
+    memcpy(entry->result.offsets, offsets, sizeof entry->result.offsets);
+    entry->result.low = entry->result.head_low = UINT32_MAX;
 }
 
 /* Record only loads belonging to an admitted complete iteration. A later
@@ -175,12 +266,12 @@ static void segment_begin(bulk_segment_t *entry, unsigned kind,
  * counts or dependencies. The read-only call still owns each source pointer. */
 static void segment_note(bulk_segment_t *entry, uint32_t address,
                            const uint8_t *p) {
-    if (!entry || entry->pages > BULK_PAGES) return;
+    if (!entry || entry->result.pages > BULK_PAGES) return;
     uint32_t page = address & ~UINT32_C(1023);
     unsigned i = 0u;
-    while (i < entry->pages && entry->page[i].address != page) i++;
-    if (i == entry->pages) {
-        if (entry->pages++ == BULK_PAGES) return;
+    while (i < entry->result.pages && entry->page[i].address != page) i++;
+    if (i == entry->result.pages) {
+        if (entry->result.pages++ == BULK_PAGES) return;
         entry->page[i].address = page;
         entry->page[i].source = p - (address & 1023u);
         entry->page[i].reads = 0u;
@@ -189,22 +280,23 @@ static void segment_note(bulk_segment_t *entry, uint32_t address,
     unsigned word = (address & 1023u) / 4u;
     entry->page[i].words[word / 32u] |= UINT32_C(1) << (word % 32u);
     entry->page[i].reads++;
-    entry->loads++;
+    entry->result.loads++;
 }
 
 static void segment_finish(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
                              bulk_segment_t *entry, uint32_t previous,
                              uint32_t current, uint32_t value) {
-    if (!entry || entry->iterations < 2u || entry->pages > BULK_PAGES) return;
-    entry->previous = previous; entry->current = current; entry->value = value;
-    entry->watch = memory->watch;
-    for (unsigned i = 0u; i < entry->pages; i++) {
+    if (!entry || entry->result.iterations < 2u || entry->result.pages > BULK_PAGES) return;
+    entry->result.previous = previous; entry->result.current = current; entry->result.value = value;
+    entry->result.watch = memory->watch;
+    for (unsigned i = 0u; i < entry->result.pages; i++) {
         entry->page[i].stamp = arm_ram_watch_capture(memory->watch, cpu,
                                                     entry->page[i].source);
         memcpy(entry->page[i].bytes, entry->page[i].source, 1024u);
         entry->page[i].source = NULL;
     }
-    entry->valid = true;
+    entry->result.valid = true;
+    segment_index(memory, entry);
 }
 
 /* A current owned write stamp can prove unchanged physical bytes; otherwise
@@ -221,13 +313,16 @@ static bool segment_validate(arm_cpu_t *cpu,
                                bulk_segment_t *entry,
                                unsigned *tlb_reads, unsigned *walk_reads) {
     unsigned reads = 0u, walks = 0u;
-    for (unsigned i = 0u; i < entry->pages; i++) {
+    for (unsigned i = 0u; i < entry->result.pages; i++) {
         bulk_page_t *page = &entry->page[i];
         unsigned read = 0u, walk = 0u;
         const uint8_t *p = chain_word_at(cpu, memory, page->address, &read, &walk);
         if (!p) return false;
         uint64_t stamp = arm_ram_watch_capture(memory->watch, cpu, p);
-        bool unchanged = stamp && entry->watch == memory->watch && page->stamp == stamp;
+        bool unchanged = stamp && entry->result.watch == memory->watch && page->stamp == stamp;
+        /* A compact descriptor has no byte snapshot or dependency mask.
+         * Lost ownership, changed mappings and writes require literal rebuild. */
+        if (entry->stamps_only && !unchanged) return false;
         if (!unchanged && memcmp(p, page->bytes, 1024u) != 0) {
             for (unsigned group = 0u; group < 8u; group++) {
                 uint32_t words = page->words[group];
@@ -250,7 +345,7 @@ static bool segment_validate(arm_cpu_t *cpu,
         walks += walk * page->reads;
     }
     *tlb_reads += reads; *walk_reads += walks;
-    entry->watch = memory->watch;
+    entry->result.watch = memory->watch;
     memory->cache->hits++;
     return true;
 }
@@ -306,10 +401,10 @@ static unsigned thumb_ordered_chain(arm_cpu_t *cpu,
         if (part == 0u) {
             bulk_segment_t *entry = segment_slot(memory, 1u, walker, offsets);
             if (segment_key(entry, 1u, walker, offsets, budget - count * 10u) &&
-                wanted > entry->high &&
+                wanted > entry->result.high &&
                 segment_validate(cpu, memory, entry, &tlb_reads, &walk_reads)) {
-                prev = entry->previous; cur = walker = entry->current;
-                key = entry->value; count += entry->iterations;
+                prev = entry->result.previous; cur = walker = entry->result.current;
+                key = entry->result.value; count += entry->result.iterations;
                 continue;
             }
             building = budget / 10u - count >= 2u ? entry : NULL;
@@ -333,9 +428,9 @@ static unsigned thumb_ordered_chain(arm_cpu_t *cpu,
         walk_reads += iteration_walks;
         count++;
         if (building) {
-            segment_range(key, &building->low, &building->high);
-            building->retired += 10u;
-            building->iterations++;
+            segment_range(key, &building->result.low, &building->result.high);
+            building->result.retired += 10u;
+            building->result.iterations++;
         }
         if (++part == BULK_SEGMENT) {
             segment_finish(cpu, memory, building, prev, cur, key);
@@ -422,15 +517,15 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
             bulk_segment_t *entry = segment_slot(memory, kind, current, offsets);
             if (segment_key(entry, kind, current, offsets, budget - retired) &&
                 value != cpu->r[12] &&
-                outside(cpu->r[12], entry->head_low, entry->head_high) &&
-                (!same_depth || outside(wanted, entry->low, entry->high)) &&
-                (!entry->empty_path || thumb_filtered_empty_path(memory, offset)) &&
+                outside(cpu->r[12], entry->result.head_low, entry->result.head_high) &&
+                (!same_depth || outside(wanted, entry->result.low, entry->result.high)) &&
+                (!entry->result.empty_path || thumb_filtered_empty_path(memory, offset)) &&
                 segment_validate(cpu, memory, entry, &tlb_reads, &walk_reads)) {
-                previous = entry->previous; current = entry->current;
-                value = entry->value; retired += entry->retired;
-                loads += entry->loads + (same_depth ? 2u * entry->iterations : 0u);
-                tlb_reads += invariant_reads * entry->iterations;
-                walk_reads += invariant_walks * entry->iterations;
+                previous = entry->result.previous; current = entry->result.current;
+                value = entry->result.value; retired += entry->result.retired;
+                loads += entry->result.loads + (same_depth ? 2u * entry->result.iterations : 0u);
+                tlb_reads += invariant_reads * entry->result.iterations;
+                walk_reads += invariant_walks * entry->result.iterations;
                 continue;
             }
             building = (budget - retired) / stride >= 2u ? entry : NULL;
@@ -474,14 +569,14 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
             if (child) {
                 segment_note(building, current + cpu->r[9], child);
                 segment_note(building, current + cpu->r[5], sibling);
-                building->empty_path = true;
+                building->result.empty_path = true;
             }
             segment_note(building, current + cpu->r[5], link);
             segment_note(building, next + cpu->r[8], key);
-            segment_range(next_value, &building->low, &building->high);
-            if (part) segment_range(value, &building->head_low, &building->head_high);
-            building->retired += cost;
-            building->iterations++;
+            segment_range(next_value, &building->result.low, &building->result.high);
+            if (part) segment_range(value, &building->result.head_low, &building->result.head_high);
+            building->result.retired += cost;
+            building->result.iterations++;
         }
         previous = current; current = next; value = next_value;
         tlb_reads += iteration_reads;

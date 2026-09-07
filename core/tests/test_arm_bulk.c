@@ -1192,6 +1192,125 @@ static void test_native_integration(void) {
 }
 #endif
 
+static unsigned long_chain_batch(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
+                                  unsigned budget, bool native) {
+    arm_cpu_t reference = *cpu;
+    unsigned retired = 0u;
+    if (native) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+        native_context_t context = {cpu, memory};
+        unsigned signed_retired = 0u, fallback = 0u;
+        a64_compact_bulk_stats_t stats = {0};
+        const a64_compact_raw_options_t options = {
+            .bulk_enabled = true, .bulk_ram_window = memory->ram_window,
+            .bulk_cache = memory->cache, .bulk_watch = memory->watch,
+        };
+        CHECK(a64_compact_raw_run_code_window_resident_options(cpu, memory->code,
+            memory->code_base, memory->code_bytes, budget, native_fallback, &context,
+            &options, NULL, &stats, NULL, &retired, &signed_retired, &fallback),
+              "long search native wrapper refused");
+        CHECK(stats.calls == 1u && stats.retired == budget &&
+              signed_retired == budget && !fallback, "long search missed native bulk path");
+#else
+        CHECK(false, "native long search requested without static engine");
+#endif
+    } else {
+        retired = arm_bulk_string_try(cpu, memory, budget);
+        cpu->cycles += retired; /* The bulk caller owns instruction accounting. */
+    }
+    CHECK(retired == budget && retired <= S5L8900_ACTIVE_CLOCK_BATCH_INSNS,
+          "long search changed the device budget");
+    bool exact = true;
+    for (unsigned i = 0u; i < retired; i++)
+        if (arm_step(&reference) != ARM_OK) { exact = false; break; }
+    CHECK(exact && memcmp(cpu, &reference, offsetof(arm_cpu_t, tlb)) == 0,
+          "long search diverged from original instructions");
+    return retired;
+}
+
+static void test_long_chain_index(void) {
+    unsigned modes = 1u;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    if (a64_static_host_available()) modes = 2u;
+#endif
+    for (unsigned native = 0u; native < modes; native++) {
+        const unsigned nodes = 32769u, steps = (nodes - 1u) * 10u;
+        const uint32_t data = 0x10000u;
+        arm_cpu_t shape; arm_bulk_memory_t pattern;
+        chain_setup(&shape, &pattern, 0u, 0u, 128u, ARM_CPSR_Q | ARM_CPSR_V);
+        s5l8900_t machine;
+        bool initialized = s5l8900_init(&machine, 0u, 1u << 20);
+        CHECK(initialized, "long search RAM allocation");
+        if (!initialized) return;
+        s5l8900_load(&machine, CODE, pattern.code, pattern.code_bytes);
+        for (unsigned i = 0u; i < nodes; i++) {
+            machine.bus.write32(&machine, data + i * 16u,
+                i + 1u < nodes ? data + (i + 1u) * 16u : 0u);
+            machine.bus.write32(&machine, data + i * 16u + 4u, 0x80000000u + i);
+        }
+        memcpy(machine.cpu.r, shape.r, sizeof shape.r);
+        machine.cpu.cpsr = shape.cpsr;
+        machine.cpu.r[4] = machine.cpu.r[6] = data;
+        machine.cpu.r[5] = UINT32_MAX;
+        machine.bus.write32(&machine, 0x4000u, 0xc02u); /* User RW identity section. */
+        machine.cpu.cp15.ttbr0 = 0x4000u;
+        machine.cpu.cp15.dacr = 1u;
+        machine.cpu.cp15.sctlr = ARM_SCTLR_M;
+        uint32_t pa = 0u;
+        CHECK(arm_mmu_translate(&machine.cpu, CODE, ARM_ACCESS_FETCH, false, &pa) == 0u,
+              "long search FETCH permission");
+        CHECK(s5l8900_set_ram_watch(&machine, true), "long search write owner");
+        arm_ram_window_t window;
+        CHECK(arm_ram_window_capture(&window, &machine.cpu, 0u, machine.ram_size),
+              "long search RAM capability");
+        arm_bulk_cache_t *cache = arm_bulk_cache_create();
+        CHECK(cache != NULL, "long search cache allocation");
+        if (!cache) { s5l8900_free(&machine); return; }
+        arm_bulk_memory_t memory = {
+            .code = machine.ram + CODE, .code_base = CODE, .code_bytes = pattern.code_bytes,
+            .data_cache = true, .ram_window = &window, .cache = cache,
+            .watch = machine.ram_watch,
+        };
+        const arm_cpu_t initial = machine.cpu;
+        for (unsigned pass = 0u; pass < 2u; pass++) {
+            machine.cpu = initial;
+            unsigned done = 0u;
+            uint64_t hits = arm_bulk_cache_hits(cache);
+            while (done < steps) {
+                unsigned budget = steps - done < 250u ? steps - done : 250u;
+                unsigned retired = long_chain_batch(&machine.cpu, &memory, budget, native != 0u);
+                if (!retired) break;
+                done += retired;
+            }
+            CHECK(done == steps && machine.cpu.r[4] == data + (nodes - 1u) * 16u,
+                  "long search did not reach its exact final node");
+            if (pass) {
+                uint64_t reused = arm_bulk_cache_hits(cache) - hits;
+                CHECK(reused > 1024u, "long search retained only %llu segments",
+                      (unsigned long long)reused);
+                printf("arm_bulk long search: native=%u nodes=%u reused=%llu\n",
+                       native, nodes, (unsigned long long)reused);
+            }
+        }
+        /* The starting entry has left the small byte cache. A real bus store,
+         * owner reset, or loss of the write contract must not trust its compact
+         * descriptor or the unrelated bytes still occupying a primary slot. */
+        machine.bus.write32(&machine, data, data + 16u * 17u);
+        machine.cpu = initial;
+        (void)long_chain_batch(&machine.cpu, &memory, 250u, native != 0u);
+        arm_ram_watch_reset(machine.ram_watch);
+        machine.bus.write32(&machine, data, data + 16u * 33u);
+        machine.cpu = initial;
+        (void)long_chain_batch(&machine.cpu, &memory, 250u, native != 0u);
+        memory.watch = NULL;
+        machine.bus.write32(&machine, data, data + 16u * 49u);
+        machine.cpu = initial;
+        (void)long_chain_batch(&machine.cpu, &memory, 250u, native != 0u);
+        arm_bulk_cache_destroy(cache);
+        s5l8900_free(&machine);
+    }
+}
+
 int main(void) {
     test_lengths();
     test_refusals();
@@ -1205,6 +1324,7 @@ int main(void) {
     test_chain_reuse();
     test_chain_reuse_at_machine_budgets();
     test_chain_write_witnesses();
+    test_long_chain_index();
     test_native_integration();
     printf("arm_bulk: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
