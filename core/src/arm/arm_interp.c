@@ -1051,6 +1051,8 @@ bool arm_reset_profile(arm_cpu_t *cpu, const arm_bus_t *bus, arm_arch_t arch) {
      * it empty.
      */
     memset(cpu->tlb, 0, sizeof cpu->tlb);
+    memset(cpu->a8_tlb_memory_type, 0, sizeof cpu->a8_tlb_memory_type);
+    cpu->tlb_arch_stamp = arch;
     cpu->tlb_gen = 1u;
     /* And the fetch-block cache, which holds a host pointer into the previous
      * machine's RAM. See the fetch_* fields in arm.h. */
@@ -3052,16 +3054,30 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
             return ARM_UNDEFINED;
         uint32_t base = rn == 15u ? pc + 4u : c->r[rn];
         uint32_t address = base + (c->r[rm] << (half ? 1u : 0u));
+        uint32_t entry = 0u;
         if (half && (address & 1u)) {
             if (c->cp15.sctlr & ARM_SCTLR_A) {
                 note_alignment_abort(c, address, false);
                 return ARM_OK;
             }
-            /* The shared translator does not expose memory-type attributes.
-             * Do not admit unaligned Device reads as ordinary RAM accesses. */
-            return ARM_UNDEFINED;
-        }
-        uint32_t entry = half ? mem_r16(c, address) : mem_r8(c, address);
+            if (c->arch != ARM_ARCH_V7_CORTEX_A8) return ARM_UNDEFINED;
+            /* MemU decomposes an unaligned halfword into ordered byte reads.
+             * A8's Device/Strongly-ordered case is UNPREDICTABLE (A3.2.2),
+             * not the alignment fault required by virtualization extensions.
+             * Refuse before that byte's bus access; an earlier Normal read
+             * remains observable. Bypass memory-type-unaware host caches. */
+            for (unsigned i = 0; i < 2u; i++) {
+                uint32_t va = address + i, pa;
+                arm_memory_type_t type;
+                uint32_t fsr = arm_mmu_translate_type(c, va, ARM_ACCESS_READ,
+                    (c->cpsr & 0x1fu) != ARM_MODE_USR, &pa, &type);
+                if (fsr) { note_abort(c, fsr, va); return ARM_OK; }
+                if (type != ARM_MEMORY_NORMAL) return ARM_UNDEFINED;
+                uint32_t byte = c->bus->read8(c->bus->ctx, pa);
+                if (note_bus_failure(c, va)) return ARM_OK;
+                entry |= byte << (8u * i);
+            }
+        } else entry = half ? mem_r16(c, address) : mem_r8(c, address);
         if (!c->abort_pending) *next = pc + 4u + 2u * entry;
         return ARM_OK;
     }

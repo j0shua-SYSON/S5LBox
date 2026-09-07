@@ -11,6 +11,8 @@ typedef struct {
     uint8_t ram[0x10000];
     uint32_t fail_address;
     unsigned fail_size, fail_nth, matches, accesses, after_failure;
+    unsigned successful_byte_reads;
+    uint32_t last_byte_address;
     bool fail_write, failed;
 } fixture_t;
 static unsigned passed, failed;
@@ -29,7 +31,10 @@ static bool reject(fixture_t *f, uint32_t address, unsigned size, bool write) {
 #define ACCESSORS(bits) \
 static uint##bits##_t read##bits(void *ctx, uint32_t address) { \
     fixture_t *f = ctx; uint##bits##_t value = 0u; \
-    if (!reject(f, address, (bits)/8u, false)) memcpy(&value, f->ram + address, (bits)/8u); \
+    if (!reject(f, address, (bits)/8u, false)) { \
+        memcpy(&value, f->ram + address, (bits)/8u); \
+        if ((bits)==8u) { f->successful_byte_reads++; f->last_byte_address=address; } \
+    } \
     return value; \
 } \
 static void write##bits(void *ctx, uint32_t address, uint##bits##_t value) { \
@@ -128,7 +133,8 @@ static void test_table_branch_and_retry(void) {
         uint32_t flags=c.cpsr, before[16]; memcpy(before,c.r,sizeof before);
         if (kind==2u) {
             CHECK(arm_step(&c)==ARM_UNDEFINED && !f.failed && c.cpsr==flags &&
-                  memcmp(c.r,before,sizeof before)==0,"unsupported unaligned TBH issued a partial table read");
+                  memcmp(c.r,before,sizeof before)==0 && !f.successful_byte_reads,
+                  "MMU-off Strongly-ordered TBH issued a partial table read");
             continue;
         }
         CHECK(arm_step(&c)==ARM_HALT && memcmp(c.r,before,sizeof before)==0,"failed table read changed PC/registers");
@@ -169,6 +175,28 @@ static void map_pages(fixture_t *f, arm_cpu_t *c) {
     c->cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP; c->cp15.ttbr0 = 0x4000u; c->cp15.dacr = 1u;
     put32(f,0x4000u,0x6001u); put32(f,0x6000u,0x803eu);
     put32(f,0x6004u,0xa03eu); put32(f,0x6008u,0xc03eu);
+}
+static void test_unaligned_table_branch_and_retry(void) {
+    for (unsigned host=0;host<2u;host++)
+     for (unsigned phase=0;phase<3u;phase++) {
+        fixture_t f; arm_bus_t bus; arm_cpu_t c;
+        setup(&f,&bus,&c,true,host!=0u); map_pages(&f,&c);
+        c.cpsr|=0x1800u; c.r[0]=0u; c.r[1]=0xfffu;
+        put16(&f,0x8000u,0xe8d1u); put16(&f,0x8002u,0xf010u);
+        f.ram[0x8fffu]=0x23u; f.ram[0xa000u]=0x81u;
+        f.fail_address=phase==0u ? 0x8fffu : phase==1u ? 0xa000u : 0x6004u;
+        f.fail_size=phase==2u ? 4u : 1u;
+        uint32_t flags=c.cpsr, before[16]; memcpy(before,c.r,sizeof before);
+        CHECK(arm_step(&c)==ARM_HALT && memcmp(before,c.r,sizeof before)==0,
+              "unaligned table failure committed registers/PC");
+        CHECK(f.successful_byte_reads==(phase ? 1u : 0u) && (!phase || f.last_byte_address==0x8fffu),
+              "unaligned table failure lost or extended the completed byte prefix");
+        check_stop(&f,&c,0u,flags);
+        f.failed=false; f.fail_size=0u;
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==0x1024au && c.cycles==1u &&
+              c.cpsr==(flags & ~0x0600fc00u) && f.successful_byte_reads==(phase ? 3u : 2u) &&
+              f.last_byte_address==0xa000u,"unaligned table retry reused failed data or skipped a byte");
+     }
 }
 static void test_walk_failures(void) {
     for (unsigned data = 0; data < 2u; data++)
@@ -390,6 +418,7 @@ static void test_signed_runner_entry_guards(void) {
 int main(void) {
     test_data_and_retry();
     test_table_branch_and_retry();
+    test_unaligned_table_branch_and_retry();
     test_fetch_and_latched_cache();
     test_walk_failures();
     test_partial_transfers_and_vfp();

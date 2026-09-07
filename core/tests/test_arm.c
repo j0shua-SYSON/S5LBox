@@ -6360,6 +6360,9 @@ static void test_reset_initializes_the_default_profile(void) {
     CHECK(c.r[15] == 0u && c.bus == &g_bus,
           "default reset lost its PC or bus");
     CHECK(c.a8_l2actlr == 0u, "default reset left inactive Cortex-A8 state");
+    static const uint8_t empty_types[ARM_TLB_ENTRIES]={0};
+    CHECK(memcmp(c.a8_tlb_memory_type,empty_types,sizeof empty_types)==0 &&
+          c.tlb_arch_stamp==ARM_ARCH_V6_ARM1176,"default reset left derived memory types");
 }
 
 static void test_explicit_profile_reset_and_invalid_configuration(void) {
@@ -6378,6 +6381,9 @@ static void test_explicit_profile_reset_and_invalid_configuration(void) {
               "explicit profile reset left stale state");
         CHECK(c.a8_l2actlr == (profiles[i] == ARM_ARCH_V7_CORTEX_A8 ? 0x42u : 0u),
               "explicit reset lost profile-specific L2 reset state");
+        static const uint8_t empty_types[ARM_TLB_ENTRIES]={0};
+        CHECK(memcmp(c.a8_tlb_memory_type,empty_types,sizeof empty_types)==0 &&
+              c.tlb_arch_stamp==profiles[i],"explicit reset left derived memory types");
         c.r[3] = 0xabcdef01u;
         c.a8_l2actlr = 0x02000000u;
         c.cp15.actlr = UINT32_MAX;
@@ -10061,14 +10067,14 @@ static void test_thumb2_table_branch_data_faults(void) {
         uint32_t pa=0xa000u+(base & 0xfffu);
         m_w8(NULL,pa,0x23u); m_w8(NULL,pa+1u,0x81u);
         g_watch_addr=pa; g_watch_reads8=0u; g_watch_reads16=0u;
-        bool refused=half && odd && fault!=5u;
+        bool refused=half && fault==7u;
         bool aborted=(fault>=1u && fault<=3u) || (half && fault==5u);
         CHECK(arm_step(&c)==(refused ? ARM_UNDEFINED : ARM_OK) && c.cycles==1u && c.r[2]==base,
               "table branch data disposition/base half=%u fault=%u",half,fault);
         if (refused) CHECK(c.r[15]==0x100u && c.cpsr==flags && !g_watch_reads8 && !g_watch_reads16,
-            "unaligned TBH must stop until memory-type attributes are available");
+            "unaligned Strongly-ordered TBH must stop before access");
         else if (!aborted) CHECK(c.r[15]==(half ? 0x1034au : 0x14au) && c.cpsr==(flags & ~TEST_IT_MASK) &&
-            g_watch_reads8==(half ? 0u : 1u) && g_watch_reads16==(half ? 1u : 0u),"table branch translated table width/value");
+            g_watch_reads8==(half && !odd ? 0u : 1u) && g_watch_reads16==(half && !odd ? 1u : 0u),"table branch translated table width/value");
         else {
             uint32_t fsr=fault==1u ? ARM_FSR_PAGE_TRANSLATION : fault==2u ? ARM_FSR_PAGE_PERMISSION :
                 fault==3u ? ARM_FSR_SECTION_TRANSLATION : ARM_FSR_ALIGNMENT;
@@ -10078,6 +10084,80 @@ static void test_thumb2_table_branch_data_faults(void) {
                   "table branch bad abort address/state or access before alignment/permission fault=%u",fault);
         }
         g_watch_addr=UINT32_MAX;
+     }
+}
+
+static uint32_t table_byte_addresses[2];
+static unsigned table_byte_reads;
+static uint8_t table_read8(void *ctx, uint32_t address) {
+    if (table_byte_reads<2u) table_byte_addresses[table_byte_reads]=address;
+    table_byte_reads++;
+    return m_r8(ctx,address);
+}
+
+static void test_thumb2_table_branch_unaligned(void) {
+    /* The bytes can belong to distinct translations. A completed first read
+     * remains observable if the second byte faults or has unsupported type. */
+    for (unsigned host=0;host<2u;host++)
+     for (unsigned kind=0;kind<16u;kind++) {
+        memset(g_ram,0,sizeof g_ram);
+        arm_bus_t bus=g_bus;
+        bus.read8=table_read8;
+        if (host) bus.host_ram=m_host_ram;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&bus,kind==10u ? ARM_ARCH_V7_SWIFT : ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP;
+        if (kind==9u) c.cp15.sctlr|=ARM_SCTLR_A;
+        if (kind==11u) c.cp15.sctlr=0u;
+        if (kind==12u) c.cp15.sctlr|=1u<<28; /* Unsupported raw TEX remap. */
+        if (kind==14u) c.cp15.sctlr|=ARM_SCTLR_FA;
+        c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_C|test_it_bits(0x18u);
+        c.r[15]=0x100u; c.r[14]=1u;
+        uint32_t address=kind==0u || kind==10u || kind==11u ? 0x2301u :
+                         kind==13u ? UINT32_MAX : 0x2fffu;
+        c.r[2]=address-2u;
+        uint32_t first=kind==7u ? 0xa036u : kind==8u ? 0xa032u : kind==15u ? 0xa076u : 0xa03eu;
+        uint32_t second=kind==2u ? 0xd036u : kind==3u ? 0xd032u : kind==4u ? 0xd076u :
+                        kind==5u ? 0xd01eu : kind==6u || kind==9u ? 0u : kind==14u ? 0xd02eu : 0xd03eu;
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x803eu);
+        m_w32(NULL,0x6008u,first); m_w32(NULL,0x600cu,second);
+        m_w32(NULL,0x7ffcu,0xc001u); m_w32(NULL,0xc3fcu,0xb03eu);
+        put_thumb_table_branch(kind==11u ? 0x100u : 0x8100u,true,2u,14u);
+        uint32_t pa0=kind==11u ? address : kind==13u ? 0xbfffu : 0xa000u+(address&0xfffu);
+        uint32_t pa1=kind==13u ? 0x8000u : (address&0xfffu)==0xfffu ? 0xd000u : pa0+1u;
+        m_w8(NULL,pa0,0x23u); m_w8(NULL,pa1,0x81u);
+        if (host) {
+            uint32_t pa;
+            if (!arm_mmu_translate(&c,address,ARM_ACCESS_READ,false,&pa))
+                CHECK(arm_data_cache_try_refill(&c,address,ARM_ACCESS_READ,false),"warm direct data cache");
+        }
+        uint32_t flags=c.cpsr, before[13]; memcpy(before,c.r,sizeof before);
+        table_byte_reads=0u;
+        bool success=kind==0u || kind==1u || kind==13u;
+        bool abort=kind==5u || kind==6u || kind==9u || kind==14u;
+        unsigned reads=success ? 2u : (kind>=2u && kind<=6u) || kind==14u ? 1u : 0u;
+        CHECK(arm_step(&c)==(success || abort ? ARM_OK : ARM_UNDEFINED) && c.cycles==1u &&
+              memcmp(before,c.r,sizeof before)==0,"unaligned TBH disposition or register effects kind=%u",kind);
+        CHECK(table_byte_reads==reads && (!reads || table_byte_addresses[0]==pa0) &&
+              (reads<2u || table_byte_addresses[1]==pa1),"unaligned TBH byte order/count/translation kind=%u",kind);
+        if (success) CHECK(c.r[15]==0x1034au && c.cpsr==(flags & ~TEST_IT_MASK),"unaligned TBH value/IT");
+        else if (!abort) CHECK(c.r[15]==0x100u && c.cpsr==flags && !c.cp15.dfsr && !c.cp15.dfar,
+            "unsupported memory type invented an alignment fault or retired TBH");
+        else {
+            uint32_t fsr=kind==5u ? ARM_FSR_PAGE_PERMISSION : kind==6u ? ARM_FSR_PAGE_TRANSLATION :
+                         kind==9u ? ARM_FSR_ALIGNMENT : ARM_FSR_PAGE_ACCESS_FLAG;
+            CHECK(c.r[15]==ARM_VEC_DATA_ABORT && c.r[14]==0x108u && c.spsr[ARM_BANK_ABT]==flags &&
+                  c.cp15.dfar==(kind==9u ? address : address+1u) && c.cp15.dfsr==fsr,"unaligned TBH fault address/state");
+        }
+        if (kind==14u) {
+            /* Setting a software Access flag permits retry without TLBI. */
+            m_w32(NULL,0x600cu,0xd03eu);
+            arm_set_mode(&c,ARM_MODE_USR); c.cpsr=flags; c.r[15]=0x100u;
+            table_byte_reads=0u;
+            CHECK(arm_step(&c)==ARM_OK && c.r[15]==0x1034au && table_byte_reads==2u,
+                  "unaligned TBH cached an Access flag fault");
+        }
      }
 }
 
@@ -10640,6 +10720,7 @@ int main(void) {
     test_thumb2_table_branch_values();
     test_thumb2_table_branch_operands();
     test_thumb2_table_branch_data_faults();
+    test_thumb2_table_branch_unaligned();
     test_thumb2_table_branch_fetch();
     test_thumb2_bitfields();
     test_thumb2_multiply();

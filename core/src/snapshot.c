@@ -122,7 +122,10 @@ SNAP_SIZE_GUARD(arm_cp15_t,        64,    "snap_cpu");
 /* The A8-only D16-D31 bank adds 128 bytes (compiler-measured 68248). It is
  * inactive on ARM1176, cleared on restore and excluded under the same profile
  * rejection rule. Version 32's serialized register list remains identical. */
-SNAP_SIZE_GUARD(arm_cpu_t,         68248,   "snap_cpu");
+/* The derived memory-type cache and profile stamp bring the compiler-measured
+ * size to 72352. Like the TLB they are cleared on restore and never serialized;
+ * no ARM1176 snapshot field or version changes. */
+SNAP_SIZE_GUARD(arm_cpu_t,         72352,   "snap_cpu");
 SNAP_SIZE_GUARD(s5l_uart_t,        8280,  "snap_uart");
 SNAP_SIZE_GUARD(s5l_vic_t,         16,    "snap_vic");
 SNAP_SIZE_GUARD(s5l_timer_t,       40,    "snap_timer");
@@ -230,7 +233,8 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * the guest snapshot byte stream and version remain unchanged.
  * The size below must be read from the
  * compiler's emitted `.space`, not inferred from source padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         128080, "snap_mach");
+/* 132184 includes the CPU's derived memory types and profile stamp. */
+SNAP_SIZE_GUARD(s5l8900_t,         132184, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -473,6 +477,8 @@ static void snap_cpu(sn_io_t *io, arm_cpu_t *c) {
         c->a8_l2actlr = 0u;
         memset(c->a8_vfp_hi, 0, sizeof c->a8_vfp_hi);
         memset(c->tlb, 0, sizeof c->tlb);
+        memset(c->a8_tlb_memory_type, 0, sizeof c->a8_tlb_memory_type);
+        c->tlb_arch_stamp = ARM_ARCH_V6_ARM1176;
         /* And generation 1, for the same reason arm_reset does: an entry at
          * generation 0 in a table whose counter is also 0 is a false hit. */
         c->tlb_gen = 1u;

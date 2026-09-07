@@ -201,6 +201,10 @@ add_executable(test_arm tests/test_arm.c)
 target_link_libraries(test_arm PRIVATE emucore)
 add_test(NAME arm_interp COMMAND test_arm)
 
+add_executable(test_mmu_memory_type tests/test_mmu_memory_type.c)
+target_link_libraries(test_mmu_memory_type PRIVATE emucore)
+add_test(NAME arm_mmu_memory_type COMMAND test_mmu_memory_type)
+
 add_executable(test_bus_failure tests/test_bus_failure.c)
 target_link_libraries(test_bus_failure PRIVATE emucore)
 if(S5LBOX_STATIC_A64_ENGINE)

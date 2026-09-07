@@ -466,7 +466,7 @@ ASR by 32 for PKHTB. All shifts, sign boundaries, aliases, IT behavior and
 split instruction fetches are tested against individual source-bit selection.
 See [DDI0406C.b, A8.8.125](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 
-Thumb TBB and aligned TBH read an unsigned byte or halfword from a table and
+Thumb TBB and TBH read an unsigned byte or halfword from a table and
 branch by twice that value. A PC table base means the instruction address
 plus four without rounding to a word boundary. Index and destination
 arithmetic wrap at 32 bits. Within an IT block they require its final slot;
@@ -475,10 +475,35 @@ state for retry, and checked-bus failures halt without retirement.
 The target is fetched on the following step. Tests cover
 these boundaries, translated tables, permissions and checked-bus retry.
 See [DDI0406C.b, A8.8.236](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
-Unaligned TBH raises an alignment abort when SCTLR.A is set; otherwise it
-stops as unsupported because the shared translator does not yet expose the
-memory-type attributes needed to distinguish permitted unaligned RAM reads
-from forbidden Device accesses. Big-endian TBH is also explicitly unsupported.
+Unaligned TBH raises an alignment abort when SCTLR.A is set. With A clear,
+Cortex-A8 now reads two bytes in address order when each translation has a
+validated Normal-memory type. Each byte uses its own translation, including
+across page boundaries and 32-bit address wrap. A second-byte fault preserves
+the first completed bus read but does not publish the branch destination or
+advance IT state. Checked-bus failures require an explicit host retry.
+Device and Strongly-ordered unaligned accesses are unpredictable on processors
+without virtualization extensions; they stop before the affected byte's data
+access. No virtualization-specific alignment fault is fabricated.
+Unaligned TBH remains unsupported on Swift; big-endian TBH remains unsupported
+on both profiles. These rules follow
+[DDI0406C.b, A3.2.2/B2.4.5](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+The Cortex-A8 translator retains the memory type alongside each cached
+physical mapping. Sections, supersections, large pages and small pages use
+the documented TEX/C/B encodings without remapping. Ordinary translations
+populate the metadata too; a later type query uses that same cached mapping
+until invalidation. Reserved and undetermined encodings, extended physical
+addresses, legacy descriptor formats, TEX remapping and big-endian page tables
+are not certified for type-dependent accesses. With the MMU disabled, A8 data
+is Strongly-ordered and instruction fetches are Normal. See
+[DDI0406C.b, B3.2.1/B3.8.2](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Tests cover all 32 attribute encodings in all four descriptor forms, cached
+mapping changes, profile/control changes, faults and invalidation, plus TBH
+byte ordering and retry. Derived metadata is cleared on reset/restore and
+omitted from ARM1176 snapshots; the version and serialized fields are unchanged.
+This establishes the type check for unaligned TBH. Other shared load/store
+paths do not yet enforce these memory types, and cache timing, shareability
+and the complete Cortex-A8 MMU remain separate work.
 
 A private fixture executes the unchanged matching AppleSamsungSerial baud
 method with explicit synthetic objects, MMU mappings and clock inputs. It
@@ -609,7 +634,7 @@ establish that result.
   byte/halfword transfers (including signed loads and pre/post indexing),
   literals, doubleword transfers, extend/add forms, bitfields and word/long
   multiply/accumulate, CLZ, RBIT and PKH. Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple
-  transfers, TBB and aligned TBH are also implemented. Other instruction
+  transfers, TBB and bounded TBH are also implemented. Other instruction
   families remain to implement. IT state
   and conditional execution are implemented for the supported Thumb families.
   Cortex-A8 MRC/MCR transfers cover the currently implemented CP15 registers.

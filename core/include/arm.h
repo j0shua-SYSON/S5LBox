@@ -631,6 +631,12 @@ typedef struct arm_cpu {
      * D16-D31 have no S-register aliases. Inactive on legacy profiles and
      * cleared, not serialized, by the ARM1176-only snapshot format. */
     uint64_t a8_vfp_hi[16];
+    /* Derived Cortex-A8 memory types, indexed by the corresponding TLB slot
+     * and valid only under that entry's generation/tag. Appended to preserve
+     * existing CPU field offsets. Neither this cache nor its profile stamp
+     * is serialized; reset/restore clears them with the translation cache. */
+    uint8_t a8_tlb_memory_type[ARM_TLB_ENTRIES];
+    arm_arch_t tlb_arch_stamp;
 } arm_cpu_t;
 
 /*
@@ -647,6 +653,13 @@ typedef enum {
     ARM_ACCESS_FETCH = 2
 } arm_access_t;
 
+typedef enum {
+    ARM_MEMORY_UNIMPLEMENTED = 0,
+    ARM_MEMORY_STRONGLY_ORDERED,
+    ARM_MEMORY_DEVICE,
+    ARM_MEMORY_NORMAL
+} arm_memory_type_t;
+
 /*
  * Translate a virtual address. Returns 0 on success (writing the physical
  * address to *pa), a non-zero architectural fault status register value, or
@@ -660,6 +673,19 @@ typedef enum {
  */
 uint32_t arm_mmu_translate(arm_cpu_t *cpu, uint32_t va, arm_access_t acc,
                            bool priv, uint32_t *pa);
+
+/* The same translation, optionally reporting its Cortex-A8 memory type.
+ * Type and PA come from the same cached descriptor, never separate walks.
+ * Classification covers XP short descriptors without TEX remapping or big-
+ * endian table walks. Other profiles, reserved/undetermined encodings and
+ * unsupported configurations return ARM_MEMORY_UNIMPLEMENTED on translation
+ * success; this is not an architectural fault. No cache timing/shareability
+ * is modeled here. MMU-off A8 data is Strongly-ordered and fetch is Normal.
+ * A translation failure leaves both outputs untouched. memory_type may be
+ * NULL; ordinary translations still retain the type for later queries. */
+uint32_t arm_mmu_translate_type(arm_cpu_t *cpu, uint32_t va, arm_access_t acc,
+                                bool priv, uint32_t *pa,
+                                arm_memory_type_t *memory_type);
 
 /* Rebuild the 1 KiB instruction-fetch host pointer without walking page
  * tables or touching the bus. With the MMU enabled this succeeds only from an
