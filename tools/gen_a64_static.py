@@ -3567,6 +3567,277 @@ def compact_system_coprocessor_body() -> list[str]:
     ]
 
 
+def compact_register_thumb() -> tuple[list[str], list[str]]:
+    """Signed live-halfword dispatch with r0-r7 and CPSR resident.
+
+    This is not a decoded guest-code cache: all 65536 table entries describe
+    ISA encodings, and every dispatch fetches the current guest halfword.
+    Operand registers are specialized at build time. Large immediate families
+    share bodies to avoid duplicating text for each literal. x0-x7 hold guest
+    r0-r7, w28 holds CPSR, and the surrounding raw loop's other pinned state
+    stays unchanged. No helper in this region may call C or use x18.
+    """
+    prefix = ".La64rr_"
+    sequential = [f"    b {prefix}sequential"]
+
+    def flags(bits: int = 4) -> list[str]:
+        shift = 32 - bits
+        return ["    mrs x8, nzcv", f"    lsr w8, w8, #{shift}",
+                f"    bfi w28, w8, #{shift}, #{bits}"]
+
+    def nz(reg: str) -> list[str]:
+        return [f"    ands wzr, {reg}, {reg}", *flags(2)]
+
+    def read(reg: int, scratch: int) -> tuple[list[str], str]:
+        if reg < 8:
+            return [], f"w{reg}"
+        name = f"w{scratch}"
+        if reg == 15:
+            return [f"    add {name}, w26, #4"], name
+        return [f"    ldr {name}, [x19, #{reg * 4}]"], name
+
+    def memory(address: list[str], reg: int, operation: str,
+               width: int) -> list[str]:
+        direction = "read" if operation.startswith("ldr") else "write"
+        return [*address, f"    bl {prefix}{direction}{width}",
+                f"    {operation} w{reg}, [x11]", *sequential]
+
+    def instruction(insn: int) -> list[str] | None:
+        rd, rm = insn & 7, (insn >> 3) & 7
+        if insn < 0x1800:
+            kind, amount = insn >> 11, (insn >> 6) & 31
+            body: list[str] = []
+            if kind == 0:
+                if amount:
+                    body += [f"    lsr w8, w{rm}, #{32 - amount}",
+                             "    bfi w28, w8, #29, #1"]
+                body += [f"    lsl w{rd}, w{rm}, #{amount}"]
+            else:
+                amount = amount or 32
+                body += [f"    lsr w8, w{rm}, #{amount - 1}",
+                         "    bfi w28, w8, #29, #1"]
+                if kind == 1 and amount == 32:
+                    body += [f"    mov w{rd}, wzr"]
+                else:
+                    operation = "lsr" if kind == 1 else "asr"
+                    body += [f"    {operation} w{rd}, w{rm}, #{min(amount, 31)}"]
+            return [*body, *nz(f"w{rd}"), *sequential]
+        if insn < 0x2000:
+            operand = (insn >> 6) & 7
+            rhs = f"#{operand}" if insn & 0x400 else f"w{operand}"
+            operation = "subs" if insn & 0x200 else "adds"
+            return [f"    {operation} w{rd}, w{rm}, {rhs}",
+                    *flags(), *sequential]
+        if insn < 0x4000:
+            rd, operation = (insn >> 8) & 7, (insn >> 11) & 3
+            if operation == 0:
+                return [f"    and w{rd}, w9, #255", *nz(f"w{rd}"),
+                        *sequential]
+            body = ["    and w8, w9, #255"]
+            if operation == 1:
+                body += [f"    cmp w{rd}, w8"]
+            else:
+                op = "adds" if operation == 2 else "subs"
+                body += [f"    {op} w{rd}, w{rd}, w8"]
+            return [*body, *flags(), *sequential]
+        if insn < 0x4400:
+            operation = (insn >> 6) & 15
+            logic = {0: "and", 1: "eor", 12: "orr", 13: "mul", 14: "bic"}
+            if operation in logic:
+                return [f"    {logic[operation]} w{rd}, w{rd}, w{rm}",
+                        *nz(f"w{rd}"), *sequential]
+            if operation == 15:
+                return [f"    mvn w{rd}, w{rm}", *nz(f"w{rd}"),
+                        *sequential]
+            if operation == 8:
+                return [f"    tst w{rd}, w{rm}", *flags(2), *sequential]
+            if operation in (5, 6):
+                op = "adcs" if operation == 5 else "sbcs"
+                return ["    msr nzcv, x28", f"    {op} w{rd}, w{rd}, w{rm}",
+                        *flags(), *sequential]
+            if operation == 9:
+                return [f"    subs w{rd}, wzr, w{rm}", *flags(), *sequential]
+            if operation in (10, 11):
+                op = "cmp" if operation == 10 else "cmn"
+                return [f"    {op} w{rd}, w{rm}", *flags(), *sequential]
+            kind = {2: "lsl", 3: "lsr", 4: "asr", 7: "ror"}[operation]
+            return [f"    mov w8, w{rd}", f"    and w10, w{rm}, #255",
+                    f"    bl {prefix}shift_{kind}", f"    mov w{rd}, w8",
+                    *sequential]
+        if insn < 0x4700:
+            rd = (insn & 7) | ((insn >> 4) & 8)
+            rm, operation = (insn >> 3) & 15, (insn >> 8) & 3
+            if rd == 15 and operation != 1:
+                return None
+            body, source = read(rm, 10)
+            if operation == 2:
+                if rd < 8:
+                    body += [f"    mov w{rd}, {source}"]
+                else:
+                    body += [f"    str {source}, [x19, #{rd * 4}]"]
+            else:
+                first, dest = read(rd, 11)
+                body += first
+                if operation == 1:
+                    body += [f"    cmp {dest}, {source}", *flags()]
+                else:
+                    body += [f"    add {dest}, {dest}, {source}"]
+                    if rd >= 8:
+                        body += [f"    str {dest}, [x19, #{rd * 4}]"]
+            return [*body, *sequential]
+        if 0x4800 <= insn < 0x5000:
+            rd = (insn >> 8) & 7
+            return memory(["    add w10, w26, #4", "    bic w10, w10, #3",
+                           "    and w8, w9, #255",
+                           "    add w10, w10, w8, lsl #2"], rd, "ldr", 4)
+        if 0x5000 <= insn < 0x6000:
+            ro, operation = (insn >> 6) & 7, (insn >> 9) & 7
+            op, width = (("str", 4), ("strh", 2), ("strb", 1), ("ldrsb", 1),
+                         ("ldr", 4), ("ldrh", 2), ("ldrb", 1), ("ldrsh", 2))[operation]
+            return memory([f"    add w10, w{rm}, w{ro}"], rd, op, width)
+        if 0x6000 <= insn < 0x9000:
+            width = 2 if insn >= 0x8000 else 1 if insn & 0x1000 else 4
+            shift = {1: 0, 2: 1, 4: 2}[width]
+            op = ("ldr" if insn & 0x800 else "str") + {1: "b", 2: "h", 4: ""}[width]
+            return memory(["    ubfx w8, w9, #6, #5",
+                           f"    add w10, w{rm}, w8, lsl #{shift}"], rd, op, width)
+        if 0x9000 <= insn < 0xa000:
+            return memory(["    ldr w10, [x19, #52]", "    and w8, w9, #255",
+                           "    add w10, w10, w8, lsl #2"], (insn >> 8) & 7,
+                          "ldr" if insn & 0x800 else "str", 4)
+        if 0xa000 <= insn < 0xb000:
+            body = ["    ldr w10, [x19, #52]"] if insn & 0x800 else [
+                "    add w10, w26, #4", "    bic w10, w10, #3"]
+            return [*body, "    and w8, w9, #255",
+                    f"    add w{(insn >> 8) & 7}, w10, w8, lsl #2", *sequential]
+        if insn & 0xff00 == 0xb000:
+            op = "sub" if insn & 0x80 else "add"
+            return ["    and w8, w9, #127", "    ldr w10, [x19, #52]",
+                    f"    {op} w10, w10, w8, lsl #2", "    str w10, [x19, #52]",
+                    *sequential]
+        if insn & 0xff00 == 0xb200:
+            op = ("sxth", "sxtb", "uxth", "uxtb")[(insn >> 6) & 3]
+            return [f"    {op} w{rd}, w{rm}", *sequential]
+        if 0xd000 <= insn < 0xde00:
+            condition = CONDITIONS[(insn >> 8) & 15]
+            return ["    msr nzcv, x28", f"    b.{condition} 1f", *sequential,
+                    "1:", "    sbfx w8, w9, #0, #8", "    add w26, w26, #4",
+                    "    add w26, w26, w8, lsl #1", f"    b {prefix}retire"]
+        if 0xe000 <= insn < 0xe800:
+            return ["    sbfx w8, w9, #0, #11", "    add w26, w26, #4",
+                    "    add w26, w26, w8, lsl #1", f"    b {prefix}retire"]
+        return None
+
+    body = [
+        f"{prefix}enter:",
+        "    ldp w0, w1, [x19]", "    ldp w2, w3, [x19, #8]",
+        "    ldp w4, w5, [x19, #16]", "    ldp w6, w7, [x19, #24]",
+        "    ldr w28, [x20]",
+        "#if defined(__APPLE__)",
+        f"    adrp x16, {prefix}table@PAGE",
+        f"    add x16, x16, {prefix}table@PAGEOFF",
+        "#else", f"    adrp x16, {prefix}table",
+        f"    add x16, x16, :lo12:{prefix}table", "#endif",
+        f"    b {prefix}dispatch",
+        f"{prefix}sequential:", "    add w26, w26, #2",
+        f"{prefix}retire:", "    add w29, w29, #1", "    subs w25, w25, #1",
+        f"    b.eq {prefix}exit",
+        # Only even-PC, same-state instructions stay here. State-changing
+        # instructions leave before execution, and the old loop revalidates T.
+        "    sub w8, w26, w23", "    cmp w8, w24",
+        f"    b.hs {prefix}window_miss", "    add w10, w8, #2",
+        "    cmp w10, w24", f"    b.hi {prefix}fallback",
+        "    ldrh w9, [x22, w8, uxtw]",
+        f"{prefix}dispatch:", "    ldrsw x15, [x16, w9, uxtw #2]",
+        "    add x15, x16, x15", "    br x15",
+    ]
+    for name, target in (("decode", ".La64cr_thumb_decode"),
+                         ("window_miss", ".La64cr_window_miss"),
+                         ("fallback", ".La64cr_fallback"),
+                         ("exit", ".La64cr_exit")):
+        body += [f"{prefix}{name}:", "    stp w0, w1, [x19]",
+                 "    stp w2, w3, [x19, #8]", "    stp w4, w5, [x19, #16]",
+                 "    stp w6, w7, [x19, #24]", "    str w28, [x20]",
+                 "    mov w28, #2", "#if defined(__APPLE__)",
+                 "    adrp x16, .La64cr_dp_table@PAGE",
+                 "    add x16, x16, .La64cr_dp_table@PAGEOFF", "#else",
+                 "    adrp x16, .La64cr_dp_table",
+                 "    add x16, x16, :lo12:.La64cr_dp_table", "#endif",
+                 f"    b {target}"]
+
+    # The witness rules are identical to the existing raw memory helper:
+    # natural alignment, exact privilege/tag/generation, and explicit write
+    # consent. A miss spills before the old decoder can refill, fault or call C.
+    for direction, cache, count in (("read", 16, 32), ("write", 24, 40)):
+        for width in (4, 2, 1):
+            body += [f"{prefix}{direction}{width}:"]
+            if width > 1:
+                body += [f"    tst w10, #{width - 1}", f"    b.ne {prefix}decode"]
+            body += [f"    b {prefix}{direction}_memory"]
+        body += [f"{prefix}{direction}_memory:", "    ldr x11, [x27]",
+                 f"    cbnz x11, {prefix}flat_memory",
+                 f"    ldr x11, [x27, #{cache}]", f"    ldr x12, [x27, #{count}]",
+                 f"    b {prefix}cached_memory"]
+    body += [f"{prefix}cached_memory:", f"    cbz x11, {prefix}decode",
+             f"    cbz x12, {prefix}decode", "    ldr w13, [x27, #84]",
+             "    lsr w14, w10, #10", "    add w14, w14, w13, lsl #5",
+             "    and w14, w14, #63", "    add x11, x11, w14, uxtw #4",
+             "    ldr x14, [x11]", f"    cbz x14, {prefix}decode",
+             "    and w15, w10, #0xfffffc00", "    orr w15, w15, w13",
+             "    ldr w13, [x11, #8]", "    cmp w13, w15",
+             f"    b.ne {prefix}decode", "    ldr w13, [x11, #12]",
+             "    ldr w15, [x27, #80]", "    cmp w13, w15",
+             f"    b.ne {prefix}decode", "    and w13, w10, #0x3ff",
+             "    add x11, x14, w13, uxtw", "    ldr x13, [x12]",
+             "    add x13, x13, #1", "    str x13, [x12]", "    ret",
+             f"{prefix}flat_memory:", "    ldr w12, [x27, #8]",
+             "    and w12, w10, w12", "    add x11, x11, w12, uxtw", "    ret"]
+
+    # Register shifts use the low byte, not AArch64's modulo-32 count.
+    # w8=value/result, w10=count, w11=carry; guest r0-r7 remain untouched.
+    for kind in ("lsl", "lsr", "asr", "ror"):
+        body += [f"{prefix}shift_{kind}:", "    ubfx w11, w28, #29, #1",
+                 f"    cbz w10, {prefix}shift_done"]
+        if kind == "ror":
+            body += ["    rorv w8, w8, w10", "    lsr w11, w8, #31",
+                     f"    b {prefix}shift_done"]
+        elif kind == "asr":
+            body += ["    cmp w10, #32", f"    b.hs {prefix}shift_asr_large",
+                     "    sub w12, w10, #1", "    lsrv w11, w8, w12",
+                     "    asrv w8, w8, w10", f"    b {prefix}shift_done",
+                     f"{prefix}shift_asr_large:", "    lsr w11, w8, #31",
+                     "    asr w8, w8, #31", f"    b {prefix}shift_done"]
+        else:
+            body += ["    cmp w10, #32", f"    b.hi {prefix}shift_zero",
+                     f"    b.eq {prefix}shift_{kind}_32"]
+            if kind == "lsl":
+                body += ["    mov w12, #32", "    sub w12, w12, w10"]
+            else:
+                body += ["    sub w12, w10, #1"]
+            body += ["    lsrv w11, w8, w12", f"    {kind}v w8, w8, w10",
+                     f"    b {prefix}shift_done", f"{prefix}shift_{kind}_32:"]
+            body += ["    mov w11, w8"] if kind == "lsl" else ["    lsr w11, w8, #31"]
+            body += ["    mov w8, wzr", f"    b {prefix}shift_done"]
+    body += [f"{prefix}shift_zero:", "    mov w11, wzr", "    mov w8, wzr",
+             f"{prefix}shift_done:", "    bfi w28, w11, #29, #1",
+             "    ands wzr, w8, w8", "    mrs x12, nzcv", "    lsr w12, w12, #30",
+             "    bfi w28, w12, #30, #2", "    ret"]
+
+    table = ["", ".p2align 2", f"{prefix}table:"]
+    handlers: dict[tuple[str, ...], str] = {}
+    for insn in range(65536):
+        instructions = instruction(insn)
+        label = f"{prefix}decode"
+        if instructions is not None:
+            key = tuple(instructions)
+            if key not in handlers:
+                handlers[key] = f"{prefix}op_{insn:04x}"
+                body += [f"{handlers[key]}:", *instructions]
+            label = handlers[key]
+        table += [f"    .long {label} - {prefix}table"]
+    return body, table
+
+
 def compact_raw_function() -> list[str]:
     """Return the mixed A32/Thumb live-byte loop used by the feasibility gate.
 
@@ -3582,6 +3853,7 @@ def compact_raw_function() -> list[str]:
     publish the proven live window containing the next PC. The return value is
     always the exact retired prefix, with no runtime code generation.
     """
+    register_body, register_table = compact_register_thumb()
     return [
         "",
         ".p2align 2",
@@ -3706,6 +3978,10 @@ def compact_raw_function() -> list[str]:
         "    cmp w11, w24",
         "    b.hi .La64cr_fallback",
         "    ldrh w9, [x22, w8, uxtw]",
+        # Keep the separately controlled bulk experiment on its original path.
+        # Ordinary execution enters the live-byte register-resident tier.
+        "    ldr x14, [x27, #344]",
+        "    cbz x14, .La64rr_enter",
         "    b .La64cr_thumb_decode",
         "",
         ".globl A64S_CSYM(a64_compact_raw_profile_dp)",
@@ -5601,6 +5877,11 @@ def compact_raw_function() -> list[str]:
         "#endif",
         "    b .La64cr_loop",
         "",
+        # Keep this out of the old decoder's short TBZ/TBNZ branch spans.
+        ".globl A64S_CSYM(a64_compact_raw_profile_thumb_register)",
+        "A64S_CSYM(a64_compact_raw_profile_thumb_register):",
+        *register_body,
+        "",
         ".globl A64S_CSYM(a64_compact_raw_profile_exit)",
         "A64S_CSYM(a64_compact_raw_profile_exit):",
         ".La64cr_exit:",
@@ -5632,6 +5913,7 @@ def compact_raw_function() -> list[str]:
         "#if !defined(__APPLE__)",
         ".size A64S_CSYM(a64_compact_raw_execute), .-A64S_CSYM(a64_compact_raw_execute)",
         "#endif",
+        *register_table,
         "",
         ".p2align 2",
         ".La64cr_dp_table:",

@@ -2268,6 +2268,7 @@ extern const unsigned char a64_compact_raw_profile_thumb_condition[];
 extern const unsigned char a64_compact_raw_profile_a32_condition[];
 extern const unsigned char a64_compact_raw_profile_retire[];
 extern const unsigned char a64_compact_raw_profile_fallback[];
+extern const unsigned char a64_compact_raw_profile_thumb_register[];
 extern const unsigned char a64_compact_raw_profile_exit[];
 extern const unsigned char a64_compact_raw_profile_end[];
 extern const unsigned char a64_compact_raw_profile_guest_live_begin[];
@@ -2395,6 +2396,10 @@ static bool compact_profile_layout_valid(void) {
     }
     return (uintptr_t)a64_compact_raw_profile_guest_live_begin >
                (uintptr_t)a64_compact_raw_profile_entry &&
+           (uintptr_t)a64_compact_raw_profile_thumb_register >
+               (uintptr_t)a64_compact_raw_profile_fallback &&
+           (uintptr_t)a64_compact_raw_profile_thumb_register <
+               (uintptr_t)a64_compact_raw_profile_exit &&
            (uintptr_t)a64_compact_raw_profile_guest_live_begin <
                (uintptr_t)a64_compact_raw_profile_dp &&
            (uintptr_t)a64_compact_raw_profile_guest_live_end >
@@ -2414,6 +2419,14 @@ static void compact_profile_sample_pc_locked(uintptr_t pc) {
     if (pc < begin || pc >= end) {
         compact_profile_increment(&g_compact_profile_outside);
         compact_profile_capture_outside_pc_locked(pc);
+        return;
+    }
+    /* The out-of-line resident Thumb decoder occupies part of the old
+     * fallback-to-exit span. Attribute it to the existing Thumb bucket. */
+    if (pc >= (uintptr_t)a64_compact_raw_profile_thumb_register &&
+        pc < (uintptr_t)a64_compact_raw_profile_exit) {
+        compact_profile_increment(&g_compact_profile_region[
+            A64_COMPACT_RAW_PC_PROFILE_THUMB_DECODE]);
         return;
     }
     for (unsigned i = 0u;

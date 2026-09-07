@@ -6370,6 +6370,125 @@ static bool validate_compact_raw_thumb_oracles(void) {
     return true;
 }
 
+/* Exercise every encoding newly handled with resident low registers. The
+ * scalar matrix rotates edge values through every operand and crosses all
+ * NZCV combinations; it does not hash a megabyte of untouched RAM per ALU.
+ * Single-transfer cases restore and compare the exact four-byte footprint.
+ * Existing resident-memory oracles separately cover consent, stale witnesses,
+ * callbacks, faults, whole-RAM equality and native/fallback accounting. */
+static bool validate_compact_raw_thumb_register_oracle(void) {
+    static const uint32_t values[16] = {
+        0u, 1u, 31u, 32u, 33u, 64u, 255u, 256u,
+        UINT32_C(0x7fffffff), UINT32_C(0x80000000), UINT32_C(0xffffffff),
+        UINT32_C(0x80000001), UINT32_C(0xabcdef01), UINT32_C(0x12345678),
+        UINT32_C(0xffffffe0), UINT32_C(0xffffffe1),
+    };
+    static const uint16_t chain[] = {
+        0x3001, 0x4141, 0x405a, 0x41a3, 0x0864, 0x006d,
+        0x4680, 0x4488, 0x4646, 0x42be, 0xd100, 0x3701,
+        0xb403, 0xbc03, 0xe7f0, 0xba00,
+    };
+    static const unsigned budgets[] = {
+        0u, 1u, 2u, 3u, 7u, 10u, 11u, 12u, 13u, 14u, 15u, 16u, 31u, 64u, 257u,
+    };
+    const uint32_t pc = UINT32_C(0x7000);
+    const uint16_t initial_code[2] = {0x2000, 0xba00};
+    arm_cpu_t initial, reference, compact;
+    unsigned scalar_cases = 0u, memory_cases = 0u;
+
+    seed_cpu_at(&initial, initial_code, 2u, true, pc);
+    for (unsigned insn = 0u; insn < 65536u; insn++) {
+        const bool memory = insn >= 0x4800u && insn < 0xa000u;
+        const bool scalar = insn < 0x4700u ||
+            (insn >= 0xa000u && insn < 0xb100u) ||
+            (insn >= 0xb200u && insn < 0xb300u) ||
+            (insn >= 0xd000u && insn < 0xde00u) ||
+            (insn >= 0xe000u && insn < 0xe800u);
+        if (!memory && !scalar) continue;
+        for (unsigned seed = 0u; seed < (memory ? 1u : 16u); seed++) {
+            uint32_t address = 0u;
+            uint8_t before[4], expected[4];
+            unsigned completed = UINT_MAX;
+            reference = initial;
+            for (unsigned reg = 0u; reg < 15u; reg++)
+                reference.r[reg] = memory
+                    ? UINT32_C(0x10000) + reg * UINT32_C(0x104)
+                    : values[(reg + seed) & 15u];
+            reference.cpsr = (initial.cpsr & UINT32_C(0x0fffffff)) |
+                             ((uint32_t)seed << 28);
+            if (a64_compact_raw_classify_instruction(&reference, insn, true) >=
+                    A64_COMPACT_RAW_ADMITTED_COUNT)
+                continue;
+            compact = reference;
+            mem_w16(NULL, pc, (uint16_t)insn);
+            if (memory) {
+                const unsigned top = insn >> 12;
+                if (insn < 0x5000u)
+                    address = ((pc + 4u) & ~UINT32_C(3)) + (insn & 255u) * 4u;
+                else if (top == 5u)
+                    address = reference.r[(insn >> 3) & 7u] +
+                              reference.r[(insn >> 6) & 7u];
+                else if (top == 9u)
+                    address = reference.r[13] + (insn & 255u) * 4u;
+                else {
+                    const unsigned scale = top == 8u ? 2u : top == 7u ? 1u : 4u;
+                    address = reference.r[(insn >> 3) & 7u] +
+                              ((insn >> 6) & 31u) * scale;
+                }
+                address &= RAM_SIZE - 1u;
+                mem_w32(NULL, address, UINT32_C(0x89abcdef));
+                memcpy(before, &g_ram[address], sizeof before);
+            }
+            const arm_status_t status = arm_step(&reference);
+            if (memory) {
+                memcpy(expected, &g_ram[address], sizeof expected);
+                memcpy(&g_ram[address], before, sizeof before);
+            }
+            if (status != ARM_OK ||
+                !a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                                     g_ram, sizeof g_ram, &completed) ||
+                completed != 1u ||
+                !indirect_register_states_equal(&reference, &compact) ||
+                (memory && memcmp(expected, &g_ram[address], sizeof expected))) {
+                fprintf(stderr, "jitbench: resident Thumb encoding=%04x "
+                        "seed=%u completed=%u status=%u cpsr=%08" PRIx32
+                        "/%08" PRIx32 "\n", insn, seed, completed,
+                        (unsigned)status, reference.cpsr, compact.cpsr);
+                return false;
+            }
+            if (memory) memory_cases++;
+            else scalar_cases++;
+        }
+    }
+    for (unsigned i = 0u; i < sizeof budgets / sizeof budgets[0]; i++) {
+        if (!compact_raw_thumb_program_compare(
+                "register-chain", chain, sizeof chain / sizeof chain[0], pc,
+                budgets[i], budgets[i], budgets[i]))
+            return false;
+    }
+    {
+        /* The STRH replaces the next halfword after it was in a live window.
+         * A decoded instruction cache would incorrectly execute MOV r2,#0. */
+        const uint16_t self_modify[] = {
+            0x4802, 0x4903, 0x8008, 0x2200, 0xba00, 0xba00,
+            0x2237, 0x0000, (uint16_t)(pc + 6u), (uint16_t)((pc + 6u) >> 16),
+        };
+        if (!compact_raw_thumb_program_compare(
+                "register-live-store", self_modify,
+                sizeof self_modify / sizeof self_modify[0], pc, 4u, 4u, 4u))
+            return false;
+    }
+    if (scalar_cases != 454144u || memory_cases != 22528u) {
+        fprintf(stderr, "jitbench: incomplete resident Thumb matrix %u/%u\n",
+                scalar_cases, memory_cases);
+        return false;
+    }
+    printf("COMPACT-RAW-THUMB-REGISTER-ORACLE exact=yes scalar-cases=454144 "
+           "memory-cases=22528 flags=all operand-aliases=all chains=15 "
+           "live-store=yes raw-reentry=yes runtime-codegen=no\n");
+    return true;
+}
+
 typedef struct {
     arm_cpu_t *cpu;
     arm_status_t status;
@@ -9106,6 +9225,8 @@ static bool validate_compact_raw_oracles(void) {
                                         sizeof dp_program[0])))
         return false;
     if (!validate_compact_raw_thumb_oracles())
+        return false;
+    if (!validate_compact_raw_thumb_register_oracle())
         return false;
     if (!validate_compact_raw_thumb_multi_oracles())
         return false;
