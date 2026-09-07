@@ -350,7 +350,7 @@ Thumb-2 framing fetches both halfwords and retires once. The second halfword
 is translated independently, including across noncontiguous physical pages.
 A fetch fault there vectors before any instruction result is committed.
 MOVW and MOVT are implemented with the split immediate and ARMv7 register
-restrictions from DDI0406C.b A8.8.102/106. Other wide operations stop as
+restrictions from DDI0406C.b A8.8.102/106. Unimplemented wide operations stop as
 unsupported, rather than being misread as legacy BL halves. ARM1176 retains
 its existing two-step BL/BLX behavior.
 
@@ -501,7 +501,8 @@ Tests cover all 32 attribute encodings in all four descriptor forms, cached
 mapping changes, profile/control changes, faults and invalidation, plus TBH
 byte ordering and retry. Derived metadata is cleared on reset/restore and
 omitted from ARM1176 snapshots; the version and serialized fields are unchanged.
-This establishes the type check for unaligned TBH. Other shared load/store
+This type check serves unaligned TBH and the new register-offset halfword
+loads. Other shared load/store
 paths do not yet enforce these memory types, and cache timing, shareability
 and the complete Cortex-A8 MMU remain separate work.
 
@@ -564,6 +565,38 @@ argument and function pointer. It now passes the unchanged driver's
 clears the injected software interrupt. It stops before the first guarded
 callback argument read at `0x807e5ce0`. This is partial execution of a
 synthetic registered record, with no callback or CPU IRQ-entry evidence.
+
+Thumb register-offset LDRB/LDRH/LDRSB/LDRSH also use full-width offsets shifted
+left by 0..3, without writeback. Byte and halfword results are zero-extended
+or sign-extended as encoded, after the complete read succeeds. SP is a valid
+base; SP destinations and SP/PC offsets are refused. PC bases keep their
+literal interpretation, and PC destinations select memory hints. PLD/PLI
+and Swift's PLDW validate their offset registers but perform no data access;
+A8's PLDW and signed-halfword PC encodings are unallocated hints and act as
+NOPs before interpreting those registers. See
+[DDI0406C.b, A6.3.8/9 and A8.8.70/82/86/90/128/130](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+The Swift profile's MP extension agrees with
+[LLVM's processor definition](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/ARM/ARMProcessors.td).
+
+Unaligned register halfword loads share TBH's bounded Cortex-A8 Normal-memory
+path. They check alignment before translation, preserve a completed first
+byte across a second-byte fault, and leave the destination unchanged on a
+fault or capability stop. Swift unaligned register halfword loads and all
+big-endian register halfword loads remain unsupported; byte loads are endian
+independent. Existing immediate/literal load paths retain their documented
+memory-type limitations. Tests cover shifted offsets and wrap, extension
+boundaries, aliases, IT execution and skips, hint allocation, separately mapped
+instruction halves, memory permissions, partial reads and explicit host retry.
+
+A private fixture executes the matching kernel's unchanged `strncat` routine
+at `0x8027034c` with bounded buffers, stack and Normal-memory mappings.
+Previously it stopped on its 14th instruction, the register-offset `LDRB.W`
+at `0x8027035e`. All eight cases now return in 19..59 instructions, covering
+empty strings, zero and truncated counts, longer limits and high bytes.
+Checks verify the entire destination buffer, unchanged source, return/stack
+state, and exact data-access and executed register-load counts. Every
+unprepared bus access stops. This is isolated real guest code; it does not
+establish kernel boot, device behavior or physical execution.
 
 Thumb UBFX/SBFX and BFI/BFC implement bitfield extraction, sign extension,
 insertion and clearing. They validate ranges before shifting and preserve
@@ -634,7 +667,7 @@ establish that result.
   byte/halfword transfers (including signed loads and pre/post indexing),
   literals, doubleword transfers, extend/add forms, bitfields and word/long
   multiply/accumulate, CLZ, RBIT and PKH. Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple
-  transfers, TBB and bounded TBH are also implemented. Other instruction
+  transfers, narrow register loads, TBB and bounded TBH are also implemented. Other instruction
   families remain to implement. IT state
   and conditional execution are implemented for the supported Thumb families.
   Cortex-A8 MRC/MCR transfers cover the currently implemented CP15 registers.

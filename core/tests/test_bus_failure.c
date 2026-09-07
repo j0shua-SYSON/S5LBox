@@ -223,6 +223,34 @@ static void test_walk_failures(void) {
     CHECK(arm_mmu_translate(&c,0x1000u,ARM_ACCESS_READ,true,&pa) == 0u && pa == 0xa000u, "MMU cached a failed physical read");
 }
 
+static void test_small_register_load_and_retry(void) {
+    const uint16_t op[]={0xf810u,0xf830u,0xf910u,0xf930u};
+    for (unsigned kind=0;kind<4u;kind++)
+     for (unsigned host=0;host<2u;host++)
+      for (unsigned phase=0;phase<((kind&1u) ? 3u : 1u);phase++) {
+        fixture_t f; arm_bus_t bus; arm_cpu_t c;
+        setup(&f,&bus,&c,true,host!=0u); map_pages(&f,&c);
+        c.cpsr|=0x1800u; c.r[0]=0u; c.r[1]=phase ? 0xfffu : 0x1000u;
+        c.excl_valid=true; c.excl_addr=0x2340u;
+        put16(&f,0x8000u,(uint16_t)(op[kind]|1u)); put16(&f,0x8002u,0x2000u);
+        uint32_t pa=phase ? 0x8fffu : 0xa000u;
+        f.ram[pa]=0x83u; f.ram[phase ? 0xa000u : pa+1u]=0x81u;
+        f.fail_address=phase==2u ? 0xa000u : pa;
+        f.fail_size=phase || !(kind&1u) ? 1u : 2u;
+        uint32_t flags=c.cpsr, before[16]; memcpy(before,c.r,sizeof before);
+        CHECK(arm_step(&c)==ARM_HALT && memcmp(before,c.r,sizeof before)==0 && c.excl_valid && c.excl_addr==0x2340u,
+              "failed small register load changed registers or exclusive state");
+        CHECK(f.successful_byte_reads==(phase==2u ? 1u : 0u),"failed small register load lost its completed byte prefix");
+        check_stop(&f,&c,0u,flags);
+        f.failed=false; f.fail_size=0u; f.ram[pa]=0x84u;
+        uint32_t expected=(kind&1u) ? 0x8184u : 0x84u;
+        if (kind&2u) expected|=(kind&1u) ? 0xffff0000u : 0xffffff00u;
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==4u && c.r[2]==expected && c.cycles==1u &&
+              c.cpsr==(flags & ~0x0600fc00u) && c.excl_valid,
+              "small register retry lost extension, used stale partial data or advanced IT early");
+      }
+}
+
 static void test_partial_transfers_and_vfp(void) {
     for (unsigned write = 0; write < 2u; write++) {
         fixture_t f; arm_bus_t bus; arm_cpu_t c;
@@ -421,6 +449,7 @@ int main(void) {
     test_unaligned_table_branch_and_retry();
     test_fetch_and_latched_cache();
     test_walk_failures();
+    test_small_register_load_and_retry();
     test_partial_transfers_and_vfp();
     test_exception_and_host_hook_paths();
     test_second_halfword_walk_failure();

@@ -2991,6 +2991,37 @@ static bool thumb_it_placement(unsigned state, uint16_t first, uint16_t second,
     return true;
 }
 
+/* Bounded MemU halfword path for newly implemented Thumb forms. Each byte
+ * must have a validated Normal-memory translation on Cortex-A8. Existing
+ * shared load/store paths have not yet adopted this memory-type boundary. */
+static arm_status_t thumb_read_unaligned_halfword(arm_cpu_t *c, uint32_t address,
+                                                 uint32_t *value) {
+    if (c->cpsr & ARM_CPSR_E) return ARM_UNDEFINED;
+    if (c->cp15.sctlr & ARM_SCTLR_A) {
+        note_alignment_abort(c, address, false);
+        return ARM_OK;
+    }
+    if (c->arch != ARM_ARCH_V7_CORTEX_A8) return ARM_UNDEFINED;
+    /* A8's unaligned Device/SO case is UNPREDICTABLE, not the alignment
+     * fault required by virtualization extensions (DDI0406C.b A3.2.2).
+     * Stop before that byte's data access, retaining a prior Normal read.
+     * Direct data caches do not yet enforce memory types, so bypass them. */
+    uint32_t result = 0u;
+    for (unsigned i = 0; i < 2u; i++) {
+        uint32_t va = address + i, pa;
+        arm_memory_type_t type;
+        uint32_t fsr = arm_mmu_translate_type(c, va, ARM_ACCESS_READ,
+            (c->cpsr & 0x1fu) != ARM_MODE_USR, &pa, &type);
+        if (fsr) { note_abort(c, fsr, va); return ARM_OK; }
+        if (type != ARM_MEMORY_NORMAL) return ARM_UNDEFINED;
+        uint32_t byte = c->bus->read8(c->bus->ctx, pa);
+        if (note_bus_failure(c, va)) return ARM_OK;
+        result |= byte << (8u * i);
+    }
+    *value = result;
+    return ARM_OK;
+}
+
 static arm_status_t thumb_load_small(arm_cpu_t *c, uint32_t address, unsigned rt,
                                      bool half, bool sign) {
     if (half && (c->cpsr & ARM_CPSR_E)) return ARM_UNDEFINED;
@@ -3056,27 +3087,8 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         uint32_t address = base + (c->r[rm] << (half ? 1u : 0u));
         uint32_t entry = 0u;
         if (half && (address & 1u)) {
-            if (c->cp15.sctlr & ARM_SCTLR_A) {
-                note_alignment_abort(c, address, false);
-                return ARM_OK;
-            }
-            if (c->arch != ARM_ARCH_V7_CORTEX_A8) return ARM_UNDEFINED;
-            /* MemU decomposes an unaligned halfword into ordered byte reads.
-             * A8's Device/Strongly-ordered case is UNPREDICTABLE (A3.2.2),
-             * not the alignment fault required by virtualization extensions.
-             * Refuse before that byte's bus access; an earlier Normal read
-             * remains observable. Bypass memory-type-unaware host caches. */
-            for (unsigned i = 0; i < 2u; i++) {
-                uint32_t va = address + i, pa;
-                arm_memory_type_t type;
-                uint32_t fsr = arm_mmu_translate_type(c, va, ARM_ACCESS_READ,
-                    (c->cpsr & 0x1fu) != ARM_MODE_USR, &pa, &type);
-                if (fsr) { note_abort(c, fsr, va); return ARM_OK; }
-                if (type != ARM_MEMORY_NORMAL) return ARM_UNDEFINED;
-                uint32_t byte = c->bus->read8(c->bus->ctx, pa);
-                if (note_bus_failure(c, va)) return ARM_OK;
-                entry |= byte << (8u * i);
-            }
+            arm_status_t status = thumb_read_unaligned_halfword(c, address, &entry);
+            if (status != ARM_OK) return status;
         } else entry = half ? mem_r16(c, address) : mem_r8(c, address);
         if (!c->abort_pending) *next = pc + 4u + 2u * entry;
         return ARM_OK;
@@ -3151,9 +3163,31 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         }
         return ARM_OK;
     }
+    /* LDRB/H/SB/SH register T2 (A6.3.8/9). Rn=PC belongs to the literal
+     * decoder below. Full-width LSL #0..3 offsets add without writeback. */
+    if ((first & 0xfed0u) == 0xf810u && (first & 15u) != 15u &&
+        (second & 0x0fc0u) == 0u) {
+        unsigned rn = first & 15u, rt = second >> 12, rm = second & 15u;
+        bool half = (first & 0x20u) != 0u, sign = (first & 0x100u) != 0u;
+        /* LDRSH-to-PC and A8's non-MP PLDW allocation are unallocated
+         * hints: NOP before interpreting Rm. PLD/PLI and Swift's PLDW
+         * retain their specified Rm restrictions even though hints do no IO. */
+        if (rt == 15u && half && (sign || c->arch == ARM_ARCH_V7_CORTEX_A8)) return ARM_OK;
+        if (rt == 13u || rm == 13u || rm == 15u) return ARM_UNDEFINED;
+        if (rt == 15u) return ARM_OK;
+        uint32_t address = c->r[rn] + (c->r[rm] << ((second >> 4) & 3u));
+        if (half && (address & 1u)) {
+            uint32_t value = 0u;
+            arm_status_t status = thumb_read_unaligned_halfword(c, address, &value);
+            if (status == ARM_OK && !c->abort_pending)
+                c->r[rt] = sign ? (uint32_t)(int32_t)(int16_t)value : value;
+            return status;
+        }
+        return thumb_load_small(c, address, rt, half, sign);
+    }
     /* LDRB/H/SB/SH immediate and literal (A6.3.8/9). Rn=PC always
      * selects a literal before interpreting bits11:8 as indexing controls.
-     * Register offsets and unprivileged aliases remain separate families. */
+     * Unprivileged aliases remain a separate unsupported family. */
     if ((first & 0xfe50u) == 0xf810u) {
         unsigned rn = first & 15u, rt = second >> 12;
         bool literal = rn == 15u, imm12 = (first & 0x80u) != 0u;

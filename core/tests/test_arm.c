@@ -9477,6 +9477,202 @@ static void put_thumb_register_load(uint32_t pc, unsigned rn, unsigned rt, unsig
     m_w16(NULL, pc + 2u, (uint16_t)((rt << 12) | (shift << 4) | rm));
 }
 
+static void put_thumb_small_register_load(uint32_t pc, unsigned kind,
+                                          unsigned rn, unsigned rt, unsigned rm, unsigned shift) {
+    const uint16_t op[]={0xf810u,0xf830u,0xf910u,0xf930u};
+    m_w16(NULL,pc,(uint16_t)(op[kind]|rn));
+    m_w16(NULL,pc+2u,(uint16_t)((rt<<12)|(shift<<4)|rm));
+}
+
+static uint32_t expected_small_load(unsigned kind, uint32_t value) {
+    uint32_t mask=(kind&1u) ? 0xffffu : 0xffu;
+    value&=mask;
+    if ((kind&2u) && (value & ((mask+1u)/2u))) value|=~mask;
+    return value;
+}
+
+static void test_thumb2_small_register_values(void) {
+    const arm_arch_t profiles[]={ARM_ARCH_V7_CORTEX_A8,ARM_ARCH_V7_SWIFT};
+    const uint32_t offsets[]={0u,1u,0x100u,0x80000001u,UINT32_MAX,0x40000003u};
+    const uint32_t values[]={0u,1u,0x7fu,0x80u,0xffu,0x7fffu,0x8000u,0xffffu};
+    for (unsigned p=0;p<2u;p++)
+     for (unsigned host=0;host<2u;host++)
+      for (unsigned kind=0;kind<4u;kind++)
+       for (unsigned shift=0;shift<4u;shift++)
+        for (unsigned off=0;off<6u;off++)
+         for (unsigned n=0;n<8u;n++)
+          for (unsigned odd=0;odd<(p && (kind&1u) ? 1u : 2u);odd++) {
+            arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c,&bus,profiles[p]),"reset");
+            c.cpsr=ARM_MODE_SYS|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_C|ARM_CPSR_V|ARM_CPSR_Q;
+            c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+            m_w32(NULL,0x4000u,0xc0eu); /* Normal, identity-mapped section. */
+            uint32_t address=0x21000u+odd;
+            c.r[4]=address-(uint32_t)((uint64_t)offsets[off]*(1u<<shift));
+            c.r[10]=offsets[off]; c.r[8]=0x12345678u;
+            c.excl_valid=true; c.excl_addr=0x2340u;
+            uint32_t flags=c.cpsr, before[15]; memcpy(before,c.r,sizeof before);
+            put_thumb_small_register_load(0u,kind,4u,8u,10u,shift);
+            for (unsigned warm=0;warm<2u;warm++) {
+                uint32_t value=values[n] ^ (warm ? ((kind&1u) ? 0x8000u : 0x80u) : 0u);
+                m_w16(NULL,address,(uint16_t)value); c.r[15]=0u;
+                before[8]=expected_small_load(kind,value);
+                CHECK(arm_step(&c)==ARM_OK && c.r[15]==4u && c.cycles==warm+1u && c.cpsr==flags &&
+                      memcmp(before,c.r,sizeof before)==0 && c.excl_valid && c.excl_addr==0x2340u,
+                      "small register load value/index/extension p=%u kind=%u shift=%u off=%u odd=%u",p,kind,shift,off,odd);
+            }
+          }
+}
+
+static void test_thumb2_small_register_operands_and_hints(void) {
+    const arm_arch_t profiles[]={ARM_ARCH_V7_CORTEX_A8,ARM_ARCH_V7_SWIFT};
+    const unsigned states[]={0u,0x18u,0x1cu,0x08u,0x0cu};
+    for (unsigned p=0;p<2u;p++)
+     for (unsigned kind=0;kind<4u;kind++)
+      for (unsigned role=0;role<3u;role++)
+       for (unsigned reg=0;reg<16u;reg++)
+        for (unsigned it=0;it<5u;it++) {
+            if (!role && reg==15u) continue; /* Literal alias below. */
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c,&g_bus,profiles[p]),"reset");
+            c.cp15.sctlr=0u;
+            c.cpsr=ARM_MODE_SYS|ARM_CPSR_T|ARM_CPSR_C|ARM_CPSR_V|test_it_bits(states[it]);
+            for (unsigned r=0;r<15u;r++) c.r[r]=0x1000u+4u*r;
+            unsigned rn=role==0u ? reg : 4u, rt=role==1u ? reg : 8u, rm=role==2u ? reg : 10u;
+            uint32_t address=c.r[rn]+c.r[rm]*8u, before[15], flags=c.cpsr;
+            memcpy(before,c.r,sizeof before);
+            bool execute=it<3u, valid=rt!=13u && rm!=13u && rm!=15u, ok=!execute || valid;
+            /* Both ITT NE (0x1c) and ITE EQ (0x0c) next select NE. */
+            uint32_t next_it=it==2u || it==4u ? 0x18u : 0u;
+            if (execute && valid && rt!=15u) before[rt]=expected_small_load(kind,0x8180u);
+            m_w16(NULL,address,0x8180u); put_thumb_small_register_load(0u,kind,rn,rt,rm,3u);
+            g_watch_addr=address; g_watch_reads8=0u; g_watch_reads16=0u;
+            CHECK(arm_step(&c)==(ok ? ARM_OK : ARM_UNDEFINED) && c.r[15]==(ok ? 4u : 0u) &&
+                  memcmp(before,c.r,sizeof before)==0 && c.cpsr==(ok ? (flags & ~TEST_IT_MASK)|test_it_bits(next_it) : flags),
+                  "small register operands/IT kind=%u role=%u reg=%u it=%u",kind,role,reg,it);
+            CHECK(g_watch_reads8==(execute && valid && rt!=15u && !(kind&1u) ? 1u : 0u) &&
+                  g_watch_reads16==(execute && valid && rt!=15u && (kind&1u) ? 1u : 0u),"small register load/hint issued wrong data access");
+            g_watch_addr=UINT32_MAX;
+        }
+    for (unsigned p=0;p<2u;p++)
+     for (unsigned kind=0;kind<4u;kind++)
+      for (unsigned rm=0;rm<16u;rm++) {
+        arm_cpu_t c;
+        memset(g_ram,0,sizeof g_ram);
+        CHECK(arm_reset_profile(&c,&g_bus,profiles[p]),"reset");
+        c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_E|ARM_CPSR_C|test_it_bits(0x1cu);
+        for (unsigned r=0;r<15u;r++) c.r[r]=0x90000000u;
+        c.excl_valid=true;
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x803eu);
+        put_thumb_small_register_load(0x8000u,kind,4u,15u,rm,0u);
+        uint32_t flags=c.cpsr;
+        bool unallocated=kind==3u || (kind==1u && p==0u);
+        bool ok=unallocated || (rm!=13u && rm!=15u);
+        g_watch_addr=0x4800u; g_watch_reads32=0u; /* Unmapped hint target 0x20000000. */
+        CHECK(arm_step(&c)==(ok ? ARM_OK : ARM_UNDEFINED) && c.r[15]==(ok ? 4u : 0u) &&
+              c.cpsr==(ok ? (flags & ~TEST_IT_MASK)|test_it_bits(0x18u) : flags) && c.excl_valid &&
+              !c.cp15.dfsr && !g_watch_reads32,"allocated hint operand check or unallocated hint NOP precedence");
+        g_watch_addr=UINT32_MAX;
+      }
+    for (unsigned kind=0;kind<4u;kind++) {
+        for (unsigned bit=6u;bit<11u;bit++)
+         for (unsigned hint=0;hint<2u;hint++) {
+            arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+            c.cpsr=ARM_MODE_SYS|ARM_CPSR_T; c.r[4]=0x300u; c.r[10]=0u;
+            put_thumb_small_register_load(0u,kind,4u,hint ? 15u : 8u,10u,0u);
+            m_w16(NULL,2u,(uint16_t)((hint ? 0xf000u : 0x8000u)|(1u<<bit)|10u));
+            g_watch_addr=0x300u; g_watch_reads8=0u; g_watch_reads16=0u;
+            CHECK(arm_step(&c)==ARM_UNDEFINED && !g_watch_reads8 && !g_watch_reads16 && !c.r[15],
+                  "reserved register-load/hint bits accepted");
+            g_watch_addr=UINT32_MAX;
+         }
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cp15.sctlr=0u; c.cpsr=ARM_MODE_SYS|ARM_CPSR_T; c.r[15]=0x2002u;
+        put_thumb_small_register_load(0x2002u,kind,15u,8u,15u,3u);
+        m_w16(NULL,0x1fc5u,0x8180u); /* Literal: Align(PC+4,4)-63, not Rm=PC. */
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==0x2006u && c.r[8]==expected_small_load(kind,0x8180u),"register decoder captured the literal alias");
+        arm_reset(&c,&g_bus); c.cpsr=ARM_MODE_SYS|ARM_CPSR_T; c.r[15]=0x100u; c.r[14]=0x200u;
+        put_thumb_small_register_load(0x100u,kind,2u,8u,10u,3u);
+        uint32_t target=0x200u+2u*(m_r16(NULL,0x100u)&0x7ffu);
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==target && c.r[14]==0x103u && !c.r[8],"small register load changed ARM1176 BL suffix framing");
+    }
+}
+
+static void test_thumb2_small_register_data_faults(void) {
+    for (unsigned host=0;host<2u;host++)
+     for (unsigned kind=0;kind<4u;kind++)
+      for (unsigned fault=0;fault<15u;fault++) {
+        memset(g_ram,0,sizeof g_ram);
+        arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&bus,fault==13u ? ARM_ARCH_V7_SWIFT : ARM_ARCH_V7_CORTEX_A8),"reset");
+        bool half=(kind&1u)!=0u, crossing=fault>=8u && fault<=10u;
+        bool odd=fault==1u || (fault>=5u && fault<=10u) || fault>=12u;
+        uint32_t address=fault==4u ? 0x100000u : crossing ? 0x2fffu : 0x2010u+(odd ? 1u : 0u);
+        c.cp15.sctlr=fault==14u ? 0u : ARM_SCTLR_M|ARM_SCTLR_XP;
+        if (fault==5u || fault==12u) c.cp15.sctlr|=ARM_SCTLR_A;
+        c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_C|test_it_bits(0x18u)|(fault==11u ? ARM_CPSR_E : 0u);
+        c.r[15]=0x100u; c.r[4]=address-2u; c.r[10]=1u; c.r[8]=0x12345678u;
+        uint32_t flags=c.cpsr;
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x803eu);
+        m_w32(NULL,0x6008u,fault==2u || fault==12u ? 0u : fault==3u ? 0xa01eu : fault==6u ? 0xa032u : fault==7u ? 0xa036u : 0xa03eu);
+        m_w32(NULL,0x600cu,fault==8u ? 0u : fault==9u ? 0xd01eu : fault==10u ? 0xd036u : 0xd03eu);
+        uint32_t pa0=fault==14u ? address : 0xa000u+(address&0xfffu);
+        uint32_t pa1=crossing ? 0xd000u : pa0+1u;
+        m_w8(NULL,pa0,0x80u); m_w8(NULL,pa1,0x81u);
+        put_thumb_small_register_load(fault==14u ? 0x100u : 0x8100u,kind,4u,8u,10u,1u);
+        bool refused=half && (fault==6u || fault==7u || fault==10u || fault==11u || fault>=13u);
+        bool aborted=fault==2u || fault==3u || fault==4u || fault==12u || (half && (fault==5u || fault==8u || fault==9u));
+        g_watch_addr=pa0; g_watch_reads8=0u; g_watch_reads16=0u;
+        CHECK(arm_step(&c)==(refused ? ARM_UNDEFINED : ARM_OK) && c.r[4]==address-2u && c.r[10]==1u,
+              "small register data disposition/operands kind=%u fault=%u",kind,fault);
+        if (!refused && !aborted) CHECK(c.r[15]==0x104u && c.r[8]==expected_small_load(kind,0x8180u) &&
+            c.cpsr==(flags & ~TEST_IT_MASK),"small register data value/IT");
+        else if (refused) CHECK(c.r[15]==0x100u && c.r[8]==0x12345678u && c.cpsr==flags && !c.cp15.dfsr,
+            "small register unsupported memory changed state");
+        else {
+            uint32_t fsr=fault==3u || fault==9u ? ARM_FSR_PAGE_PERMISSION : fault==4u ? ARM_FSR_SECTION_TRANSLATION :
+                         half && (fault==5u || fault==12u) ? ARM_FSR_ALIGNMENT : ARM_FSR_PAGE_TRANSLATION;
+            CHECK(c.r[15]==ARM_VEC_DATA_ABORT && c.r[8]==0x12345678u && c.r[14]==0x108u &&
+                  c.cp15.dfar==(crossing ? address+1u : address) && c.cp15.dfsr==fsr && c.spsr[ARM_BANK_ABT]==flags,
+                  "small register fault address/state");
+        }
+        bool prefix=half && crossing, read=(!refused && !aborted) || prefix;
+        CHECK(g_watch_reads8==(read && (!half || odd) ? 1u : 0u) &&
+              g_watch_reads16==(read && half && !odd ? 1u : 0u),"small register failure read the wrong byte prefix");
+        g_watch_addr=UINT32_MAX;
+      }
+}
+
+static void test_thumb2_small_register_fetch(void) {
+    for (unsigned kind=0;kind<4u;kind++)
+     for (unsigned fault=0;fault<4u;fault++)
+      for (unsigned execute=0;execute<2u;execute++) {
+        memset(g_ram,0,sizeof g_ram);
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_C|test_it_bits(execute ? 0x1cu : 0x0cu);
+        c.r[15]=0xffeu; c.r[4]=0x3000u; c.r[10]=1u; c.r[8]=0x12345678u;
+        uint32_t flags=c.cpsr;
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x803eu);
+        m_w32(NULL,0x6004u,fault==1u ? 0u : fault==2u ? 0xa03fu : fault==3u ? 0xa01eu : 0xa03eu);
+        m_w32(NULL,0x600cu,0xe03eu); m_w16(NULL,0xe002u,0x8180u);
+        put_thumb_small_register_load(0x8ffeu,kind,4u,8u,10u,1u);
+        m_w16(NULL,0xa000u,m_r16(NULL,0x9000u)); m_w16(NULL,0x9000u,0x901au);
+        g_watch_addr=0xe002u; g_watch_reads8=0u; g_watch_reads16=0u;
+        CHECK(arm_step(&c)==ARM_OK,"small register fetch disposition");
+        CHECK(c.r[8]==(!fault && execute ? expected_small_load(kind,0x8180u) : 0x12345678u) &&
+              g_watch_reads8==(!fault && execute && !(kind&1u) ? 1u : 0u) &&
+              g_watch_reads16==(!fault && execute && (kind&1u) ? 1u : 0u),"small register data read before complete fetch or on failed condition");
+        if (!fault) CHECK(c.r[15]==0x1002u && c.cpsr==((flags & ~TEST_IT_MASK)|test_it_bits(0x18u)),"small register fetch/IT advance");
+        else CHECK(c.r[15]==ARM_VEC_PREFETCH && c.r[14]==0x1002u && c.cp15.ifar==0x1000u && c.spsr[ARM_BANK_ABT]==flags &&
+            (c.cp15.ifsr&15u)==(fault==1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION),"small register split fetch fault");
+        g_watch_addr=UINT32_MAX;
+      }
+}
+
 static void test_thumb2_register_word_load_values(void) {
     const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
     const uint32_t offsets[] = {0u,1u,0x100u,0x80000001u,0xffffffffu,0x40000003u};
@@ -10675,6 +10871,10 @@ int main(void) {
     test_thumb2_register_store_aborts();
     test_thumb2_register_store_fetch();
     test_thumb2_register_word_load_values();
+    test_thumb2_small_register_values();
+    test_thumb2_small_register_operands_and_hints();
+    test_thumb2_small_register_data_faults();
+    test_thumb2_small_register_fetch();
     test_thumb2_register_word_load_operands();
     test_thumb2_register_word_load_pc();
     test_thumb2_register_word_load_aborts();
