@@ -6819,6 +6819,8 @@ static void test_armv7_multiword_and_sync_alignment(void) {
             CHECK(arm_reset_profile(&c, &g_bus, profiles[p]), "reset");
             c.cp15.sctlr = 0u; /* Neither U nor A permits legacy behavior on v7. */
             c.r[0] = 0x101u; c.r[1] = 0x12345678u; c.r[2] = 0x87654321u;
+            /* A8 checks alignment only after its local monitor passes. */
+            if (i == 3u) { c.excl_valid = true; c.excl_addr = 0x101u; c.a8_excl_size = 4u; }
             m_w32(NULL, 0, cases[i].insn);
             memset(g_ram + 0x100u, 0xee, 12);
             CHECK(arm_step(&c) == ARM_OK && c.r[15] == ARM_VEC_DATA_ABORT &&
@@ -9280,7 +9282,7 @@ static void test_thumb2_barrier_options_and_it(void) {
                   "Thumb barrier changed registers, monitor or TLB");
          }
     static const uint16_t invalid[][2] = {
-        {0xf3bfu,0x8f2fu}, /* CLREX is a separate, currently unsupported family. */
+        {0xf3bfu,0x8f2fu}, /* CLREX is separate from barriers and clears the monitor. */
         {0xf3bfu,0x8f3fu},{0xf3bfu,0x8f7fu},{0xf3bfu,0x8e5bu},{0xf3afu,0x8f5bu}
     };
     for (unsigned n = 0; n < sizeof invalid / sizeof invalid[0]; n++) {
@@ -9288,8 +9290,9 @@ static void test_thumb2_barrier_options_and_it(void) {
         CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
         c.cpsr = ARM_MODE_SYS | ARM_CPSR_T; c.excl_valid = true; c.excl_addr = 0x200u;
         m_w16(NULL, 0u, invalid[n][0]); m_w16(NULL, 2u, invalid[n][1]);
-        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.excl_valid && c.excl_addr == 0x200u,
-              "Thumb barrier swallowed a neighboring encoding");
+        CHECK(arm_step(&c) == (n == 0u ? ARM_OK : ARM_UNDEFINED) &&
+              c.r[15] == (n == 0u ? 4u : 0u) && c.excl_valid == (n != 0u) && c.excl_addr == 0x200u &&
+              c.cpsr == (ARM_MODE_SYS | ARM_CPSR_T), "Thumb barrier/CLREX neighboring encoding behavior");
     }
     for (unsigned kind = 4u; kind <= 6u; kind++) {
         arm_cpu_t c;
@@ -11310,7 +11313,206 @@ static void test_cortex_a8_thumb_cp15_fetch_and_maintenance(void) {
     }
 }
 
+/* DDI0406C.b A8.8.75..78/212..215, and DDI0344K 8.5. The data VA is
+ * deliberately different from its PA; a virtual-only monitor fails these
+ * checks. Expected transfers are assembled byte by byte from source values. */
+static uint32_t exclusive_encoding(bool thumb, bool load, unsigned size,
+                                   unsigned rn, unsigned rt, unsigned rt2, unsigned rd, unsigned imm8) {
+    if (!thumb) {
+        unsigned cls = size == 4u ? 0u : size == 8u ? 1u : size == 1u ? 2u : 3u;
+        return 0xe1800f90u | (cls << 21) | ((unsigned)load << 20) | (rn << 16) |
+            ((load ? rt : rd) << 12) | (load ? 15u : rt);
+    }
+    if (size == 4u) return (load ? 0xe8500f00u : 0xe8400000u) |
+        (rn << 16) | (rt << 12) | (load ? 0u : rd << 8) | imm8;
+    return (load ? 0xe8d00000u : 0xe8c00000u) | (rn << 16) | (rt << 12) |
+        ((size == 8u ? rt2 : 15u) << 8) | (size == 8u ? 0x70u : size == 1u ? 0x40u : 0x50u) |
+        (load ? 15u : rd);
+}
+static void exclusive_put(bool thumb, uint32_t pc, uint32_t insn) {
+    if (thumb) { m_w16(NULL, pc, (uint16_t)(insn >> 16)); m_w16(NULL, pc + 2u, (uint16_t)insn); }
+    else m_w32(NULL, pc, insn);
+}
+static void exclusive_setup(arm_cpu_t *c, bool thumb, uint32_t insn) {
+    memset(g_ram, 0, sizeof g_ram);
+    CHECK(arm_reset_profile(c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+    CHECK(c->a8_excl_size == 0u && !c->excl_valid, "reset retained an exclusive claim");
+    c->cp15.sctlr |= ARM_SCTLR_M; c->cp15.ttbr0 = 0x4000u; c->cp15.dacr = 1u;
+    c->cpsr = ARM_MODE_USR | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_Q | 0xa0000u | (thumb ? ARM_CPSR_T : 0u);
+    c->vfp_fpscr = 0x0bc00080u;
+    for (unsigned r = 0; r < 15u; r++) c->r[r] = 0x89abcdefu + 0x01010101u * r;
+    c->r[15] = 0u;
+    m_w32(NULL, 0x4000u, 0xc0eu); /* Normal User RW identity code section */
+    m_w32(NULL, 0x4004u, 0x6001u); m_w32(NULL, 0x6004u, 0xa03fu); /* VA101000 -> PAa000, XN */
+    m_w32(NULL, 0x6008u, 0xa03fu); /* explicit alias for tag checks */
+    m_w32(NULL, 0xa000u, 0x44332211u); m_w32(NULL, 0xa004u, 0xfedcba98u);
+    exclusive_put(thumb, 0u, insn);
+}
+static void test_a8_exclusive_registers(void) {
+    CHECK(exclusive_encoding(true,true,8u,2u,4u,5u,0u,0u) == 0xe8d2457fu &&
+          exclusive_encoding(true,false,8u,2u,4u,5u,3u,0u) == 0xe8c24573u,
+          "real OSAtomicAdd64 encoding anchors");
+    static const unsigned sizes[] = {1u,2u,4u,8u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned kind = 0; kind < 4u; kind++)
+      for (unsigned rn = 0; rn < 15u; rn++)
+       for (unsigned rt = 0; rt < 15u; rt++) {
+        unsigned size = sizes[kind], rt2 = thumb ? (rt + 7u) % 15u : rt + 1u;
+        if (rt2 == 13u && thumb) rt2 = 14u;
+        if ((thumb && rt == 13u) || (!thumb && size == 8u && ((rt & 1u) || rt == 14u))) continue;
+        arm_cpu_t c;
+        exclusive_setup(&c, thumb != 0u, exclusive_encoding(thumb != 0u,true,size,rn,rt,rt2,0u,0u));
+        c.r[rn] = 0x101000u;
+        uint32_t before[16], flags = c.cpsr; memcpy(before,c.r,sizeof before);
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.excl_valid &&
+              c.excl_addr == 0xa000u && c.a8_excl_size == size && c.cpsr == flags,
+              "exclusive load decode/tag T=%u size=%u n=%u t=%u",thumb,size,rn,rt);
+        for (unsigned r = 0; r < 15u; r++) {
+            uint32_t want = r == rt ? size == 1u ? 0x11u : size == 2u ? 0x2211u : 0x44332211u :
+                size == 8u && r == rt2 ? 0xfedcba98u : before[r];
+            CHECK(c.r[r] == want, "exclusive load alias/register preservation r=%u",r);
+        }
+        /* Use a real opposite-state load to establish the store's monitor. */
+        exclusive_setup(&c, !thumb, exclusive_encoding(!thumb,true,size,1u,2u,3u,0u,0u));
+        c.r[1] = 0x101000u;
+        CHECK(arm_step(&c) == ARM_OK && c.excl_valid, "cross-state monitor setup");
+        for (unsigned r = 0; r < 15u; r++) c.r[r] = 0x89abcdefu + 0x01010101u * r;
+        c.r[rn] = 0x101000u; c.r[15] = 0u;
+        c.cpsr = flags;
+        unsigned rd = (rt + 9u) % 15u;
+        while (rd == rn || rd == rt || (size == 8u && rd == rt2) || (thumb && rd == 13u)) rd = (rd + 1u) % 15u;
+        uint8_t expected[8]; memcpy(expected, g_ram + 0xa000u, sizeof expected);
+        for (unsigned b = 0; b < size; b++) expected[b] = (uint8_t)(c.r[b < 4u ? rt : rt2] >> (8u * (b % 4u)));
+        memcpy(before,c.r,sizeof before);
+        exclusive_put(thumb != 0u,0u,exclusive_encoding(thumb != 0u,false,size,rn,rt,rt2,rd,0u));
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.r[rd] == 0u && !c.excl_valid &&
+              c.cpsr == flags && c.vfp_fpscr == 0x0bc00080u && !memcmp(expected,g_ram + 0xa000u,sizeof expected),
+              "exclusive store cross-state/width T=%u size=%u n=%u t=%u",thumb,size,rn,rt);
+        for (unsigned r = 0; r < 15u; r++) CHECK(c.r[r] == (r == rd ? 0u : before[r]), "exclusive store clobbered source r=%u",r);
+       }
+    /* T32 STREXD permits equal data registers and independent odd registers. */
+    for (unsigned rt = 0; rt < 15u; rt++) if (rt != 13u) {
+        arm_cpu_t c;
+        exclusive_setup(&c,true,exclusive_encoding(true,false,8u,13u,rt,rt,rt == 0u ? 1u : 0u,0u));
+        c.r[13] = 0x101000u; c.excl_valid = true; c.excl_addr = 0xa000u; c.a8_excl_size = 8u;
+        uint32_t value = c.r[rt];
+        CHECK(arm_step(&c) == ARM_OK && m_r32(NULL,0xa000u) == value && m_r32(NULL,0xa004u) == value,
+              "T32 equal STREXD sources or SP base refused");
+    }
+    /* Every scaled T32 word offset. */
+    for (unsigned imm = 0; imm < 256u; imm++) {
+        arm_cpu_t c;
+        exclusive_setup(&c,true,exclusive_encoding(true,true,4u,1u,2u,0u,0u,imm));
+        c.r[1] = 0x101000u - 4u * imm;
+        CHECK(arm_step(&c) == ARM_OK && c.r[2] == 0x44332211u && c.excl_addr == 0xa000u, "T32 LDREX scaled offset");
+        exclusive_put(true,4u,exclusive_encoding(true,false,4u,1u,2u,0u,3u,imm));
+        CHECK(arm_step(&c) == ARM_OK && c.r[3] == 0u && !c.excl_valid, "T32 STREX scaled offset");
+    }
+}
+static void test_a8_exclusive_monitor_and_faults(void) {
+    static const unsigned sizes[] = {1u,2u,4u,8u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned k = 0; k < 4u; k++) {
+        unsigned size = sizes[k];
+        arm_cpu_t c;
+        uint32_t load = exclusive_encoding(thumb != 0u,true,size,1u,2u,3u,0u,0u);
+        uint32_t store = exclusive_encoding(thumb != 0u,false,size,1u,2u,3u,5u,0u);
+        exclusive_setup(&c,thumb != 0u,load); c.r[1] = 0x101000u;
+        CHECK(arm_step(&c) == ARM_OK && c.excl_valid, "monitor setup");
+        exclusive_put(thumb != 0u,4u,thumb ? 0xf3bf8f2fu : 0xf57ff01fu);
+        uint32_t flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_OK && !c.excl_valid && c.cpsr == flags, "CLREX did not clear across instruction states");
+        c.r[1] = 0x102001u; /* unmapped/misaligned target: failed monitor must precede both */
+        m_w32(NULL,0x6008u,0u); arm_mmu_tlb_flush(&c);
+        exclusive_put(thumb != 0u,8u,store);
+        g_watch_addr = 0x6008u; g_watch_reads32 = 0u;
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 12u && c.r[5] == 1u && c.cpsr == flags && !g_watch_reads32,
+              "A8 failed monitor walked/faulted on the store address");
+        g_watch_addr = UINT32_MAX;
+        /* A different PA or width cannot reuse the old claim. A same-PA
+         * alias exercises our physical-tag policy; portable pairs use one VA. */
+        for (unsigned change = 0; change < 3u; change++) {
+            exclusive_setup(&c,thumb != 0u,load); c.r[1] = 0x101000u;
+            CHECK(arm_step(&c) == ARM_OK && c.excl_valid, "monitor remap setup");
+            if (change == 0u) { m_w32(NULL,0x6004u,0xc03fu); arm_mmu_tlb_flush(&c); }
+            if (change == 1u) c.a8_excl_size = (uint8_t)(size == 1u ? 2u : 1u);
+            if (change == 2u) c.r[1] = 0x102000u;
+            exclusive_put(thumb != 0u,4u,store);
+            CHECK(arm_step(&c) == ARM_OK && c.r[5] == (change == 2u ? 0u : 1u) && !c.excl_valid &&
+                  m_r32(NULL,0xc000u) == 0u, "exclusive PA/size comparison");
+            exclusive_put(thumb != 0u,8u,store);
+            CHECK(arm_step(&c) == ARM_OK && c.r[5] == 1u, "second store-exclusive reused a consumed claim");
+        }
+        for (unsigned write = 0; write < 2u; write++)
+         for (unsigned fault = 0; fault < 6u; fault++) {
+            if ((fault == 0u || fault == 5u) && size == 1u) continue;
+            exclusive_setup(&c,thumb != 0u,write ? store : load);
+            c.r[1] = 0x101000u + (fault == 0u ? 1u : 0u);
+            c.excl_valid = true; c.excl_addr = 0xa000u; c.a8_excl_size = (uint8_t)size;
+            if (fault == 1u) m_w32(NULL,0x6004u,0xa01fu); /* User denied */
+            if (fault == 2u) m_w32(NULL,0x6004u,0u);
+            if (fault == 3u) m_w32(NULL,0x6004u,0xa037u); /* Device */
+            if (fault == 4u) m_w32(NULL,0x6004u,0xa033u); /* Strongly-ordered */
+            if (fault == 5u) c.cpsr |= ARM_CPSR_E;
+            flags = c.cpsr; uint32_t before[16]; memcpy(before,c.r,sizeof before);
+            g_watch_addr = 0xa000u; g_watch_reads32 = g_watch_reads16 = g_watch_reads8 = 0u;
+            g_watch_writes32 = g_watch_writes16 = g_watch_writes8 = 0u;
+            arm_status_t status = arm_step(&c);
+            CHECK(!g_watch_reads32 && !g_watch_reads16 && !g_watch_reads8 && !g_watch_writes32 && !g_watch_writes16 && !g_watch_writes8,
+                  "rejected exclusive touched data");
+            if (fault < 3u) {
+                uint32_t fsr = fault == 0u ? ARM_FSR_ALIGNMENT : fault == 1u ? ARM_FSR_PAGE_PERMISSION : ARM_FSR_PAGE_TRANSLATION;
+                CHECK(status == ARM_OK && c.r[15] == ARM_VEC_DATA_ABORT && c.r[14] == 8u &&
+                      c.cp15.dfar == before[1] && c.cp15.dfsr == (fsr | (write << 11)) && c.spsr[ARM_BANK_ABT] == flags && !c.excl_valid,
+                      "exclusive abort address/status/monitor");
+                CHECK(c.r[2] == before[2] && c.r[3] == before[3] && c.r[5] == before[5], "faulting exclusive published data/status");
+            } else CHECK(status == ARM_UNDEFINED && !memcmp(before,c.r,sizeof before) && c.cpsr == flags && c.excl_valid,
+                         "unsupported exclusive type/endian changed architectural state");
+            g_watch_addr = UINT32_MAX;
+         }
+     }
+}
+static void test_a8_exclusive_invalid_and_conditions(void) {
+    static const uint32_t invalid_thumb[] = {
+        0xe85f2f00u,0xe851df00u,0xe851ff00u,0xe8512e00u, /* base/data/SBO */
+        0xe8d1227fu,0xe8d12d7fu,0xe8d12f7fu,0xe8d12370u, /* equal/bad double load */
+        0xe8d12e4fu,0xe8d12f6fu, /* SBO and neighboring unimplemented form */
+        0xe8412100u,0xe8412200u,0xe8412d00u,0xe8412f00u, /* status aliases/SP/PC */
+        0xe8c12371u,0xe8c12372u,0xe8c12373u,0xe8c1237du,0xe8c1237fu,
+        0xe8c12d74u,0xe8c12f74u,0xe8c12e44u,0xe8c12f64u,0xf3bf8f20u
+    };
+    static const uint32_t invalid_arm[] = {
+        0xe19f2f9fu,0xe191ff9fu,0xe1912e9fu,0xe1912f90u,0xe1b13f9fu,0xe1b1ef9fu,
+        0xe1811f92u,0xe1812f92u,0xe181ff92u,0xe1a12f92u,0xe1a13f92u,0xe1a14f93u,0xe1a14e92u
+    };
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+        const uint32_t *forms = thumb ? invalid_thumb : invalid_arm;
+        unsigned count = thumb ? sizeof invalid_thumb / sizeof invalid_thumb[0] : sizeof invalid_arm / sizeof invalid_arm[0];
+        for (unsigned i = 0; i < count; i++) for (unsigned execute = 0; execute < 2u; execute++) {
+            arm_cpu_t c; uint32_t insn = forms[i];
+            if (!thumb && !execute) insn &= 0x0fffffffu; /* EQ, Z clear */
+            exclusive_setup(&c,thumb != 0u,insn);
+            if (thumb && !execute) c.cpsr |= test_it_bits(0x08u);
+            c.excl_valid = true; c.excl_addr = 0xa000u; c.a8_excl_size = 8u;
+            uint32_t flags = c.cpsr, before[16]; memcpy(before,c.r,sizeof before);
+            CHECK(arm_step(&c) == (execute ? ARM_UNDEFINED : ARM_OK), "invalid exclusive disposition i=%u T=%u execute=%u",i,thumb,execute);
+            CHECK(c.excl_valid && c.excl_addr == 0xa000u && c.a8_excl_size == 8u &&
+                  c.cpsr == (execute ? flags : flags & ~TEST_IT_MASK), "invalid/condition-failed exclusive changed monitor/flags");
+            for (unsigned r = 0; r < 16u; r++) CHECK(c.r[r] == (!execute && r == 15u ? 4u : before[r]), "invalid exclusive register effects");
+        }
+    }
+    /* Swift has not adopted this A8-specific memory/monitor implementation. */
+    arm_cpu_t c;
+    CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_SWIFT),"Swift reset");
+    c.cpsr = ARM_MODE_SYS | ARM_CPSR_T;
+    exclusive_put(true,0u,0xe8d2457fu);
+    CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && !c.excl_valid,"A8 exclusive decoder leaked into Swift");
+}
+
 int main(void) {
+    test_a8_exclusive_registers();
+    test_a8_exclusive_monitor_and_faults();
+    test_a8_exclusive_invalid_and_conditions();
     test_cortex_a8_vfp_system_access();
     test_cortex_a8_vfp_control_fields();
     test_cortex_a8_vfp_core_registers();

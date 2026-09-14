@@ -460,6 +460,10 @@ typedef struct arm_cpu {
      * spinlock goes through these, so they are load-bearing rather than
      * optional. One CPU means a single address tag is sufficient. */
     bool     excl_valid;
+    /* A8 pairs share a physical address tag across ARM/Thumb and record their
+     * transfer size. Legacy profiles retain a virtual tag in excl_addr; this byte
+     * occupies existing alignment padding and is not in ARM1176 snapshots. */
+    uint8_t  a8_excl_size;
     uint32_t excl_addr;
 
     /* VFP11 system registers. The kernel disables VFP and enables it lazily

@@ -428,8 +428,8 @@ static void snap_cp15(sn_io_t *io, arm_cp15_t *p) {
  * Deliberately NOT serialised: `bus`, a host pointer into the machine struct.
  * snapshot_load re-points it at the live machine's bus, which is what lets a
  * tool wrap the bus callbacks and still restore underneath the wrapper.
- * a8_l2actlr and a8_vfp_hi are likewise absent because this format accepts
- * ARM1176 only; both are cleared on restore, not reconstructed as A8 state.
+ * A8-only L2, upper FP and exclusive-size state are likewise absent because
+ * this format accepts ARM1176 only; they are cleared on restore.
  */
 static void snap_cpu(sn_io_t *io, arm_cpu_t *c) {
     FA32(c->r, 16);
@@ -474,6 +474,7 @@ static void snap_cpu(sn_io_t *io, arm_cpu_t *c) {
      * would misdescribe what it did.
      */
     if (sn_reading(io)) {
+        c->a8_excl_size = 0u;
         c->a8_l2actlr = 0u;
         memset(c->a8_vfp_hi, 0, sizeof c->a8_vfp_hi);
         memset(c->tlb, 0, sizeof c->tlb);

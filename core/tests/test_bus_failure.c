@@ -438,7 +438,10 @@ static void test_exclusive_store_retry(void) {
         fixture_t f; arm_bus_t bus; arm_cpu_t c;
         setup(&f,&bus,&c,false,false);
         put32(&f,0u,cases[n].insn); put32(&f,0x1000u,0x44332211u);
+        c.cp15.sctlr |= ARM_SCTLR_M; c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        put32(&f,0x4000u,0xc0eu); /* explicit Normal identity mapping */
         c.excl_valid = true; c.excl_addr = 0x1000u; c.r[4] = 0xabcdef01u;
+        c.a8_excl_size = (uint8_t)(n == 3u ? 8u : cases[n].size);
         f.fail_address = 0x1000u; f.fail_size = cases[n].size; f.fail_write = true;
         uint32_t flags = c.cpsr;
         CHECK(arm_step(&c) == ARM_HALT && c.excl_valid && c.excl_addr == 0x1000u &&
@@ -449,6 +452,60 @@ static void test_exclusive_store_retry(void) {
         CHECK(arm_step(&c) == ARM_OK && !c.excl_valid && c.r[n == 3u ? 4u : 3u] == 0u,
               "retry of a failed exclusive store reported spurious monitor failure");
     }
+}
+
+static void test_a8_exclusive_access_retry(void) {
+    static const struct { uint32_t arm_load, arm_store, thumb_load, thumb_store; unsigned size; } cases[] = {
+        {0xe1d12f9fu,0xe1c14f92u,0xe8d12f4fu,0xe8c12f44u,1u},
+        {0xe1f12f9fu,0xe1e14f92u,0xe8d12f5fu,0xe8c12f54u,2u},
+        {0xe1912f9fu,0xe1814f92u,0xe8512f00u,0xe8412400u,4u},
+        {0xe1b12f9fu,0xe1a14f92u,0xe8d1237fu,0xe8c12374u,8u}
+    };
+    for (unsigned k = 0; k < 4u; k++)
+     for (unsigned thumb = 0; thumb < 2u; thumb++)
+      for (unsigned host = 0; host < 2u; host++)
+       for (unsigned load = 0; load < 2u; load++)
+        for (unsigned stop = 0; stop < 6u; stop++) {
+            if ((stop == 1u && cases[k].size != 8u) || (stop == 5u && !thumb)) continue;
+            fixture_t f; arm_bus_t bus; arm_cpu_t c;
+            setup(&f,&bus,&c,thumb != 0u,host != 0u);
+            if (thumb) c.cpsr |= 0x1800u; /* Last IT NE slot. */
+            c.cp15.sctlr |= ARM_SCTLR_M; c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+            put32(&f,0x4000u,0xc0eu); put32(&f,0x4004u,0x6001u); put32(&f,0x6004u,0x103fu);
+            c.r[1] = 0x101000u; c.r[4] = 0xabcdef01u;
+            c.excl_valid = true; c.excl_addr = load ? 0x88u : 0x1000u;
+            c.a8_excl_size = (uint8_t)(load ? 1u : cases[k].size);
+            uint32_t old_tag = c.excl_addr; uint8_t old_size = c.a8_excl_size;
+            put32(&f,0x1000u,0x44332211u); put32(&f,0x1004u,0xfedcba98u);
+            uint32_t insn = thumb ? (load ? cases[k].thumb_load : cases[k].thumb_store) :
+                                   (load ? cases[k].arm_load : cases[k].arm_store);
+            if (thumb) { put16(&f,0u,(uint16_t)(insn >> 16)); put16(&f,2u,(uint16_t)insn); }
+            else put32(&f,0u,insn);
+            f.fail_address = stop < 2u ? 0x1000u + 4u * stop : stop == 2u ? 0x4004u :
+                stop == 3u ? 0x6004u : stop == 4u ? 0u : 2u;
+            f.fail_size = stop >= 4u ? (thumb ? 2u : 4u) : stop >= 2u || cases[k].size == 8u ? 4u : cases[k].size;
+            f.fail_write = stop < 2u && !load;
+            uint32_t flags = c.cpsr;
+            CHECK(arm_step(&c) == ARM_HALT, "exclusive checked failure did not stop");
+            check_stop(&f,&c,0u,flags);
+            CHECK(c.r[1] == 0x101000u && c.r[2] == 0x87654321u && c.r[3] == 0x12345678u &&
+                  c.r[4] == 0xabcdef01u && c.excl_valid && c.excl_addr == old_tag && c.a8_excl_size == old_size,
+                  "exclusive failed fetch/walk/data published a partial register or monitor");
+            CHECK(get32(&f,0x1000u) == (!load && stop == 1u ? 0x87654321u : 0x44332211u) &&
+                  get32(&f,0x1004u) == 0xfedcba98u, "exclusive host stop lost completed prefix or wrote failed word");
+            f.failed = false; f.fail_size = 0u;
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u &&
+                  c.cpsr == (flags & ~0x0600fc00u), "exclusive retry did not retire/advance IT exactly once");
+            uint32_t mask = cases[k].size >= 4u ? UINT32_MAX : (1u << (8u * cases[k].size)) - 1u;
+            CHECK(c.r[2] == (load ? 0x44332211u & mask : 0x87654321u) &&
+                  c.r[3] == (load && cases[k].size == 8u ? 0xfedcba98u : 0x12345678u) &&
+                  c.r[4] == (load ? 0xabcdef01u : 0u) && c.excl_valid == (load != 0u) &&
+                  (!load || (c.excl_addr == 0x1000u && c.a8_excl_size == cases[k].size)),
+                  "exclusive retry data/status/physical tag");
+            CHECK(get32(&f,0x1000u) == (load ? 0x44332211u : (0x44332211u & ~mask) | (0x87654321u & mask)) &&
+                  get32(&f,0x1004u) == (!load && cases[k].size == 8u ? 0x12345678u : 0xfedcba98u),
+                  "exclusive retry wrote wrong bytes");
+        }
 }
 
 static void test_native_cache_refill_refused(void) {
@@ -538,6 +595,7 @@ int main(void) {
     test_exception_and_host_hook_paths();
     test_second_halfword_walk_failure();
     test_exclusive_store_retry();
+    test_a8_exclusive_access_retry();
     test_native_cache_refill_refused();
     test_counter_wraparound();
 #ifdef S5LBOX_STATIC_A64_ENGINE

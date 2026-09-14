@@ -349,6 +349,27 @@ and registers. Source padding for the aligned vector reads is explicitly
 prepared and bounded. These cases use lengths below 1024 bytes and exclude
 the separate large-block/stack paths. They remain isolated User-mode fixtures.
 
+Eight additional cases exercise the same copy body's large-block paths with
+1024–1536-byte buffers, including overlap in both directions. Every requested
+source byte is read once, every destination byte is written once, and the
+24-byte stack save/restore is checked. R9 is checked against the last loaded
+source word: Apple's [ARMv6 ABI](https://developer.apple.com/documentation/xcode/writing-armv6-code-for-ios)
+makes it volatile in iOS 3 and later, and the
+[ARMv7 ABI](https://developer.apple.com/documentation/xcode/writing-armv7-code-for-ios)
+inherits those core-register rules. Both observed PLD forms already execute
+as functional hints; these checks establish no cache timing.
+
+The cache's selected ARM `memset_pattern16` entry at `0x391d5fc8` and its
+shared fill body complete 560 cases with unchanged instructions. They cover
+lengths 0–31, all 32 destination alignments with all 16 tail lengths at
+64–79 bytes, and 16 larger fills. Checks compare the repeated pattern and
+truncated tail independently, including unaligned pattern pointers, exact
+source-read counts, untouched surrounding bytes, saved registers and the
+32-byte stack. These inputs follow Apple's
+[pattern-fill contract](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/memset_pattern16.3.html).
+Both copy and pattern fixtures use synthetic User mappings and direct entry;
+they do not establish resolver execution, a process or a boot.
+
 ARM and Thumb VLDR/VSTR now move one S or D register through the translating
 memory accessors, including D16-D31. They use signed, scaled immediate
 offsets and require word alignment even for doubleword registers. Thumb
@@ -519,6 +540,41 @@ advanced state for the following instruction. Tests cover exception returns,
 failed second-half fetches, SVC hook rollback/retirement, and signed-static
 fallback with mixed instruction widths. This does not complete the separate
 Cortex-A8 CP15/exception-control audit, including SCTLR.TE.
+
+Cortex-A8 ARM and Thumb now share byte, halfword, word and doubleword
+exclusive accesses, with Thumb CLREX and scaled word offsets. Register
+validation follows [DDI0406C.b, A8.8.32/75–78/212–215](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92),
+including independent Thumb doubleword registers and permitted SP bases.
+Only naturally aligned Normal memory is prepared; multi-byte big-endian
+accesses remain unsupported. A cleared local monitor makes a store fail
+before alignment checks or translation, as specified for Cortex-A8 in
+[DDI0344K, 8.5.2](https://documentation-service.arm.com/static/5e8e1ac688295d1e18d35fde).
+ARM1176 retains its existing exclusive-access path.
+
+The A8 monitor records the translated physical address and transfer size.
+Matching ARM/Thumb pairs can share the claim; a physical remap or different
+size cannot reuse it. Completed store-exclusive attempts, CLREX and guest exceptions clear the
+claim. Tests cover register aliases, all scaled offsets, failed-monitor
+stores to invalid addresses, permission/alignment faults, memory-type
+refusals and instruction conditions. Checked failures during either fetch
+halfword, either table-walk level or either data word preserve registers and
+the monitor for an explicit host retry. Completed physical store words
+remain while the machine is halted. The synchronous interpreter has no
+second guest observer between doubleword accesses; DMA and multiprocessor
+global-monitor behavior remain unimplemented. The added size byte occupies
+existing structure padding and is cleared, not serialized, by the unchanged
+ARM1176 snapshot format.
+
+The unchanged cache `OSAtomicAdd64` routine at `0x391d4668` now returns in all
+16 isolated cases. Eight carry/wraparound inputs take 13 instructions; the
+same inputs take 21 after the fixture explicitly clears the monitor once
+before the first STREXD, forcing the guest's retry loop. Checks cover the
+64-bit result, exact cell and stack accesses, preserved registers and final
+monitor state. The baseline stopped at its first LDREXD after three steps.
+This is direct User-mode routine execution with synthetic mappings, without
+a guest scheduler, real contention, DMA, process launch or full boot.
+After this change, a fresh guarded kernel-entry run also reproduced the
+complete archived trace through the same 61,650-step L2 ECC configuration stop.
 
 Wide STRB/STRH with unsigned imm12 offsets use the common byte/halfword memory
 paths. They accept SP as a base, reject SP/PC sources and PC bases, and leave
@@ -841,7 +897,7 @@ establish that result.
 - Thumb-2 currently implements MOVW/MOVT, modified-immediate logical operations
   and arithmetic (also with shifted registers), immediate LDR/STR and
   byte/halfword transfers (including signed loads and pre/post indexing),
-  literals, doubleword transfers, extend/add forms, bitfields and word/long
+  literals, doubleword transfers, A8 exclusive accesses, extend/add forms, bitfields and word/long
   multiply/accumulate, CLZ, RBIT and PKH. Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple
   transfers, narrow register loads, TBB and bounded TBH are also implemented. Other instruction
   families remain to implement. IT state

@@ -1395,6 +1395,7 @@ bool arm_reset_profile(arm_cpu_t *cpu, const arm_bus_t *bus, arm_arch_t arch) {
     cpu->irq_line = false;
     cpu->fiq_line = false;
     cpu->excl_valid = false;
+    cpu->a8_excl_size = 0u;
     cpu->excl_addr = 0;
     cpu->vfp_fpexc = 0;
     cpu->vfp_fpscr = 0;
@@ -3416,9 +3417,96 @@ static arm_status_t thumb_load_word(arm_cpu_t *c, uint32_t address, unsigned rt,
     return ARM_OK;
 }
 
+/* A8 exclusives use one monitor across ARM and Thumb. Only Normal memory is
+ * prepared: Device/SO exclusives need explicit implementation support
+ * (DDI0406C.b A3.4.5). DDI0344K 8.5.2 requires a cleared local monitor to
+ * fail before translation, unlike the ARM1176 word-store path below.
+ *
+ * The interpreter and bus complete synchronously, with no second guest
+ * observer between the two words of a doubleword transfer. A checked host
+ * failure stops the machine; completed physical writes remain for an explicit
+ * retry, while registers and the monitor retain their pre-instruction state.
+ * This is not a DMA or multiprocessor global-monitor implementation. */
+static arm_status_t exec_a8_exclusive(arm_cpu_t *c, uint32_t insn, bool thumb) {
+    unsigned rn, rt, rt2 = 0u, rd = 0u, size, offset = 0u;
+    bool load;
+    if (thumb) {
+        unsigned first = insn >> 16, second = insn & 0xffffu;
+        rn = first & 15u; rt = second >> 12; load = (first & 0x10u) != 0u;
+        if (!(first & 0x80u)) { /* LDREX/STREX T1: scaled imm8 */
+            size = 4u; offset = (second & 255u) << 2; rd = (second >> 8) & 15u;
+            if (load && rd != 15u) return ARM_UNDEFINED;
+        } else {
+            unsigned op = (second >> 4) & 15u;
+            size = op == 4u ? 1u : op == 5u ? 2u : 8u;
+            rt2 = (second >> 8) & 15u; rd = second & 15u;
+            if ((load && rd != 15u) || (size != 8u && rt2 != 15u)) return ARM_UNDEFINED;
+        }
+        if (rt == 13u || (size == 8u && (rt2 == 13u || rt2 == 15u || (load && rt == rt2))) ||
+            (!load && rd == 13u)) return ARM_UNDEFINED;
+    } else {
+        static const unsigned sizes[] = {4u,8u,1u,2u};
+        rn = (insn >> 16) & 15u; load = (insn & (1u << 20)) != 0u;
+        size = sizes[(insn >> 21) & 3u]; rd = (insn >> 12) & 15u;
+        rt = load ? rd : insn & 15u; rt2 = rt + 1u;
+        if ((insn & 0xf00u) != 0xf00u || (load && (insn & 15u) != 15u) ||
+            (size == 8u && ((rt & 1u) || rt == 14u))) return ARM_UNDEFINED;
+    }
+    if (rn == 15u || rt == 15u || (!load && (rd == 15u || rd == rn || rd == rt || (size == 8u && rd == rt2))))
+        return ARM_UNDEFINED;
+    if (!load && !c->excl_valid) { c->r[rd] = 1u; return ARM_OK; }
+    if (size != 1u && (c->cpsr & ARM_CPSR_E)) return ARM_UNDEFINED;
+    uint32_t address = c->r[rn] + offset;
+    if (address & (size - 1u)) {
+        note_alignment_abort(c, address, !load);
+        return ARM_OK;
+    }
+    uint32_t pa;
+    arm_memory_type_t type;
+    uint32_t fsr = arm_mmu_translate_type(c, address, load ? ARM_ACCESS_READ : ARM_ACCESS_WRITE,
+                                          cpu_is_priv(c), &pa, &type);
+    if (fsr) { note_abort(c, fsr, address); return ARM_OK; }
+    if (type != ARM_MEMORY_NORMAL) return ARM_UNDEFINED;
+    /* Natural alignment keeps every supported width in one translation page.
+     * Address/size mismatches can fail; only matching pairs are guaranteed by
+     * A3.4.5. A physical tag also prevents a remap from reusing an old claim. */
+    if (!load) {
+        bool pass = c->excl_addr == pa && c->a8_excl_size == size;
+        if (pass) {
+            if (size == 1u) c->bus->write8(c->bus->ctx, pa, (uint8_t)c->r[rt]);
+            else if (size == 2u) c->bus->write16(c->bus->ctx, pa, (uint16_t)c->r[rt]);
+            else c->bus->write32(c->bus->ctx, pa, c->r[rt]);
+            if (note_bus_failure(c, address)) return ARM_OK;
+            if (size == 8u) {
+                c->bus->write32(c->bus->ctx, pa + 4u, c->r[rt2]);
+                if (note_bus_failure(c, address + 4u)) return ARM_OK;
+            }
+        }
+        c->r[rd] = pass ? 0u : 1u;
+        c->excl_valid = false;
+    } else {
+        uint32_t lo = size == 1u ? c->bus->read8(c->bus->ctx, pa) : size == 2u ?
+            c->bus->read16(c->bus->ctx, pa) : c->bus->read32(c->bus->ctx, pa), hi = 0u;
+        if (note_bus_failure(c, address)) return ARM_OK;
+        if (size == 8u) {
+            hi = c->bus->read32(c->bus->ctx, pa + 4u);
+            if (note_bus_failure(c, address + 4u)) return ARM_OK;
+        }
+        c->r[rt] = lo;
+        if (size == 8u) c->r[rt2] = hi;
+        c->excl_addr = pa; c->a8_excl_size = (uint8_t)size; c->excl_valid = true;
+    }
+    return ARM_OK;
+}
+
 static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
                                  uint16_t second, uint32_t *next) {
     if (first == 0xf3afu && second == 0x8003u) return exec_a8_wfi(c); /* WFI T2 */
+    if (first == 0xf3bfu && second == 0x8f2fu) { /* CLREX T1, A8.8.32 */
+        if (c->arch != ARM_ARCH_V7_CORTEX_A8) return ARM_UNDEFINED;
+        c->excl_valid = false;
+        return ARM_OK;
+    }
     /* DSB/DMB/ISB T1 (DDI0406C.b A8.8.43/44/53), including reserved
      * options as full-system operations. The dispatcher has checked IT and
      * the ARMv7 wide framing. As in A32, bus accesses/CP15 changes complete
@@ -3427,6 +3515,12 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
     if (first == 0xf3bfu && (barrier == 0x8f40u || barrier == 0x8f50u || barrier == 0x8f60u))
         return ARM_OK;
     uint32_t insn = ((uint32_t)first << 16) | second;
+    if ((first & 0xffe0u) == 0xe840u ||
+        ((first & 0xffe0u) == 0xe8c0u &&
+         ((second & 0xf0u) == 0x40u || (second & 0xf0u) == 0x50u || (second & 0xf0u) == 0x70u))) {
+        if (c->arch != ARM_ARCH_V7_CORTEX_A8) return ARM_UNDEFINED;
+        return exec_a8_exclusive(c, insn, true);
+    }
     if (a8_neon_single_elements_space(c, insn)) return exec_a8_neon_single_elements(c, insn);
     if (a8_neon_bitwise_space(c, insn)) return exec_a8_neon_bitwise(c, insn);
     if (a8_neon_immediate_space(c, insn)) return exec_a8_neon_immediate(c, insn);
@@ -4334,6 +4428,8 @@ arm_status_t arm_step(arm_cpu_t *c) {
                (insn & 0x00000060u) != 0x00000000u) {
         /* bits[6:5] != 00 -> extra load/store (LDRH/STRH/LDRSB/LDRSH, LDRD/STRD) */
         st = exec_extra_transfer(c, pc, insn, &next);
+    } else if (c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn & 0x0f8000f0u) == 0x01800090u) {
+        st = exec_a8_exclusive(c, insn, false);
     } else if ((insn & 0x0ff00ff0u) == 0x01900f90u) {     /* LDREX Rd,[Rn] */
         unsigned rn = (insn >> 16) & 0xfu, rd = (insn >> 12) & 0xfu;
         if (rn == 15u || rd == 15u) { st = ARM_UNDEFINED; }
