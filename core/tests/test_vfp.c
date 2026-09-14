@@ -2128,6 +2128,148 @@ static void test_a8_neon_multiply_access_and_invalid(void) {
     }
 }
 
+/* kind: 0 MLA, 1 MLS, 2 MUL. Q is in a different field from three-vector
+ * encodings; M selects a lane, never an upper-bank scalar register. */
+static uint32_t a8_neon_by_scalar(unsigned thumb, unsigned kind, unsigned quad,
+                                   unsigned d, unsigned n, unsigned m, unsigned index) {
+    return (thumb ? 0xefa00140u : 0xf2a00140u) | (kind << 10) | (quad << (thumb ? 28u : 24u)) |
+        ((d & 15u) << 12) | ((d >> 4) << 22) | ((n & 15u) << 16) | ((n >> 4) << 7) | m | (index << 5);
+}
+
+static void test_a8_neon_by_scalar_registers(void) {
+    CHECK(a8_neon_by_scalar(0u,2u,1u,4u,4u,6u,0u)==0xf3a44946u &&
+          a8_neon_by_scalar(1u,1u,1u,30u,16u,15u,1u)==0xffe0e5efu,"by-scalar encoding anchors");
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned kind=0;kind<3u;kind++)
+      for (unsigned quad=0;quad<2u;quad++)
+       for (unsigned d=0;d<32u;d+=quad+1u)
+        for (unsigned n=0;n<32u;n+=quad+1u)
+         for (unsigned m=0;m<16u;m++)
+          for (unsigned index=0;index<2u;index++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.cpsr|=ARM_CPSR_E; c.vfp_fpscr=0xfff79f9fu;
+            c.excl_valid=true; c.excl_addr=0x2468u; c.a8_excl_size=8u;
+            uint64_t expected[32];
+            for (unsigned r=0;r<32u;r++) {
+                expected[r]=a8_macc_int_bits((int)((2u*r)%9u)-4) |
+                    (uint64_t)a8_macc_int_bits((int)((2u*r+1u)%9u)-4)<<32;
+                vfp_set_d(&c,r,expected[r]);
+            }
+            int scalar=(int)((2u*m+index)%9u)-4;
+            for (unsigned r=0;r<=quad;r++) {
+                uint32_t result[2];
+                for (unsigned lane=0;lane<2u;lane++) {
+                    int a=(int)((2u*(n+r)+lane)%9u)-4, accumulator=(int)((2u*(d+r)+lane)%9u)-4;
+                    int product=a*scalar, value=kind==2u ? product : accumulator+(kind ? -product : product);
+                    result[lane]=a8_macc_int_bits(value);
+                    if (kind==2u && !product && ((a<0)!=(scalar<0))) result[lane]=0x80000000u;
+                }
+                expected[d+r]=(uint64_t)result[1]<<32|result[0];
+            }
+            uint32_t flags=c.cpsr;
+            CHECK(a8_move_step(&c,thumb,a8_neon_by_scalar(thumb,kind,quad,d,n,m,index))==ARM_OK &&
+                  c.r[15]==0x104u && c.cycles==1u && c.cpsr==flags && c.vfp_fpscr==0xfff79f9fu &&
+                  c.vfp_fpexc==ARM_FPEXC_EN && c.excl_valid && c.excl_addr==0x2468u && c.a8_excl_size==8u,
+                  "by-scalar status T=%u kind=%u Q=%u",thumb,kind,quad);
+            bool same=true;
+            for (unsigned r=0;r<32u;r++) same&=vfp_get_d(&c,r)==expected[r];
+            for (unsigned r=0;r<15u;r++) same&=c.r[r]==0u;
+            CHECK(same,"by-scalar original lane/alias T=%u kind=%u Q=%u D=%u N=%u M=%u index=%u",thumb,kind,quad,d,n,m,index);
+          }
+}
+
+static void test_a8_neon_by_scalar_values_and_host_state(void) {
+    fenv_t saved; CHECK(fegetenv(&saved)==0,"save scalar host state");
+    static const int rounds[]={FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    const unsigned count=sizeof a8_macc_cases/sizeof a8_macc_cases[0];
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned kind=0;kind<3u;kind++)
+      for (unsigned quad=0;quad<2u;quad++)
+       for (unsigned index=0;index<2u;index++)
+        for (unsigned host=0;host<4u;host++)
+         for (unsigned guest=0;guest<16u;guest++)
+          for (unsigned row=0;row<count;row++) {
+            const a8_macc_case_t *entry=&a8_macc_cases[row];
+            CHECK(fesetround(FE_TONEAREST)==0,"prepare scalar numeric oracle");
+            uint32_t exceptions=0u, result;
+            if (kind==2u) result=a8_neon_mul_expected(entry->a,entry->b,&exceptions);
+            else { result=kind ? entry->subtract : entry->add; exceptions=kind ? entry->subtract_flags : entry->add_flags; }
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.vfp_fpscr=ARM_FPSCR_QC|ARM_FPSCR_DZC|ARM_FPSCR_NZCV|ARM_FPSCR_ENABLES|ARM_FPSCR_LEN|ARM_FPSCR_STRIDE|
+                ((guest&3u)<<22)|(guest&4u ? ARM_FPSCR_FZ : 0u)|(guest&8u ? ARM_FPSCR_DN : 0u);
+            uint32_t flags=c.cpsr, fpscr=c.vfp_fpscr; uint64_t expected[32];
+            for (unsigned d=0;d<32u;d++) expected[d]=UINT64_C(0x12345678dead0000)+d;
+            /* A signaling NaN in the unselected lane must not set IOC. */
+            expected[15]=index ? (uint64_t)entry->b<<32|0x7f812345u : UINT64_C(0x7f81234500000000)|entry->b;
+            expected[16]=expected[17]=(uint64_t)entry->a<<32|entry->a;
+            expected[30]=expected[31]=(uint64_t)entry->c<<32|entry->c;
+            for (unsigned d=0;d<32u;d++) vfp_set_d(&c,d,expected[d]);
+            for (unsigned r=0;r<=quad;r++) expected[30u+r]=(uint64_t)result<<32|result;
+            CHECK(fesetround(rounds[host])==0 && feclearexcept(FE_ALL_EXCEPT)==0 && feraiseexcept(FE_DIVBYZERO)==0,"prepare scalar host environment");
+            int host_flags=fetestexcept(FE_ALL_EXCEPT);
+            CHECK(a8_move_step(&c,thumb,a8_neon_by_scalar(thumb,kind,quad,30u,16u,15u,index))==ARM_OK &&
+                  c.r[15]==0x104u && c.cpsr==flags && c.vfp_fpscr==(fpscr|exceptions) &&
+                  fegetround()==rounds[host] && fetestexcept(FE_ALL_EXCEPT)==host_flags,
+                  "by-scalar standard FP/host state T=%u kind=%u Q=%u lane=%u host=%u guest=%u row=%u",thumb,kind,quad,index,host,guest,row);
+            bool same=true;
+            for (unsigned d=0;d<32u;d++) same&=vfp_get_d(&c,d)==expected[d];
+            CHECK(same,"by-scalar analytical result/lane preservation row=%u kind=%u",row,kind);
+          }
+    CHECK(fesetenv(&saved)==0,"restore scalar host state");
+}
+
+static void test_a8_neon_by_scalar_access_invalid_and_it(void) {
+    const unsigned permissions[]={0u,1u,3u};
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned kind=0;kind<3u;kind++)
+      for (unsigned user=0;user<2u;user++)
+       for (unsigned enabled=0;enabled<2u;enabled++)
+        for (unsigned access=0;access<3u;access++)
+         for (unsigned variant=0;variant<5u;variant++)
+          for (unsigned skip=0;skip<(thumb ? 2u : 1u);skip++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.cpsr=(c.cpsr&~ARM_CPSR_MODE_MASK)|(user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr=permissions[access]*0x00500000u; c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u;
+            if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c)==ARM_OK,"scalar IT setup"); }
+            uint32_t insn=a8_neon_by_scalar(thumb,kind,1u,variant==3u ? 31u : 30u,variant==4u ? 17u : 16u,15u,1u);
+            if (variant==1u || variant==2u) insn=(insn&~0x00300000u)|((variant-1u)<<20);
+            uint32_t pc=c.r[15], flags=c.cpsr, fpscr=c.vfp_fpscr;
+            bool valid=variant==0u, allowed=enabled && (permissions[access]==3u || (permissions[access]==1u && !user));
+            CHECK(a8_move_step(&c,thumb,insn)==(skip || valid ? ARM_OK : ARM_UNDEFINED) && c.vfp_fpscr==fpscr,"scalar access/invalid disposition");
+            CHECK(skip ? c.r[15]==pc+4u && c.cpsr==(flags&~0x0600fc00u) :
+                  !valid ? c.r[15]==pc && c.cpsr==flags : allowed ? c.r[15]==pc+4u && c.cpsr==(flags&~0x0600fc00u) :
+                  c.r[15]==ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND]==flags && c.r[14]==pc+(thumb ? 2u : 4u),"scalar access precedence/IT retirement");
+            for (unsigned d=0;d<32u;d++) CHECK(vfp_get_d(&c,d)==0u,"scalar invalid/access/zero inputs changed registers");
+          }
+    /* Changing size=2 to size=3 in this encoding selects VEXT, with its own
+     * Q bit and immediate. Preserve that real neighboring allocation. */
+    for (unsigned thumb=0;thumb<2u;thumb++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb);
+        vfp_set_d(&c,2u,UINT64_C(0x0706050403020100)); vfp_set_d(&c,3u,UINT64_C(0x0f0e0d0c0b0a0908));
+        vfp_set_d(&c,0u,UINT64_C(0x1716151413121110)); vfp_set_d(&c,1u,UINT64_C(0x1f1e1d1c1b1a1918));
+        uint32_t insn=a8_neon_by_scalar(thumb,0u,0u,0u,2u,0u,0u)|(1u<<20);
+        CHECK(insn==a8_neon_extract(thumb,1u,0u,2u,0u,1u) && a8_move_step(&c,thumb,insn)==ARM_OK &&
+              vfp_get_d(&c,0u)==UINT64_C(0x0807060504030201) && vfp_get_d(&c,1u)==UINT64_C(0x100f0e0d0c0b0a09),"scalar decoder swallowed size3 VEXT");
+    }
+    static const uint32_t toggles[]={1u<<8,1u<<9,1u<<6,1u<<4,0xc00u};
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned enabled=0;enabled<2u;enabled++)
+      for (unsigned k=0;k<sizeof toggles/sizeof toggles[0];k++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u;
+        uint32_t flags=c.cpsr, insn=a8_neon_by_scalar(thumb,0u,0u,31u,16u,15u,1u)^toggles[k];
+        bool lazy=!thumb && !enabled;
+        CHECK(a8_move_step(&c,thumb,insn)==(lazy ? ARM_OK : ARM_UNDEFINED) &&
+              (lazy ? c.r[15]==ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND]==flags : c.r[15]==0x100u && c.cpsr==flags),"scalar neighboring allocation");
+      }
+    const arm_arch_t legacy[]={ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned p=0;p<2u;p++)
+     for (unsigned kind=0;kind<3u;kind++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,legacy[p]),"legacy scalar reset");
+        c.cp15.cpacr=0x00f00000u; c.vfp_fpexc=ARM_FPEXC_EN;
+        CHECK(a8_move_step(&c,0u,a8_neon_by_scalar(0u,kind,1u,30u,16u,15u,1u))==ARM_UNDEFINED && c.r[15]==0u,"scalar arithmetic leaked to legacy");
+     }
+}
+
 static void test_a8_neon_add_results(void) {
     /* a,b,add result/flags,subtract result/flags. Includes cancellation,
      * signed zero, both tie directions, binade edges and large exponent gaps. */
@@ -4590,6 +4732,9 @@ int main(void) {
     test_a8_neon_immediate_invalid_and_it();
     test_a8_neon_multiply_results();
     test_a8_neon_multiply_access_and_invalid();
+    test_a8_neon_by_scalar_registers();
+    test_a8_neon_by_scalar_values_and_host_state();
+    test_a8_neon_by_scalar_access_invalid_and_it();
     test_a8_neon_add_results();
     test_a8_neon_add_access_and_invalid();
     test_a8_neon_memory_registers();

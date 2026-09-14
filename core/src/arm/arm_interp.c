@@ -1110,6 +1110,45 @@ static arm_status_t exec_a8_neon_macc(arm_cpu_t *c, uint32_t insn) {
     return ARM_OK;
 }
 
+/* F32 VMUL/VMLA/VMLS by scalar (DDI0406C.b A8.8.338/352). Size=3
+ * belongs to related allocations, including VEXT; leave it to their decoders.
+ * Size=0/1 remains checked so invalid F32 does not become a lazy fault. */
+static bool a8_neon_by_scalar_space(const arm_cpu_t *c, uint32_t insn) {
+    if (c->arch != ARM_ARCH_V7_CORTEX_A8 || (insn & 0x00300000u) == 0x00300000u) return false;
+    bool thumb = (c->cpsr & ARM_CPSR_T) != 0u;
+    uint32_t fixed = insn & (thumb ? 0xef800f50u : 0xfe800f50u);
+    uint32_t prefix = thumb ? 0xef800140u : 0xf2800140u;
+    return fixed == prefix || fixed == (prefix | 0x400u) || fixed == (prefix | 0x800u);
+}
+
+static arm_status_t exec_a8_neon_by_scalar(arm_cpu_t *c, uint32_t insn) {
+    unsigned d = ((insn >> 12) & 15u) | ((insn >> 18) & 16u);
+    unsigned n = ((insn >> 16) & 15u) | ((insn >> 3) & 16u);
+    unsigned m = insn & 15u, index = (insn >> 5) & 1u;
+    unsigned quad = (insn >> ((c->cpsr & ARM_CPSR_T) ? 28u : 24u)) & 1u;
+    if (((insn >> 20) & 3u) != 2u || (quad && ((d | n) & 1u))) return ARM_UNDEFINED;
+    if (!vfp_cpacr_permits(c) || !vfp_enabled(c)) return ARM_GUEST_UNDEFINED;
+    bool accumulate = !(insn & 0x800u), subtract = (insn & 0x400u) != 0u;
+    uint32_t scalar = (uint32_t)(vfp_get_d(c, m) >> (32u * index)), exceptions = 0u;
+    uint64_t result[2];
+    for (unsigned r = 0; r <= quad; r++) {
+        uint64_t a = vfp_get_d(c, n + r);
+        uint32_t lo = a8_neon_multiply_f32((uint32_t)a, scalar, &exceptions);
+        uint32_t hi = a8_neon_multiply_f32((uint32_t)(a >> 32), scalar, &exceptions);
+        if (accumulate) {
+            uint64_t accumulator = vfp_get_d(c, d + r);
+            lo = a8_neon_add_f32((uint32_t)accumulator, lo, subtract, &exceptions);
+            hi = a8_neon_add_f32((uint32_t)(accumulator >> 32), hi, subtract, &exceptions);
+        }
+        result[r] = (uint64_t)hi << 32 | lo;
+    }
+    /* A destination may overlap the scalar or either half of Qn. All reads
+     * and separately rounded products/sums precede the first register write. */
+    for (unsigned r = 0; r <= quad; r++) vfp_set_d(c, d + r, result[r]);
+    c->vfp_fpscr |= exceptions;
+    return ARM_OK;
+}
+
 /* vfp_cpacr_permits() and vfp_enabled() live in vfp.c (declared in vfp.h):
  * they are half of the availability gate the VFP unit itself applies, and one
  * copy of that rule is the only safe number of copies.
@@ -1122,7 +1161,7 @@ static bool vfp_lazy_enable_trap(const arm_cpu_t *c, uint32_t insn) {
     if (a8_neon_single_elements_space(c, insn) || a8_neon_pairs_space(c, insn) || a8_neon_bitwise_space(c, insn) ||
         a8_neon_immediate_space(c, insn) || a8_neon_multiply_space(c, insn) || a8_neon_add_space(c, insn) ||
         a8_neon_extract_space(c, insn) || a8_neon_sign_space(c, insn) || a8_neon_transpose_space(c, insn) ||
-        a8_neon_macc_space(c, insn)) return false;
+        a8_neon_macc_space(c, insn) || a8_neon_by_scalar_space(c, insn)) return false;
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 &&
         (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn) ||
          vfp_is_memory_transfer(insn) || vfp_is_bitwise_data(insn) || vfp_is_compare_data(insn))) return false;
@@ -3661,6 +3700,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
     if (a8_neon_multiply_space(c, insn)) return exec_a8_neon_multiply(c, insn);
     if (a8_neon_add_space(c, insn)) return exec_a8_neon_add(c, insn);
     if (a8_neon_macc_space(c, insn)) return exec_a8_neon_macc(c, insn);
+    if (a8_neon_by_scalar_space(c, insn)) return exec_a8_neon_by_scalar(c, insn);
     if (a8_neon_extract_space(c, insn)) return exec_a8_neon_extract(c, insn);
     if (a8_neon_sign_space(c, insn)) return exec_a8_neon_sign(c, insn);
     if (a8_neon_transpose_space(c, insn)) return exec_a8_neon_transpose(c, insn);
@@ -4313,14 +4353,16 @@ arm_status_t arm_step(arm_cpu_t *c) {
         }
         if (a8_neon_bitwise_space(c, insn) || a8_neon_immediate_space(c, insn) ||
             a8_neon_multiply_space(c, insn) || a8_neon_add_space(c, insn) ||
-            a8_neon_extract_space(c, insn) || a8_neon_sign_space(c, insn) || a8_neon_transpose_space(c, insn) || a8_neon_macc_space(c, insn)) {
+            a8_neon_extract_space(c, insn) || a8_neon_sign_space(c, insn) || a8_neon_transpose_space(c, insn) ||
+            a8_neon_macc_space(c, insn) || a8_neon_by_scalar_space(c, insn)) {
             arm_status_t status = a8_neon_bitwise_space(c, insn) ? exec_a8_neon_bitwise(c, insn) :
                 a8_neon_immediate_space(c, insn) ? exec_a8_neon_immediate(c, insn) :
                 a8_neon_multiply_space(c, insn) ? exec_a8_neon_multiply(c, insn) :
                 a8_neon_add_space(c, insn) ? exec_a8_neon_add(c, insn) :
                 a8_neon_extract_space(c, insn) ? exec_a8_neon_extract(c, insn) :
                 a8_neon_sign_space(c, insn) ? exec_a8_neon_sign(c, insn) :
-                a8_neon_transpose_space(c, insn) ? exec_a8_neon_transpose(c, insn) : exec_a8_neon_macc(c, insn);
+                a8_neon_transpose_space(c, insn) ? exec_a8_neon_transpose(c, insn) :
+                a8_neon_by_scalar_space(c, insn) ? exec_a8_neon_by_scalar(c, insn) : exec_a8_neon_macc(c, insn);
             if (status == ARM_GUEST_UNDEFINED) return take_undefined_instruction(c, pc);
             if (status != ARM_OK) return status;
             c->r[15] = next;

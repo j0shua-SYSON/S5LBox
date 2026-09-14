@@ -383,8 +383,32 @@ using an exact small-integer oracle, 25 analytical F32 cases, guest controls,
 host rounding/exception preservation, IT, checked-bus retry and guest
 enable/exception-return retry. See
 [DDI0406C.b, A8.8.337](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+The F32 forms of VMUL, VMLA and VMLS by scalar select either 32-bit lane
+from D0-D15 and apply it across a D or Q vector. They reuse the same integer
+arithmetic and standard NEON controls, including separate multiply/add
+rounding. All original operands are read before publication, including when
+the scalar overlaps the destination. Size 0/1 and odd Q operands stop
+before access checks; size 3 remains with its related decoders, including
+VEXT. Tests cover every register/lane combination, an ignored signaling NaN
+in the unselected lane, analytical FP cases, guest and host controls, IT,
+access priority, complete instruction fetch and both host/guest retry.
+See [DDI0406C.b, A8.8.338/352](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 Other NEON arithmetic and full-bank Cortex-A8 VFP arithmetic remain
 separate work.
+
+The unchanged 528-byte ARM [`vDSP_vramp`](https://developer.apple.com/documentation/accelerate/vdsp_vramp)
+at `0x30827720..0x30827930` completes 1,824 prepared calls after this addition.
+Before it, the first aligned empty call stopped after 16 instructions at
+`0x30827774`, on `VMUL.F32 q2, q2, d6[0]`, after reading both scalar inputs
+and before any output. The unchanged fixture checks four exact-integer
+ramps, selected lengths 0..129, strides +/-1, +/-2 and +/-3, and four word
+alignments. It verifies every selected output byte once, untouched gaps and
+page canaries, the four-byte argument and saved frame, ABI registers and
+unaffected FP state. The original VFP scalar setup runs with nearest-even,
+FZ and DN. Fractional/special inputs, other VFP rounding modes, process
+execution and boot remain outside this fixture; it supplies no CPU-family
+identity input.
 
 The unchanged ARM [`vDSP_vma`](https://developer.apple.com/documentation/accelerate/vdsp_vma)
 at `0x30825f94` now completes 144 calls through its scalar body. Before
@@ -1041,7 +1065,8 @@ establish that result.
   scalar comparisons across the full register bank, and the bounded
   32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms,
   register Boolean operations, VEXT, 8/16/32-bit VTRN, F32 VABS/VNEG,
-  immediate constants, core-register VDUP and register VMUL/VADD/VSUB/VMLA/VMLS.F32
+  immediate constants, core-register VDUP, register VMUL/VADD/VSUB/VMLA/VMLS.F32
+  and F32 VMUL/VMLA/VMLS by scalar
   described above.
   Upper-bank VFP arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Shared lower-bank arithmetic
