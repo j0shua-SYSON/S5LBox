@@ -23,8 +23,19 @@ checks unchanged bytes outside the detour and its two signature-page hashes.
 ARM and Thumb destructor fixtures (147 checks); the original fails the ordering
 regression. These checks do not prove filesystem writeback behavior, loading
 in the guest, a faster refresh, or a general emulator improvement. The trial
-is not part of the default bootstrap. Consecutive physical refreshes with
-correct timestamps, unchanged content and valid conditional reuse remain gates.
+is not part of the default bootstrap.
+
+The reversible trial was then installed and its active executable verified
+byte-for-byte. After one refresh repaired the old timestamp, two physical
+refreshes reused the same BigBoss file identity, contents and correct server
+timestamp. Host input was only 9,430 and 9,439 bytes. The second repeat also
+retained identical package/source cache contents. Their observed completion
+bounds were (64.304, 91.113] and (69.530, 83.320] seconds, versus the earlier
+original-method warm result (128.120, 133.242]. These are sequential observations
+on the same test phone, not a randomized general benchmark. The remaining wait
+is largely after network completion. Seconds-level usability, changed-content
+validation, physical removal rollback and default-bootstrap integration remain
+unmet; do not turn this result into a general emulator-speed claim.
 
 The exact pinned `apt7-lib` 0.7.20.2-1 library implements `WriteUniqString` with
 a 26-entry recent-value cache followed by a descending sorted linked-list
