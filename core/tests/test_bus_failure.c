@@ -203,6 +203,46 @@ static void test_neon_pairs_and_retry(void) {
          }
 }
 
+static void test_vfp_add_fetch_and_retry(void) {
+    static const uint32_t insns[2][2] = {{0xee78fa28u,0xee78fa68u},{0xee70fba1u,0xee70fbe1u}};
+    static const uint64_t result[2][2] = {{0x40a00000u,0xbf800000u},
+        {UINT64_C(0x4014000000000000),UINT64_C(0xbff0000000000000)}};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned sub = 0; sub < 2u; sub++)
+       for (unsigned host = 0; host < 2u; host++)
+        for (unsigned second = 0; second < (thumb ? 2u : 1u); second++)
+         for (unsigned enabled = 0; enabled < 2u; enabled++) {
+            fixture_t f; arm_bus_t bus; arm_cpu_t c;
+            setup(&f,&bus,&c,thumb != 0u,host != 0u);
+            if (thumb) c.cpsr |= 0x1800u;
+            c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u; c.vfp_fpscr = 0x4bc00080u;
+            uint32_t insn = insns[dbl][sub];
+            if (thumb) { put16(&f,0u,(uint16_t)(insn>>16)); put16(&f,2u,(uint16_t)insn); }
+            else put32(&f,0u,insn);
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c,d,UINT64_C(0xdead1234beef0000)+d);
+            if (dbl) { vfp_set_d(&c,16u,UINT64_C(0x4000000000000000)); vfp_set_d(&c,17u,UINT64_C(0x4008000000000000)); }
+            else { vfp_set_s(&c,16u,0x40000000u); vfp_set_s(&c,17u,0x40400000u); }
+            uint64_t expected[32]; for (unsigned d = 0; d < 32u; d++) expected[d] = vfp_get_d(&c,d);
+            uint32_t flags = c.cpsr;
+            f.fail_address = second*2u; f.fail_size = thumb ? 2u : 4u;
+            CHECK(arm_step(&c) == ARM_HALT,"VFP add executed an incomplete fetch");
+            check_stop(&f,&c,0u,flags);
+            bool match = true;
+            for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c,d) == expected[d];
+            CHECK(match && c.vfp_fpscr == 0x4bc00080u && c.vfp_fpexc == (enabled ? ARM_FPEXC_EN : 0u),
+                  "VFP add availability/effects preceded full checked fetch");
+            f.failed = false; f.fail_size = 0u; c.vfp_fpexc = ARM_FPEXC_EN;
+            if (dbl) expected[31] = result[dbl][sub];
+            else expected[15] = (expected[15] & UINT64_C(0xffffffff)) | (result[dbl][sub] << 32);
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u &&
+                  c.cpsr == (flags & ~0x0600fc00u) && c.vfp_fpscr == 0x4bc00080u,"VFP add checked fetch retry");
+            match = true;
+            for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c,d) == expected[d];
+            CHECK(match,"VFP add retry register result/preservation");
+         }
+}
+
 static void test_neon_by_scalar_fetch_and_retry(void) {
     const uint64_t a=UINT64_C(0x3fc000003fc00000), accumulator=UINT64_C(0x3f8000003f800000);
     static const uint64_t results[]={UINT64_C(0x4080000040800000),UINT64_C(0xc0000000c0000000),UINT64_C(0x4040000040400000)};
@@ -829,6 +869,7 @@ static void test_signed_runner_entry_guards(void) {
 #endif
 
 int main(void) {
+    test_vfp_add_fetch_and_retry();
     test_neon_by_scalar_fetch_and_retry();
     test_thumb_byte_reverse_fetch_retry();
     test_neon_macc_fetch_and_retry();

@@ -394,8 +394,7 @@ VEXT. Tests cover every register/lane combination, an ignored signaling NaN
 in the unselected lane, analytical FP cases, guest and host controls, IT,
 access priority, complete instruction fetch and both host/guest retry.
 See [DDI0406C.b, A8.8.338/352](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
-Other NEON arithmetic and full-bank Cortex-A8 VFP arithmetic remain
-separate work.
+Other NEON arithmetic remains separate work.
 
 The unchanged 528-byte ARM [`vDSP_vramp`](https://developer.apple.com/documentation/accelerate/vdsp_vramp)
 at `0x30827720..0x30827930` completes 1,824 prepared calls after this addition.
@@ -409,6 +408,46 @@ unaffected FP state. The original VFP scalar setup runs with nearest-even,
 FZ and DN. Fractional/special inputs, other VFP rounding modes, process
 execution and boot remain outside this fixture; it supplies no CPU-family
 identity input.
+
+Cortex-A8 VFP VADD/VSUB now support F32 and F64 across all S/D registers
+in ARM and Thumb. Integer significands retain guard, round and sticky bits;
+FPSCR selects all four rounding modes, gradual underflow or FZ, and DN or
+original NaN payloads. Signaling NaNs take priority over quiet NaNs, with
+the first operand winning within each class. Subtraction selects NaNs
+before changing the second operand's sign. FZ unpacks both inputs before
+NaN selection and flushes tiny results before rounding, raising UFC without
+IXC. Short vectors wrap within their banks, including the D16-D19 scalar
+bank, and stage all original operands before publishing results. Invalid
+FPSCR fields and vector shapes stop before access checks. See
+[DDI0406C.b, A2.7.8, A8.8.283/415 and Appendix K](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Tests cover every scalar register triple, vector shapes and aliases,
+explicit rounding boundaries, finite native IEEE oracles, NaN/infinity
+combinations, cumulative flags, guest/host controls, conditional execution,
+access denials, checked-bus retry and User instruction-fetch faults. A
+guest handler enables VFP and returns to the interrupted Thumb IT slot.
+The first focused run exposed a missing Thumb dispatch registration; after
+that correction all three focused suites passed. The numerical implementation
+and test expectations needed no correction.
+
+The unchanged Thumb [`vDSP_vrampD`](https://developer.apple.com/documentation/accelerate/vdsp_vrampd)
+at `0x3082bf90` now completes all 256 prepared small-count calls. On the
+preceding commit, 64 empty calls returned, then the first nonempty call
+stopped after 16 instructions at `0x3082bfc0`, on
+`VADD.F64 d18, d17, d16`, after reading both eight-byte inputs and before
+any output. The unchanged fixture executes only `0x3082bf90..0x3082bfd6`
+and the return at `0x3082c1fc` from the original 622-byte image. Counts 0..3,
+strides +/-2 and +/-3, four word alignments and four exact-integer ramps
+verify output bits, exact selected-byte writes, untouched gaps and page
+canaries, the eight-byte saved frame, four-byte argument, all FP registers,
+ABI registers and return state. It uses nearest-even, FZ and DN; larger or
+unit-stride paths, fractional/special inputs, process execution and boot
+remain outside this fixture. Other full-bank VFP arithmetic remains unfinished.
+
+With the new VFP addition path, the existing F32 ramp and F64 remainder
+fixtures also retain all 1,824 and 112 passing calls. The guarded kernel-entry
+fixture matches its entire prior trace, with only line endings normalized:
+61,650 steps to the same unestablished S5L8920 L2 parity/ECC configuration.
 
 The unchanged ARM [`vDSP_vma`](https://developer.apple.com/documentation/accelerate/vdsp_vma)
 at `0x30825f94` now completes 144 calls through its scalar body. Before
@@ -529,7 +568,7 @@ both original halves. Tests cover complete register lists, both stack
 aliases, invalid modes/ranges, access/conditional behavior and faults after
 partial progress, including with host memory shortcuts enabled. A separate
 test places the odd-length trailing gap on an unmapped page. Upper-bank
-VFP arithmetic and the remaining NEON instruction families are still unfinished.
+VFP arithmetic beyond VADD/VSUB and the remaining NEON families are still unfinished.
 
 An isolated host fixture executed the matching kernel's
 `_enable_kernel_vfp_context` routine with unchanged instructions and synthetic
@@ -559,7 +598,8 @@ Thumb additionally forbids SP in the transfer register. Refused accesses leave
 flags and IT state unchanged. IT conditions, privileged
 state changes and permitted User thread-ID/barrier accesses retain their
 normal semantics. CP14 and Swift CP15 transfers remain unsupported in
-Thumb; supported VFP instructions cover the A8 transfers, raw data operations and comparisons above.
+Thumb; supported VFP instructions cover the A8 transfers, raw data operations,
+comparisons and VADD/VSUB above.
 CP15 MRC2/MCR2 encodings are undefined and refused. The ARM1176
 instruction path is unchanged.
 See [DDI0406C.b, A8.8.98/107](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
@@ -1062,15 +1102,15 @@ establish that result.
   Cortex-A8 MRC/MCR transfers cover the currently implemented CP15 registers.
 - Cortex-A8 stores d0-d31 and supports system/core/memory transfers plus
   VFP copies, immediate constants and sign operations with short vectors,
-  scalar comparisons across the full register bank, and the bounded
+  scalar comparisons and F32/F64 VADD/VSUB across the full register bank, and the bounded
   32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms,
   register Boolean operations, VEXT, 8/16/32-bit VTRN, F32 VABS/VNEG,
   immediate constants, core-register VDUP, register VMUL/VADD/VSUB/VMLA/VMLS.F32
   and F32 VMUL/VMLA/VMLS by scalar
   described above.
-  Upper-bank VFP arithmetic, the remaining NEON families, and full
-  context-switch semantics remain to implement. Shared lower-bank arithmetic
-  still derives from VFP11 and requires a complete Cortex-A8 semantic audit.
+  Other upper-bank VFP arithmetic, the remaining NEON families, and full
+  context-switch semantics remain to implement. Remaining shared lower-bank
+  arithmetic derives from VFP11 and requires a Cortex-A8 semantic audit.
 - The partial S5L8920 RAM and interrupt fabric does not yet supply its UART,
   clocks, storage, graphics, input or power devices. Build those components
   from the N88 firmware requirements.

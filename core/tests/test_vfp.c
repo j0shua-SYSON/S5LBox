@@ -471,6 +471,354 @@ static void a8_compare_value_set(arm_cpu_t *c, unsigned dbl, unsigned reg, unsig
     a8_fp_value_set(c, dbl, reg, dbl ? a8_compare_values[value].dual : a8_compare_values[value].single);
 }
 
+/* VFP VADD/VSUB T2/A2, with actual S/D register numbers. */
+static uint32_t a8_fp_add(unsigned sub, unsigned dbl, unsigned dst, unsigned left, unsigned right) {
+    return 0xee300a00u | (sub << 6) | (dbl << 8) |
+        (dbl ? ((dst & 15u) << 12) | ((dst >> 4) << 22) | ((left & 15u) << 16) |
+               ((left >> 4) << 7) | (right & 15u) | ((right >> 4) << 5) :
+               ((dst >> 1) << 12) | ((dst & 1u) << 22) | ((left >> 1) << 16) |
+               ((left & 1u) << 7) | (right >> 1) | ((right & 1u) << 5));
+}
+
+static uint64_t a8_add_integer(unsigned dbl, int value) {
+    return dbl ? d2u((double)value) : f2u((float)value); /* Small exact integers only. */
+}
+
+static void a8_add_expected_set(uint64_t expected[32], unsigned dbl, unsigned reg, uint64_t value) {
+    if (dbl) expected[reg] = value;
+    else {
+        unsigned shift = (reg % 2u) * 32u;
+        expected[reg / 2u] = (expected[reg / 2u] & ~(UINT64_C(0xffffffff) << shift)) | (value << shift);
+    }
+}
+
+static void test_a8_vfp_add_registers(void) {
+    CHECK(a8_fp_add(0u,1u,18u,17u,16u) == 0xee712ba0u &&
+          a8_fp_add(1u,0u,31u,16u,1u) == 0xee78fa60u, "VFP add/sub encoding anchors");
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned sub = 0; sub < 2u; sub++)
+       for (unsigned dst = 0; dst < 32u; dst++)
+        for (unsigned left = 0; left < 32u; left++)
+         for (unsigned right = 0; right < 32u; right++) {
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            c.vfp_fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC;
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c, d, UINT64_C(0x7ff01234dead0000) + d);
+            for (unsigned r = 0; r < 32u; r++) a8_fp_value_set(&c, dbl, r, a8_add_integer(dbl, (int)r - 16));
+            uint64_t expected[32];
+            for (unsigned d = 0; d < 32u; d++) expected[d] = vfp_get_d(&c, d);
+            int sum = (int)left - 16 + (sub ? 16 - (int)right : (int)right - 16);
+            a8_add_expected_set(expected, dbl, dst, a8_add_integer(dbl, sum));
+            c.excl_valid = true; c.excl_addr = 0x12340u;
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c, thumb, a8_fp_add(sub,dbl,dst,left,right)) == ARM_OK &&
+                  c.r[15] == 0x104u && c.cycles == 1u && c.cpsr == flags && c.vfp_fpscr == fpscr &&
+                  c.excl_valid && c.excl_addr == 0x12340u, "VFP add register state T=%u D=%u sub=%u d/n/m=%u/%u/%u",
+                  thumb,dbl,sub,dst,left,right);
+            bool match = true;
+            for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c,d) == expected[d];
+            for (unsigned r = 0; r < 15u; r++) match &= c.r[r] == 0u;
+            CHECK(match, "VFP add register/alias oracle");
+         }
+}
+
+/* The finite-value oracle uses native IEEE operations and fenv, independent
+ * of the production integer alignment/rounding. Raw analytical anchors below
+ * check that the host actually honors the requested modes and exceptions. */
+static uint64_t a8_add_native(uint64_t a, uint64_t b, unsigned dbl, unsigned sub,
+                               uint32_t fpscr, uint32_t *flags) {
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    uint64_t sign = dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+    uint64_t normal = dbl ? UINT64_C(0x0010000000000000) : UINT64_C(0x00800000);
+    *flags = 0u;
+    if (fpscr & ARM_FPSCR_FZ) {
+        if ((a & ~sign) && (a & ~sign) < normal) { a &= sign; *flags |= ARM_FPSCR_IDC; }
+        if ((b & ~sign) && (b & ~sign) < normal) { b &= sign; *flags |= ARM_FPSCR_IDC; }
+    }
+    fenv_t saved;
+    CHECK(fegetenv(&saved) == 0 && fesetround(rounds[(fpscr >> 22) & 3u]) == 0 &&
+          feclearexcept(FE_ALL_EXCEPT) == 0, "prepare native add oracle");
+    uint64_t bits;
+    if (dbl) {
+        volatile double x = u2d(a), y = u2d(b);
+        volatile double z = sub ? x - y : x + y;
+        bits = d2u(z);
+    } else {
+        volatile float x = u2f((uint32_t)a), y = u2f((uint32_t)b);
+        volatile float z = sub ? x - y : x + y;
+        bits = f2u(z);
+    }
+    int exceptions = fetestexcept(FE_ALL_EXCEPT);
+    if (exceptions & FE_OVERFLOW) *flags |= ARM_FPSCR_OFC;
+    if (exceptions & FE_UNDERFLOW) *flags |= ARM_FPSCR_UFC;
+    if (exceptions & FE_INEXACT) *flags |= ARM_FPSCR_IXC;
+    CHECK(!(exceptions & (FE_INVALID | FE_DIVBYZERO)), "nonfinite input reached finite add oracle");
+    /* Addition/subtraction of same-format operands can only produce exact
+     * subnormals. ARM FZ still reports UFC when flushing that nonzero result. */
+    if ((fpscr & ARM_FPSCR_FZ) && (bits & ~sign) && (bits & ~sign) < normal) {
+        bits &= sign; *flags |= ARM_FPSCR_UFC;
+    }
+    CHECK(fesetenv(&saved) == 0, "restore native add oracle host state");
+    return bits;
+}
+
+static void test_a8_vfp_add_values_and_host_state(void) {
+    fenv_t saved; CHECK(fegetenv(&saved) == 0, "save VFP add host state");
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    for (unsigned dbl = 0; dbl < 2u; dbl++) {
+        uint64_t sign = dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+        uint64_t normal = dbl ? UINT64_C(0x0010000000000000) : UINT64_C(0x00800000);
+        uint64_t infinity = dbl ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
+        uint64_t one = dbl ? UINT64_C(0x3ff0000000000000) : UINT64_C(0x3f800000);
+        uint64_t half_ulp = dbl ? UINT64_C(0x3ca0000000000000) : UINT64_C(0x33800000);
+        uint64_t half_below = dbl ? UINT64_C(0x3c90000000000000) : UINT64_C(0x33000000);
+        const struct { uint64_t a,b,result[4]; uint32_t flags; } anchors[] = {
+            {0u,sign,{0u,0u,sign,0u},0u}, {sign,sign,{sign,sign,sign,sign},0u},
+            {one,half_ulp,{one,one+1u,one,one},ARM_FPSCR_IXC},
+            {one+1u,half_ulp,{one+2u,one+2u,one+1u,one+1u},ARM_FPSCR_IXC},
+            {one,sign|half_below,{one,one,one-1u,one-1u},ARM_FPSCR_IXC},
+            {one,1u,{one,one+1u,one,one},ARM_FPSCR_IXC},
+            {sign|one,sign|half_ulp,{sign|one,sign|one,sign|(one+1u),sign|one},ARM_FPSCR_IXC},
+            {one,sign|one,{0u,0u,sign,0u},0u},
+            {normal,sign|(normal+1u),{sign|1u,sign|1u,sign|1u,sign|1u},0u},
+            {normal,sign|(normal-1u),{1u,1u,1u,1u},0u},
+            {normal-1u,1u,{normal,normal,normal,normal},0u},
+            {1u,1u,{2u,2u,2u,2u},0u},
+            {infinity-1u,infinity-1u,{infinity,infinity,infinity-1u,infinity-1u},ARM_FPSCR_OFC|ARM_FPSCR_IXC},
+            {sign|(infinity-1u),sign|(infinity-1u),{sign|infinity,sign|(infinity-1u),sign|infinity,sign|(infinity-1u)},ARM_FPSCR_OFC|ARM_FPSCR_IXC}
+        };
+        for (unsigned row = 0; row < sizeof anchors / sizeof anchors[0]; row++)
+         for (unsigned mode = 0; mode < 4u; mode++)
+          for (unsigned sub = 0; sub < 2u; sub++) {
+            uint32_t exceptions;
+            uint64_t b = anchors[row].b ^ (sub ? sign : 0u);
+            uint64_t result = a8_add_native(anchors[row].a,b,dbl,sub,mode<<22,&exceptions);
+            CHECK(result == anchors[row].result[mode] && exceptions == anchors[row].flags,
+                  "native add anchor D=%u row=%u mode=%u sub=%u",dbl,row,mode,sub);
+            for (unsigned thumb = 0; thumb < 2u; thumb++) {
+                arm_cpu_t c; a8_move_reset(&c,thumb);
+                c.vfp_fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC | (mode<<22);
+                a8_fp_value_set(&c,dbl,16u,anchors[row].a); a8_fp_value_set(&c,dbl,1u,b);
+                uint32_t flags = c.vfp_fpscr;
+                CHECK(a8_move_step(&c,thumb,a8_fp_add(sub,dbl,31u,16u,1u)) == ARM_OK &&
+                      a8_fp_value(&c,dbl,31u) == anchors[row].result[mode] &&
+                      c.vfp_fpscr == (flags | anchors[row].flags), "VFP add analytical anchor");
+            }
+          }
+        uint64_t random = UINT64_C(0xd12a3b4c5d6e7f89);
+        for (unsigned sample = 0; sample < 1024u; sample++) {
+            random ^= random << 13; random ^= random >> 7; random ^= random << 17;
+            uint64_t a = dbl ? random : (uint32_t)random;
+            random ^= random << 13; random ^= random >> 7; random ^= random << 17;
+            uint64_t b = dbl ? random : (uint32_t)random;
+            if ((a & ~sign) >= infinity) a &= ~infinity;
+            if ((b & ~sign) >= infinity) b &= ~infinity;
+            /* Include cancellation, close exponents, denormals and very
+             * large exponent gaps, in addition to the independent samples. */
+            if (sample % 8u == 0u) b = a ^ sign;
+            if (sample % 8u == 1u) b = (b & (sign | (normal-1u))) | (a & infinity);
+            if (sample % 8u == 2u) a &= sign | (normal-1u);
+            if (sample % 8u == 3u) { a = normal; b = sign | (normal+1u); }
+            for (unsigned controls = 0; controls < 16u; controls++)
+             for (unsigned sub = 0; sub < 2u; sub++) {
+                uint32_t fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC |
+                    ((controls & 3u) << 22) | (controls & 4u ? ARM_FPSCR_FZ : 0u) |
+                    (controls & 8u ? ARM_FPSCR_DN : 0u), exceptions;
+                uint64_t want = a8_add_native(a,b,dbl,sub,fpscr,&exceptions);
+                for (unsigned thumb = 0; thumb < 2u; thumb++) {
+                    arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = fpscr;
+                    a8_fp_value_set(&c,dbl,16u,a); a8_fp_value_set(&c,dbl,1u,b);
+                    unsigned host = sample % 4u;
+                    CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
+                          (!(sample & 1u) || feraiseexcept(FE_INVALID | FE_DIVBYZERO) == 0), "prepare VFP add host state");
+                    int pending = fetestexcept(FE_ALL_EXCEPT);
+                    uint32_t cpsr = c.cpsr;
+                    CHECK(a8_move_step(&c,thumb,a8_fp_add(sub,dbl,31u,16u,1u)) == ARM_OK &&
+                          a8_fp_value(&c,dbl,31u) == want && c.vfp_fpscr == (fpscr | exceptions) && c.cpsr == cpsr,
+                          "VFP finite oracle D=%u T=%u sub=%u controls=%u sample=%u",dbl,thumb,sub,controls,sample);
+                    CHECK(fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == pending,
+                          "VFP add changed host rounding or exceptions");
+                }
+             }
+        }
+    }
+    CHECK(fesetenv(&saved) == 0, "restore VFP add host state");
+}
+
+static void test_a8_vfp_add_special_values(void) {
+    fenv_t saved; CHECK(fegetenv(&saved) == 0, "save special add host state");
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    unsigned count = sizeof a8_compare_values / sizeof a8_compare_values[0];
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned sub = 0; sub < 2u; sub++)
+       for (unsigned controls = 0; controls < 16u; controls++)
+        for (unsigned x = 0; x < count; x++)
+         for (unsigned y = 0; y < count; y++) {
+            bool nan = a8_compare_values[x].nan || a8_compare_values[y].nan;
+            bool inf_x = x == 0u || x == 17u, inf_y = y == 0u || y == 17u;
+            if (!nan && !inf_x && !inf_y) continue;
+            uint64_t sign = dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+            uint64_t infinity = dbl ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
+            uint64_t quiet = dbl ? UINT64_C(0x0008000000000000) : UINT64_C(0x00400000);
+            uint64_t a = dbl ? a8_compare_values[x].dual : a8_compare_values[x].single;
+            uint64_t b = dbl ? a8_compare_values[y].dual : a8_compare_values[y].single;
+            uint32_t exceptions = (controls & 4u) &&
+                (a8_compare_values[x].denormal || a8_compare_values[y].denormal) ? ARM_FPSCR_IDC : 0u;
+            uint64_t want;
+            if (nan) {
+                unsigned chosen = a8_compare_values[x].signaling ? x : a8_compare_values[y].signaling ? y :
+                                  a8_compare_values[x].nan ? x : y;
+                want = (controls & 8u) ? infinity | quiet :
+                    (dbl ? a8_compare_values[chosen].dual : a8_compare_values[chosen].single) | quiet;
+                if (a8_compare_values[x].signaling || a8_compare_values[y].signaling) exceptions |= ARM_FPSCR_IOC;
+            } else if (inf_x && inf_y && (((a ^ b) & sign) != 0u) != (sub != 0u)) {
+                want = infinity | quiet; exceptions |= ARM_FPSCR_IOC;
+            } else want = inf_x ? a : b ^ (sub ? sign : 0u);
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.vfp_fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC |
+                ((controls & 3u) << 22) | (controls & 4u ? ARM_FPSCR_FZ : 0u) |
+                (controls & 8u ? ARM_FPSCR_DN : 0u);
+            a8_fp_value_set(&c,dbl,16u,a); a8_fp_value_set(&c,dbl,1u,b);
+            uint32_t flags = c.vfp_fpscr;
+            unsigned host = (x + y) % 4u;
+            CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
+                  (!((x + y) & 1u) || feraiseexcept(FE_DIVBYZERO) == 0), "prepare special add host state");
+            int pending = fetestexcept(FE_ALL_EXCEPT);
+            CHECK(a8_move_step(&c,thumb,a8_fp_add(sub,dbl,31u,16u,1u)) == ARM_OK &&
+                  a8_fp_value(&c,dbl,31u) == want && c.vfp_fpscr == (flags | exceptions),
+                  "VFP NaN/infinity D=%u T=%u sub=%u controls=%u x/y=%u/%u",dbl,thumb,sub,controls,x,y);
+            CHECK(fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == pending,
+                  "special VFP add changed host rounding or exceptions");
+         }
+    CHECK(fesetenv(&saved) == 0, "restore special add host state");
+}
+
+static void test_a8_vfp_add_vectors(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned sub = 0; sub < 2u; sub++)
+       for (unsigned len = 0; len < 8u; len++)
+        for (unsigned stride = 0; stride < 4u; stride++)
+         for (unsigned dst = 0; dst < 32u; dst++) {
+            unsigned bank = dbl ? 4u : 8u, step = stride == 3u ? 2u : 1u;
+            bool scalar = !len || (dbl ? dst % 16u < 4u : dst < 8u);
+            unsigned count = scalar ? 1u : len + 1u;
+            bool valid = (stride == 0u || (stride == 3u && len >= 1u && len <= 3u)) &&
+                         (scalar || count * step <= bank);
+            for (unsigned left = 0; left < (valid ? 32u : 1u); left++) {
+                unsigned right = (left * 7u + dst) % 32u;
+                arm_cpu_t c; a8_move_reset(&c,thumb);
+                c.vfp_fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC | (len<<16) | (stride<<20);
+                if (!valid && (dst & 1u)) { c.vfp_fpexc = 0u; c.cp15.cpacr = 0u; }
+                for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c,d,UINT64_C(0xdead1234beef0000)+d);
+                for (unsigned r = 0; r < 32u; r++) a8_fp_value_set(&c,dbl,r,a8_add_integer(dbl,(int)r+1));
+                uint64_t expected[32];
+                for (unsigned d = 0; d < 32u; d++) expected[d] = vfp_get_d(&c,d);
+                if (valid) for (unsigned lane = 0; lane < count; lane++) {
+                    unsigned dr = dst / bank * bank + (dst % bank + lane*step) % bank;
+                    unsigned nr = left / bank * bank + (left % bank + lane*step) % bank;
+                    unsigned mr = right / bank * bank + (right % bank + lane*step) % bank;
+                    if (scalar) { dr = dst; nr = left; mr = right; }
+                    else if (dbl ? right % 16u < 4u : right < 8u) mr = right;
+                    a8_add_expected_set(expected,dbl,dr,a8_add_integer(dbl,(int)nr+1+(sub ? -(int)mr-1 : (int)mr+1)));
+                }
+                uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+                CHECK(a8_move_step(&c,thumb,a8_fp_add(sub,dbl,dst,left,right)) == (valid ? ARM_OK : ARM_UNDEFINED) &&
+                      c.r[15] == (valid ? 0x104u : 0x100u) && c.cycles == 1u && c.cpsr == flags && c.vfp_fpscr == fpscr,
+                      "VFP vector shape T=%u D=%u sub=%u len/stride=%u/%u dst=%u",thumb,dbl,sub,len,stride,dst);
+                bool match = true;
+                for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c,d) == expected[d];
+                CHECK(match, "VFP vector wrap/scalar/alias oracle");
+            }
+         }
+    /* Every lane contributes flags; a later exact lane must not replace an
+     * earlier overflow/invalid result or read an already published alias. */
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = ARM_FPSCR_QC | (3u<<16);
+        vfp_set_d(&c,28u,UINT64_C(0x7fefffffffffffff)); vfp_set_d(&c,29u,UINT64_C(0x7ff0000000000001));
+        vfp_set_d(&c,30u,UINT64_C(0x3ff0000000000000)); vfp_set_d(&c,31u,0u);
+        CHECK(a8_move_step(&c,thumb,a8_fp_add(0u,1u,31u,28u,28u)) == ARM_OK &&
+              vfp_get_d(&c,31u) == UINT64_C(0x7ff0000000000000) &&
+              vfp_get_d(&c,28u) == UINT64_C(0x7ff8000000000001) &&
+              vfp_get_d(&c,29u) == UINT64_C(0x4000000000000000) && vfp_get_d(&c,30u) == 0u &&
+              c.vfp_fpscr == (ARM_FPSCR_QC | (3u<<16) | ARM_FPSCR_OFC | ARM_FPSCR_IXC | ARM_FPSCR_IOC),
+              "VFP vector staged inputs/sticky flags");
+        c.vfp_fpscr &= ~ARM_FPSCR_LEN;
+        CHECK(a8_move_step(&c,thumb,a8_fp_add(0u,1u,20u,30u,30u)) == ARM_OK &&
+              a8_move_step(&c,thumb,VMRS(2u,1u)) == ARM_OK &&
+              c.r[2] == (ARM_FPSCR_QC | ARM_FPSCR_OFC | ARM_FPSCR_IXC | ARM_FPSCR_IOC),
+              "VFP exact add/VMRS lost accumulated flags");
+    }
+}
+
+static void test_a8_vfp_add_access_and_invalid(void) {
+    static const unsigned permissions[] = {0u,1u,3u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned sub = 0; sub < 2u; sub++)
+       for (unsigned user = 0; user < 2u; user++)
+        for (unsigned enabled = 0; enabled < 2u; enabled++)
+         for (unsigned access = 0; access < 3u; access++)
+          for (unsigned skip = 0; skip < 2u; skip++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permissions[access] * 0x00500000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            a8_compare_value_set(&c,dbl,16u,20u); a8_fp_value_set(&c,dbl,1u,1u);
+            a8_fp_value_set(&c,dbl,31u,0x12345678u);
+            if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf0cu : 0xbf1cu); CHECK(arm_step(&c) == ARM_OK,"VFP add IT setup"); }
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr, pc = c.r[15];
+            bool allowed = enabled && (permissions[access] == 3u || (permissions[access] == 1u && !user));
+            uint32_t insn = a8_fp_add(sub,dbl,31u,16u,1u);
+            if (!thumb && skip) insn &= 0x0fffffffu;
+            uint64_t want = skip || !allowed ? 0x12345678u : dbl ? UINT64_C(0x7ff8000000000000) : UINT64_C(0x7fc00000);
+            CHECK(a8_move_step(&c,thumb,insn) == ARM_OK && a8_fp_value(&c,dbl,31u) == want &&
+                  c.vfp_fpscr == (fpscr | (!skip && allowed ? ARM_FPSCR_IOC | ARM_FPSCR_IDC : 0u)), "VFP add access effects");
+            CHECK(skip || allowed ? c.r[15] == pc+4u &&
+                  c.cpsr == (thumb ? (flags & ~0x0600fc00u) | 0x1800u : flags) :
+                  c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == pc+(thumb ? 2u : 4u) &&
+                  c.spsr[ARM_BANK_UND] == flags && (c.cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_UND,
+                  "VFP add conditional/exception state");
+          }
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned sub = 0; sub < 2u; sub++)
+       for (unsigned bit = 0; bit < 32u; bit++) {
+        if ((1u << bit) & ARM_FPSCR_A8_WMASK) continue;
+        for (unsigned enabled = 0; enabled < 2u; enabled++)
+         for (unsigned skip = 0; skip < 2u; skip++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr |= 1u<<bit;
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u; c.cp15.cpacr = enabled ? 0x00f00000u : 0u;
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c,d,UINT64_C(0x7ff01234dead0000)+d);
+            if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK,"invalid add IT setup"); }
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr, pc = c.r[15];
+            uint32_t insn = a8_fp_add(sub,dbl,31u,16u,1u); if (!thumb && skip) insn &= 0x0fffffffu;
+            CHECK(a8_move_step(&c,thumb,insn) == (skip ? ARM_OK : ARM_UNDEFINED) &&
+                  c.r[15] == pc+(skip ? 4u : 0u) && c.vfp_fpscr == fpscr &&
+                  c.cpsr == (thumb && skip ? flags & ~0x0600fc00u : flags), "VFP reserved FPSCR/access/skip priority");
+            bool match = true;
+            for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c,d) == UINT64_C(0x7ff01234dead0000)+d;
+            CHECK(match,"invalid/skipped VFP add changed FP registers");
+         }
+       }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++)
+     for (unsigned sub = 0; sub < 2u; sub++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,legacy[profile]),"reset legacy add");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        vfp_set_d(&c,0u,UINT64_C(0x123456789abcdef0));
+        CHECK(a8_move_step(&c,0u,a8_fp_add(sub,1u,16u,0u,0u)) == ARM_UNDEFINED &&
+              vfp_get_d(&c,0u) == UINT64_C(0x123456789abcdef0), "A8 add upper bank leaked into legacy");
+     }
+    const uint32_t neighbors[] = {0xee600b00u,0xeee00b00u,0xee300c00u,0xee300900u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned n = 0; n < sizeof neighbors / sizeof neighbors[0]; n++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = 0u;
+        CHECK(!vfp_is_add_sub_data(neighbors[n]) && a8_move_step(&c,thumb,neighbors[n]) == ARM_UNDEFINED,
+              "VFP add consumed neighboring arithmetic/coprocessor encoding");
+     }
+}
+
 static void test_a8_vfp_compare_registers_and_values(void) {
     CHECK(a8_fp_compare(0u, 0u, 0u, 0u, 0u) == 0xeeb40a40u &&
           a8_fp_compare(1u, 0u, 0u, 31u, 16u) == 0xeef4fb60u &&
@@ -2799,12 +3147,12 @@ static void test_a8_vfp_core_move_refusals_and_it(void) {
       }
      }
     }
-    /* Upper-bank arithmetic is still separate work. */
+    /* Upper-bank multiplication remains separate from transfers and add/sub. */
     arm_cpu_t c;
     a8_move_reset(&c, 0u);
     vfp_set_d(&c, 16u, UINT64_C(0x1122334455667788));
-    CHECK(a8_move_step(&c, 0u, VFP_DP(0,1,1,1,0,0,1,0,0,0,0)) == ARM_UNDEFINED &&
-          vfp_get_d(&c, 16u) == UINT64_C(0x1122334455667788), "core VMOV enabled upper-bank arithmetic");
+    CHECK(a8_move_step(&c, 0u, VFP_DP(0,1,0,1,0,0,1,0,0,0,0)) == ARM_UNDEFINED &&
+          vfp_get_d(&c, 16u) == UINT64_C(0x1122334455667788), "core VMOV enabled upper-bank multiplication");
 }
 
 /* VLDR/VSTR use D:Vd for doublewords and Vd:D for singlewords. */
@@ -4710,6 +5058,11 @@ static void test_condition_codes_apply(void) {
 
 /* --------------------------------------------------------------- main ---- */
 int main(void) {
+    test_a8_vfp_add_registers();
+    test_a8_vfp_add_values_and_host_state();
+    test_a8_vfp_add_special_values();
+    test_a8_vfp_add_vectors();
+    test_a8_vfp_add_access_and_invalid();
     test_a8_neon_macc_registers();
     test_a8_neon_macc_values_and_host_state();
     test_a8_neon_macc_access_invalid_and_it();

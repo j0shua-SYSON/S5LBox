@@ -151,6 +151,12 @@ static inline bool vfp_is_compare_data(uint32_t insn) {
     return (insn & 0x0fbe0e50u) == 0x0eb40a40u;
 }
 
+/* Scalar/short-vector VADD and VSUB, F32/F64. Bit 6 selects subtraction;
+ * Advanced SIMD and the other VFP arithmetic groups are separate spaces. */
+static inline bool vfp_is_add_sub_data(uint32_t insn) {
+    return (insn & 0x0fb00e10u) == 0x0e300a00u;
+}
+
 /*
  * Execute one VFP encoding. `insn` must already have been identified as a
  * cp10/cp11 encoding by the caller and its condition code must already have

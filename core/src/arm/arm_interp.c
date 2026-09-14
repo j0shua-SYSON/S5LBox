@@ -1164,7 +1164,8 @@ static bool vfp_lazy_enable_trap(const arm_cpu_t *c, uint32_t insn) {
         a8_neon_macc_space(c, insn) || a8_neon_by_scalar_space(c, insn)) return false;
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 &&
         (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn) ||
-         vfp_is_memory_transfer(insn) || vfp_is_bitwise_data(insn) || vfp_is_compare_data(insn))) return false;
+         vfp_is_memory_transfer(insn) || vfp_is_bitwise_data(insn) || vfp_is_compare_data(insn) ||
+         vfp_is_add_sub_data(insn))) return false;
     if (!insn_is_vfp_space(insn)) return false;
     return !vfp_cpacr_permits(c) || !vfp_enabled(c);
 }
@@ -3706,7 +3707,8 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
     if (a8_neon_transpose_space(c, insn)) return exec_a8_neon_transpose(c, insn);
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn >> 28) == 0xeu &&
         (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn) ||
-         vfp_is_memory_transfer(insn) || vfp_is_bitwise_data(insn) || vfp_is_compare_data(insn)))
+         vfp_is_memory_transfer(insn) || vfp_is_bitwise_data(insn) || vfp_is_compare_data(insn) ||
+         vfp_is_add_sub_data(insn)))
         return vfp_execute(c, pc, insn, &g_vfp_bus);
     /* MCR/MRC T1 (DDI0406C.b A8.8.98/107): CP15 uses the A32 fields,
      * but Thumb forbids Rt=SP. This route covers Cortex-A8's checked CP15

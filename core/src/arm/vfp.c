@@ -1,9 +1,9 @@
 /*
  * S5LBox — VFPv2 (the ARM1176JZF-S's VFP11 unit).
  *
- * Cortex-A8 transfers, raw-bit data operations and scalar comparisons use
- * checked paths with D0-D31. Comparisons use integer classification/ordering
- * and preserve the host floating-point environment. The
+ * Cortex-A8 transfers, raw-bit data operations, scalar comparisons and
+ * VADD/VSUB use checked paths with D0-D31. Comparisons and addition/subtraction
+ * use integer bits and preserve the host floating-point environment. The
  * register-file and arithmetic descriptions below concern the legacy VFP11
  * implementation; they do not establish complete Cortex-A8 VFPv3/NEON support.
  *
@@ -731,6 +731,143 @@ static arm_status_t vfp_a8_compare_data(arm_cpu_t *c, uint32_t pc, uint32_t insn
     else if (ma < mb) order = a & sign ? 1 : -1;
     else order = a & sign ? -1 : 1;
     c->vfp_fpscr = (c->vfp_fpscr & ~ARM_FPSCR_NZCV) | cmp_flags_ordered(order) | exc;
+    return ARM_OK;
+}
+
+/* DDI0406C.b A2.7.8 FPAdd/FPSub/FPRound. Three low bits retain guard,
+ * round and sticky information; even a binary64 significand fits in uint64_t.
+ * Cancellation can require many left shifts only when alignment was exact. */
+static uint64_t vfp_a8_shift_jam(uint64_t value, unsigned shift) {
+    if (!shift) return value;
+    if (shift >= 64u) return value != 0u;
+    return (value >> shift) | ((value << (64u - shift)) != 0u);
+}
+
+static uint64_t vfp_a8_add_sub(uint64_t a, uint64_t b, bool dbl, bool sub,
+                               uint32_t fpscr, uint32_t *exceptions) {
+    const unsigned fraction = dbl ? 52u : 23u;
+    const unsigned max_exp = dbl ? 2047u : 255u;
+    const uint64_t hidden = UINT64_C(1) << fraction;
+    const uint64_t sign = hidden << (dbl ? 11u : 8u);
+    const uint64_t infinity = (uint64_t)max_exp << fraction;
+    const uint64_t quiet = hidden >> 1;
+    const uint64_t default_nan = infinity | quiet;
+    const unsigned mode = (fpscr >> 22) & 3u;
+    uint64_t ma = a & (sign - 1u), mb = b & (sign - 1u);
+
+    /* FPUnpack processes both inputs before NaN selection. A subnormal
+     * raises IDC only when FZ flushes it, preserving the sign of zero. */
+    if (fpscr & ARM_FPSCR_FZ) {
+        if (ma && ma < hidden) { a &= sign; ma = 0u; *exceptions |= ARM_FPSCR_IDC; }
+        if (mb && mb < hidden) { b &= sign; mb = 0u; *exceptions |= ARM_FPSCR_IDC; }
+    }
+    bool nan_a = ma > infinity, nan_b = mb > infinity;
+    bool snan_a = nan_a && !(a & quiet), snan_b = nan_b && !(b & quiet);
+    if (nan_a || nan_b) {
+        if (snan_a || snan_b) *exceptions |= ARM_FPSCR_IOC;
+        /* FPSub selects the original NaN, before changing operand 2's sign. */
+        uint64_t chosen = snan_a ? a : snan_b ? b : nan_a ? a : b;
+        return fpscr & ARM_FPSCR_DN ? default_nan : chosen | quiet;
+    }
+    if (sub) b ^= sign;
+    bool same_sign = ((a ^ b) & sign) == 0u;
+    if (ma == infinity || mb == infinity) {
+        if (ma == infinity && mb == infinity && !same_sign) {
+            *exceptions |= ARM_FPSCR_IOC;
+            return default_nan;
+        }
+        return ma == infinity ? a : b;
+    }
+    if (!ma && !mb && same_sign) return a & sign;
+    if (ma == mb && !same_sign) return mode == 2u ? sign : 0u;
+
+    /* Sort magnitudes to make subtraction nonnegative. The larger input
+     * supplies the result sign, including when the other input is zero. */
+    uint64_t result_sign = a & sign;
+    if (ma < mb) {
+        uint64_t swap = ma; ma = mb; mb = swap;
+        result_sign = b & sign;
+    }
+    unsigned exponent = (unsigned)(ma >> fraction), exp_b = (unsigned)(mb >> fraction);
+    uint64_t sig_a = (ma & (hidden - 1u)) | (exponent ? hidden : 0u);
+    uint64_t sig_b = (mb & (hidden - 1u)) | (exp_b ? hidden : 0u);
+    if (!exponent) exponent = 1u;
+    if (!exp_b) exp_b = 1u;
+    sig_a <<= 3;
+    sig_b = vfp_a8_shift_jam(sig_b << 3, exponent - exp_b);
+    uint64_t significand = same_sign ? sig_a + sig_b : sig_a - sig_b;
+    if (significand >= (hidden << 4)) {
+        significand = vfp_a8_shift_jam(significand, 1u);
+        exponent++;
+    } else {
+        while (significand < (hidden << 3) && exponent > 1u) {
+            significand <<= 1;
+            exponent--;
+        }
+    }
+    bool tiny = exponent == 1u && significand < (hidden << 3);
+    if (tiny && (fpscr & ARM_FPSCR_FZ)) {
+        *exceptions |= ARM_FPSCR_UFC; /* FPRound flushes before rounding, without IXC. */
+        return result_sign;
+    }
+    unsigned remainder = (unsigned)(significand & 7u);
+    uint64_t rounded = significand >> 3;
+    bool increment = mode == 0u ? remainder > 4u || (remainder == 4u && (rounded & 1u)) :
+                     mode == 1u ? remainder && !result_sign :
+                     mode == 2u ? remainder && result_sign : false;
+    if (increment) rounded++;
+    if (rounded >= (hidden << 1)) { rounded >>= 1; exponent++; }
+    if (exponent >= max_exp) {
+        *exceptions |= ARM_FPSCR_OFC | ARM_FPSCR_IXC;
+        bool to_infinity = mode == 0u || (mode == 1u && !result_sign) || (mode == 2u && result_sign);
+        return result_sign | (to_infinity ? infinity : infinity - 1u);
+    }
+    if (remainder) {
+        *exceptions |= ARM_FPSCR_IXC;
+        if (tiny) *exceptions |= ARM_FPSCR_UFC;
+    }
+    if (rounded < hidden) exponent = 0u;
+    return result_sign | ((uint64_t)exponent << fraction) | (rounded & (hidden - 1u));
+}
+
+/* A8.8.283/415 and Appendix K. Both S and D operations obey FPSCR;
+ * D16-D19 is a second scalar bank. Stage every lane before publication so
+ * circular vectors and overlapping source/destination banks read originals. */
+static arm_status_t vfp_a8_add_sub_data(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
+    g_reason = NULL;
+    bool dbl = BIT(8), sub = BIT(6);
+    unsigned rd = dbl ? FIELD(12) | (BIT(22) << 4) : SREG(FIELD(12), BIT(22));
+    unsigned rn = dbl ? FIELD(16) | (BIT(7) << 4) : SREG(FIELD(16), BIT(7));
+    unsigned rm = dbl ? (insn & 15u) | (BIT(5) << 4) : SREG(insn & 15u, BIT(5));
+    unsigned len = (c->vfp_fpscr & ARM_FPSCR_LEN) >> 16;
+    unsigned stride = (c->vfp_fpscr & ARM_FPSCR_STRIDE) >> 20;
+    vfp_short_vector_t shape;
+    const char *why = NULL;
+    if (c->vfp_fpscr & ~ARM_FPSCR_A8_WMASK)
+        return vfp_trap(pc, insn, "nonzero Cortex-A8 FPSCR DNM/SBZP fields");
+    if (stride == 3u && len > 3u)
+        return vfp_trap(pc, insn, "invalid Cortex-A8 short-vector length/stride");
+    if (!vfp_short_vector_shape(c->vfp_fpscr, dbl, dbl ? rd & 15u : rd, &shape, &why))
+        return vfp_trap(pc, insn, why);
+    if (!vfp_cpacr_permits(c) || !vfp_enabled(c))
+        return vfp_guest_undefined("Cortex-A8 VFP addition/subtraction requires CPACR access and FPEXC.EN");
+
+    bool scalar_m = dbl ? (rm & 15u) < 4u : rm < 8u;
+    uint64_t result[8];
+    uint32_t exceptions = 0u;
+    for (unsigned lane = 0; lane < shape.count; lane++) {
+        unsigned nr = vfp_short_vector_reg(&shape, rn, lane, false);
+        unsigned mr = scalar_m ? rm : vfp_short_vector_reg(&shape, rm, lane, false);
+        uint64_t a = dbl ? vfp_get_d(c, nr) : vfp_get_s(c, nr);
+        uint64_t b = dbl ? vfp_get_d(c, mr) : vfp_get_s(c, mr);
+        result[lane] = vfp_a8_add_sub(a, b, dbl, sub, c->vfp_fpscr, &exceptions);
+    }
+    for (unsigned lane = 0; lane < shape.count; lane++) {
+        unsigned dr = vfp_short_vector_reg(&shape, rd, lane, false);
+        if (dbl) vfp_set_d(c, dr, result[lane]);
+        else vfp_set_s(c, dr, (uint32_t)result[lane]);
+    }
+    c->vfp_fpscr |= exceptions;
     return ARM_OK;
 }
 
@@ -1589,6 +1726,8 @@ arm_status_t vfp_execute(arm_cpu_t *c, uint32_t pc, uint32_t insn,
         return vfp_a8_bitwise_data(c, pc, insn);
     if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_compare_data(insn))
         return vfp_a8_compare_data(c, pc, insn);
+    if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_add_sub_data(insn))
+        return vfp_a8_add_sub_data(c, pc, insn);
     if (!c || (c->vfp_fpscr & ARM_FPSCR_RMODE) == 0u)
         return vfp_execute_inner(c, pc, insn, bus);
 
