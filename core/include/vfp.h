@@ -157,6 +157,11 @@ static inline bool vfp_is_add_sub_data(uint32_t insn) {
     return (insn & 0x0fb00e10u) == 0x0e300a00u;
 }
 
+/* VFP VMUL/VNMUL F32/F64; bit 6 negates the rounded product. */
+static inline bool vfp_is_multiply_data(uint32_t insn) {
+    return (insn & 0x0fb00e10u) == 0x0e200a00u;
+}
+
 /*
  * Execute one VFP encoding. `insn` must already have been identified as a
  * cp10/cp11 encoding by the caller and its condition code must already have

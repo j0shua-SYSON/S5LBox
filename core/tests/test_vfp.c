@@ -480,6 +480,10 @@ static uint32_t a8_fp_add(unsigned sub, unsigned dbl, unsigned dst, unsigned lef
                ((left & 1u) << 7) | (right >> 1) | ((right & 1u) << 5));
 }
 
+static uint32_t a8_fp_multiply(unsigned neg, unsigned dbl, unsigned dst, unsigned left, unsigned right) {
+    return a8_fp_add(neg,dbl,dst,left,right) ^ 0x00100000u;
+}
+
 static uint64_t a8_add_integer(unsigned dbl, int value) {
     return dbl ? d2u((double)value) : f2u((float)value); /* Small exact integers only. */
 }
@@ -694,10 +698,10 @@ static void test_a8_vfp_add_special_values(void) {
     CHECK(fesetenv(&saved) == 0, "restore special add host state");
 }
 
-static void test_a8_vfp_add_vectors(void) {
+static void test_a8_vfp_binary_vectors(void) {
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned dbl = 0; dbl < 2u; dbl++)
-      for (unsigned sub = 0; sub < 2u; sub++)
+      for (unsigned op = 0; op < 4u; op++)
        for (unsigned len = 0; len < 8u; len++)
         for (unsigned stride = 0; stride < 4u; stride++)
          for (unsigned dst = 0; dst < 32u; dst++) {
@@ -721,12 +725,15 @@ static void test_a8_vfp_add_vectors(void) {
                     unsigned mr = right / bank * bank + (right % bank + lane*step) % bank;
                     if (scalar) { dr = dst; nr = left; mr = right; }
                     else if (dbl ? right % 16u < 4u : right < 8u) mr = right;
-                    a8_add_expected_set(expected,dbl,dr,a8_add_integer(dbl,(int)nr+1+(sub ? -(int)mr-1 : (int)mr+1)));
+                    int x = (int)nr+1, y = (int)mr+1;
+                    int value = op == 0u ? x+y : op == 1u ? x-y : op == 2u ? x*y : -x*y;
+                    a8_add_expected_set(expected,dbl,dr,a8_add_integer(dbl,value));
                 }
                 uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
-                CHECK(a8_move_step(&c,thumb,a8_fp_add(sub,dbl,dst,left,right)) == (valid ? ARM_OK : ARM_UNDEFINED) &&
+                uint32_t insn = op < 2u ? a8_fp_add(op,dbl,dst,left,right) : a8_fp_multiply(op&1u,dbl,dst,left,right);
+                CHECK(a8_move_step(&c,thumb,insn) == (valid ? ARM_OK : ARM_UNDEFINED) &&
                       c.r[15] == (valid ? 0x104u : 0x100u) && c.cycles == 1u && c.cpsr == flags && c.vfp_fpscr == fpscr,
-                      "VFP vector shape T=%u D=%u sub=%u len/stride=%u/%u dst=%u",thumb,dbl,sub,len,stride,dst);
+                      "VFP vector shape T=%u D=%u op=%u len/stride=%u/%u dst=%u",thumb,dbl,op,len,stride,dst);
                 bool match = true;
                 for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c,d) == expected[d];
                 CHECK(match, "VFP vector wrap/scalar/alias oracle");
@@ -752,11 +759,11 @@ static void test_a8_vfp_add_vectors(void) {
     }
 }
 
-static void test_a8_vfp_add_access_and_invalid(void) {
+static void test_a8_vfp_binary_access_and_invalid(void) {
     static const unsigned permissions[] = {0u,1u,3u};
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned dbl = 0; dbl < 2u; dbl++)
-      for (unsigned sub = 0; sub < 2u; sub++)
+      for (unsigned op = 0; op < 4u; op++)
        for (unsigned user = 0; user < 2u; user++)
         for (unsigned enabled = 0; enabled < 2u; enabled++)
          for (unsigned access = 0; access < 3u; access++)
@@ -769,9 +776,10 @@ static void test_a8_vfp_add_access_and_invalid(void) {
             if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf0cu : 0xbf1cu); CHECK(arm_step(&c) == ARM_OK,"VFP add IT setup"); }
             uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr, pc = c.r[15];
             bool allowed = enabled && (permissions[access] == 3u || (permissions[access] == 1u && !user));
-            uint32_t insn = a8_fp_add(sub,dbl,31u,16u,1u);
+            uint32_t insn = op < 2u ? a8_fp_add(op,dbl,31u,16u,1u) : a8_fp_multiply(op&1u,dbl,31u,16u,1u);
             if (!thumb && skip) insn &= 0x0fffffffu;
             uint64_t want = skip || !allowed ? 0x12345678u : dbl ? UINT64_C(0x7ff8000000000000) : UINT64_C(0x7fc00000);
+            if (!skip && allowed && op == 3u) want ^= dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
             CHECK(a8_move_step(&c,thumb,insn) == ARM_OK && a8_fp_value(&c,dbl,31u) == want &&
                   c.vfp_fpscr == (fpscr | (!skip && allowed ? ARM_FPSCR_IOC | ARM_FPSCR_IDC : 0u)), "VFP add access effects");
             CHECK(skip || allowed ? c.r[15] == pc+4u &&
@@ -782,7 +790,7 @@ static void test_a8_vfp_add_access_and_invalid(void) {
           }
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned dbl = 0; dbl < 2u; dbl++)
-      for (unsigned sub = 0; sub < 2u; sub++)
+      for (unsigned op = 0; op < 4u; op++)
        for (unsigned bit = 0; bit < 32u; bit++) {
         if ((1u << bit) & ARM_FPSCR_A8_WMASK) continue;
         for (unsigned enabled = 0; enabled < 2u; enabled++)
@@ -792,7 +800,8 @@ static void test_a8_vfp_add_access_and_invalid(void) {
             for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c,d,UINT64_C(0x7ff01234dead0000)+d);
             if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK,"invalid add IT setup"); }
             uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr, pc = c.r[15];
-            uint32_t insn = a8_fp_add(sub,dbl,31u,16u,1u); if (!thumb && skip) insn &= 0x0fffffffu;
+            uint32_t insn = op < 2u ? a8_fp_add(op,dbl,31u,16u,1u) : a8_fp_multiply(op&1u,dbl,31u,16u,1u);
+            if (!thumb && skip) insn &= 0x0fffffffu;
             CHECK(a8_move_step(&c,thumb,insn) == (skip ? ARM_OK : ARM_UNDEFINED) &&
                   c.r[15] == pc+(skip ? 4u : 0u) && c.vfp_fpscr == fpscr &&
                   c.cpsr == (thumb && skip ? flags & ~0x0600fc00u : flags), "VFP reserved FPSCR/access/skip priority");
@@ -803,20 +812,250 @@ static void test_a8_vfp_add_access_and_invalid(void) {
        }
     const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
     for (unsigned profile = 0; profile < 2u; profile++)
-     for (unsigned sub = 0; sub < 2u; sub++) {
+     for (unsigned op = 0; op < 4u; op++) {
         arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,legacy[profile]),"reset legacy add");
         c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
         vfp_set_d(&c,0u,UINT64_C(0x123456789abcdef0));
-        CHECK(a8_move_step(&c,0u,a8_fp_add(sub,1u,16u,0u,0u)) == ARM_UNDEFINED &&
+        uint32_t insn = op < 2u ? a8_fp_add(op,1u,16u,0u,0u) : a8_fp_multiply(op&1u,1u,16u,0u,0u);
+        CHECK(a8_move_step(&c,0u,insn) == ARM_UNDEFINED &&
               vfp_get_d(&c,0u) == UINT64_C(0x123456789abcdef0), "A8 add upper bank leaked into legacy");
      }
-    const uint32_t neighbors[] = {0xee600b00u,0xeee00b00u,0xee300c00u,0xee300900u};
+    const uint32_t neighbors[] = {0xee500b00u,0xeee00b00u,0xee300c00u,0xee300900u,0xee200c00u,0xee200900u};
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned n = 0; n < sizeof neighbors / sizeof neighbors[0]; n++) {
         arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = 0u;
-        CHECK(!vfp_is_add_sub_data(neighbors[n]) && a8_move_step(&c,thumb,neighbors[n]) == ARM_UNDEFINED,
+        CHECK(!vfp_is_add_sub_data(neighbors[n]) && !vfp_is_multiply_data(neighbors[n]) &&
+              a8_move_step(&c,thumb,neighbors[n]) == ARM_UNDEFINED,
               "VFP add consumed neighboring arithmetic/coprocessor encoding");
      }
+}
+
+/* Independent exact tininess test: divide an all-ones integer by the second
+ * significand, one bit at a time. This checks a*b < 2^k without the production
+ * limb multiplication. Stop once the quotient reaches the first significand. */
+static bool a8_multiply_tiny(uint64_t a, uint64_t b, unsigned dbl) {
+    unsigned fraction = dbl ? 52u : 23u;
+    uint64_t hidden = UINT64_C(1) << fraction;
+    uint64_t sign = dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+    unsigned ea = (unsigned)((a & ~sign) >> fraction), eb = (unsigned)((b & ~sign) >> fraction);
+    uint64_t sa = (a & (hidden-1u)) + (ea ? hidden : 0u), sb = (b & (hidden-1u)) + (eb ? hidden : 0u);
+    if (!sa || !sb) return false;
+    int power = 1 + (dbl ? 1023 : 127) + 2*(int)fraction - (int)(ea ? ea : 1u) - (int)(eb ? eb : 1u);
+    if (power <= 0) return false;
+    if (power >= 2*(int)fraction+2) return true;
+    uint64_t quotient = 0u, remainder = 0u;
+    for (int bit = 0; bit < power; bit++) {
+        remainder = remainder*2u+1u; quotient *= 2u;
+        if (remainder >= sb) { remainder -= sb; quotient++; }
+        if (quotient >= sa) return true;
+    }
+    return false;
+}
+
+static uint64_t a8_multiply_native(uint64_t a, uint64_t b, unsigned dbl, unsigned neg,
+                                   uint32_t fpscr, uint32_t *flags) {
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    uint64_t sign = dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+    uint64_t normal = dbl ? UINT64_C(0x0010000000000000) : UINT64_C(0x00800000);
+    *flags = 0u;
+    if (fpscr & ARM_FPSCR_FZ) {
+        if ((a & ~sign) && (a & ~sign) < normal) { a &= sign; *flags |= ARM_FPSCR_IDC; }
+        if ((b & ~sign) && (b & ~sign) < normal) { b &= sign; *flags |= ARM_FPSCR_IDC; }
+    }
+    bool tiny = a8_multiply_tiny(a,b,dbl);
+    fenv_t saved;
+    CHECK(fegetenv(&saved) == 0 && fesetround(rounds[(fpscr>>22)&3u]) == 0 &&
+          feclearexcept(FE_ALL_EXCEPT) == 0,"prepare native multiply oracle");
+    uint64_t bits;
+    if (dbl) {
+        volatile double x = u2d(a), y = u2d(b);
+        volatile double z = x*y; bits = d2u(z);
+    } else {
+        volatile float x = u2f((uint32_t)a), y = u2f((uint32_t)b);
+        volatile float z = x*y; bits = f2u(z);
+    }
+    int exceptions = fetestexcept(FE_ALL_EXCEPT);
+    CHECK(!(exceptions & (FE_INVALID | FE_DIVBYZERO)),"nonfinite input reached finite multiply oracle");
+    if (tiny && (fpscr & ARM_FPSCR_FZ)) { bits = (a ^ b) & sign; *flags |= ARM_FPSCR_UFC; }
+    else {
+        if (exceptions & FE_OVERFLOW) *flags |= ARM_FPSCR_OFC;
+        if (exceptions & FE_INEXACT) { *flags |= ARM_FPSCR_IXC; if (tiny) *flags |= ARM_FPSCR_UFC; }
+    }
+    /* ARM detects tininess before rounding. Native FE_UNDERFLOW can instead
+     * use after-rounding tininess and is deliberately not the flag oracle. */
+    CHECK(fesetenv(&saved) == 0,"restore native multiply oracle host state");
+    return bits ^ (neg ? sign : 0u);
+}
+
+static void test_a8_vfp_multiply_registers(void) {
+    CHECK(a8_fp_multiply(0u,1u,20u,16u,18u) == 0xee604ba2u &&
+          a8_fp_multiply(1u,0u,31u,16u,17u) == 0xee68fa68u,"VFP multiply encoding anchors");
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned neg = 0; neg < 2u; neg++)
+       for (unsigned dst = 0; dst < 32u; dst++)
+        for (unsigned left = 0; left < 32u; left++)
+         for (unsigned right = 0; right < 32u; right++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.vfp_fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC;
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c,d,UINT64_C(0x7ff01234dead0000)+d);
+            for (unsigned r = 0; r < 32u; r++) a8_fp_value_set(&c,dbl,r,a8_add_integer(dbl,(int)r-16));
+            uint64_t expected[32]; for (unsigned d = 0; d < 32u; d++) expected[d] = vfp_get_d(&c,d);
+            int x = (int)left-16, y = (int)right-16, product = x*y;
+            uint64_t want = a8_add_integer(dbl,neg ? -product : product);
+            if (!product && ((x < 0) != (y < 0)) != (neg != 0u))
+                want = dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+            a8_add_expected_set(expected,dbl,dst,want);
+            c.excl_valid = true; c.excl_addr = 0x12340u;
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c,thumb,a8_fp_multiply(neg,dbl,dst,left,right)) == ARM_OK &&
+                  c.r[15] == 0x104u && c.cycles == 1u && c.cpsr == flags && c.vfp_fpscr == fpscr &&
+                  c.excl_valid && c.excl_addr == 0x12340u,"VFP multiply register state T=%u D=%u neg=%u d/n/m=%u/%u/%u",
+                  thumb,dbl,neg,dst,left,right);
+            bool match = true;
+            for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c,d) == expected[d];
+            for (unsigned r = 0; r < 15u; r++) match &= c.r[r] == 0u;
+            CHECK(match,"VFP multiply register/alias/signed-zero oracle");
+         }
+}
+
+static void test_a8_vfp_multiply_values_and_host_state(void) {
+    fenv_t saved; CHECK(fegetenv(&saved) == 0,"save VFP multiply host state");
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    for (unsigned dbl = 0; dbl < 2u; dbl++) {
+        uint64_t sign = dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+        uint64_t normal = dbl ? UINT64_C(0x0010000000000000) : UINT64_C(0x00800000);
+        uint64_t infinity = dbl ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
+        uint64_t one = dbl ? UINT64_C(0x3ff0000000000000) : UINT64_C(0x3f800000);
+        uint64_t half = dbl ? UINT64_C(0x3fe0000000000000) : UINT64_C(0x3f000000);
+        uint64_t two = dbl ? UINT64_C(0x4000000000000000) : UINT64_C(0x40000000);
+        const struct { uint64_t a,b,result[4]; uint32_t flags; bool tiny; } anchors[] = {
+            {one,one,{one,one,one,one},0u,false},
+            {sign,one,{sign,sign,sign,sign},0u,false},
+            {one+1u,one+1u,{one+2u,one+3u,one+2u,one+2u},ARM_FPSCR_IXC,false},
+            {one-1u,one+1u,{one,one+1u,one,one},ARM_FPSCR_IXC,false},
+            {normal,half,{normal/2u,normal/2u,normal/2u,normal/2u},0u,true},
+            {1u,half,{0u,1u,0u,0u},ARM_FPSCR_UFC|ARM_FPSCR_IXC,true},
+            {normal,one-1u,{normal,normal,normal-1u,normal-1u},ARM_FPSCR_UFC|ARM_FPSCR_IXC,true},
+            {normal,one-2u,{normal-1u,normal-1u,normal-1u,normal-1u},0u,true},
+            {infinity-1u,two,{infinity,infinity,infinity-1u,infinity-1u},ARM_FPSCR_OFC|ARM_FPSCR_IXC,false}
+        };
+        for (unsigned row = 0; row < sizeof anchors / sizeof anchors[0]; row++)
+         for (unsigned mode = 0; mode < 4u; mode++)
+          for (unsigned neg = 0; neg < 2u; neg++) {
+            uint32_t exceptions;
+            uint64_t want = anchors[row].result[mode] ^ (neg ? sign : 0u);
+            CHECK(a8_multiply_tiny(anchors[row].a,anchors[row].b,dbl) == anchors[row].tiny,"multiply tininess anchor");
+            CHECK(a8_multiply_native(anchors[row].a,anchors[row].b,dbl,neg,mode<<22,&exceptions) == want &&
+                  exceptions == anchors[row].flags,"native multiply anchor D=%u row=%u mode=%u neg=%u",dbl,row,mode,neg);
+            for (unsigned thumb = 0; thumb < 2u; thumb++) {
+                arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = ARM_FPSCR_QC | ARM_FPSCR_DZC | (mode<<22);
+                a8_fp_value_set(&c,dbl,16u,anchors[row].a); a8_fp_value_set(&c,dbl,1u,anchors[row].b);
+                uint32_t flags = c.vfp_fpscr;
+                CHECK(a8_move_step(&c,thumb,a8_fp_multiply(neg,dbl,31u,16u,1u)) == ARM_OK &&
+                      a8_fp_value(&c,dbl,31u) == want && c.vfp_fpscr == (flags | anchors[row].flags),"VFP multiply analytical anchor");
+            }
+          }
+        uint64_t random = UINT64_C(0x91a2b3c4d5e6f708);
+        for (unsigned sample = 0; sample < 1024u; sample++) {
+            random ^= random << 13; random ^= random >> 7; random ^= random << 17;
+            uint64_t a = dbl ? random : (uint32_t)random;
+            random ^= random << 13; random ^= random >> 7; random ^= random << 17;
+            uint64_t b = dbl ? random : (uint32_t)random;
+            if ((a & ~sign) >= infinity) a &= ~infinity;
+            if ((b & ~sign) >= infinity) b &= ~infinity;
+            if (sample % 8u == 0u) { a = normal; b = one-1u; }
+            if (sample % 8u == 1u) a &= sign | (normal-1u);
+            if (sample % 8u == 2u) { a = normal; b = half; }
+            if (sample % 8u == 3u) { a = 1u; b = half; }
+            if (sample & 8u) a ^= sign;
+            for (unsigned controls = 0; controls < 16u; controls++)
+             for (unsigned neg = 0; neg < 2u; neg++) {
+                uint32_t fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC |
+                    ((controls&3u)<<22) | (controls&4u ? ARM_FPSCR_FZ : 0u) | (controls&8u ? ARM_FPSCR_DN : 0u), exceptions;
+                uint64_t want = a8_multiply_native(a,b,dbl,neg,fpscr,&exceptions);
+                for (unsigned thumb = 0; thumb < 2u; thumb++) {
+                    arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = fpscr;
+                    a8_fp_value_set(&c,dbl,16u,a); a8_fp_value_set(&c,dbl,1u,b);
+                    unsigned host = sample % 4u;
+                    CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
+                          (!(sample&1u) || feraiseexcept(FE_INVALID | FE_DIVBYZERO) == 0),"prepare multiply host state");
+                    int pending = fetestexcept(FE_ALL_EXCEPT); uint32_t flags = c.cpsr;
+                    CHECK(a8_move_step(&c,thumb,a8_fp_multiply(neg,dbl,31u,16u,1u)) == ARM_OK &&
+                          a8_fp_value(&c,dbl,31u) == want && c.vfp_fpscr == (fpscr | exceptions) && c.cpsr == flags,
+                          "VFP finite multiply D=%u T=%u neg=%u controls=%u sample=%u",dbl,thumb,neg,controls,sample);
+                    CHECK(fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == pending,"VFP multiply changed host FP state");
+                }
+             }
+        }
+    }
+    CHECK(fesetenv(&saved) == 0,"restore VFP multiply host state");
+}
+
+static void test_a8_vfp_multiply_special_values(void) {
+    fenv_t saved; CHECK(fegetenv(&saved) == 0,"save special multiply host state");
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    unsigned count = sizeof a8_compare_values / sizeof a8_compare_values[0];
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned neg = 0; neg < 2u; neg++)
+       for (unsigned controls = 0; controls < 16u; controls++)
+        for (unsigned x = 0; x < count; x++)
+         for (unsigned y = 0; y < count; y++) {
+            bool nan = a8_compare_values[x].nan || a8_compare_values[y].nan;
+            bool inf_x = x == 0u || x == 17u, inf_y = y == 0u || y == 17u;
+            bool zero_x = x == 8u || x == 9u || ((controls&4u) && a8_compare_values[x].denormal);
+            bool zero_y = y == 8u || y == 9u || ((controls&4u) && a8_compare_values[y].denormal);
+            if (!nan && !inf_x && !inf_y && !zero_x && !zero_y) continue;
+            uint64_t sign = dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+            uint64_t infinity = dbl ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
+            uint64_t quiet = dbl ? UINT64_C(0x0008000000000000) : UINT64_C(0x00400000);
+            uint64_t a = dbl ? a8_compare_values[x].dual : a8_compare_values[x].single;
+            uint64_t b = dbl ? a8_compare_values[y].dual : a8_compare_values[y].single;
+            uint32_t exceptions = (controls&4u) &&
+                (a8_compare_values[x].denormal || a8_compare_values[y].denormal) ? ARM_FPSCR_IDC : 0u;
+            uint64_t want;
+            if (nan) {
+                unsigned chosen = a8_compare_values[x].signaling ? x : a8_compare_values[y].signaling ? y :
+                                  a8_compare_values[x].nan ? x : y;
+                want = controls&8u ? infinity | quiet :
+                    (dbl ? a8_compare_values[chosen].dual : a8_compare_values[chosen].single) | quiet;
+                if (a8_compare_values[x].signaling || a8_compare_values[y].signaling) exceptions |= ARM_FPSCR_IOC;
+            } else if ((inf_x && zero_y) || (inf_y && zero_x)) {
+                want = infinity | quiet; exceptions |= ARM_FPSCR_IOC;
+            } else want = ((a ^ b) & sign) | (inf_x || inf_y ? infinity : 0u);
+            if (neg) want ^= sign;
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.vfp_fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC |
+                ((controls&3u)<<22) | (controls&4u ? ARM_FPSCR_FZ : 0u) | (controls&8u ? ARM_FPSCR_DN : 0u);
+            a8_fp_value_set(&c,dbl,16u,a); a8_fp_value_set(&c,dbl,1u,b);
+            uint32_t flags = c.vfp_fpscr; unsigned host = (x+y)%4u;
+            CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
+                  (!((x+y)&1u) || feraiseexcept(FE_DIVBYZERO) == 0),"prepare special multiply host state");
+            int pending = fetestexcept(FE_ALL_EXCEPT);
+            CHECK(a8_move_step(&c,thumb,a8_fp_multiply(neg,dbl,31u,16u,1u)) == ARM_OK &&
+                  a8_fp_value(&c,dbl,31u) == want && c.vfp_fpscr == (flags | exceptions),
+                  "VFP special multiply D=%u T=%u neg=%u controls=%u x/y=%u/%u",dbl,thumb,neg,controls,x,y);
+            CHECK(fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == pending,"special multiply changed host FP state");
+         }
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned neg = 0; neg < 2u; neg++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = ARM_FPSCR_QC | ARM_FPSCR_FZ | (3u<<16);
+        uint64_t flip = neg ? UINT64_C(0x8000000000000000) : 0u;
+        vfp_set_d(&c,28u,UINT64_C(0x7fefffffffffffff)); vfp_set_d(&c,29u,UINT64_C(0x0010000000000000));
+        vfp_set_d(&c,30u,UINT64_C(0x7ff0000000000001)); vfp_set_d(&c,31u,UINT64_C(0x3ff0000000000000));
+        uint32_t flags = c.vfp_fpscr | ARM_FPSCR_OFC | ARM_FPSCR_IXC | ARM_FPSCR_UFC | ARM_FPSCR_IOC;
+        CHECK(a8_move_step(&c,thumb,a8_fp_multiply(neg,1u,31u,28u,28u)) == ARM_OK &&
+              vfp_get_d(&c,31u) == (UINT64_C(0x7ff0000000000000) ^ flip) && vfp_get_d(&c,28u) == flip &&
+              vfp_get_d(&c,29u) == (UINT64_C(0x7ff8000000000001) ^ flip) &&
+              vfp_get_d(&c,30u) == (UINT64_C(0x3ff0000000000000) ^ flip) && c.vfp_fpscr == flags,
+              "VFP multiply vector staged inputs/sticky flags");
+        c.vfp_fpscr &= ~ARM_FPSCR_LEN;
+        CHECK(a8_move_step(&c,thumb,a8_fp_multiply(0u,1u,20u,30u,30u)) == ARM_OK &&
+              a8_move_step(&c,thumb,VMRS(2u,1u)) == ARM_OK && c.r[2] == (flags & ~ARM_FPSCR_LEN),
+              "VFP exact multiply/VMRS lost accumulated flags");
+     }
+    CHECK(fesetenv(&saved) == 0,"restore special multiply host state");
 }
 
 static void test_a8_vfp_compare_registers_and_values(void) {
@@ -3147,12 +3386,12 @@ static void test_a8_vfp_core_move_refusals_and_it(void) {
       }
      }
     }
-    /* Upper-bank multiplication remains separate from transfers and add/sub. */
+    /* Upper-bank division remains separate from the supported transfers/arithmetic. */
     arm_cpu_t c;
     a8_move_reset(&c, 0u);
     vfp_set_d(&c, 16u, UINT64_C(0x1122334455667788));
-    CHECK(a8_move_step(&c, 0u, VFP_DP(0,1,0,1,0,0,1,0,0,0,0)) == ARM_UNDEFINED &&
-          vfp_get_d(&c, 16u) == UINT64_C(0x1122334455667788), "core VMOV enabled upper-bank multiplication");
+    CHECK(a8_move_step(&c, 0u, VFP_DP(1,0,0,1,0,0,1,0,0,0,0)) == ARM_UNDEFINED &&
+          vfp_get_d(&c, 16u) == UINT64_C(0x1122334455667788), "core VMOV enabled upper-bank division");
 }
 
 /* VLDR/VSTR use D:Vd for doublewords and Vd:D for singlewords. */
@@ -5058,11 +5297,14 @@ static void test_condition_codes_apply(void) {
 
 /* --------------------------------------------------------------- main ---- */
 int main(void) {
+    test_a8_vfp_multiply_registers();
+    test_a8_vfp_multiply_values_and_host_state();
+    test_a8_vfp_multiply_special_values();
     test_a8_vfp_add_registers();
     test_a8_vfp_add_values_and_host_state();
     test_a8_vfp_add_special_values();
-    test_a8_vfp_add_vectors();
-    test_a8_vfp_add_access_and_invalid();
+    test_a8_vfp_binary_vectors();
+    test_a8_vfp_binary_access_and_invalid();
     test_a8_neon_macc_registers();
     test_a8_neon_macc_values_and_host_state();
     test_a8_neon_macc_access_invalid_and_it();

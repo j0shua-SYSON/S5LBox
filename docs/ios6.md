@@ -449,6 +449,39 @@ fixtures also retain all 1,824 and 112 passing calls. The guarded kernel-entry
 fixture matches its entire prior trace, with only line endings normalized:
 61,650 steps to the same unestablished S5L8920 L2 parity/ECC configuration.
 
+VFP VMUL/VNMUL now use the same checked full-bank scalar and short-vector
+paths in ARM and Thumb. Four 32-bit limb products retain the exact 106-bit
+binary64 product before normalization and guest-controlled rounding. They
+share input flushing, NaN selection and rounding with VADD/VSUB. VNMUL
+flips the sign of the rounded product, including zeros and NaNs; it does
+not reverse the rounding direction. Tininess is checked before rounding,
+including when an inexact tiny product rounds to the smallest normal value.
+See [DDI0406C.b, A2.7.8 and A8.8.351/356](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Tests compare native IEEE results with raw analytical anchors. An independent
+binary-division check determines exact tininess, so the exception oracle
+accounts for ARM's rule even on hosts that check underflow after rounding.
+Tests cover every register triple, signed zeros, gradual and flushed tiny
+results, overflow, NaN payloads and negation, all guest rounding/FZ/DN
+controls, host FP-state preservation, vector aliases and cumulative flags.
+The existing vector-shape, access, invalid-state, conditional, checked-fetch
+and guest enable/return retry matrices also cover both multiply forms.
+
+The unchanged positive unit-stride path of `vDSP_vrampD` completes 336
+prepared calls: 21 selected lengths from 0 through 257, four word alignments
+and four exact-integer ramps. Before multiplication support, the first empty
+aligned call stopped after 17 instructions at `0x3082c000`, on
+`VMUL.F64 d20, d16, d18`, after reading both eight-byte inputs and the
+eight-byte zero literal at `0x3082c268`, with no output. The unchanged
+736-byte image covers `0x3082bf90..0x3082c270`; execution is limited to the
+entry, positive unit-stride body and return at `0x3082c1fc`. The fixture
+verifies every input/literal/frame/argument/output byte count, exact outputs,
+page canaries, ABI registers and unaffected FP state. It does not provide
+a complete oracle for clobbered FP temporaries, other strides, fractional or
+special inputs, other FPSCR modes, process execution or boot. The existing
+nonunit F64 ramp, F64 remainder and F32 ramp fixtures retain their 256, 112
+and 1,824 passing calls after the shared arithmetic refactor.
+
 The unchanged ARM [`vDSP_vma`](https://developer.apple.com/documentation/accelerate/vdsp_vma)
 at `0x30825f94` now completes 144 calls through its scalar body. Before
 multiply-accumulate support, the first nonempty case stopped at `0x30826144`
@@ -568,7 +601,7 @@ both original halves. Tests cover complete register lists, both stack
 aliases, invalid modes/ranges, access/conditional behavior and faults after
 partial progress, including with host memory shortcuts enabled. A separate
 test places the odd-length trailing gap on an unmapped page. Upper-bank
-VFP arithmetic beyond VADD/VSUB and the remaining NEON families are still unfinished.
+VFP arithmetic beyond VADD/VSUB/VMUL/VNMUL and the remaining NEON families are still unfinished.
 
 An isolated host fixture executed the matching kernel's
 `_enable_kernel_vfp_context` routine with unchanged instructions and synthetic
@@ -599,7 +632,7 @@ flags and IT state unchanged. IT conditions, privileged
 state changes and permitted User thread-ID/barrier accesses retain their
 normal semantics. CP14 and Swift CP15 transfers remain unsupported in
 Thumb; supported VFP instructions cover the A8 transfers, raw data operations,
-comparisons and VADD/VSUB above.
+comparisons and VADD/VSUB/VMUL/VNMUL above.
 CP15 MRC2/MCR2 encodings are undefined and refused. The ARM1176
 instruction path is unchanged.
 See [DDI0406C.b, A8.8.98/107](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
@@ -1102,7 +1135,7 @@ establish that result.
   Cortex-A8 MRC/MCR transfers cover the currently implemented CP15 registers.
 - Cortex-A8 stores d0-d31 and supports system/core/memory transfers plus
   VFP copies, immediate constants and sign operations with short vectors,
-  scalar comparisons and F32/F64 VADD/VSUB across the full register bank, and the bounded
+  scalar comparisons and F32/F64 VADD/VSUB/VMUL/VNMUL across the full register bank, and the bounded
   32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms,
   register Boolean operations, VEXT, 8/16/32-bit VTRN, F32 VABS/VNEG,
   immediate constants, core-register VDUP, register VMUL/VADD/VSUB/VMLA/VMLS.F32
