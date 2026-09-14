@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 
 
 HOST = tuple(range(19, 27))  # guest r0-r7 stay pinned in x19-x26
@@ -3605,6 +3606,28 @@ def compact_register_memory(prefix: str) -> list[str]:
     return body
 
 
+def compact_register_fetch(prefix: str) -> list[str]:
+    """Refill without spilling the resident guest registers or table bases.
+
+    Reuse the exact raw-TLB/capability proof and publication protocol. Its six
+    scratch registers move to x9-x14; x0-x7, x16/x17 and guest CPSR in w28 stay
+    live. A refusal takes the original spill/window exit before any guest
+    instruction executes. This uses only the existing opt-in refill controls.
+    """
+    body = compact_tlb_refill_body(True)
+    result = [f"{prefix}window_miss:"]
+    for line in body:
+        # CPSR memory is deliberately stale while the register tier is live.
+        line = line.replace("ldr w1, [x20]", "mov w1, w28")
+        line = re.sub(r"\b([wx])([0-5])\b",
+                      lambda m: m[1] + str(int(m[2]) + 9), line)
+        line = line.replace(".La64cr_fallback", prefix + "window_spill")
+        line = line.replace(".La64cr_loop", prefix + "fetch")
+        line = line.replace(".La64cr_", prefix + "refill_")
+        result.append(line)
+    return result
+
+
 def compact_register_a32() -> tuple[list[str], list[str]]:
     """Live-word A32 execution with the same resident ABI as the Thumb tier.
 
@@ -3716,7 +3739,8 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
             *table_address(17, prefix + "conditions"), f"    b {prefix}condition",
             f"{prefix}sequential:", "    add w26, w26, #4",
             f"{prefix}retire:", "    add w29, w29, #1", "    subs w25, w25, #1",
-            f"    b.eq {prefix}exit", "    sub w8, w26, w23", "    cmp w8, w24",
+            f"    b.eq {prefix}exit", f"{prefix}fetch:",
+            "    sub w8, w26, w23", "    cmp w8, w24",
             f"    b.hs {prefix}window_miss", "    sub w10, w24, w8",
             "    cmp w10, #4", f"    b.lo {prefix}fallback",
             "    ldr w9, [x22, w8, uxtw]",
@@ -3752,8 +3776,9 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
     for index, condition in enumerate(CONDITIONS):
         body += [f"{prefix}condition_{index}:", f"    b.{condition} {prefix}classify",
                  f"    b {prefix}sequential"]
+    body += compact_register_fetch(prefix)
     for name, target in (("decode", ".La64cr_condition_pass"),
-                         ("window_miss", ".La64cr_window_miss"),
+                         ("window_spill", ".La64cr_window_miss"),
                          ("fallback", ".La64cr_fallback"),
                          ("exit", ".La64cr_exit")):
         body += [f"{prefix}{name}:", "    stp w0, w1, [x19]",
@@ -4062,6 +4087,7 @@ def compact_register_thumb() -> tuple[list[str], list[str]]:
         f"    b.eq {prefix}exit",
         # Only even-PC, same-state instructions stay here. State-changing
         # instructions leave before execution, and the old loop revalidates T.
+        f"{prefix}fetch:",
         "    sub w8, w26, w23", "    cmp w8, w24",
         f"    b.hs {prefix}window_miss", "    add w10, w8, #2",
         "    cmp w10, w24", f"    b.hi {prefix}fallback",
@@ -4069,8 +4095,9 @@ def compact_register_thumb() -> tuple[list[str], list[str]]:
         f"{prefix}dispatch:", "    ldrsw x15, [x16, w9, uxtw #2]",
         "    add x15, x16, x15", "    br x15",
     ]
+    body += compact_register_fetch(prefix)
     for name, target in (("decode", ".La64cr_thumb_decode"),
-                         ("window_miss", ".La64cr_window_miss"),
+                         ("window_spill", ".La64cr_window_miss"),
                          ("fallback", ".La64cr_fallback"),
                          ("exit", ".La64cr_exit")):
         body += [f"{prefix}{name}:", "    stp w0, w1, [x19]",

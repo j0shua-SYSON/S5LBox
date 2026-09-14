@@ -34,6 +34,14 @@ counts its normal DREAD/DWRITE hit once.
 Capabilities and counters are derived host state, never snapshot data.
 The frontend reacquires the capability after restore/reset.
 
+The ARM and Thumb register-resident tiers reuse this same FETCH proof without
+spilling guest r0-r7, CPSR, or their dispatch-table bases at an ordinary window
+crossing. Only six scratch registers are reassigned in the generated proof;
+the permission checks and three-way FETCH publication are shared with the raw
+runner. Failure still spills the exact retired prefix to the existing exit.
+Interworking, unsupported instructions and callbacks keep their original
+boundaries. This adds no cache, runtime switch, or larger retirement budget.
+
 ## Control and evidence
 
 A nonempty `engine.compact-tlb-refill-on` file in a machine's working directory
@@ -48,6 +56,11 @@ observer revocation without memory access. On real AArch64 it additionally
 compares ARM/Thumb loops and memory families against the interpreter, checks
 exact retirement budgets and mutation-boundary stops. CI explicitly rejects
 skipped native execution on the Apple runners.
+
+The resident-window matrix additionally compares every prefix through repeated
+sequential/direct-branch crossings, dirty low registers and flags, both ISAs,
+warm persistent grants with raw-TLB eviction, and rejected target witnesses.
+Passing it establishes architectural equivalence, not a physical speedup.
 
 No physical performance gain is established by the implementation or by these
 tests. Promotion requires matched, profiler-off phone runs on general guest

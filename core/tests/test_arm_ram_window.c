@@ -1098,10 +1098,12 @@ static void test_native_live_code(void) {
     if (!a64_static_host_available()) return;
     for (unsigned persistent = 0; persistent < 2u; persistent++) {
     for (unsigned different = 0; different < 2u; different++) {
+    for (unsigned direct = 0; direct < 2u; direct++) {
         setup();
         uint32_t target = different ? NEXT : CODE + 8u;
         insn(CODE, 0xe5810000u); /* str r0, [r1] */
-        insn(CODE + 4u, 0xe12fff13u); /* bx r3 */
+        insn(CODE + 4u, direct ? (different ? 0xea0000fdu : 0xeaffffffu)
+                               : 0xe12fff13u); /* b target / bx r3 */
         insn(target, 0xe3a02003u); /* mov r2, #3, overwritten before fetch */
         cpu.r[0] = 0xe3a02009u; /* mov r2, #9 */
         cpu.r[1] = cpu.r[3] = target;
@@ -1136,6 +1138,150 @@ static void test_native_live_code(void) {
               "live guest store visible in %s window", different ? "new" : "same");
     }
     }
+    }
+}
+
+/* Ordinary arithmetic, condition flags, sequential FETCH and direct branches
+ * cross the 1 KiB boundary while every low register is live. BX tests alone
+ * do not exercise this path: interworking deliberately leaves the register
+ * tier before switching windows. */
+static void test_resident_fetch_windows(void) {
+    if (!a64_static_host_available()) return;
+    unsigned runs = 0u;
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+    for (unsigned persistent = 0; persistent < 2u; persistent++) {
+    for (unsigned flags = 0; flags < 16u; flags++) {
+    for (unsigned budget = 1; budget <= 97u; budget++) {
+        setup();
+        uint32_t start = CODE + (thumb ? 0x3fcu : 0x3f8u);
+        if (thumb) {
+            half(start, 0x3001u);       /* adds r0, #1 */
+            half(start + 2u, 0x4159u);  /* adcs r1, r3 */
+            half(NEXT, 0x4290u);       /* cmp r0, r2 */
+            half(NEXT + 2u, 0xd300u);  /* bcc NEXT+6 */
+            half(NEXT + 4u, 0x3401u);  /* adds r4, #1 */
+            half(NEXT + 6u, 0x4075u);  /* eors r5, r6 */
+            half(NEXT + 8u, 0x3e01u);  /* subs r6, #1 */
+            half(NEXT + 10u, 0x415fu); /* adcs r7, r3 */
+            half(NEXT + 12u, 0xe7f6u); /* b start */
+        } else {
+            insn(start, 0xe2900001u);      /* adds r0, r0, #1 */
+            insn(start + 4u, 0xe2a11000u); /* adc r1, r1, #0 */
+            insn(NEXT, 0xe1500002u);       /* cmp r0, r2 */
+            insn(NEXT + 4u, 0x02833007u);  /* addeq r3, r3, #7 */
+            insn(NEXT + 8u, 0xe0244005u);  /* eor r4, r4, r5 */
+            insn(NEXT + 12u, 0xe2566001u); /* subs r6, r6, #1 */
+            insn(NEXT + 16u, 0xe2a77000u); /* adc r7, r7, #0 */
+            insn(NEXT + 20u, 0xeafffff7u); /* b start */
+        }
+        cpu.r[15] = start;
+        cpu.cpsr |= flags << 28 | (thumb ? ARM_CPSR_T : 0u) | ARM_CPSR_Q;
+        for (unsigned r = 0; r < 15u; r++)
+            cpu.r[r] = 0x98765432u ^ (r * 0x11335577u) ^ flags;
+        cpu.r[0] = flags & 1u ? UINT32_MAX : 0x7fffffffu;
+        cpu.r[2] = flags & 2u ? 0u : 0x80000000u;
+        cpu.r[3] = 0u;
+        prime(NEXT, ARM_ACCESS_FETCH, false, BASE + 0x8400u);
+        arm_ram_window_t w;
+        CHECK(arm_ram_window_capture(&w, &cpu, BASE, SIZE), "resident capture");
+        arm_ram_map_reset(&ram_map);
+        if (persistent) {
+            CHECK(arm_ram_map_prepare(&ram_map, &w, &cpu) &&
+                      arm_ram_map_publish(&ram_map, &cpu, NEXT, ARM_ACCESS_FETCH) &&
+                      arm_ram_map_publish(&ram_map, &cpu, CODE, ARM_ACCESS_FETCH),
+                  "resident warm FETCH grants");
+            /* Current entry remains provable; the next raw TLB entry need
+             * not survive when the independent map already owns the grant. */
+            memset(&cpu.tlb[slot(NEXT, ARM_ACCESS_FETCH)], 0, sizeof cpu.tlb[0]);
+        }
+        reference = cpu;
+        for (unsigned n = 0; n < budget; n++)
+            CHECK(arm_step(&reference) == ARM_OK, "resident literal oracle");
+        fallback_t f = {0};
+        uint32_t owner = CODE;
+        a64_compact_tlb_stats_t raw = {0};
+        a64_compact_ram_map_stats_t mapped = {0};
+        a64_compact_raw_options_t options = {
+            .ram_window = &w, .owner_fetch_block = &owner,
+            .ram_map = persistent ? &ram_map : NULL, .ram_map_stats = &mapped,
+        };
+        unsigned total, native, slow;
+        reads = writes = 0u;
+        CHECK(a64_compact_raw_run_code_window_resident_options(&cpu,
+                  ram + 0x8000u, CODE, 1024u, budget, fallback, &f, &options,
+                  NULL, NULL, &raw, &total, &native, &slow), "resident window run");
+        CHECK(total == budget && native == budget && !slow && !f.calls &&
+                  !memcmp(cpu.r, reference.r, sizeof cpu.r) &&
+                  cpu.cpsr == reference.cpsr && cpu.cycles == reference.cycles,
+              "resident windows exact thumb=%u map=%u flags=%u budget=%u",
+              thumb, persistent, flags, budget);
+        CHECK(!reads && !writes && !raw.read && !raw.write &&
+                  !mapped.read && !mapped.write,
+              "resident FETCH never performs data or bus access");
+        CHECK(cpu.fetch_blk == owner && cpu.fetch_gen == cpu.tlb_gen &&
+                  cpu.fetch_host == ram + (owner - VA) && !cpu.fetch_priv,
+              "resident FETCH publication remains coherent");
+        CHECK(budget <= 2u ? !raw.fetch && !mapped.fetch :
+                  persistent ? !raw.fetch && mapped.fetch > 0u :
+                               raw.fetch > 0u && !mapped.fetch,
+              "resident window proof actually consumed");
+        runs++;
+    }
+    }
+    }
+    }
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+    for (unsigned kind = 0; kind < 10u; kind++) {
+        setup();
+        uint32_t start = CODE + (thumb ? 0x3fcu : 0x3f8u);
+        if (thumb) {
+            half(start, 0x3001u);
+            half(start + 2u, 0x3101u);
+        } else {
+            insn(start, 0xe2900001u);
+            insn(start + 4u, 0xe2811001u);
+        }
+        cpu.r[15] = start;
+        cpu.r[0] = UINT32_MAX;
+        cpu.r[1] = 0x12345678u;
+        cpu.cpsr |= thumb ? ARM_CPSR_T : 0u;
+        prime(NEXT, ARM_ACCESS_FETCH, false, BASE + 0x8400u);
+        reference = cpu;
+        CHECK(arm_step(&reference) == ARM_OK && arm_step(&reference) == ARM_OK,
+              "refused boundary literal prefix");
+        unsigned i = slot(NEXT, ARM_ACCESS_FETCH);
+        switch (kind) {
+        case 0: cpu.tlb[i].gen = 0u; break;
+        case 1: cpu.tlb[i].tag ^= 1u; break;
+        case 2: cpu.tlb[i].tag ^= 2u; break;
+        case 3: cpu.tlb[i].fsr = 15u; break;
+        case 4: cpu.tlb[i].pa = BASE - 1024u; break;
+        case 5: cpu.tlb[i].pa = BASE + SIZE; break;
+        case 6: cpu.tlb[i].pa++; break;
+        case 8: cpu.tlb[i].tag ^= 8u; break;
+        default: break; /* truncated grant or disabled experiment */
+        }
+        arm_ram_window_t w;
+        CHECK(arm_ram_window_capture(&w, &cpu, BASE, kind == 7u ? 0x8500u : SIZE),
+              "resident refusal capture");
+        a64_compact_raw_options_t options = { .ram_window = kind == 9u ? NULL : &w };
+        a64_compact_tlb_stats_t raw = {0};
+        fallback_t f = {0};
+        unsigned total, native, slow;
+        reads = writes = 0u;
+        CHECK(a64_compact_raw_run_code_window_resident_options(&cpu,
+                  ram + 0x8000u, CODE, 1024u, 8u, fallback, &f, &options,
+                  NULL, NULL, &raw, &total, &native, &slow), "resident refusal run");
+        CHECK(total == 2u && native == 2u && !slow && f.calls == 1u &&
+                  !memcmp(cpu.r, reference.r, sizeof cpu.r) &&
+                  cpu.cpsr == reference.cpsr && cpu.cycles == reference.cycles,
+              "resident miss spills exact dirty prefix thumb=%u kind=%u", thumb, kind);
+        CHECK(!raw.fetch && !reads && !writes && cpu.fetch_blk == CODE,
+              "resident refusal neither accesses nor publishes target");
+        runs++;
+    }
+    }
+    printf("RESIDENT-FETCH-WINDOWS %u exact boundary/refusal runs executed\n", runs);
 }
 
 static void test_native_machine(void) {
@@ -1331,6 +1477,7 @@ int main(void) {
     test_extra_transfer_forms();
     test_arith_extra_budget_loop();
     test_native_live_code();
+    test_resident_fetch_windows();
     test_native_machine();
     test_native_map_machine();
 #else
