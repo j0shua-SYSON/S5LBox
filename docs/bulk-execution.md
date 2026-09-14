@@ -108,6 +108,23 @@ derives its short budgets from `S5L8900_ACTIVE_CLOCK_BATCH_INSNS` and requires
 actual reuse in all seven path shapes, including native warm/cold execution.
 Summary length follows available complete work; device timing is not enlarged.
 
+## Shared register-operand execution
+
+The ordinary register-resident A32 tier also handles non-PC register operands
+with immediate or register-specified shifts, including high-register operands.
+It supplies the existing data-processing handler table directly instead of
+spilling all eight low registers into the older decoder for each such instruction.
+Two 16-entry operand-selection tables and one bounded shifter replace that
+transition; no guest-code cache, new option or instruction budget is added.
+The existing low-register unshifted and immediate fast paths are unchanged.
+Miscellaneous encodings and PC operands retain their original guarded paths.
+
+This is shared instruction execution, independent of the experimental bulk
+option. The native differential oracle covers 188,160 dirty-input/alias chains
+and 480 conditional cases, including zero, 32, oversized and low-byte register
+shift counts and RRX carry. CI requires the oracle to execute, not skip.
+These semantic checks do not establish a phone or application speedup.
+
 ## First physical result
 
 Build `cd6f350` passed all eight core CI jobs (including native ARM64 execution

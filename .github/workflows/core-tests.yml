@@ -231,6 +231,7 @@ jobs:
             test "$static_status" -eq 0
             test "$compact_status" -eq 0
             test "$compact_soc_status" -eq 0
+            grep -Fq 'COMPACT-RAW-A32-RESIDENT-OPERAND-ORACLE exact=yes cases=188160 conditions=480 registers=all-nonpc aliases=yes dirty-inputs=yes carry=both shift-boundaries=yes' <<<"$compact_output"
             if grep -Fq 'SKIP:' <<<"$memory_output"; then
               echo 'Required macOS MAP_JIT memory-policy coverage was skipped.' >&2
               exit 1

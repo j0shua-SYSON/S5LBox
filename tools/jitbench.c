@@ -6558,6 +6558,101 @@ static bool validate_compact_raw_a32_register_oracle(void) {
     return true;
 }
 
+static bool validate_compact_raw_a32_resident_operand_oracle(void) {
+    static const uint32_t values[] = {
+        0u, 1u, UINT32_MAX, UINT32_C(0x80000000),
+        UINT32_C(0x7fffffff), UINT32_C(0x80000001),
+        UINT32_C(0x12345678), UINT32_C(0xabcdef01),
+    };
+    static const unsigned amounts[] = {0u, 1u, 7u, 31u, 32u, 33u, 63u, 64u, 255u, 256u};
+    static const unsigned aliases[][4] = {
+        {0u, 0u, 0u, 0u}, {8u, 8u, 8u, 8u}, {1u, 2u, 2u, 1u},
+        {13u, 7u, 14u, 13u}, {14u, 13u, 7u, 13u},
+    };
+    const uint32_t pc = UINT32_C(0x7000), nop = UINT32_C(0xe1a00000);
+    arm_cpu_t initial, reference, compact;
+    unsigned cases = 0u, conditions = 0u;
+    seed_cpu_at(&initial, &nop, 1u, false, pc);
+    for (unsigned variant = 0u; variant < 20u; variant++) {
+        const unsigned rn = variant < 15u ? (variant + 3u) % 15u : aliases[variant - 15u][0];
+        const unsigned rd = variant < 15u ? (variant + 7u) % 15u : aliases[variant - 15u][1];
+        const unsigned rm = variant < 15u ? variant : aliases[variant - 15u][2];
+        const unsigned rs = variant < 15u ? (variant + 11u) % 15u : aliases[variant - 15u][3];
+        for (unsigned op = 0u; op < 16u; op++)
+            for (unsigned setting = 0u; setting < 2u; setting++) {
+                if (op >= 8u && op <= 11u && !setting) continue;
+                for (unsigned type = 0u; type < 4u; type++)
+                    for (unsigned form = 0u; form < 2u; form++)
+                        for (unsigned index = 0u; index < (form ? 10u : 32u); index++)
+                            for (unsigned carry = 0u; carry < 2u; carry++) {
+                                const unsigned amount = form ? amounts[index] : index;
+                                const uint32_t insn = UINT32_C(0xe0000000) |
+                                    (op << 21) | (setting << 20) | (rn << 16) | (rd << 12) |
+                                    (type << 5) | rm | (form ? (rs << 8) | 16u : amount << 7);
+                                reference = initial;
+                                for (unsigned reg = 0u; reg < 15u; reg++)
+                                    reference.r[reg] = values[(reg + variant + index) & 7u];
+                                reference.r[rs] = UINT32_C(0x5a5a0000) | ((amount - 1u) & 255u);
+                                const unsigned flags = ((variant + type + index) & 13u) | (carry << 1);
+                                reference.cpsr = (initial.cpsr & UINT32_C(0x0fffffff)) | (flags << 28);
+                                compact = reference;
+                                /* Dirty operands before the shift, then consume its result
+                                 * in resident code. Aliases deliberately overlap these writes. */
+                                mem_w32(NULL, pc, UINT32_C(0xe2800001) | (rn << 16) | (rn << 12));
+                                mem_w32(NULL, pc + 4u, UINT32_C(0xe2200080) | (rm << 16) | (rm << 12));
+                                mem_w32(NULL, pc + 8u, UINT32_C(0xe2800001) | (rs << 16) | (rs << 12));
+                                mem_w32(NULL, pc + 12u, insn);
+                                mem_w32(NULL, pc + 16u, UINT32_C(0xe0200000) | rd);
+                                arm_status_t status = ARM_OK;
+                                for (unsigned step = 0u; step < 5u && status == ARM_OK; step++)
+                                    status = arm_step(&reference);
+                                unsigned completed = UINT_MAX;
+                                if (status != ARM_OK ||
+                                    !a64_compact_raw_run(&compact, &g_ram[pc], pc, 20u, 5u,
+                                                        g_ram, sizeof g_ram, &completed) ||
+                                    completed != 5u || !indirect_register_states_equal(&reference, &compact)) {
+                                    fprintf(stderr, "jitbench: resident operand=%08" PRIx32
+                                            " variant=%u amount=%u carry=%u completed=%u cpsr=%08" PRIx32
+                                            "/%08" PRIx32 "\n", insn, variant, amount, carry, completed,
+                                            reference.cpsr, compact.cpsr);
+                                    return false;
+                                }
+                                cases++;
+                            }
+            }
+    }
+    for (unsigned condition = 0u; condition < 15u; condition++)
+        for (unsigned flags = 0u; flags < 16u; flags++)
+            for (unsigned form = 0u; form < 2u; form++) {
+                reference = initial;
+                reference.r[0] = UINT32_C(0x80000001);
+                reference.r[11] = 32u;
+                reference.cpsr = (initial.cpsr & UINT32_C(0x0fffffff)) | (flags << 28);
+                compact = reference;
+                const uint32_t insn = (condition << 28) | UINT32_C(0x01b08060) |
+                                      (form ? (11u << 8) | 16u : 0u);
+                mem_w32(NULL, pc, UINT32_C(0xe2800001));
+                mem_w32(NULL, pc + 4u, insn);
+                arm_status_t status = arm_step(&reference);
+                if (status == ARM_OK) status = arm_step(&reference);
+                unsigned completed = UINT_MAX;
+                if (status != ARM_OK ||
+                    !a64_compact_raw_run(&compact, &g_ram[pc], pc, 8u, 2u,
+                                        g_ram, sizeof g_ram, &completed) ||
+                    completed != 2u || !indirect_register_states_equal(&reference, &compact)) {
+                    fprintf(stderr, "jitbench: resident shifted condition=%u flags=%u form=%u\n",
+                            condition, flags, form);
+                    return false;
+                }
+                conditions++;
+            }
+    if (cases != 188160u || conditions != 480u) return false;
+    printf("COMPACT-RAW-A32-RESIDENT-OPERAND-ORACLE exact=yes cases=%u conditions=%u "
+           "registers=all-nonpc aliases=yes dirty-inputs=yes carry=both shift-boundaries=yes\n",
+           cases, conditions);
+    return true;
+}
+
 static bool validate_compact_raw_thumb_register_oracle(void) {
     static const uint32_t values[16] = {
         0u, 1u, 31u, 32u, 33u, 64u, 255u, 256u,
@@ -9437,6 +9532,8 @@ static bool validate_compact_raw_oracles(void) {
     if (!validate_compact_raw_a32_register_shift_oracles())
         return false;
     if (!validate_compact_raw_a32_register_oracle())
+        return false;
+    if (!validate_compact_raw_a32_resident_operand_oracle())
         return false;
     if (!validate_compact_raw_wide_data_cache())
         return false;

@@ -3609,7 +3609,7 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
     """Live-word A32 execution with the same resident ABI as the Thumb tier.
 
     Tables specialize ISA operands at build time, never guest code. Immediate
-    DP, low-register unshifted DP, immediate word/byte transfers and B/BL stay
+    DP, non-PC shifted-register DP, immediate word/byte transfers and B/BL stay
     resident. Everything else spills into the old decoder exactly once. No
     guest state changes before an instruction's final guard has succeeded.
     """
@@ -3732,7 +3732,7 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
             # Only the ordinary unshifted, all-low-register form. The high
             # register and shift bits also reject BX/MSR/multiply/extra space.
             "    mov w11, #0x8ff8", "    movk w11, #8, lsl #16",
-            "    tst w9, w11", f"    b.ne {prefix}decode",
+            "    tst w9, w11", f"    b.ne {prefix}register_operand",
             "    ubfx w10, w9, #20, #5", "    ubfx w11, w9, #16, #3",
             "    add w10, w11, w10, lsl #3", "    ubfx w11, w9, #12, #3",
             "    add w10, w11, w10, lsl #3", "    and w11, w9, #7",
@@ -3761,6 +3761,80 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
                  "    stp w6, w7, [x19, #24]", "    str w28, [x20]",
                  "    mov w28, #4", *table_address(16, ".La64cr_dp_table"),
                  *table_address(17, ".La64cr_cond_table"), f"    b {target}"]
+    # The uncommon register-operand family supplies the same w8 operand as
+    # the immediate table. Keep its shifter outside the already-fast low,
+    # unshifted path and do not multiply handlers by shift type/amount/Rs.
+    # All encoding/PC guards precede changes to resident architectural state.
+    body += [f"{prefix}register_operand:",
+             "    tbz w9, #4, 1f", "    tbnz w9, #7, " + prefix + "decode", "1:",
+             "    ubfx w10, w9, #23, #2", "    cmp w10, #2", "    b.ne 2f",
+             f"    tbz w9, #20, {prefix}decode", "2:",
+             "    ubfx w10, w9, #12, #4", "    cmp w10, #15",
+             f"    b.eq {prefix}decode", "    ubfx w10, w9, #16, #4",
+             "    cmp w10, #15", f"    b.eq {prefix}decode",
+             "    and w10, w9, #15", *table_address(15, prefix + "operand_rm"),
+             "    ldrsw x10, [x15, w10, uxtw #2]", "    add x15, x15, x10",
+             "    br x15", f"{prefix}operand_rm_ready:",
+             "    ubfx w12, w28, #29, #1", f"    tbz w9, #4, {prefix}operand_imm",
+             "    ubfx w10, w9, #8, #4", *table_address(15, prefix + "operand_rs"),
+             "    ldrsw x10, [x15, w10, uxtw #2]", "    add x15, x15, x10",
+             "    br x15", f"{prefix}operand_rs_ready:",
+             # Rs[7:0]==0 preserves the operand AND carry for all shift kinds.
+             f"    cbz w14, {prefix}operand_ready", f"    b {prefix}operand_kind",
+             f"{prefix}operand_imm:", "    ubfx w14, w9, #7, #5",
+             f"    cbnz w14, {prefix}operand_kind", "    ubfx w10, w9, #5, #2",
+             f"    cbz w10, {prefix}operand_ready", "    cmp w10, #3",
+             f"    b.eq {prefix}operand_rrx", "    mov w14, #32",
+             f"{prefix}operand_kind:", "    ubfx w10, w9, #5, #2",
+             f"    cbz w10, {prefix}operand_lsl", "    cmp w10, #1",
+             f"    b.eq {prefix}operand_lsr", "    cmp w10, #2",
+             f"    b.eq {prefix}operand_asr",
+             # A nonzero multiple-of-32 ROR leaves the value unchanged but
+             # sets carry from bit31; A64's modulo count is correct here.
+             "    rorv w8, w8, w14", "    lsr w12, w8, #31",
+             f"    b {prefix}operand_ready",
+             f"{prefix}operand_rrx:", "    and w13, w8, #1", "    lsr w8, w8, #1",
+             "    orr w8, w8, w12, lsl #31", "    mov w12, w13",
+             f"    b {prefix}operand_ready",
+             f"{prefix}operand_lsl:", "    cmp w14, #32",
+             f"    b.hi {prefix}operand_zero", f"    b.eq {prefix}operand_lsl_32",
+             "    mov w13, #32", "    sub w13, w13, w14", "    lsrv w12, w8, w13",
+             "    lslv w8, w8, w14", f"    b {prefix}operand_ready",
+             f"{prefix}operand_lsl_32:", "    mov w12, w8", "    mov w8, wzr",
+             f"    b {prefix}operand_ready",
+             f"{prefix}operand_lsr:", "    cmp w14, #32",
+             f"    b.hi {prefix}operand_zero", f"    b.eq {prefix}operand_lsr_32",
+             "    sub w13, w14, #1", "    lsrv w12, w8, w13", "    lsrv w8, w8, w14",
+             f"    b {prefix}operand_ready",
+             f"{prefix}operand_lsr_32:", "    lsr w12, w8, #31", "    mov w8, wzr",
+             f"    b {prefix}operand_ready",
+             f"{prefix}operand_asr:", "    cmp w14, #32",
+             f"    b.hs {prefix}operand_asr_32", "    sub w13, w14, #1",
+             "    lsrv w12, w8, w13", "    asrv w8, w8, w14",
+             f"    b {prefix}operand_ready",
+             f"{prefix}operand_asr_32:", "    lsr w12, w8, #31", "    asr w8, w8, #31",
+             f"    b {prefix}operand_ready",
+             f"{prefix}operand_zero:", "    mov w12, wzr", "    mov w8, wzr",
+             f"{prefix}operand_ready:",
+             # Only logical S operations consume shifter carry. ADC/SBC/RSC
+             # must still read the OLD C, and arithmetic S supplies its own C.
+             "    tbz w9, #20, 1f", "    mov w10, #0xf303",
+             "    ubfx w13, w9, #21, #4", "    lsrv w10, w10, w13",
+             "    tbz w10, #0, 1f", "    bfi w28, w12, #29, #1", "1:",
+             # Zero rotation tells the immediate-table logical handlers to
+             # preserve the carry already selected above. All guards passed;
+             # dispatch cannot now fall into a miscellaneous/PC handler.
+             "    mov w11, wzr", "    ubfx w10, w9, #12, #13",
+             f"    b {prefix}dispatch"]
+    for role, destination in (("rm", 8), ("rs", 14)):
+        for reg in range(15):
+            loads, value = read(reg, destination)
+            body += [f"{prefix}operand_{role}_{reg}:", *loads]
+            if role == "rs":
+                body += [f"    and w14, {value}, #255"]
+            elif value != "w8":
+                body += [f"    mov w8, {value}"]
+            body += [f"    b {prefix}operand_{role}_ready"]
     body += compact_register_memory(prefix)
     table = ["", ".p2align 2", f"{prefix}table:"]
     handlers: dict[tuple[str, ...], str] = {}
@@ -3784,6 +3858,11 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
         append(memory(key))
     table += [f"{prefix}conditions:"]
     table += [f"    .long {prefix}condition_{i} - {prefix}conditions" for i in range(14)]
+    for role in ("rm", "rs"):
+        table += [f"{prefix}operand_{role}:"]
+        table += [f"    .long {prefix}operand_{role}_{reg} - {prefix}operand_{role}"
+                  for reg in range(15)]
+        table += [f"    .long {prefix}decode - {prefix}operand_{role}"]
     return body, table
 
 
