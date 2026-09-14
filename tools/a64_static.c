@@ -2150,7 +2150,7 @@ _Static_assert(offsetof(arm_ram_window_t, read_host) == 104u &&
                    offsetof(arm_ram_window_t, bytes) == 124u &&
                    sizeof(arm_ram_window_t) == 128u,
                "compact raw RAM capability layout drifted");
-_Static_assert(ARM_TLB_ENTRIES == 4096u && ARM_DREAD_ENTRIES == 64u &&
+_Static_assert(ARM_TLB_ENTRIES == 4096u && ARM_DREAD_ENTRIES == 4096u &&
                    sizeof(((arm_cpu_t *)0)->tlb[0]) == 16u &&
                    offsetof(arm_cpu_t, tlb[0].tag) -
                        offsetof(arm_cpu_t, tlb[0]) == 4u &&

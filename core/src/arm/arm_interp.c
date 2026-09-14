@@ -53,7 +53,7 @@ static inline bool cpu_is_priv(const arm_cpu_t *c) {
  * contract in arm.h.
  */
 /* arm_cpu_t deliberately carries large translation/data caches.  The saved
- * rollback image below is therefore about 68 KiB in the shipping arm64 build.
+ * rollback image below is therefore about 193 KiB in the arm64 build.
  * Apple Clang LTO used to inline this helper into arm_step(), making every
  * ordinary guest instruction call ___chkstk_darwin and reserve that frame even
  * though only an actual privileged SVC can reach the snapshot.  Keep the rare

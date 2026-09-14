@@ -6762,6 +6762,84 @@ static a64_compact_raw_fallback_result_t compact_raw_resident_oracle_step(
     return A64_COMPACT_RAW_FALLBACK_RETIRE_CONTINUE;
 }
 
+/* Exercise cache indices beyond the former six-bit mask, including wrap at
+ * the final slot and the privilege offset. Every pointer comes from a real
+ * nonidentity MMU translation, not an invented direct-access witness. */
+static bool validate_compact_raw_wide_data_cache(void) {
+    static const unsigned pages[] = {63u, 64u, 1023u, 2047u, 2048u, 4095u};
+    static const uint32_t operations[] = {
+        UINT32_C(0xe5960000), UINT32_C(0xe5860000), /* resident A32 LDR/STR */
+        UINT32_C(0xe7960002), UINT32_C(0xe7860002), /* raw A32 LDR/STR [r6,r2] */
+        UINT32_C(0x6830), UINT32_C(0x6030),         /* resident Thumb LDR/STR */
+        UINT32_C(0x8830), UINT32_C(0x8030),         /* Thumb LDRH/STRH */
+    };
+    const uint32_t pc = UINT32_C(0x7000);
+    arm_bus_t bus = g_bus;
+    unsigned cases = 0u;
+    bus.host_ram_write = mem_host_ram;
+    for (unsigned priv = 0u; priv < 2u; priv++)
+        for (unsigned page = 0u; page < sizeof pages / sizeof pages[0]; page++)
+            for (unsigned op = 0u; op < sizeof operations / sizeof operations[0]; op++) {
+                arm_cpu_t reference, compact;
+                const bool thumb = op >= 4u, write = (op & 1u) != 0u;
+                const uint16_t halfword = (uint16_t)operations[op];
+                const uint32_t va = UINT32_C(0x80000020) + (pages[page] << 10);
+                const uint32_t physical = va & (RAM_SIZE - 1u);
+                const arm_access_t access = write ? ARM_ACCESS_WRITE : ARM_ACCESS_READ;
+                const void *program = thumb ? (const void *)&halfword :
+                                              (const void *)&operations[op];
+                uint32_t pa = UINT32_MAX;
+                seed_cpu_at(&reference, program, 1u, thumb, pc);
+                reference.bus = &bus;
+                reference.cpsr = (reference.cpsr & ~ARM_CPSR_MODE_MASK) |
+                                 (priv ? ARM_MODE_SYS : ARM_MODE_USR);
+                reference.r[0] = UINT32_C(0xaabbccdd);
+                reference.r[2] = 0u;
+                reference.r[6] = va;
+                reference.cp15.sctlr = ARM_SCTLR_M;
+                reference.cp15.ttbr0 = 0x4000u;
+                reference.cp15.dacr = 1u;
+                mem_w32(NULL, 0x4000u, (3u << 10) | 2u);
+                mem_w32(NULL, 0x4000u + ((va >> 20) << 2), (3u << 10) | 2u);
+                mem_w32(NULL, physical, UINT32_C(0x89abcdef));
+                if (arm_mmu_translate(&reference, pc, ARM_ACCESS_FETCH, priv != 0u, &pa) ||
+                    pa != pc || !arm_fetch_cache_try_refill(&reference, pc, priv != 0u) ||
+                    arm_mmu_translate(&reference, va, access, priv != 0u, &pa) ||
+                    pa != physical ||
+                    !arm_data_cache_try_refill(&reference, va, access, priv != 0u)) {
+                    fprintf(stderr, "jitbench: wide data-cache translation failed\n");
+                    return false;
+                }
+                compact = reference;
+                const uint32_t before = mem_r32(NULL, physical);
+                const arm_status_t status = arm_step(&reference);
+                const uint64_t expected_ram = hash_ram();
+                mem_w32(NULL, physical, before);
+                compact_raw_resident_oracle_context_t context;
+                memset(&context, 0, sizeof context);
+                context.cpu = &compact;
+                context.status = ARM_OK;
+                context.code = g_ram;
+                context.code_bytes = (uint32_t)sizeof g_ram;
+                unsigned completed = UINT_MAX, native = UINT_MAX, fallback = UINT_MAX;
+                if (status != ARM_OK || !a64_compact_raw_run_code_window_resident(
+                        &compact, &g_ram[pc], pc, 4u, 1u,
+                        compact_raw_resident_oracle_step, &context,
+                        &completed, &native, &fallback) ||
+                    completed != 1u || native != 1u || fallback != 0u || context.calls != 0u ||
+                    !static_vfp_states_equal(&reference, &compact) || hash_ram() != expected_ram) {
+                    fprintf(stderr, "jitbench: wide data-cache page=%u priv=%u op=%u "
+                            "completed/native/fallback=%u/%u/%u\n",
+                            pages[page], priv, op, completed, native, fallback);
+                    return false;
+                }
+                cases++;
+            }
+    printf("COMPACT-RAW-WIDE-DATA-CACHE exact=yes cases=%u last-slot=yes "
+           "privileges=both nonidentity=yes native-only=yes\n", cases);
+    return true;
+}
+
 static bool compact_raw_resident_compare(
         const char *name, const void *program, unsigned insns, bool thumb,
         uint32_t pc, uint32_t initial_code_base,
@@ -9359,6 +9437,8 @@ static bool validate_compact_raw_oracles(void) {
     if (!validate_compact_raw_a32_register_shift_oracles())
         return false;
     if (!validate_compact_raw_a32_register_oracle())
+        return false;
+    if (!validate_compact_raw_wide_data_cache())
         return false;
 
     for (unsigned i = 0u; i < sizeof result_ops / sizeof result_ops[0]; i++) {

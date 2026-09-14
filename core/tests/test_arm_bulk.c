@@ -330,13 +330,13 @@ static void test_length_prefixes(void) {
         while (cpu.r[15] != CODE + 48u) (void)arm_step(&cpu);
         if (scenario == 0u) cpu.r[1] ^= 1u;
         if (scenario == 1u) cpu.r[0]++;
-        if (scenario == 2u) cpu.dread[(DATA >> 10) & 63u].host = NULL;
+        if (scenario == 2u) cpu.dread[(DATA >> 10) & (ARM_DREAD_ENTRIES - 1u)].host = NULL;
         refusal(&cpu, &memory, 256u);
     }
     arm_cpu_t cpu; arm_bulk_memory_t memory;
     cached_setup(&cpu, &memory, 0x13f4u, 83u);
     while (cpu.r[15] != CODE + 48u) (void)arm_step(&cpu);
-    cpu.dread[(0x1400u >> 10) & 63u].host = NULL;
+    cpu.dread[(0x1400u >> 10) & (ARM_DREAD_ENTRIES - 1u)].host = NULL;
     CHECK(prefix_differential(&cpu, &memory, 256u, false) == 10u,
           "length cold-page prefix did not stop before the missing load");
 }
@@ -391,7 +391,7 @@ static void test_compare_prefixes(void) {
     CHECK(arm_data_cache_try_refill(&cpu, DATA, ARM_ACCESS_READ, false), "left map");
     CHECK(arm_data_cache_try_refill(&cpu, 0x2000u, ARM_ACCESS_READ, false), "right map");
     CHECK(prefix_differential(&cpu, &memory, 256u, true) == 252u, "cached compare");
-    cpu.dread[(0x2000u >> 10) & 63u].gen++;
+    cpu.dread[(0x2000u >> 10) & (ARM_DREAD_ENTRIES - 1u)].gen++;
     refusal(&cpu, &memory, 256u);
 }
 
@@ -551,13 +551,13 @@ static void test_thumb_chains(void) {
         memory.flat_ram = NULL; memory.data_cache = true;
         (void)arm_data_cache_try_refill(&cpu, DATA, ARM_ACCESS_READ, false);
         (void)arm_data_cache_try_refill(&cpu, 0x3000u, ARM_ACCESS_READ, false);
-        cpu.dread[(DATA >> 10) & 63u].gen++;
+        cpu.dread[(DATA >> 10) & (ARM_DREAD_ENTRIES - 1u)].gen++;
         refusal(&cpu, &memory, 256u);
     }
 }
 
 /* Alternate nodes between VAs 64KiB apart, mapped to distinct physical pages.
- * They collide in DREAD but not the larger, already permission-checked TLB.
+ * Both have live permission-checked TLB mappings; DREAD can remain cold.
  * Neither the bulk executor nor its refusal path may fill a software cache. */
 static void chain_tlb_setup(arm_cpu_t *cpu, arm_bulk_memory_t *memory,
                              arm_ram_window_t *window, unsigned kind) {
@@ -601,16 +601,16 @@ static void test_thumb_chain_tlb(void) {
         arm_cpu_t cpu; arm_bulk_memory_t memory; arm_ram_window_t window;
         chain_tlb_setup(&cpu, &memory, &window, kind);
         CHECK(arm_data_cache_try_refill(&cpu, DATA, ARM_ACCESS_READ, false),
-              "warm colliding DREAD page");
-        CHECK(((DATA >> 10) & (ARM_DREAD_ENTRIES - 1u)) ==
-                  ((0x11000u >> 10) & (ARM_DREAD_ENTRIES - 1u)), "DREAD collision");
+              "warm first DREAD page");
+        CHECK(!cpu.dread[(0x11000u >> 10) & (ARM_DREAD_ENTRIES - 1u)].host,
+              "second DREAD page must remain cold");
         memory.ram_window = NULL;
         refusal(&cpu, &memory, 4096u);
         memset(cpu.dread, 0, sizeof cpu.dread);
         memory.ram_window = &window;
         uint64_t hits = cpu.tlb_hits, dread = cpu.dread_hits;
         CHECK(chain_differential(&cpu, &memory, 4096u, kind) == 127u * stride,
-              "TLB-backed chain did not batch across colliding DREAD pages");
+              "TLB-backed chain did not batch across cold DREAD pages");
         CHECK(cpu.tlb_hits - hits == 127u * (kind ? 5u : 2u) &&
                   cpu.dread_hits == dread, "READ TLB grants mislabeled as DREAD hits");
         for (unsigned budget = 0u; budget <= 256u; budget++) {

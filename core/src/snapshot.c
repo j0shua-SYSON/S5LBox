@@ -115,7 +115,9 @@ SNAP_SIZE_GUARD(arm_cp15_t,        64,    "snap_cpu");
  * below, and justified the same way. Measured with the compiler's failed size
  * guard and confirmed by the successful guard below, not assumed from source
  * arithmetic; the padding is exactly why. */
-SNAP_SIZE_GUARD(arm_cpu_t,         68112,   "snap_cpu");
+/* Enlarging those same derived caches adds 2 x (4096 - 64) x 16 bytes.
+ * No CPU field or serialized byte is added; snap_cpu still clears both. */
+SNAP_SIZE_GUARD(arm_cpu_t,         197136,  "snap_cpu");
 SNAP_SIZE_GUARD(s5l_uart_t,        8280,  "snap_uart");
 SNAP_SIZE_GUARD(s5l_vic_t,         16,    "snap_vic");
 SNAP_SIZE_GUARD(s5l_timer_t,       40,    "snap_timer");
@@ -219,7 +221,7 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * owner, also deliberately absent from snap_mach(); load revokes its proofs
  * before replacing RAM. The size below must be read from the
  * compiler's emitted `.space`, not inferred from source padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         127944, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         256968, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */

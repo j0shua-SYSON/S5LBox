@@ -2492,6 +2492,55 @@ static void test_data_cache_refill_requires_an_exact_live_witness(void) {
           "non-RAM data translation produced a direct pointer");
 }
 
+/* Retain a working set larger than the old 64 KiB direct-access cache in
+ * both directions and privileges. Translation is deliberately nonidentity. */
+static void test_data_cache_retains_a_larger_working_set(void) {
+    arm_bus_t bus = g_bus;
+    arm_cpu_t c;
+    bus.host_ram = m_host_ram;
+    bus.host_ram_write = m_host_ram_write;
+    memset(g_ram, 0, sizeof g_ram);
+    m_w32(NULL, 0x4000u + (0x800u << 2), (3u << 10) | 2u);
+    arm_reset(&c, &bus);
+    c.cp15.ttbr0 = 0x4000u;
+    c.cp15.dacr = 1u;
+    c.cp15.sctlr = ARM_SCTLR_M;
+    for (unsigned priv = 0u; priv < 2u; priv++)
+        for (unsigned write = 0u; write < 2u; write++)
+            for (unsigned page = 0u; page < 128u; page++) {
+                const uint32_t va = UINT32_C(0x80000020) + (page << 10);
+                const arm_access_t access = write ? ARM_ACCESS_WRITE : ARM_ACCESS_READ;
+                uint32_t pa = UINT32_MAX;
+                CHECK(arm_mmu_translate(&c, va, access, priv != 0u, &pa) == 0u &&
+                          pa == (page << 10) + 0x20u,
+                      "working-set translation page=%u priv=%u write=%u", page, priv, write);
+                CHECK(arm_data_cache_try_refill(&c, va, access, priv != 0u),
+                      "working-set refill page=%u priv=%u write=%u", page, priv, write);
+            }
+    const uint64_t hits = c.tlb_hits, misses = c.tlb_misses;
+    for (unsigned priv = 0u; priv < 2u; priv++)
+        for (unsigned page = 0u; page < 128u; page++) {
+            const uint32_t va = UINT32_C(0x80000020) + (page << 10);
+            const unsigned slot = ((va >> 10) + priv * (ARM_DREAD_ENTRIES / 2u)) &
+                                  (ARM_DREAD_ENTRIES - 1u);
+            CHECK(c.dread[slot].host == g_ram + (page << 10) &&
+                      c.dwrite[slot].host == g_ram + (page << 10) &&
+                      c.dread[slot].tag == ((va & ~ARM_DREAD_BLK_MASK) | priv) &&
+                      c.dwrite[slot].tag == c.dread[slot].tag &&
+                      c.dread[slot].gen == c.tlb_gen && c.dwrite[slot].gen == c.tlb_gen,
+                  "working-set block displaced page=%u priv=%u", page, priv);
+            CHECK(arm_data_cache_try_refill(&c, va, ARM_ACCESS_READ, priv != 0u) &&
+                      arm_data_cache_try_refill(&c, va, ARM_ACCESS_WRITE, priv != 0u),
+                  "retained working-set block was not reusable");
+        }
+    CHECK(c.tlb_hits == hits && c.tlb_misses == misses,
+          "retained data blocks required another TLB lookup");
+    arm_mmu_tlb_flush(&c);
+    CHECK(!arm_data_cache_try_refill(&c, UINT32_C(0x80000020), ARM_ACCESS_READ, false) &&
+              !arm_data_cache_try_refill(&c, UINT32_C(0x80000020), ARM_ACCESS_WRITE, true),
+          "larger data cache survived translation revocation");
+}
+
 static void test_abort_restores_base_register(void) {
     /* Base Restored Abort Model: after a data abort the base and destination
      * registers must be unchanged so the handler can retry the instruction. */
@@ -5935,6 +5984,7 @@ int main(void) {
     test_force_access_flag_faults_precede_domain_permissions();
     test_fetch_cache_refill_requires_an_exact_live_witness();
     test_data_cache_refill_requires_an_exact_live_witness();
+    test_data_cache_retains_a_larger_working_set();
     test_abort_restores_base_register();
     test_sctlr_a_faults_ordinary_unaligned_accesses();
     test_sctlr_u_selects_legacy_or_armv6_unaligned_data();
