@@ -6,6 +6,26 @@ Real refreshes complete, but still take minutes; the seconds-level usability
 target is not met. Catalog equivalence and package-removal rollback are still
 acceptance gates, so this is not a default guest-library replacement.
 
+## HTTP timestamp ordering trial (September 14)
+
+An unchanged 8,245,184-byte BigBoss index was processed again on warm refresh,
+with its modification time replaced by the guest's January 1970 clock. Exact
+checkpoint replay observed gzip copying the already-wrong input modification
+time; its `utime` succeeded. The actual publisher HTTP executable uses a
+CFReadStream success path that leaves `File` open across `utime` and `URIDone`.
+Do not infer that path from the unmodified Debian HTTP source.
+
+`patch_guest_apt_http.py` creates an exact-identity offline trial that deletes
+and clears `File` before the original timestamp/hash/publication sequence.
+It adds no imports, segments or runtime options. The independent verifier
+checks unchanged bytes outside the detour and its two signature-page hashes.
+`guest_apt_arm_probe --http-close` executes the real success path with null,
+ARM and Thumb destructor fixtures (147 checks); the original fails the ordering
+regression. These checks do not prove filesystem writeback behavior, loading
+in the guest, a faster refresh, or a general emulator improvement. The trial
+is not part of the default bootstrap. Consecutive physical refreshes with
+correct timestamps, unchanged content and valid conditional reuse remain gates.
+
 The exact pinned `apt7-lib` 0.7.20.2-1 library implements `WriteUniqString` with
 a 26-entry recent-value cache followed by a descending sorted linked-list
 search. Every visited node calls `strlen` and a signed-byte range comparator.

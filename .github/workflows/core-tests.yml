@@ -421,7 +421,7 @@ jobs:
             build-apt-input/library.deb | sha256sum --check -
           ar p build-apt-input/library.deb data.tar.lzma \
             | xz --format=lzma --decompress \
-            | tar -x -C build-apt-input ./usr/lib/libapt-pkg.dylib.4.6.0
+            | tar -x -C build-apt-input ./usr/lib/libapt-pkg.dylib.4.6.0 ./usr/lib/apt/methods/http
 
       - name: Compile actual Apple ARMv6 calling convention
         run: |
@@ -445,6 +445,13 @@ jobs:
             build-apt-input/usr/lib/libapt-pkg.dylib.4.6.0 \
             build-apt-input/library-indexed.dylib
 
+      - name: Verify HTTP close-before-timestamp trial
+        run: |
+          python3 -B tools/patch_guest_apt_http.py \
+            build-apt-input/usr/lib/apt/methods/http build-apt-input/http-closed
+          python3 -B tools/verify_guest_apt_http.py \
+            build-apt-input/usr/lib/apt/methods/http build-apt-input/http-closed
+
       - name: Execute original and replacement ARM code
         run: |
           cmake -S . -B build-apt-probe -DCMAKE_BUILD_TYPE=Release \
@@ -453,6 +460,11 @@ jobs:
           ./build-apt-probe/core/guest_apt_arm_probe \
             build-apt-input/usr/lib/libapt-pkg.dylib.4.6.0 \
             build-apt-input/library-indexed.dylib
+          ./build-apt-probe/core/guest_apt_arm_probe --http-close build-apt-input/http-closed
+          if ./build-apt-probe/core/guest_apt_arm_probe --http-close build-apt-input/usr/lib/apt/methods/http; then
+            echo "Original HTTP unexpectedly passed close-order regression"
+            exit 1
+          fi
 
   strict:
     # Every C target, including host tools and the app's portable bridge, must

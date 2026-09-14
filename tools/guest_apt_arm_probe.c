@@ -53,7 +53,7 @@ static uint32_t le32(const uint8_t *p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
 
-static int load_library(const char *path) {
+static int load_image(const char *path, uint32_t kind) {
     FILE *file = fopen(path, "rb");
     if (!file) { perror(path); return 0; }
     if (fseek(file, 0, SEEK_END)) { fclose(file); return 0; }
@@ -64,7 +64,7 @@ static int load_library(const char *path) {
     if (!data) { fclose(file); return 0; }
     int ok = fread(data, 1, n, file) == n;
     fclose(file);
-    if (!ok || le32(data) != 0xfeedface || le32(data+4) != 12 || le32(data+12) != 6) goto bad;
+    if (!ok || le32(data) != 0xfeedface || le32(data+4) != 12 || le32(data+12) != kind) goto bad;
     uint32_t count = le32(data+16), command_size = le32(data+20), at = 28;
     if (count > 64 || command_size > n - 28) goto bad;
     memset(ram, 0, sizeof ram);
@@ -86,7 +86,7 @@ static int load_library(const char *path) {
     return 1;
 bad:
     free(data);
-    fprintf(stderr, "invalid bounded ARM library: %s\n", path);
+    fprintf(stderr, "invalid bounded ARM image: %s\n", path);
     return 0;
 }
 
@@ -109,7 +109,7 @@ static void generator_reset(void) {
 }
 
 static int setup(const char *path, int fail) {
-    if (!load_library(path)) return 0;
+    if (!load_image(path, 6)) return 0;
     for (unsigned i = 0; i < sizeof strlen_words / 4; ++i)
         w32(NULL, STRLEN_CODE + i * 4, strlen_words[i]);
     w32(NULL, 0xd19a4, 0xea000000u | (((STRLEN_CODE - 0xd19a4u - 8u) >> 2) & 0xffffffu));
@@ -279,7 +279,85 @@ static int edge_cases(const char *original, const char *candidate) {
     return 1;
 }
 
+/* Execute the HTTP success path through the original utime call. Only the
+ * virtual destructor and two libc calls are fixtures. The null-file case and
+ * both ARM/Thumb virtual callees must rejoin with the original frame intact. */
+static int http_close_test(const char *path) {
+    const uint32_t object = GENERATOR, file = INPUT, table = MAP_TOKEN;
+    const uint32_t queue = GENERATOR + 0x100, name = INPUT + 0x100;
+    const uint32_t destructor = 0x184000, last_modified = 1789306673;
+    for (unsigned scenario = 0; scenario < 3; ++scenario) {
+        if (!load_image(path, 2)) return 2;
+        memset(&cpu, 0, sizeof cpu);
+        arm_reset(&cpu, &bus);
+        fault = 0;
+        cpu.cpsr = ARM_MODE_USR | ARM_CPSR_I | ARM_CPSR_F;
+        for (unsigned r = 0; r < 15; ++r) cpu.r[r] = 0x55000000u + r;
+        cpu.r[7] = STACK;
+        cpu.r[13] = STACK - 0x3000;
+        cpu.r[15] = 0xb25c;
+        w32(NULL, STACK - 0x2d70, object);
+        w32(NULL, STACK - 0x12c, last_modified);
+        w32(NULL, object + 0x1c, scenario ? file : 0);
+        w32(NULL, object + 0x10, queue);
+        w32(NULL, queue + 8, name);
+        w32(NULL, file, table);
+        w32(NULL, table + 4, destructor | (scenario == 2));
+        unsigned closes = 0, times = 0, stamps = 0, steps = 0;
+        while (cpu.r[15] != 0xb2a8 && !fault && steps++ < 200) {
+            uint32_t pc = cpu.r[15], result = 0;
+            if (pc == destructor) {
+                CHECK(scenario && !closes && cpu.r[0] == file,
+                      "HTTP virtual destructor object/lifetime");
+                CHECK(!!(cpu.cpsr & ARM_CPSR_T) == (scenario == 2),
+                      "HTTP virtual destructor interworking");
+                CHECK(!times && !stamps, "HTTP closes before timestamp calls");
+                ++closes;
+            } else if (pc == 0xfac8) {
+                CHECK(!times++ && !stamps, "HTTP time call count/order");
+                CHECK(cpu.r[0] == STACK - 0xe8, "HTTP time buffer ABI");
+                w32(NULL, cpu.r[0], 2752);
+                result = 2752;
+            } else if (pc == 0xfaec) {
+                CHECK(closes == !!scenario && times == 1 && !stamps++,
+                      "HTTP utime follows completed close");
+                CHECK(!r32(NULL, object + 0x1c), "HTTP File cleared before utime");
+                CHECK(cpu.r[0] == name && cpu.r[1] == STACK - 0xe8,
+                      "HTTP utime path/buffer ABI");
+                CHECK(r32(NULL, cpu.r[1]) == last_modified &&
+                      r32(NULL, cpu.r[1] + 4) == last_modified,
+                      "HTTP preserves server access/modification times");
+            } else {
+                arm_status_t status = arm_step(&cpu);
+                CHECK(status == ARM_OK && (cpu.cpsr & 31u) == ARM_MODE_USR,
+                      "HTTP ARM execution status=%d pc=%08x", (int)status, pc);
+                if (status != ARM_OK || (cpu.cpsr & 31u) != ARM_MODE_USR) return 1;
+                continue;
+            }
+            uint32_t target = cpu.r[14];
+            cpu.r[0] = result;
+            cpu.r[1] = 0xfbad0001; cpu.r[2] = 0xfbad0002; cpu.r[3] = 0xfbad0003;
+            cpu.r[9] = 0xfbad0009; cpu.r[12] = 0xfbad000c; cpu.r[14] = 0xfbad000e;
+            cpu.cpsr = ((cpu.cpsr & 0x0fffffff) & ~ARM_CPSR_T) | 0xa0000000;
+            if (target & 1) cpu.cpsr |= ARM_CPSR_T;
+            cpu.r[15] = target & ~1u;
+        }
+        CHECK(!fault && cpu.r[15] == 0xb2a8, "HTTP reaches original hash path");
+        CHECK(closes == !!scenario && times == 1 && stamps == 1,
+              "HTTP success-path call counts");
+        CHECK(cpu.r[7] == STACK && cpu.r[13] == STACK - 0x3000,
+              "HTTP preserves frame and stack");
+        for (unsigned r = 4; r <= 11; ++r)
+            if (r != 7 && r != 9)
+                CHECK(cpu.r[r] == 0x55000000u + r, "HTTP preserves r%u", r);
+    }
+    printf("HTTP close ordering: %u checks, %u failures; ARM execution, not OS timing\n",
+           checks, failures);
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 3 && !strcmp(argv[1], "--http-close")) return http_close_test(argv[2]);
     if (argc != 3 && !(argc == 4 && !strcmp(argv[3], "--edges-only"))) {
         fprintf(stderr, "usage: guest_apt_arm_probe ORIGINAL DYLIB_EXPERIMENT [--edges-only]\n"); return 2;
     }
