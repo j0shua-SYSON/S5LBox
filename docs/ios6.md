@@ -758,6 +758,39 @@ inconsistent source fields are refused, following
 Tests cover zero, every single-bit position, mixed patterns, IT conditions,
 separately mapped instruction halves and ARM1176's existing framing.
 
+Thumb-wide REV, REV16 and REVSH reverse the word's bytes, reverse bytes
+within each halfword, or reverse and sign-extend the low halfword. The
+decoder shares the duplicated-source and SP/PC checks with RBIT; it reads
+the source before writing an overlapping destination and preserves flags.
+See [DDI0406C.b, A8.8.145..147](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Tests use independent byte selection across all byte values and all register
+pairings, including aliases, invalid operands, IT skips and legacy framing.
+Guest translation/permission/XN faults and checked-bus failures verify that
+both instruction halves are fetched before effects or condition evaluation;
+an owner-cleared bus failure permits one complete retry.
+
+An isolated fixture runs the unchanged 82-byte Thumb `memcmp` at
+`0x391d214c..0x391d219e` from the verified N88 cache. Before wide REV,
+the first aligned four-byte difference stopped after 13 instructions at
+`0x391d216c`, having read four bytes from each input. With REV, all 1,458
+prepared calls return and match an independent unsigned-byte comparison
+sign. They cover selected lengths 0..257, every pair of byte alignments,
+equal inputs, and first/middle/last/two differences, including embedded NULs
+and high-bit bytes. The fixture checks the exact consumed prefix of each
+separate User buffer, whole-page canaries, an eight-byte saved frame,
+preserved general/FP registers and FP status. It does not establish aliased
+inputs, process execution, a complete boot or physical execution.
+
+The unchanged ARM `strlen` at `0x391d2d58..0x391d2db4` also passes 1,332
+isolated calls using existing UQSUB8, REV and CLZ support. Cases include
+selected lengths 0..511, all byte alignments, every nonzero byte value,
+three padding patterns and terminators at the end of a User page. The
+fixture explicitly prepares up to three bytes before the input and after
+its terminator for aligned word loads, and checks each consumed byte once,
+the literal read, eight-byte saved frame, canaries and preserved registers.
+This is routine-level evidence with synthetic mappings; it adds no CPU
+behavior and does not establish process or boot execution.
+
 Thumb PKHBT/PKHTB combine halfwords after shifting the second operand.
 The dedicated decode validates S/T fields and excludes SP/PC, then uses the
 existing A32 packing arithmetic. Encoded zero means no shift for PKHBT and
@@ -998,7 +1031,7 @@ establish that result.
   and arithmetic (also with shifted registers), immediate LDR/STR and
   byte/halfword transfers (including signed loads and pre/post indexing),
   literals, doubleword transfers, A8 exclusive accesses, extend/add forms, bitfields and word/long
-  multiply/accumulate, CLZ, RBIT and PKH. Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple
+  multiply/accumulate, CLZ, RBIT, REV/REV16/REVSH and PKH. Wide B/BL/BLX, CBZ/CBNZ and IA/DB multiple
   transfers, narrow register loads, TBB and bounded TBH are also implemented. Other instruction
   families remain to implement. IT state
   and conditional execution are implemented for the supported Thumb families.

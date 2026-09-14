@@ -599,6 +599,33 @@ static void test_exception_and_host_hook_paths(void) {
     }
 }
 
+static void test_thumb_byte_reverse_fetch_retry(void) {
+    static const unsigned ops[]={0x80u,0x90u,0xb0u};
+    static const uint32_t results[]={0x80563412u,0x34128056u,0xffff8056u};
+    for (unsigned kind=0;kind<3u;kind++)
+     for (unsigned host=0;host<2u;host++)
+      for (unsigned half=0;half<2u;half++)
+       for (unsigned skip=0;skip<2u;skip++) {
+        fixture_t f; arm_bus_t bus; arm_cpu_t c;
+        setup(&f,&bus,&c,true,host!=0u);
+        c.cpsr|=skip ? 0x0c00u : 0x1c00u;
+        c.r[15]=0x3feu; c.r[2]=0x12345680u; c.r[8]=0xdeadbeefu;
+        c.excl_valid=true; c.excl_addr=0x1000u; c.a8_excl_size=8u;
+        put16(&f,0x3feu,0xfa92u); put16(&f,0x400u,(uint16_t)(0xf802u|ops[kind]));
+        uint32_t flags=c.cpsr, before[16]; memcpy(before,c.r,sizeof before);
+        f.fail_address=0x3feu+half*2u; f.fail_size=2u;
+        CHECK(arm_step(&c)==ARM_HALT,"wide reversal did not halt on failed fetch");
+        check_stop(&f,&c,0x3feu,flags);
+        CHECK(!memcmp(before,c.r,sizeof before) && c.excl_valid && c.excl_addr==0x1000u && c.a8_excl_size==8u,
+              "wide reversal published effects from a partial fetch");
+        f.failed=false; f.fail_size=0u;
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==0x402u && c.cycles==1u && c.r[2]==0x12345680u &&
+              c.r[8]==(skip ? 0xdeadbeefu : results[kind]) &&
+              c.cpsr==((flags&~0x0600fc00u)|0x1800u) && c.excl_valid &&
+              c.excl_addr==0x1000u && c.a8_excl_size==8u,"wide reversal owner retry did not retire/advance IT exactly once");
+       }
+}
+
 static void test_second_halfword_walk_failure(void) {
     for (unsigned level = 0; level < 2u; level++) {
         fixture_t f; arm_bus_t bus; arm_cpu_t c;
@@ -769,6 +796,7 @@ static void test_signed_runner_entry_guards(void) {
 #endif
 
 int main(void) {
+    test_thumb_byte_reverse_fetch_retry();
     test_neon_macc_fetch_and_retry();
     test_neon_transpose_fetch_and_retry();
     test_neon_pairs_and_retry();

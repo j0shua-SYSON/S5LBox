@@ -9396,8 +9396,8 @@ static void test_thumb2_clz_rbit_operands(void) {
         CHECK(arm_step(&c)==ARM_UNDEFINED && c.cpsr==flags && memcmp(c.r,before,sizeof before)==0,
               "Thumb bit operation accepted inconsistent Rm copies %u/%u",low,high);
       }
-    /* Other unary/DSP instructions stay separate. These exact neighbors are
-     * currently unsupported; fixed top-nibble changes are undefined. */
+    /* Byte reversals have their own results; the other unary/DSP neighbors
+     * and fixed top-nibble changes below remain unsupported. */
     static const uint16_t neighbors[][2]={{0xfab2u,0xf892u},{0xfab2u,0xf8a2u},
         {0xfab2u,0xf8b2u},{0xfab2u,0xe882u},{0xfa92u,0xe8a2u},
         {0xfa92u,0xf882u},{0xfa92u,0xf892u},{0xfa92u,0xf8b2u},{0xfaa2u,0xf882u}};
@@ -9406,7 +9406,10 @@ static void test_thumb2_clz_rbit_operands(void) {
         CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
         c.cpsr=ARM_MODE_SYS|ARM_CPSR_T; c.r[2]=1u; c.r[8]=0x12345678u;
         m_w16(NULL,0u,neighbors[n][0]); m_w16(NULL,2u,neighbors[n][1]);
-        CHECK(arm_step(&c)==ARM_UNDEFINED && c.r[15]==0u && c.r[8]==0x12345678u,
+        bool byte_reverse=n>=5u && n<=7u;
+        uint32_t want=n==5u ? 0x01000000u : 0x00000100u;
+        CHECK(arm_step(&c)==(byte_reverse ? ARM_OK : ARM_UNDEFINED) &&
+              c.r[15]==(byte_reverse ? 4u : 0u) && c.r[8]==(byte_reverse ? want : 0x12345678u),
               "Thumb bit operation swallowed neighboring encoding %u",n);
     }
     for (unsigned reverse=0;reverse<2u;reverse++) {
@@ -9446,6 +9449,138 @@ static void test_thumb2_clz_rbit_fetch(void) {
             (c.cp15.ifsr&15u)==(fault==1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION),
             "Thumb bit operation effects preceded complete fetch");
       }
+}
+
+/* Select and serialize bytes independently of the interpreter's mask/shift
+ * expressions. REVSH repeats the sign byte above the reversed halfword. */
+static uint32_t thumb_byte_reverse_reference(uint32_t value, unsigned kind) {
+    uint8_t bytes[4], result[4];
+    for (unsigned b=0;b<4u;b++) bytes[b]=(uint8_t)(value>>(8u*b));
+    static const unsigned order[2][4]={{3u,2u,1u,0u},{1u,0u,3u,2u}};
+    if (kind<2u) for (unsigned b=0;b<4u;b++) result[b]=bytes[order[kind][b]];
+    else {
+        result[0]=bytes[1]; result[1]=bytes[0];
+        result[2]=result[3]=bytes[0]>=128u ? 255u : 0u;
+    }
+    uint32_t word=0u;
+    for (unsigned b=4u;b>0u;b--) word=word*256u+result[b-1u];
+    return word;
+}
+
+static void put_thumb_byte_reverse(uint32_t pc, unsigned kind, unsigned rd, unsigned rm) {
+    static const unsigned ops[]={0x80u,0x90u,0xb0u};
+    m_w16(NULL,pc,(uint16_t)(0xfa90u|rm));
+    m_w16(NULL,pc+2u,(uint16_t)(0xf000u|ops[kind]|(rd<<8)|rm));
+}
+
+static void test_thumb2_byte_reverse_values(void) {
+    const arm_arch_t profiles[]={ARM_ARCH_V7_CORTEX_A8,ARM_ARCH_V7_SWIFT};
+    for (unsigned p=0;p<2u;p++)
+     for (unsigned kind=0;kind<3u;kind++)
+      for (unsigned byte=0;byte<256u;byte++)
+       for (unsigned lane=0;lane<4u;lane++) {
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,profiles[p]),"reset");
+        uint32_t value=(0x01807fffu&~(255u<<(8u*lane)))|(byte<<(8u*lane));
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_Z|ARM_CPSR_C|
+               ARM_CPSR_V|ARM_CPSR_Q|(10u<<16);
+        c.r[14]=value; c.r[8]=0xdeadbeefu;
+        c.excl_valid=true; c.excl_addr=0x4560u; c.a8_excl_size=8u;
+        c.vfp_fpscr=0x0bc0009fu; c.vfp_fpexc=ARM_FPEXC_EN;
+        for (unsigned s=0;s<32u;s++) c.vfp_s[s]=0x7fa10000u+s;
+        for (unsigned d=0;d<16u;d++) c.a8_vfp_hi[d]=UINT64_C(0x7ff0123456780000)+d;
+        uint32_t flags=c.cpsr, want=thumb_byte_reverse_reference(value,kind);
+        put_thumb_byte_reverse(0u,kind,8u,14u);
+        CHECK(arm_step(&c)==ARM_OK && c.r[8]==want && c.r[14]==value && c.r[15]==4u &&
+              c.cpsr==flags && c.cycles==1u,"wide byte reversal value p=%u kind=%u input=%08x got=%08x want=%08x",
+              p,kind,value,c.r[8],want);
+        CHECK(c.excl_valid && c.excl_addr==0x4560u && c.a8_excl_size==8u &&
+              c.vfp_fpscr==0x0bc0009fu && c.vfp_fpexc==ARM_FPEXC_EN,"byte reversal changed monitor/FP state");
+        for (unsigned s=0;s<32u;s++) CHECK(c.vfp_s[s]==0x7fa10000u+s,"byte reversal changed FP word %u",s);
+        for (unsigned d=0;d<16u;d++) CHECK(c.a8_vfp_hi[d]==UINT64_C(0x7ff0123456780000)+d,
+            "byte reversal changed upper FP register %u",d);
+       }
+}
+
+static void test_thumb2_byte_reverse_operands(void) {
+    const arm_arch_t profiles[]={ARM_ARCH_V7_CORTEX_A8,ARM_ARCH_V7_SWIFT};
+    const unsigned states[]={0u,0x18u,0x1cu,0x0cu}, advanced[]={0u,0u,0x18u,0x18u};
+    for (unsigned p=0;p<2u;p++)
+     for (unsigned kind=0;kind<3u;kind++)
+      for (unsigned rd=0;rd<16u;rd++)
+       for (unsigned rm=0;rm<16u;rm++)
+        for (unsigned it=0;it<4u;it++) {
+            arm_cpu_t c;
+            CHECK(arm_reset_profile(&c,&g_bus,profiles[p]),"reset");
+            c.cpsr=(p ? ARM_MODE_SVC : ARM_MODE_USR)|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_V|
+                   ARM_CPSR_Q|(5u<<16)|test_it_bits(states[it]);
+            for (unsigned r=0;r<15u;r++) c.r[r]=0x012380efu+0x070b0301u*r;
+            c.r[15]=0x100u;
+            uint32_t before[16]; memcpy(before,c.r,sizeof before);
+            uint32_t flags=c.cpsr, want=thumb_byte_reverse_reference(before[rm],kind);
+            bool passed=it!=3u, valid=rd!=13u && rd!=15u && rm!=13u && rm!=15u, ok=!passed || valid;
+            put_thumb_byte_reverse(0x100u,kind,rd,rm);
+            CHECK(arm_step(&c)==(ok ? ARM_OK : ARM_UNDEFINED) && c.cycles==1u &&
+                  c.r[15]==(ok ? 0x104u : 0x100u) &&
+                  c.cpsr==(ok ? (flags&~TEST_IT_MASK)|test_it_bits(advanced[it]) : flags),
+                  "wide reversal operands p=%u kind=%u rd=%u rm=%u IT=%u",p,kind,rd,rm,it);
+            for (unsigned r=0;r<15u;r++) CHECK(c.r[r]==(passed && valid && r==rd ? want : before[r]),
+                "wide reversal lost original operand/alias r=%u kind=%u rd=%u rm=%u IT=%u",r,kind,rd,rm,it);
+        }
+    for (unsigned kind=0;kind<3u;kind++)
+     for (unsigned low=0;low<16u;low++)
+      for (unsigned high=0;high<16u;high++)
+       for (unsigned skip=0;skip<2u;skip++) {
+        if (low==high) continue;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cpsr=ARM_MODE_SYS|ARM_CPSR_T|ARM_CPSR_C|test_it_bits(skip ? 0x08u : 0u);
+        for (unsigned r=0;r<15u;r++) c.r[r]=0x12348000u+r;
+        uint32_t before[15]; memcpy(before,c.r,sizeof before);
+        uint32_t flags=c.cpsr;
+        put_thumb_byte_reverse(0u,kind,8u,low); m_w16(NULL,0u,(uint16_t)(0xfa90u|high));
+        CHECK(arm_step(&c)==(skip ? ARM_OK : ARM_UNDEFINED) && c.cycles==1u &&
+              c.cpsr==(skip ? flags&~TEST_IT_MASK : flags) && c.r[15]==(skip ? 4u : 0u) &&
+              !memcmp(before,c.r,sizeof before),"wide reversal inconsistent Rm kind=%u low=%u high=%u skip=%u",kind,low,high,skip);
+       }
+    for (unsigned kind=0;kind<3u;kind++) {
+        arm_cpu_t c; arm_reset(&c,&g_bus);
+        c.cpsr=ARM_MODE_SYS|ARM_CPSR_T|ARM_CPSR_C;
+        c.r[15]=0x100u; c.r[14]=0x200u; c.r[2]=0x01234567u; c.r[8]=0xdeadbeefu;
+        uint32_t flags=c.cpsr;
+        put_thumb_byte_reverse(0x100u,kind,8u,2u);
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==0x200u+(0xfa92u&0x7ffu)*2u &&
+              c.r[14]==0x103u && c.r[2]==0x01234567u && c.r[8]==0xdeadbeefu && c.cpsr==flags,
+              "wide byte reversal changed ARM1176 BL halfword framing");
+    }
+}
+
+static void test_thumb2_byte_reverse_fetch(void) {
+    for (unsigned kind=0;kind<3u;kind++)
+     for (unsigned host=0;host<2u;host++)
+      for (unsigned fault=0;fault<4u;fault++)
+       for (unsigned skip=0;skip<2u;skip++) {
+        memset(g_ram,0,sizeof g_ram);
+        arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_V|test_it_bits(skip ? 0x0cu : 0x1cu);
+        c.r[15]=0xffeu; c.r[2]=0x12345680u; c.r[8]=0xdeadbeefu;
+        uint32_t flags=c.cpsr;
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x8032u);
+        m_w32(NULL,0x6004u,fault==1u ? 0u : fault==2u ? 0xa033u : fault==3u ? 0xa012u : 0xa032u);
+        put_thumb_byte_reverse(0x8ffeu,kind,8u,2u);
+        m_w16(NULL,0xa000u,m_r16(NULL,0x9000u)); m_w16(NULL,0x9000u,0xf992u);
+        CHECK(arm_step(&c)==ARM_OK && c.cycles==1u,"wide reversal split-fetch disposition");
+        if (!fault) CHECK(c.r[15]==0x1002u && c.r[2]==0x12345680u &&
+            c.r[8]==(skip ? 0xdeadbeefu : thumb_byte_reverse_reference(0x12345680u,kind)) &&
+            c.cpsr==((flags&~TEST_IT_MASK)|test_it_bits(0x18u)),"wide reversal used wrong second half or lost IT");
+        else CHECK(c.r[15]==ARM_VEC_PREFETCH && c.r[14]==0x1002u && c.cp15.ifar==0x1000u &&
+            c.spsr[ARM_BANK_ABT]==flags && c.r[8]==0xdeadbeefu && c.r[2]==0x12345680u &&
+            (c.cp15.ifsr&15u)==(fault==1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION),
+            "wide reversal executed/skipped before complete fetch");
+       }
 }
 
 static void test_thumb2_barrier_options_and_it(void) {
@@ -11734,6 +11869,9 @@ int main(void) {
     test_thumb2_clz_rbit_values();
     test_thumb2_clz_rbit_operands();
     test_thumb2_clz_rbit_fetch();
+    test_thumb2_byte_reverse_values();
+    test_thumb2_byte_reverse_operands();
+    test_thumb2_byte_reverse_fetch();
     test_thumb2_register_store_values();
     test_thumb2_register_store_operands();
     test_thumb2_register_store_aborts();

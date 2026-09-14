@@ -4078,11 +4078,12 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         alu_logic_flags(c, value, carry, (first & 0x10u) != 0u);
         return ARM_OK;
     }
-    /* CLZ/RBIT T1 (A8.8.33/144). Rm is encoded twice; inconsistent
-     * copies and SP/PC are unpredictable. Neither operation sets flags. */
+    /* CLZ/RBIT T1 and REV/REV16/REVSH T2 (A8.8.33/144..147). Rm is
+     * encoded twice; inconsistent copies and SP/PC are unpredictable.
+     * All five operations preserve flags and read before writing an alias. */
     bool count_zeroes = (first & 0xfff0u) == 0xfab0u && (second & 0xf0f0u) == 0xf080u;
-    bool reverse_bits = (first & 0xfff0u) == 0xfa90u && (second & 0xf0f0u) == 0xf0a0u;
-    if (count_zeroes || reverse_bits) {
+    bool reversal = (first & 0xfff0u) == 0xfa90u && (second & 0xf0c0u) == 0xf080u;
+    if (count_zeroes || reversal) {
         unsigned rm = first & 15u, rd = (second >> 8) & 15u;
         if (rm != (second & 15u) || rm == 13u || rm == 15u || rd == 13u || rd == 15u)
             return ARM_UNDEFINED;
@@ -4090,11 +4091,18 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         if (count_zeroes) {
             if (!value) result = 32u;
             else while (!(value & 0x80000000u)) { value <<= 1; result++; }
-        } else {
+        } else if ((second & 0x30u) == 0x20u) { /* RBIT */
             for (unsigned bit = 0; bit < 32u; bit++) {
                 result = (result << 1) | (value & 1u);
                 value >>= 1;
             }
+        } else if (!(second & 0x30u)) { /* REV */
+            result = ((value & 0xffu) << 24) | ((value & 0xff00u) << 8) |
+                     ((value >> 8) & 0xff00u) | (value >> 24);
+        } else if ((second & 0x30u) == 0x10u) { /* REV16 */
+            result = ((value & 0x00ff00ffu) << 8) | ((value >> 8) & 0x00ff00ffu);
+        } else { /* REVSH */
+            result = sign_extend16(((value & 0xffu) << 8) | ((value >> 8) & 0xffu));
         }
         c->r[rd] = result;
         return ARM_OK;
