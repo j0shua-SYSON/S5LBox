@@ -1389,6 +1389,94 @@ static unsigned long_chain_batch(arm_cpu_t *cpu, const arm_bulk_memory_t *memory
     return retired;
 }
 
+static void test_joined_filtered_dependencies(void) {
+    arm_bulk_cache_t *cache = arm_bulk_cache_create();
+    arm_ram_watch_t *watch = arm_ram_watch_create(ram, 0u, sizeof ram);
+    CHECK(cache && watch, "filtered composition allocation");
+    if (!cache || !watch) {
+        arm_bulk_cache_destroy(cache); arm_ram_watch_destroy(watch); return;
+    }
+    unsigned modes = 1u;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    if (a64_static_host_available()) modes = 2u;
+#endif
+    for (unsigned native = 0u; native < modes; native++)
+        for (unsigned shape = 0u; shape < 6u; shape++) {
+            bool depth = shape >= 3u;
+            unsigned empty = shape % 3u;
+            arm_cpu_t initial; arm_bulk_memory_t memory;
+            arm_bulk_cache_reset(cache); arm_ram_watch_reset(watch);
+            chain_setup(&initial, &memory, 1u, 0u, 128u, ARM_CPSR_Q | ARM_CPSR_V);
+            filtered_paths_install(&initial, &memory, depth, empty, 128u, false);
+            memory.cache = cache; memory.watch = watch;
+            if (native) {
+                memory.flat_ram = NULL; memory.data_cache = true;
+                const uint32_t pages[] = {DATA, DATA + 1024u, 0x3000u};
+                for (unsigned i = 0u; i < sizeof pages / sizeof pages[0]; i++)
+                    CHECK(arm_data_cache_try_refill(&initial, pages[i],
+                          ARM_ACCESS_READ, false), "filtered native READ witness");
+            }
+            /* Two-iteration fragments must grow into the eight-iteration
+             * spans admitted by later machine budgets, without a new cache. */
+            for (unsigned pass = 0u; pass < 3u; pass++) {
+                arm_cpu_t cpu = initial;
+                unsigned span = pass ? 8u : 2u;
+                unsigned budget = filtered_paths_prefix(depth, empty, span + 1u, 256u);
+                uint64_t hits = arm_bulk_cache_hits(cache);
+                for (unsigned node = 0u; node < 112u; node += span)
+                    (void)long_chain_batch(&cpu, &memory, budget, native != 0u);
+                if (pass == 2u) {
+                    uint64_t reused = arm_bulk_cache_hits(cache) - hits;
+                    CHECK(reused == 14u, "filtered fragments not composed: shape=%u reused=%llu",
+                          shape, (unsigned long long)reused);
+                    printf("arm_bulk filtered composition: native=%u shape=%u reused=%llu\n",
+                           native, shape, (unsigned long long)reused);
+                }
+            }
+            unsigned full = filtered_paths_prefix(depth, empty, 9u, 256u);
+            for (unsigned budget = 0u; budget <= full; budget++) {
+                arm_cpu_t cpu = initial;
+                CHECK(chain_differential(&cpu, &memory, budget, 2u) ==
+                      filtered_paths_prefix(depth, empty, 9u, budget),
+                      "filtered composition exceeded partial budget");
+            }
+            /* Each subspan excludes its first head from head_low/high. The
+             * join must explicitly add that boundary value to its own range. */
+            for (unsigned node = 0u; node < 8u; node++) {
+                arm_cpu_t cpu = initial;
+                cpu.r[12] = r32(NULL, DATA + node * 16u);
+                CHECK(chain_differential(&cpu, &memory, full, 2u) ==
+                      filtered_paths_prefix(depth, empty, node + 1u, full),
+                      "filtered composition skipped an interior head exit");
+                if (!depth && node) {
+                    cpu = initial;
+                    w32(NULL, 0x3100u, r32(NULL, DATA + node * 16u));
+                    CHECK(chain_differential(&cpu, &memory, full, 2u) ==
+                          filtered_paths_prefix(depth, empty, node, full),
+                          "filtered composition skipped the wanted-key exit");
+                    w32(NULL, 0x3100u, 0xfffffff0u);
+                }
+            }
+            /* The last iteration reads a key on the second page. */
+            arm_ram_watch_changed(watch, DATA + 64u * 16u, 4u);
+            w32(NULL, DATA + 64u * 16u, 0x11223344u);
+            arm_cpu_t cpu = initial;
+            cpu.r[3] = DATA + 56u * 16u;
+            cpu.r[2] = r32(NULL, cpu.r[3]);
+            CHECK(chain_differential(&cpu, &memory, full, 2u) == full &&
+                  cpu.r[2] == 0x11223344u, "filtered composition lost a later-page dependency");
+            if (empty) {
+                /* Code is always rematched, even when all data stamps match. */
+                w16(NULL, CODE + 108u, 0x46c0u);
+                cpu = initial;
+                unsigned prefix = empty == 1u ? 0u : (depth ? 15u : 19u);
+                CHECK(chain_differential(&cpu, &memory, full, 2u) == prefix,
+                      "filtered composition accepted a changed detour");
+            }
+        }
+    arm_bulk_cache_destroy(cache); arm_ram_watch_destroy(watch);
+}
+
 static void test_long_chain_index(bool fragmented) {
     unsigned modes = 1u;
 #if defined(S5LBOX_STATIC_A64_ENGINE)
@@ -1500,6 +1588,7 @@ int main(void) {
     test_chain_reuse_at_machine_budgets();
     test_chain_write_witnesses();
     test_joined_search_dependencies();
+    test_joined_filtered_dependencies();
     test_long_chain_index(false);
     test_long_chain_index(true);
     test_native_integration();

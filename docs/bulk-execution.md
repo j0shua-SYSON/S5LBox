@@ -137,3 +137,20 @@ distort CPU attribution. Exact fallback tracing remains an explicit core API
 option for instruction-coverage diagnostics, separate from the sampling-only
 mode used to select performance work. Neither diagnostic is a timing oracle;
 all final performance comparisons must still have profiling disabled.
+
+## Filtered-search composition trial
+
+The existing summary index now combines adjacent verified filtered-search
+fragments, as it already does for ordered searches. Two-iteration warmups no
+longer permanently require four validations per later eight-iteration batch.
+The six portable path fixtures reduce 56 summary hits to 14 for identical
+112-iteration work. This is a component work reduction, not a measured phone
+speedup. No cache capacity, device budget, runtime option or default changes.
+
+Composition retains every page dependency, empty-payload detour requirement,
+key range and logical load count. A subspan's first head becomes an interior
+head in the combined span and must join its exclusion range. Regression cases
+exercise all six paths, partial instruction budgets, every interior head/key
+exit, a changed dependency on the next page, and changed live detour code.
+Native-enabled hosts run the same fragmented warmup through signed execution.
+Physical profile-off comparison remains required before promotion.

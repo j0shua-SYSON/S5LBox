@@ -282,7 +282,7 @@ static void segment_forget(const arm_bulk_memory_t *memory,
     }
 }
 
-/* Compose only contiguous ordered-search spans already proved in this single
+/* Compose only contiguous read-only search spans already proved in this single
  * serialized, read-only call. Short-budget warmups otherwise remain tiny
  * forever, paying a hash lookup and mapping validation for every few nodes.
  * The combined descriptor retains every dependency and the original bounds;
@@ -301,7 +301,9 @@ static void segment_join(const arm_bulk_memory_t *memory,
         return;
     }
     bulk_index_entry_t next = *joined;
-    if (next.result.current != entry->result.start ||
+    if (next.result.kind != entry->result.kind ||
+        memcmp(next.result.offsets, entry->result.offsets, sizeof next.result.offsets) ||
+        next.result.current != entry->result.start ||
         next.result.iterations + entry->result.iterations > BULK_SEGMENT)
         goto separate;
     for (unsigned i = 0u; i < entry->result.pages; i++) {
@@ -322,6 +324,15 @@ static void segment_join(const arm_bulk_memory_t *memory,
     next.result.iterations += entry->result.iterations;
     if (entry->result.low < next.result.low) next.result.low = entry->result.low;
     if (entry->result.high > next.result.high) next.result.high = entry->result.high;
+    if (next.result.kind != 1u) {
+        /* Each filtered span tests its first head against the live register,
+         * not head_low/high. That head becomes interior after composition. */
+        if (next.result.value < next.result.head_low) next.result.head_low = next.result.value;
+        if (next.result.value > next.result.head_high) next.result.head_high = next.result.value;
+        if (entry->result.head_low < next.result.head_low) next.result.head_low = entry->result.head_low;
+        if (entry->result.head_high > next.result.head_high) next.result.head_high = entry->result.head_high;
+        next.result.empty_path |= entry->result.empty_path;
+    }
     next.result.previous = entry->result.previous;
     next.result.current = entry->result.current;
     next.result.value = entry->result.value;
@@ -613,6 +624,8 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
     const unsigned kind = same_depth ? 2u : 3u;
     unsigned part = 0u;
     bulk_segment_t *building = NULL;
+    bulk_index_entry_t joined = {0};
+    unsigned pieces = 0u;
     while (budget - retired >= stride) {
         if (part == 0u) {
             bulk_segment_t *entry = segment_slot(memory, kind, current, offsets,
@@ -623,6 +636,7 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
                 (!same_depth || outside(wanted, entry->result.low, entry->result.high)) &&
                 (!entry->result.empty_path || thumb_filtered_empty_path(memory, offset)) &&
                 segment_validate(cpu, memory, entry, &tlb_reads, &walk_reads)) {
+                segment_join(memory, &joined, &pieces, entry);
                 previous = entry->result.previous; current = entry->result.current;
                 value = entry->result.value; retired += entry->result.retired;
                 loads += entry->result.loads + (same_depth ? 2u * entry->result.iterations : 0u);
@@ -687,10 +701,15 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
         retired += cost;
         if (++part == BULK_SEGMENT) {
             segment_finish(cpu, memory, building, previous, current, value);
+            segment_join(memory, &joined, &pieces, building);
             part = 0u;
         }
     }
-    if (part) segment_finish(cpu, memory, building, previous, current, value);
+    if (part) {
+        segment_finish(cpu, memory, building, previous, current, value);
+        segment_join(memory, &joined, &pieces, building);
+    }
+    if (pieces > 1u) segment_index_store(memory, &joined);
     if (!retired) return 0u;
     cpu->r[1] = same_depth ? wanted : cpu->r[8];
     cpu->r[2] = value; cpu->r[3] = current;
