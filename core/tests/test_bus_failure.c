@@ -204,13 +204,13 @@ static void test_neon_pairs_and_retry(void) {
 }
 
 static void test_vfp_binary_fetch_and_retry(void) {
-    static const uint32_t insns[2][4] = {{0xee78fa28u,0xee78fa68u,0xee68fa28u,0xee68fa68u},
-        {0xee70fba1u,0xee70fbe1u,0xee60fba1u,0xee60fbe1u}};
-    static const uint64_t result[2][4] = {{0x40a00000u,0xbf800000u,0x40c00000u,0xc0c00000u},
-        {UINT64_C(0x4014000000000000),UINT64_C(0xbff0000000000000),UINT64_C(0x4018000000000000),UINT64_C(0xc018000000000000)}};
+    static const uint32_t insns[2][5] = {{0xee78fa28u,0xee78fa68u,0xee68fa28u,0xee68fa68u,0xeec8fa28u},
+        {0xee70fba1u,0xee70fbe1u,0xee60fba1u,0xee60fbe1u,0xeec0fba1u}};
+    static const uint64_t result[2][5] = {{0x40a00000u,0xbf800000u,0x40c00000u,0xc0c00000u,0x3f2aaaaau},
+        {UINT64_C(0x4014000000000000),UINT64_C(0xbff0000000000000),UINT64_C(0x4018000000000000),UINT64_C(0xc018000000000000),UINT64_C(0x3fe5555555555555)}};
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned dbl = 0; dbl < 2u; dbl++)
-      for (unsigned op = 0; op < 4u; op++)
+      for (unsigned op = 0; op < 5u; op++)
        for (unsigned host = 0; host < 2u; host++)
         for (unsigned second = 0; second < (thumb ? 2u : 1u); second++)
          for (unsigned enabled = 0; enabled < 2u; enabled++) {
@@ -237,7 +237,8 @@ static void test_vfp_binary_fetch_and_retry(void) {
             if (dbl) expected[31] = result[dbl][op];
             else expected[15] = (expected[15] & UINT64_C(0xffffffff)) | (result[dbl][op] << 32);
             CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u &&
-                  c.cpsr == (flags & ~0x0600fc00u) && c.vfp_fpscr == 0x4bc00080u,"VFP add checked fetch retry");
+                  c.cpsr == (flags & ~0x0600fc00u) && c.vfp_fpscr == (0x4bc00080u | (op == 4u ? ARM_FPSCR_IXC : 0u)),
+                  "VFP binary checked fetch retry");
             match = true;
             for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c,d) == expected[d];
             CHECK(match,"VFP add retry register result/preservation");

@@ -482,6 +482,49 @@ special inputs, other FPSCR modes, process execution or boot. The existing
 nonunit F64 ramp, F64 remainder and F32 ramp fixtures retain their 256, 112
 and 1,824 passing calls after the shared arithmetic refactor.
 
+VFP VDIV supports F32 and F64 through the same full-bank ARM/Thumb scalar
+and short-vector paths. Integer long division produces the significand and
+three rounding bits; its remainder supplies sticky information. It uses
+the shared guest rounding, input-flushing and NaN rules without host FP
+operations. Zero divided by zero and infinity divided by infinity raise
+IOC. Finite nonzero values divided by zero raise DZC; infinity divided by
+zero returns signed infinity without DZC. See
+[DDI0406C.b, A2.7.8 and A8.8.312](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Division tests cover every register triple, signed powers of two, all vector
+shapes and overlapping banks, NaNs, zeros, infinities and cumulative flags.
+Native finite-result oracles use an independent exact ratio comparison for
+ARM's tininess-before-rounding rule. Analytical anchors include signed
+thirds, halfway subnormals, tiny results that round to normal, FZ and overflow
+under all rounding modes. The access, conditional, invalid-state and fetch
+matrices include division. Inexact flags appear only after a complete fetch
+or successful guest enable/exception-return retry. The first build caught
+an unavailable symbolic constant in the new ARM test; the assertion was
+corrected to its architectural bit value before tests ran.
+
+The unchanged 62-byte Thumb
+[`vDSP_vdivD`](https://developer.apple.com/documentation/accelerate/vdsp_vdivd)
+at `0x308610b8..0x308610f6` completes all 1,536 prepared calls. Its first
+input is denominator B, its second is numerator A, and its output is A/B.
+Before division support, all 256 empty calls returned; the first nonempty
+call stopped after 17 instructions at `0x308610e8`, on
+`VDIV.F64 d16, d17, d16`, after reading eight bytes from each input and
+before writing output. The same fixture covers counts 0, 1, 3, 7, 16 and 33,
+four signed-stride tuples, four word-alignment tuples and all 16 combinations
+of rounding mode, FZ and DN. Sixteen analytical operand pairs cover exact
+quotients, thirds, zeros, infinities, distinct NaN payloads, overflow and
+underflow boundaries. Checks include every selected input/output byte count,
+untouched gaps and page canaries, the eight-byte saved frame, twelve-byte
+argument area, all FP registers, FPSCR, ABI state and return. Inputs and output
+occupy separate prepared User mappings. Aliasing, other lengths or routines,
+process execution and board boot remain outside this fixture.
+
+The existing unit and nonunit F64 ramp and F64 remainder fixtures retain
+all 336, 256 and 112 passing calls after division support. The guarded
+kernel-entry fixture still matches the complete prior trace, normalizing
+line endings only, and stops after 61,650 steps at the same L2 parity/ECC
+configuration boundary.
+
 The unchanged ARM [`vDSP_vma`](https://developer.apple.com/documentation/accelerate/vdsp_vma)
 at `0x30825f94` now completes 144 calls through its scalar body. Before
 multiply-accumulate support, the first nonempty case stopped at `0x30826144`
@@ -601,7 +644,7 @@ both original halves. Tests cover complete register lists, both stack
 aliases, invalid modes/ranges, access/conditional behavior and faults after
 partial progress, including with host memory shortcuts enabled. A separate
 test places the odd-length trailing gap on an unmapped page. Upper-bank
-VFP arithmetic beyond VADD/VSUB/VMUL/VNMUL and the remaining NEON families are still unfinished.
+VFP arithmetic beyond VADD/VSUB/VMUL/VNMUL/VDIV and the remaining NEON families are still unfinished.
 
 An isolated host fixture executed the matching kernel's
 `_enable_kernel_vfp_context` routine with unchanged instructions and synthetic
@@ -632,7 +675,7 @@ flags and IT state unchanged. IT conditions, privileged
 state changes and permitted User thread-ID/barrier accesses retain their
 normal semantics. CP14 and Swift CP15 transfers remain unsupported in
 Thumb; supported VFP instructions cover the A8 transfers, raw data operations,
-comparisons and VADD/VSUB/VMUL/VNMUL above.
+comparisons and VADD/VSUB/VMUL/VNMUL/VDIV above.
 CP15 MRC2/MCR2 encodings are undefined and refused. The ARM1176
 instruction path is unchanged.
 See [DDI0406C.b, A8.8.98/107](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
@@ -1135,7 +1178,7 @@ establish that result.
   Cortex-A8 MRC/MCR transfers cover the currently implemented CP15 registers.
 - Cortex-A8 stores d0-d31 and supports system/core/memory transfers plus
   VFP copies, immediate constants and sign operations with short vectors,
-  scalar comparisons and F32/F64 VADD/VSUB/VMUL/VNMUL across the full register bank, and the bounded
+  scalar comparisons and F32/F64 VADD/VSUB/VMUL/VNMUL/VDIV across the full register bank, and the bounded
   32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms,
   register Boolean operations, VEXT, 8/16/32-bit VTRN, F32 VABS/VNEG,
   immediate constants, core-register VDUP, register VMUL/VADD/VSUB/VMLA/VMLS.F32

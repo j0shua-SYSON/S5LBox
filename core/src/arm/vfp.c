@@ -2,7 +2,7 @@
  * S5LBox — VFPv2 (the ARM1176JZF-S's VFP11 unit).
  *
  * Cortex-A8 transfers, raw-bit data operations, scalar comparisons and
- * VADD/VSUB and VMUL/VNMUL use checked paths with D0-D31. Comparisons and
+ * VADD/VSUB, VMUL/VNMUL and VDIV use checked paths with D0-D31. Comparisons and
  * these arithmetic operations use integer bits and preserve the host FP environment. The
  * register-file and arithmetic descriptions below concern the legacy VFP11
  * implementation; they do not establish complete Cortex-A8 VFPv3/NEON support.
@@ -896,12 +896,53 @@ static uint64_t vfp_a8_multiply(uint64_t a, uint64_t b, bool dbl,
     return vfp_a8_round(significand, exp_a + exp_b - bias + (int)carry, result_sign, dbl, fpscr, exceptions);
 }
 
-/* A8.8.283/351/356/415 and Appendix K. Both S and D operations obey FPSCR;
+/* FPDiv (A2.7.8). Long division yields the leading significand and three
+ * rounding bits. A nonzero remainder supplies sticky information; neither
+ * a 128-bit type nor the host floating-point environment is needed. */
+static uint64_t vfp_a8_divide(uint64_t a, uint64_t b, bool dbl,
+                              uint32_t fpscr, uint32_t *exceptions) {
+    const unsigned fraction = dbl ? 52u : 23u;
+    const int bias = dbl ? 1023 : 127;
+    const uint64_t hidden = UINT64_C(1) << fraction;
+    const uint64_t sign = hidden << (dbl ? 11u : 8u);
+    const uint64_t infinity = (uint64_t)(dbl ? 2047u : 255u) << fraction;
+    uint64_t nan_result;
+    if (vfp_a8_unpack_pair(&a, &b, dbl, fpscr, exceptions, &nan_result)) return nan_result;
+    uint64_t ma = a & (sign - 1u), mb = b & (sign - 1u), result_sign = (a ^ b) & sign;
+    if ((!ma && !mb) || (ma == infinity && mb == infinity)) {
+        *exceptions |= ARM_FPSCR_IOC;
+        return infinity | (hidden >> 1);
+    }
+    if (ma == infinity || !mb) {
+        /* Infinity divided by zero does not raise Division by Zero. */
+        if (ma != infinity) *exceptions |= ARM_FPSCR_DZC;
+        return result_sign | infinity;
+    }
+    if (!ma || mb == infinity) return result_sign;
+    int exp_a = (int)(ma >> fraction), exp_b = (int)(mb >> fraction);
+    uint64_t sig_a = (ma & (hidden - 1u)) | (exp_a ? hidden : 0u);
+    uint64_t sig_b = (mb & (hidden - 1u)) | (exp_b ? hidden : 0u);
+    if (!exp_a) exp_a = 1;
+    if (!exp_b) exp_b = 1;
+    while (sig_a < hidden) { sig_a <<= 1; exp_a--; }
+    while (sig_b < hidden) { sig_b <<= 1; exp_b--; }
+    if (sig_a < sig_b) { sig_a <<= 1; exp_a--; }
+    uint64_t quotient = 0u, remainder = sig_a;
+    for (unsigned bit = 0; bit < fraction + 4u; bit++) {
+        quotient <<= 1;
+        if (remainder >= sig_b) { remainder -= sig_b; quotient |= 1u; }
+        if (bit + 1u < fraction + 4u) remainder <<= 1;
+    }
+    quotient |= remainder != 0u;
+    return vfp_a8_round(quotient, exp_a - exp_b + bias, result_sign, dbl, fpscr, exceptions);
+}
+
+/* A8.8.283/312/351/356/415 and Appendix K. Both S and D operations obey FPSCR;
  * D16-D19 is a second scalar bank. Stage every lane before publication so
  * circular vectors and overlapping source/destination banks read originals. */
 static arm_status_t vfp_a8_binary_data(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
     g_reason = NULL;
-    bool dbl = BIT(8), sub_or_neg = BIT(6), multiply = vfp_is_multiply_data(insn);
+    bool dbl = BIT(8), sub_or_neg = BIT(6), multiply = vfp_is_multiply_data(insn), divide = vfp_is_divide_data(insn);
     unsigned rd = dbl ? FIELD(12) | (BIT(22) << 4) : SREG(FIELD(12), BIT(22));
     unsigned rn = dbl ? FIELD(16) | (BIT(7) << 4) : SREG(FIELD(16), BIT(7));
     unsigned rm = dbl ? (insn & 15u) | (BIT(5) << 4) : SREG(insn & 15u, BIT(5));
@@ -926,7 +967,8 @@ static arm_status_t vfp_a8_binary_data(arm_cpu_t *c, uint32_t pc, uint32_t insn)
         unsigned mr = scalar_m ? rm : vfp_short_vector_reg(&shape, rm, lane, false);
         uint64_t a = dbl ? vfp_get_d(c, nr) : vfp_get_s(c, nr);
         uint64_t b = dbl ? vfp_get_d(c, mr) : vfp_get_s(c, mr);
-        result[lane] = multiply ? vfp_a8_multiply(a, b, dbl, c->vfp_fpscr, &exceptions) :
+        result[lane] = divide ? vfp_a8_divide(a, b, dbl, c->vfp_fpscr, &exceptions) :
+                      multiply ? vfp_a8_multiply(a, b, dbl, c->vfp_fpscr, &exceptions) :
                                  vfp_a8_add_sub(a, b, dbl, sub_or_neg, c->vfp_fpscr, &exceptions);
         /* VNMUL applies FPNeg after rounding, even to a NaN or signed zero. */
         if (multiply && sub_or_neg) result[lane] ^= dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
@@ -1795,7 +1837,8 @@ arm_status_t vfp_execute(arm_cpu_t *c, uint32_t pc, uint32_t insn,
         return vfp_a8_bitwise_data(c, pc, insn);
     if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_compare_data(insn))
         return vfp_a8_compare_data(c, pc, insn);
-    if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && (vfp_is_add_sub_data(insn) || vfp_is_multiply_data(insn)))
+    if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 &&
+        (vfp_is_add_sub_data(insn) || vfp_is_multiply_data(insn) || vfp_is_divide_data(insn)))
         return vfp_a8_binary_data(c, pc, insn);
     if (!c || (c->vfp_fpscr & ARM_FPSCR_RMODE) == 0u)
         return vfp_execute_inner(c, pc, insn, bus);

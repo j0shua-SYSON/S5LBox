@@ -8121,13 +8121,13 @@ static void test_cortex_a8_neon_macc_fetch_and_retry(void) {
 }
 
 static void test_cortex_a8_vfp_binary_fetch_and_retry(void) {
-    static const uint32_t insns[2][4] = {{0xee78fa28u,0xee78fa68u,0xee68fa28u,0xee68fa68u},
-        {0xee70fba1u,0xee70fbe1u,0xee60fba1u,0xee60fbe1u}};
-    static const uint64_t result[2][4] = {{0x40a00000u,0xbf800000u,0x40c00000u,0xc0c00000u},
-        {UINT64_C(0x4014000000000000),UINT64_C(0xbff0000000000000),UINT64_C(0x4018000000000000),UINT64_C(0xc018000000000000)}};
+    static const uint32_t insns[2][5] = {{0xee78fa28u,0xee78fa68u,0xee68fa28u,0xee68fa68u,0xeec8fa28u},
+        {0xee70fba1u,0xee70fbe1u,0xee60fba1u,0xee60fbe1u,0xeec0fba1u}};
+    static const uint64_t result[2][5] = {{0x40a00000u,0xbf800000u,0x40c00000u,0xc0c00000u,0x3f2aaaaau},
+        {UINT64_C(0x4014000000000000),UINT64_C(0xbff0000000000000),UINT64_C(0x4018000000000000),UINT64_C(0xc018000000000000),UINT64_C(0x3fe5555555555555)}};
     for (unsigned host = 0; host < 2u; host++)
      for (unsigned dbl = 0; dbl < 2u; dbl++)
-      for (unsigned op = 0; op < 4u; op++)
+      for (unsigned op = 0; op < 5u; op++)
        for (unsigned fault = 0; fault < 4u; fault++) {
         memset(g_ram,0,sizeof g_ram);
         arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
@@ -8145,7 +8145,8 @@ static void test_cortex_a8_vfp_binary_fetch_and_retry(void) {
         m_w32(NULL,0x6004u,fault == 1u ? 0u : fault == 2u ? 0xa033u : fault == 3u ? 0xa012u : 0xa032u);
         m_w16(NULL,0x8ffeu,(uint16_t)(insns[dbl][op]>>16)); m_w16(NULL,0xa000u,(uint16_t)insns[dbl][op]);
         m_w16(NULL,0x9000u,0u);
-        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u && c.vfp_fpscr == 0x4bc00080u,"VFP add split fetch disposition");
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u &&
+              c.vfp_fpscr == (0x4bc00080u | (!fault && op == 4u ? 0x10u : 0u)),"VFP binary split fetch disposition");
         if (!fault) {
             if (dbl) upper[15] = result[dbl][op]; else singles[31] = (uint32_t)result[dbl][op];
             CHECK(c.r[15] == 0x1002u && c.cpsr == ((flags & ~TEST_IT_MASK) | test_it_bits(0x18u)),"VFP add split fetch/IT");
@@ -8157,7 +8158,7 @@ static void test_cortex_a8_vfp_binary_fetch_and_retry(void) {
               "VFP add split fetch register result/preservation");
        }
     for (unsigned dbl = 0; dbl < 2u; dbl++)
-     for (unsigned op = 0; op < 4u; op++) {
+     for (unsigned op = 0; op < 5u; op++) {
         arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset VFP add retry");
         c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_Z | ARM_CPSR_Q;
         c.cp15.cpacr = 0x00f00000u; c.vfp_fpscr = 0x08000002u;
@@ -8178,8 +8179,10 @@ static void test_cortex_a8_vfp_binary_fetch_and_retry(void) {
               "VFP add lazy exception changed FP state");
         CHECK(arm_step(&c) == ARM_OK && c.vfp_fpexc == 0x40000000u,"VFP add guest enable");
         CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x102u && c.cpsr == interrupted,"VFP add exception return");
-        if (dbl) upper[15] = result[dbl][op]; else singles[31] = (uint32_t)result[dbl][op];
-        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x106u && c.vfp_fpscr == 0x08000002u &&
+        if (dbl) upper[15] = result[dbl][op];
+        else singles[31] = op == 4u ? 0x3f2aaaabu : (uint32_t)result[dbl][op]; /* Retry uses nearest rounding. */
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x106u &&
+              c.vfp_fpscr == (0x08000002u | (op == 4u ? 0x10u : 0u)) &&
               c.cpsr == ((interrupted & ~TEST_IT_MASK) | test_it_bits(0x08u)) &&
               memcmp(singles,c.vfp_s,sizeof singles) == 0 && memcmp(upper,c.a8_vfp_hi,sizeof upper) == 0,
               "VFP add exact retry/IT/register state");
