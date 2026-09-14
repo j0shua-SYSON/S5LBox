@@ -41,16 +41,6 @@
 #include <string.h>
 #include <time.h>
 
-/* Replay the existing complete flat-RAM matrices through both frontends.
- * This is serial test ownership, never shared runtime machine state. */
-static a64_compact_decode_cache_t *decode_oracle_cache;
-static bool compact_raw_oracle_run(arm_cpu_t *cpu, const uint8_t *code,
-        uint32_t base, uint32_t bytes, unsigned budget, uint8_t *ram,
-        size_t ram_size, unsigned *completed) {
-    return a64_compact_raw_run_decoded(cpu, code, base, bytes, budget, ram,
-                                      ram_size, decode_oracle_cache, completed);
-}
-
 #if defined(_WIN32)
 #include <windows.h>
 #endif
@@ -5342,7 +5332,7 @@ static bool run_compact_raw(const bench_case_t *bc, uint64_t total,
         uint64_t left = total - done;
         unsigned chunk = left > UINT_MAX ? UINT_MAX : (unsigned)left;
         unsigned completed = 0u;
-        if (!compact_raw_oracle_run(&cpu, g_ram, 0u, bc->insns * 4u,
+        if (!a64_compact_raw_run(&cpu, g_ram, 0u, bc->insns * 4u,
                                  chunk, g_ram, sizeof g_ram, &completed) ||
             completed != chunk)
             break;
@@ -5724,7 +5714,7 @@ static bool compact_raw_compare(const char *name, const uint32_t *program,
     modeled = compact_raw_modeled_prefix(program, insns, pc, budget);
 
     seed_cpu_at(&compact, program, insns, false, pc);
-    const bool accepted = compact_raw_oracle_run(&compact, &g_ram[pc], pc, insns * 4u,
+    const bool accepted = a64_compact_raw_run(&compact, &g_ram[pc], pc, insns * 4u,
                                              budget, g_ram, sizeof g_ram, &completed);
     /* A zero budget is a public-contract refusal, not a native invocation. */
     if (accepted != (budget != 0u)) {
@@ -5814,7 +5804,7 @@ static bool compact_raw_thumb_instruction_compare(uint16_t insn,
     capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
 
     seed_compact_raw_thumb(&compact, program, 2u, pc);
-    if (!compact_raw_oracle_run(&compact, &g_ram[pc], pc, 4u, 1u,
+    if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                              g_ram, sizeof g_ram, &completed)) {
         fprintf(stderr,
                 "jitbench: compact raw Thumb 0x%04x contract refused\n",
@@ -5852,7 +5842,7 @@ static bool compact_raw_thumb_program_compare(
     capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
 
     seed_compact_raw_thumb(&compact, program, insns, pc);
-    const bool accepted = compact_raw_oracle_run(
+    const bool accepted = a64_compact_raw_run(
         &compact, &g_ram[pc], pc, insns * 2u, budget,
         g_ram, sizeof g_ram, &completed);
     /* Zero is a public-contract refusal, with zero retirement and no state
@@ -5905,7 +5895,7 @@ static bool compact_raw_a32_register_shift_exact_case(
 
     status = arm_step(&reference);
     capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
-    if (!compact_raw_oracle_run(&compact, &g_ram[pc], pc, 4u, 1u,
+    if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                              g_ram, sizeof g_ram, &completed)) {
         fprintf(stderr,
                 "jitbench: compact raw A32 register shift %s contract "
@@ -5939,7 +5929,7 @@ static bool compact_raw_a32_register_shift_refusal_case(
     compact = reference;
     before = compact;
     reference_status = arm_step(&reference);
-    if (!compact_raw_oracle_run(&compact, &g_ram[pc], pc, 4u, 1u,
+    if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                              g_ram, sizeof g_ram, &completed) ||
         completed != 0u || memcmp(&before, &compact, sizeof compact) != 0) {
         fprintf(stderr,
@@ -6115,7 +6105,7 @@ static bool run_compact_raw_a32_indirect_case(
     compact = reference;
 
     status = arm_step(&reference);
-    if (!compact_raw_oracle_run(&compact, &g_ram[pc], pc, 4u, 1u,
+    if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                              g_ram, sizeof g_ram, &completed) ||
         status != ARM_OK || completed != 1u ||
         !indirect_register_states_equal(&reference, &compact) ||
@@ -6206,7 +6196,7 @@ static bool validate_compact_raw_a32_indirect_oracles(void) {
         compact = reference;
         before = compact;
         reference_status = arm_step(&reference);
-        if (!compact_raw_oracle_run(&compact, &g_ram[pc], pc, 4u, 1u,
+        if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                                  g_ram, sizeof g_ram, &completed) ||
             completed != 0u ||
             !indirect_register_states_equal(&before, &compact)) {
@@ -6437,7 +6427,7 @@ static bool validate_compact_raw_a32_register_oracle(void) {
                                 arm_status_t status = arm_step(&reference);
                                 if (status == ARM_OK) status = arm_step(&reference);
                                 if (status != ARM_OK ||
-                                    !compact_raw_oracle_run(&compact, &g_ram[pc], pc, 8u, 2u,
+                                    !a64_compact_raw_run(&compact, &g_ram[pc], pc, 8u, 2u,
                                                          g_ram, sizeof g_ram, &completed) ||
                                     completed != 2u ||
                                     !indirect_register_states_equal(&reference, &compact)) {
@@ -6473,7 +6463,7 @@ static bool validate_compact_raw_a32_register_oracle(void) {
                 memcpy(before, &g_ram[address], sizeof before);
                 if (writeback && rn == rd) {
                     unsigned completed = UINT_MAX;
-                    if (!compact_raw_oracle_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                    if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                                              g_ram, sizeof g_ram, &completed) ||
                         completed != 0u || memcmp(&reference, &compact, sizeof compact) ||
                         memcmp(before, &g_ram[address], sizeof before) ||
@@ -6490,7 +6480,7 @@ static bool validate_compact_raw_a32_register_oracle(void) {
                 memcpy(&g_ram[address], before, sizeof before);
                 unsigned completed = UINT_MAX;
                 if (status != ARM_OK ||
-                    !compact_raw_oracle_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                    !a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                                          g_ram, sizeof g_ram, &completed) ||
                     completed != 1u ||
                     !indirect_register_states_equal(&reference, &compact) ||
@@ -6520,7 +6510,7 @@ static bool validate_compact_raw_a32_register_oracle(void) {
                     a64_compact_raw_classify_instruction(&reference, insn, false));
                 unsigned completed = UINT_MAX;
                 if (admitted && arm_step(&reference) != ARM_OK) return false;
-                if (!compact_raw_oracle_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                                          g_ram, sizeof g_ram, &completed) ||
                     completed != (admitted ? 1u : 0u) ||
                     !indirect_register_states_equal(&reference, &compact)) {
@@ -6637,7 +6627,7 @@ static bool validate_compact_raw_thumb_register_oracle(void) {
                 memcpy(&g_ram[address], before, sizeof before);
             }
             if (status != ARM_OK ||
-                !compact_raw_oracle_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                !a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                                      g_ram, sizeof g_ram, &completed) ||
                 completed != 1u ||
                 !indirect_register_states_equal(&reference, &compact) ||
@@ -6926,15 +6916,11 @@ static bool compact_raw_resident_compare(
     context.refuse_window = refuse_window;
     context.fast_refill_window = fast_refill_window;
     context.omit_window_after = omit_window_after;
-    const a64_compact_raw_options_t options = {
-        .window_cache_enabled = window_cache_enabled,
-        .decode_cache = decode_oracle_cache,
-    };
-    if (!a64_compact_raw_run_code_window_resident_options(
+    if (!a64_compact_raw_run_code_window_resident_cached(
             &resident, &g_ram[initial_code_base], initial_code_base,
             initial_code_bytes, budget,
             compact_raw_resident_oracle_step, &context,
-            &options, &window_cache_hits, NULL, NULL, &completed,
+            window_cache_enabled, &window_cache_hits, &completed,
             &native_completed, &fallback_completed)) {
         fprintf(stderr,
                 "jitbench: compact raw resident %s contract refused\n",
@@ -7095,7 +7081,7 @@ static bool compact_raw_vfp_run_pair(const char *name,
         status = arm_step(reference);
         if (status != ARM_OK) break;
     }
-    if (!compact_raw_oracle_run(compact, &g_ram[code_base], code_base,
+    if (!a64_compact_raw_run(compact, &g_ram[code_base], code_base,
                              code_insns * 4u, budget, g_ram, sizeof g_ram,
                              &completed) ||
         status != ARM_OK || completed != expected_completed ||
@@ -7260,7 +7246,7 @@ static bool validate_compact_raw_vfp_nonarith_oracles(void) {
         else
             compact.vfp_fpscr = ARM_FPSCR_STRIDE;
         before = compact;
-        if (!compact_raw_oracle_run(&compact, &g_ram[pc], pc, 4u, 1u,
+        if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                                  g_ram, sizeof g_ram, &completed) ||
             completed != 0u ||
             !static_vfp_states_equal(&before, &compact)) {
@@ -7331,7 +7317,7 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
                 &reference, program[operation], d, n, m);
             compact = reference;
             if (arm_step(&reference) != ARM_OK ||
-                !compact_raw_oracle_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                !a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                                      g_ram, sizeof g_ram, &completed) ||
                 completed != 1u ||
                 !static_vfp_states_equal(&reference, &compact)) {
@@ -7361,7 +7347,7 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
             &reference, insn, two, negative_zero, two);
         compact = reference;
         if (arm_step(&reference) != ARM_OK ||
-            !compact_raw_oracle_run(&compact, &g_ram[pc], pc, 4u, 1u,
+            !a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                                  g_ram, sizeof g_ram, &completed) ||
             completed != 1u ||
             !static_vfp_states_equal(&reference, &compact)) {
@@ -7390,7 +7376,7 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
             &compact, test->insn, test->d, test->n, test->m);
         before = compact;
         completed = UINT_MAX;
-        if (!compact_raw_oracle_run(&compact, &g_ram[pc], pc, 4u, 1u,
+        if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                                  g_ram, sizeof g_ram, &completed) ||
             completed != 0u ||
             !static_vfp_states_equal(&before, &compact)) {
@@ -7411,7 +7397,7 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
         reference.cp15.cpacr = 0u;
         compact = reference;
         if (arm_step(&reference) != ARM_OK ||
-            !compact_raw_oracle_run(&compact, &g_ram[pc], pc, 4u, 1u,
+            !a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                                  g_ram, sizeof g_ram, &completed) ||
             completed != 1u ||
             !static_vfp_states_equal(&reference, &compact)) {
@@ -7438,7 +7424,7 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
         reference.vfp_s[1] = UINT32_C(0x40000000);
         compact = reference;
         if (arm_step(&reference) != ARM_OK || arm_step(&reference) != ARM_OK ||
-            !compact_raw_oracle_run(&compact, &g_ram[pc], pc, 12u, 3u,
+            !a64_compact_raw_run(&compact, &g_ram[pc], pc, 12u, 3u,
                                  g_ram, sizeof g_ram, &completed) ||
             completed != 2u ||
             !static_vfp_states_equal(&reference, &compact)) {
@@ -7481,7 +7467,7 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
         installed_fpcr = static_host_fpcr_read();
         installed_fpsr = static_host_fpsr_read();
         completed = UINT_MAX;
-        run_ok = compact_raw_oracle_run(
+        run_ok = a64_compact_raw_run(
             &compact, &g_ram[pc], pc, 4u, 1u,
             g_ram, sizeof g_ram, &completed);
         after_fpcr = static_host_fpcr_read();
@@ -7537,7 +7523,7 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
         installed_fpcr = static_host_fpcr_read();
         installed_fpsr = static_host_fpsr_read();
         completed = UINT_MAX;
-        run_ok = compact_raw_oracle_run(
+        run_ok = a64_compact_raw_run(
             &compact, &g_ram[pc], pc, 8u, 2u,
             g_ram, sizeof g_ram, &completed);
         after_fpcr = static_host_fpcr_read();
@@ -7683,7 +7669,7 @@ static bool validate_compact_raw_vfp_narrow_oracles(void) {
                   ACCEPTED[i].input);
         compact = reference;
         if (arm_step(&reference) != ARM_OK ||
-            !compact_raw_oracle_run(&compact, &g_ram[pc], pc, 4u, 1u,
+            !a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                                  g_ram, sizeof g_ram, &completed) ||
             completed != 1u ||
             !static_vfp_states_equal(&reference, &compact)) {
@@ -7706,7 +7692,7 @@ static bool validate_compact_raw_vfp_narrow_oracles(void) {
         vfp_set_d(&compact, 7u, FALLBACKS[i].input);
         before = compact;
         completed = UINT_MAX;
-        if (!compact_raw_oracle_run(&compact, &g_ram[pc], pc, 4u, 1u,
+        if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                                  g_ram, sizeof g_ram, &completed) ||
             completed != 0u || !static_vfp_states_equal(&before, &compact)) {
             fprintf(stderr,
@@ -7723,7 +7709,7 @@ static bool validate_compact_raw_vfp_narrow_oracles(void) {
     vfp_set_d(&reference, 2u, UINT64_C(0x400921fb54442d18));
     compact = reference;
     if (arm_step(&reference) != ARM_OK || arm_step(&reference) != ARM_OK ||
-        !compact_raw_oracle_run(
+        !a64_compact_raw_run(
             &compact, &g_ram[UINT32_C(0x18200)], UINT32_C(0x18200),
             12u, 3u, g_ram, sizeof g_ram, &completed) ||
         completed != 2u ||
@@ -7743,7 +7729,7 @@ static bool validate_compact_raw_vfp_narrow_oracles(void) {
         reference.vfp_fpscr = 0u;
         compact = reference;
         if (arm_step(&reference) != ARM_OK ||
-            !compact_raw_oracle_run(
+            !a64_compact_raw_run(
                 &compact, &g_ram[UINT32_C(0x18300)], UINT32_C(0x18300),
                 4u, 1u, g_ram, sizeof g_ram, &completed) ||
             completed != 1u ||
@@ -7783,7 +7769,7 @@ static bool validate_compact_raw_vfp_narrow_oracles(void) {
         installed_fpcr = static_host_fpcr_read();
         installed_fpsr = static_host_fpsr_read();
         completed = UINT_MAX;
-        run_ok = compact_raw_oracle_run(
+        run_ok = a64_compact_raw_run(
             &compact, &g_ram[pc], pc, 4u, 1u,
             g_ram, sizeof g_ram, &completed);
         after_fpcr = static_host_fpcr_read();
@@ -7880,7 +7866,7 @@ static bool compact_raw_vfp_flat_memory_case(const char *name,
     }
     memcpy(expected, g_ram, sizeof g_ram);
     memcpy(g_ram, baseline, sizeof g_ram);
-    if (!compact_raw_oracle_run(&compact, &g_ram[pc], pc, insns * 4u,
+    if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, insns * 4u,
                              insns, g_ram, sizeof g_ram, &completed) ||
         status != ARM_OK || completed != insns ||
         !static_vfp_arch_states_equal(&reference, &compact) ||
@@ -8182,7 +8168,7 @@ static bool compact_raw_thumb_multi_exact_case(
             &native_completed, &fallback_completed);
     } else {
         memset(&context, 0, sizeof context);
-        run_ok = compact_raw_oracle_run(
+        run_ok = a64_compact_raw_run(
             &compact, &g_ram[sc->pc], sc->pc, 4u, 1u,
             g_ram, sizeof g_ram, &completed);
         native_completed = completed;
@@ -8228,7 +8214,7 @@ static bool compact_raw_thumb_multi_refusal_case(
     reference_status = arm_step(&reference);
     memcpy(expected, g_ram, sizeof g_ram);
     memcpy(g_ram, baseline, sizeof g_ram);
-    if (!compact_raw_oracle_run(
+    if (!a64_compact_raw_run(
             &compact, &g_ram[sc->pc], sc->pc, 4u, 1u,
             g_ram, sizeof g_ram, &completed) ||
         completed != 0u || memcmp(&before, &compact, sizeof compact) != 0 ||
@@ -8500,7 +8486,7 @@ static bool compact_raw_single_exact_case(
             &native_completed, &fallback_completed);
     } else {
         memset(&context, 0, sizeof context);
-        run_ok = compact_raw_oracle_run(
+        run_ok = a64_compact_raw_run(
             &compact, &g_ram[sc->pc], sc->pc, 4u, 1u,
             g_ram, sizeof g_ram, &completed);
         native_completed = completed;
@@ -8546,7 +8532,7 @@ static bool compact_raw_single_refusal_case(
     reference_status = arm_step(&reference);
     memcpy(expected, g_ram, sizeof g_ram);
     memcpy(g_ram, baseline, sizeof g_ram);
-    if (!compact_raw_oracle_run(
+    if (!a64_compact_raw_run(
             &compact, &g_ram[sc->pc], sc->pc, 4u, 1u,
             g_ram, sizeof g_ram, &completed) ||
         completed != 0u || memcmp(&before, &compact, sizeof compact) != 0 ||
@@ -8900,7 +8886,7 @@ static bool compact_raw_block_exact_case(
             &native_completed, &fallback_completed);
     } else {
         memset(&context, 0, sizeof context);
-        run_ok = compact_raw_oracle_run(
+        run_ok = a64_compact_raw_run(
             &compact, &g_ram[sc->pc], sc->pc, 4u, 1u,
             g_ram, sizeof g_ram, &completed);
         native_completed = completed;
@@ -8946,7 +8932,7 @@ static bool compact_raw_block_refusal_case(
     reference_status = arm_step(&reference);
     memcpy(expected, g_ram, sizeof g_ram);
     memcpy(g_ram, baseline, sizeof g_ram);
-    if (!compact_raw_oracle_run(
+    if (!a64_compact_raw_run(
             &compact, &g_ram[sc->pc], sc->pc, 4u, 1u,
             g_ram, sizeof g_ram, &completed) ||
         completed != 0u || memcmp(&before, &compact, sizeof compact) != 0 ||
@@ -9189,7 +9175,7 @@ static bool compact_raw_system_coprocessor_case(
         if (status != ARM_OK) break;
     }
     capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
-    if (!compact_raw_oracle_run(
+    if (!a64_compact_raw_run(
             &compact, &g_ram[pc], pc, insns * 4u, insns,
             g_ram, sizeof g_ram, &completed)) {
         fprintf(stderr,
@@ -9325,7 +9311,7 @@ static bool validate_compact_raw_mode_continuity_oracle(void) {
     }
     capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
 
-    if (!compact_raw_oracle_run(
+    if (!a64_compact_raw_run(
             &compact, &g_ram[pc], pc, (uint32_t)sizeof program, 4u,
             g_ram, sizeof g_ram, &completed)) {
         fprintf(stderr,
@@ -9353,7 +9339,7 @@ static bool validate_compact_raw_mode_continuity_oracle(void) {
     return true;
 }
 
-static bool validate_compact_raw_oracles_once(void) {
+static bool validate_compact_raw_oracles(void) {
     static const unsigned result_ops[] = {
         0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 12u, 13u, 14u, 15u,
     };
@@ -9634,7 +9620,7 @@ static bool validate_compact_raw_oracles_once(void) {
                 UINT32_C(0x5000));
     contract.cp15.sctlr |= ARM_SCTLR_M;
     capture_state(&before, &contract, ARM_OK, JIT_EXIT_NEXT);
-    if (compact_raw_oracle_run(&contract, &g_ram[0x5000], UINT32_C(0x5000),
+    if (a64_compact_raw_run(&contract, &g_ram[0x5000], UINT32_C(0x5000),
                             8u, 1u, g_ram, sizeof g_ram, &completed) ||
         completed != 0u) {
         fprintf(stderr, "jitbench: compact raw invalid contract was accepted\n");
@@ -9661,58 +9647,6 @@ static bool validate_compact_raw_oracles_once(void) {
            "write-consent=yes ram-equality=yes "
            "runtime-codegen=no\n");
     return true;
-}
-
-static bool validate_compact_decoded_blocks(void) {
-    const uint32_t pc = UINT32_C(0x7000);
-    uint32_t program[16];
-    unsigned cases = 0u;
-    /* Every witness tail, warm reuse, in-place mutation and exact partial
-     * budget. The branch returns to a warm head inside the same native call. */
-    for (unsigned variant = 0u; variant < 3u; variant++)
-        for (unsigned length = 1u; length <= 16u; length++) {
-            for (unsigned i = 0u; i + 1u < length; i++)
-                program[i] = UINT32_C(0xe2800000) |
-                             ((i & 7u) << 16) | ((i & 7u) << 12) |
-                             (i + 1u + variant * 17u);
-            program[length - 1u] = UINT32_C(0xea000000) |
-                                   ((0u - length - 1u) & UINT32_C(0xffffff));
-            for (unsigned budget = 0u; budget <= 64u; budget++) {
-                if (!compact_raw_compare("decoded-block-tail", program,
-                        length, pc, budget, budget, budget)) return false;
-                cases++;
-            }
-        }
-    const uint32_t live_store[] = {
-        UINT32_C(0xe59f0008), UINT32_C(0xe58f0000),
-        UINT32_C(0xe2801001), UINT32_C(0xe3a02000),
-        UINT32_C(0xe2822037), UINT32_C(0xe1a00000),
-    };
-    if (!compact_raw_compare("decoded-prewarm-target", &live_store[2],
-            2u, pc + 8u, 2u, 2u, 2u) ||
-        !compact_raw_compare("decoded-live-store-target", live_store,
-            6u, pc, 4u, 4u, 4u)) return false;
-    unsigned populated = 0u;
-    for (unsigned i = 0u; i < A64_COMPACT_DECODE_SLOTS; i++)
-        populated += decode_oracle_cache->blocks[i].count != 0u;
-    if (!populated || cases != 3120u) return false;
-    printf("COMPACT-DECODED-BLOCKS exact=yes cases=%u tails=1-16 "
-           "budgets=0-64 warm-loop=yes mutation=yes live-store=yes "
-           "runtime-codegen=no\n", cases + 2u);
-    return true;
-}
-
-static bool validate_compact_raw_oracles(void) {
-    if (!validate_compact_raw_oracles_once()) return false;
-    decode_oracle_cache = calloc(1u, sizeof *decode_oracle_cache);
-    if (!decode_oracle_cache) return false;
-    const bool ok = validate_compact_raw_oracles_once() &&
-                    validate_compact_decoded_blocks();
-    free(decode_oracle_cache);
-    decode_oracle_cache = NULL;
-    if (ok) printf("COMPACT-DECODED-ORACLES exact=yes full-flat-matrix=yes "
-                   "resident-continuation=yes runtime-codegen=no\n");
-    return ok;
 }
 
 static bool run_product_entry(const bench_case_t *bc,
@@ -9802,10 +9736,10 @@ static bool bench_compact_raw(const bench_case_t *bc, uint64_t requested,
         interp_rates[rep] = (double)total / interp_s / 1.0e6;
         static_rates[rep] = (double)total / static_s / 1.0e6;
         compact_rates[rep] = (double)total / compact_s / 1.0e6;
-        printf("COMPACT-RAW-SAMPLE case=%s rep=%u order=%s decoded-cache=%s "
+        printf("COMPACT-RAW-SAMPLE case=%s rep=%u order=%s "
                "interpreter=%.3f static-threaded=%.3f compact-raw=%.3f "
                "Minsn/s\n",
-               bc->name, rep + 1u, order, decode_oracle_cache ? "yes" : "no", interp_rates[rep],
+               bc->name, rep + 1u, order, interp_rates[rep],
                static_rates[rep], compact_rates[rep]);
     }
 
@@ -9813,11 +9747,11 @@ static bool bench_compact_raw(const bench_case_t *bc, uint64_t requested,
     qsort(static_rates, reps, sizeof *static_rates, cmp_double);
     qsort(compact_rates, reps, sizeof *compact_rates, cmp_double);
     printf("COMPACT-RAW-CEILING case=%s guest-insns=%" PRIu64
-           " reps=%u live-bytes=yes decoded-cache=%s graph=no "
+           " reps=%u live-bytes=yes decoded-cache=no graph=no "
            "runtime-codegen=no interpreter-median=%.3f "
            "static-threaded-median=%.3f compact-raw-median=%.3f "
            "static-speedup=%.3fx compact-speedup=%.3fx\n",
-           bc->name, total, reps, decode_oracle_cache ? "yes" : "no", interp_rates[reps / 2u],
+           bc->name, total, reps, interp_rates[reps / 2u],
            static_rates[reps / 2u], compact_rates[reps / 2u],
            static_rates[reps / 2u] / interp_rates[reps / 2u],
            compact_rates[reps / 2u] / interp_rates[reps / 2u]);
@@ -14541,16 +14475,6 @@ int main(int argc, char **argv) {
                 !bench_compact_raw(&CASES[i], insns, reps))
                 return 1;
         }
-        decode_oracle_cache = calloc(1u, sizeof *decode_oracle_cache);
-        if (!decode_oracle_cache) return 1;
-        puts("COMPACT-DECODED-MEASUREMENT existing-flat-workloads; not phone performance");
-        bool ok = true;
-        for (i = 0u; i < sizeof CASES / sizeof CASES[0] && ok; i++)
-            if (!CASES[i].thumb)
-                ok = bench_compact_raw(&CASES[i], insns, reps);
-        free(decode_oracle_cache);
-        decode_oracle_cache = NULL;
-        if (!ok) return 1;
         return 0;
     }
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {

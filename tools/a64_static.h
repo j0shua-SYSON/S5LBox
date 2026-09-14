@@ -321,33 +321,6 @@ typedef struct {
     uint64_t read, write, fetch;
 } a64_compact_ram_map_stats_t;
 
-/* Decoded data only. Targets are offsets into the build-time-linked resident
- * A32 table, never guest-supplied addresses or generated executable memory.
- * Every block carries its complete live-byte witness; stores/control changes
- * terminate it. The owner serializes use and starts with zeroed storage. */
-enum { A64_COMPACT_DECODE_SLOTS = 1024u, A64_COMPACT_DECODE_INSNS = 16u };
-typedef struct {
-    uint32_t word;
-    int32_t target;
-    uint32_t immediate, rotate;
-} a64_compact_decoded_op_t;
-typedef struct {
-    uint32_t pc, count;
-    uint32_t words[A64_COMPACT_DECODE_INSNS];
-    a64_compact_decoded_op_t ops[A64_COMPACT_DECODE_INSNS + 1u];
-    uint8_t reserved[168];
-} a64_compact_decoded_block_t;
-typedef struct {
-    a64_compact_decoded_block_t blocks[A64_COMPACT_DECODE_SLOTS];
-} a64_compact_decode_cache_t;
-
-/* Same flat-RAM oracle contract as a64_compact_raw_run, with caller-owned
- * decoded data retained across calls. NULL selects the live-word control. */
-bool a64_compact_raw_run_decoded(arm_cpu_t *cpu, const uint8_t *code,
-    uint32_t code_base, uint32_t code_bytes, unsigned max_insns,
-    uint8_t *ram, size_t ram_size, a64_compact_decode_cache_t *decode_cache,
-    unsigned *completed);
-
 /* Optional, User-only second-level refill from the existing exact TLB. This
  * never walks page tables. A full-range bus capability supplies host pointers;
  * access-specific TLB tags still supply guest permission. Any interpreter
@@ -369,7 +342,6 @@ typedef struct {
     const arm_ram_window_t *bulk_ram_window;
     arm_bulk_cache_t *bulk_cache;
     arm_ram_watch_t *bulk_watch;
-    a64_compact_decode_cache_t *decode_cache;
 } a64_compact_raw_options_t;
 bool a64_compact_raw_run_code_window_resident_options(
     arm_cpu_t *cpu, const uint8_t *code, uint32_t code_base,

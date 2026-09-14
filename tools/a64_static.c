@@ -2074,7 +2074,6 @@ typedef struct {
     const arm_ram_window_t *bulk_ram_window;
     arm_bulk_cache_t *bulk_cache;
     arm_ram_watch_t *bulk_watch;
-    a64_compact_decode_cache_t *decode_cache;
 } a64_compact_raw_context_t;
 
 _Static_assert(sizeof(void *) == 8u,
@@ -2131,79 +2130,8 @@ _Static_assert(offsetof(a64_compact_raw_context_t, flat_ram) == 0u &&
                    offsetof(a64_compact_raw_context_t, bulk_ram_window) == 552u &&
                    offsetof(a64_compact_raw_context_t, bulk_cache) == 560u &&
                    offsetof(a64_compact_raw_context_t, bulk_watch) == 568u &&
-                   offsetof(a64_compact_raw_context_t, decode_cache) == 576u &&
-                   sizeof(a64_compact_raw_context_t) == 584u,
+                   sizeof(a64_compact_raw_context_t) == 576u,
                "compact raw native context layout drifted");
-
-_Static_assert(sizeof(a64_compact_decoded_op_t) == 16u &&
-                   offsetof(a64_compact_decoded_block_t, words) == 8u &&
-                   offsetof(a64_compact_decoded_block_t, ops) == 72u &&
-                   sizeof(a64_compact_decoded_block_t) == 512u &&
-                   A64_COMPACT_DECODE_SLOTS == 1024u &&
-                   A64_COMPACT_DECODE_INSNS == 16u,
-               "resident decode block layout drifted");
-
-extern const int32_t a64_compact_resident_a32_table[];
-extern const char a64_compact_resident_a32_decode[];
-extern const char a64_compact_resident_a32_branch[];
-
-/* Cold fill only; warm block selection and byte validation stay native.
- * This does not inspect data RAM, execute guest instructions or change CPU
- * state. All dynamic permissions/alignment checks remain in the same handlers. */
-a64_compact_decoded_block_t *a64_compact_decode_prepare(
-        a64_compact_decode_cache_t *cache, const uint8_t *code,
-        uint32_t base, uint32_t bytes, uint32_t pc) {
-    const uint32_t offset = pc - base;
-    if (!cache || !code || (pc & 3u) || offset > bytes || bytes - offset < 4u)
-        return NULL;
-    a64_compact_decoded_block_t *block = &cache->blocks[
-        ((pc >> 2) ^ (pc >> 12)) & (A64_COMPACT_DECODE_SLOTS - 1u)];
-    const int32_t decode = (int32_t)((intptr_t)a64_compact_resident_a32_decode -
-                                   (intptr_t)a64_compact_resident_a32_table);
-    const int32_t branch = (int32_t)((intptr_t)a64_compact_resident_a32_branch -
-                                   (intptr_t)a64_compact_resident_a32_table);
-    unsigned available = (bytes - offset) / 4u;
-    if (available > A64_COMPACT_DECODE_INSNS) available = A64_COMPACT_DECODE_INSNS;
-    unsigned count = 0u;
-    block->count = 0u;
-    block->pc = pc;
-    for (; count < available; count++) {
-        uint32_t word;
-        memcpy(&word, code + offset + count * 4u, sizeof word);
-        a64_compact_decoded_op_t op = {word, decode, 0u, 0u};
-        const unsigned cls = (word >> 25) & 7u;
-        bool terminal = true;
-        if ((word >> 28) != 15u) {
-            unsigned key = UINT_MAX;
-            if (cls == 5u) {
-                op.target = branch;
-            } else if (cls == 2u) {
-                key = 24576u + ((word >> 12) & 8191u);
-                terminal = (word & (1u << 20)) == 0u;
-            } else if (cls == 1u) {
-                key = (word >> 12) & 8191u;
-                op.rotate = ((word >> 8) & 15u) * 2u;
-                op.immediate = ror32(word & 255u, op.rotate);
-                terminal = false;
-            } else if (cls == 0u && !(word & UINT32_C(0x00088ff8))) {
-                key = 8192u + (((word >> 20) & 31u) << 9) +
-                      (((word >> 16) & 7u) << 6) +
-                      (((word >> 12) & 7u) << 3) + (word & 7u);
-                terminal = false;
-            }
-            if (key != UINT_MAX) {
-                op.target = a64_compact_resident_a32_table[key];
-                if (op.target == decode) terminal = true;
-            }
-        }
-        block->words[count] = word;
-        block->ops[count] = op;
-        if (terminal) { count++; break; }
-    }
-    memset(&block->ops[count], 0, sizeof block->ops[count]);
-    block->count = count;
-    return block;
-}
 _Static_assert(ARM_RAM_MAP_ENTRIES == 4096u &&
                    sizeof(arm_ram_map_entry_t) == 16u &&
                    offsetof(arm_ram_map_entry_t, host) == 0u &&
@@ -2795,14 +2723,6 @@ bool a64_compact_raw_run(arm_cpu_t *cpu, const uint8_t *code,
                          uint32_t code_base, uint32_t code_bytes,
                          unsigned max_insns, uint8_t *ram, size_t ram_size,
                          unsigned *completed) {
-    return a64_compact_raw_run_decoded(cpu, code, code_base, code_bytes,
-                                      max_insns, ram, ram_size, NULL, completed);
-}
-
-bool a64_compact_raw_run_decoded(arm_cpu_t *cpu, const uint8_t *code,
-        uint32_t code_base, uint32_t code_bytes, unsigned max_insns,
-        uint8_t *ram, size_t ram_size, a64_compact_decode_cache_t *decode_cache,
-        unsigned *completed) {
     uint64_t code_end;
 
     if (!completed) return false;
@@ -2824,7 +2744,6 @@ bool a64_compact_raw_run_decoded(arm_cpu_t *cpu, const uint8_t *code,
         memset(&context, 0, sizeof context);
         context.flat_ram = ram;
         context.flat_mask = (uint64_t)ram_size - 1u;
-        context.decode_cache = decode_cache;
         context.vfp_s = cpu->vfp_s;
         context.vfp_fpexc = &cpu->vfp_fpexc;
         context.vfp_fpscr = &cpu->vfp_fpscr;
@@ -2842,7 +2761,6 @@ bool a64_compact_raw_run_decoded(arm_cpu_t *cpu, const uint8_t *code,
     }
 #else
     (void)code_end;
-    (void)decode_cache;
     return false;
 #endif
 }
@@ -2950,7 +2868,6 @@ bool a64_compact_raw_run_code_window_resident_options(
         }
         context.fallback = fallback;
         context.fallback_opaque = fallback_opaque;
-        context.decode_cache = options ? options->decode_cache : NULL;
         context.bulk_cpu = options && options->bulk_enabled && fallback && !priv
             ? cpu : NULL;
         context.bulk_ram_window = context.bulk_cpu ? options->bulk_ram_window : NULL;
