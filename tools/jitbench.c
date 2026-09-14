@@ -5714,8 +5714,10 @@ static bool compact_raw_compare(const char *name, const uint32_t *program,
     modeled = compact_raw_modeled_prefix(program, insns, pc, budget);
 
     seed_cpu_at(&compact, program, insns, false, pc);
-    if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, insns * 4u,
-                             budget, g_ram, sizeof g_ram, &completed)) {
+    const bool accepted = a64_compact_raw_run(&compact, &g_ram[pc], pc, insns * 4u,
+                                             budget, g_ram, sizeof g_ram, &completed);
+    /* A zero budget is a public-contract refusal, not a native invocation. */
+    if (accepted != (budget != 0u)) {
         fprintf(stderr, "jitbench: compact raw %s contract refused\n", name);
         return false;
     }
