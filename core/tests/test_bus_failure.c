@@ -122,6 +122,87 @@ static void test_neon_memory_and_retry(void) {
         }
 }
 
+static void test_neon_pairs_and_retry(void) {
+    static const unsigned types[] = {8u,9u,3u};
+    static const unsigned slots[3][8] = {{0u,2u,1u,3u},{0u,4u,1u,5u},{0u,4u,1u,5u,2u,6u,3u,7u}};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned host = 0; host < 2u; host++)
+      for (unsigned load = 0; load < 2u; load++)
+       for (unsigned kind = 0; kind < 3u; kind++)
+        for (unsigned stop = 0; stop < (kind == 2u ? 8u : 4u); stop++) {
+            fixture_t f; arm_bus_t bus; arm_cpu_t c;
+            setup(&f, &bus, &c, thumb != 0u, host != 0u);
+            if (thumb) c.cpsr |= 0x1800u;
+            c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN; c.vfp_fpscr = 0x0bc00080u;
+            uint32_t insn = (thumb ? 0xf941c08du : 0xf441c08du) | (load << 21) | (types[kind] << 8);
+            if (thumb) { put16(&f, 0u, (uint16_t)(insn >> 16)); put16(&f, 2u, (uint16_t)insn); }
+            else put32(&f, 0u, insn);
+            uint64_t expected[32];
+            for (unsigned d = 0; d < 32u; d++) {
+                expected[d] = (UINT64_C(0xdead0001) + 2u * d) << 32 | (UINT64_C(0xdead0000) + 2u * d);
+                vfp_set_d(&c, d, expected[d]);
+            }
+            unsigned words = kind == 2u ? 8u : 4u;
+            for (unsigned word = 0; word < 8u; word++) put32(&f, 0x1000u + word * 4u, 0xabcdef00u + word);
+            f.fail_address = 0x1000u + stop * 4u; f.fail_size = 4u; f.fail_write = !load;
+            uint32_t flags = c.cpsr;
+            CHECK(arm_step(&c) == ARM_HALT, "pair failed data callback did not halt");
+            check_stop(&f, &c, 0u, flags);
+            CHECK(c.r[1] == 0x1000u && c.vfp_fpscr == 0x0bc00080u && c.vfp_fpexc == ARM_FPEXC_EN,
+                  "pair failed writeback or FP control changed");
+            for (unsigned word = 0; word < 8u; word++) {
+                unsigned slot = slots[kind][word];
+                if (load && word < stop) {
+                    unsigned d = 28u + slot / 2u, shift = 32u * (slot % 2u);
+                    expected[d] = (expected[d] & ~(UINT64_C(0xffffffff) << shift)) | (UINT64_C(0xabcdef00) + word) << shift;
+                }
+                CHECK(get32(&f, 0x1000u + word * 4u) == (!load && word < stop ? 0xdead0038u + slot : 0xabcdef00u + word),
+                      "pair store lost the interleaved prefix or wrote after the failed callback");
+            }
+            for (unsigned d = 0; d < 32u; d++) CHECK(vfp_get_d(&c, d) == expected[d], "pair partial load/gap preservation");
+            f.failed = false; f.fail_size = 0u;
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u && c.r[1] == 0x1000u + words * 4u &&
+                  c.cpsr == (flags & ~0x0600fc00u) && c.vfp_fpscr == 0x0bc00080u, "pair retry did not finish exactly once");
+            for (unsigned word = 0; word < 8u; word++) {
+                unsigned slot = slots[kind][word];
+                if (load && word < words) {
+                    unsigned d = 28u + slot / 2u, shift = 32u * (slot % 2u);
+                    expected[d] = (expected[d] & ~(UINT64_C(0xffffffff) << shift)) | (UINT64_C(0xabcdef00) + word) << shift;
+                }
+                CHECK(get32(&f, 0x1000u + word * 4u) == (!load && word < words ? 0xdead0038u + slot : 0xabcdef00u + word),
+                      "pair retry stored wrong words or overwrote the suffix");
+            }
+            for (unsigned d = 0; d < 32u; d++) CHECK(vfp_get_d(&c, d) == expected[d], "pair retry register order/preservation");
+        }
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned host = 0; host < 2u; host++)
+      for (unsigned load = 0; load < 2u; load++)
+       for (unsigned kind = 0; kind < 3u; kind++)
+        for (unsigned enabled = 0; enabled < 2u; enabled++)
+         for (unsigned half = 0; half <= thumb; half++) {
+            fixture_t f; arm_bus_t bus; arm_cpu_t c;
+            setup(&f, &bus, &c, thumb != 0u, host != 0u);
+            if (thumb) c.cpsr |= 0x1800u;
+            c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u; c.vfp_fpscr = 0x0bc00080u;
+            uint32_t insn = (thumb ? 0xf941c08du : 0xf441c08du) | (load << 21) | (types[kind] << 8);
+            if (thumb) { put16(&f, 0u, (uint16_t)(insn >> 16)); put16(&f, 2u, (uint16_t)insn); }
+            else put32(&f, 0u, insn);
+            for (unsigned word = 0; word < 8u; word++) put32(&f, 0x1000u + word * 4u, 0xabcdef00u + word);
+            uint32_t flags = c.cpsr;
+            f.fail_address = half * 2u; f.fail_size = thumb ? 2u : 4u;
+            CHECK(arm_step(&c) == ARM_HALT, "pair failed fetch did not halt before FP access checking");
+            check_stop(&f, &c, 0u, flags);
+            CHECK(c.r[1] == 0x1000u && c.vfp_fpscr == 0x0bc00080u && c.vfp_fpexc == (enabled ? ARM_FPEXC_EN : 0u),
+                  "pair failed fetch changed base or FP control");
+            for (unsigned d = 0; d < 32u; d++) CHECK(vfp_get_d(&c, d) == 0u, "pair load preceded complete fetch");
+            for (unsigned word = 0; word < 8u; word++) CHECK(get32(&f, 0x1000u + word * 4u) == 0xabcdef00u + word,
+                "pair store preceded complete fetch");
+            f.failed = false; f.fail_size = 0u; c.vfp_fpexc = ARM_FPEXC_EN;
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u &&
+                  c.r[1] == 0x1000u + (kind == 2u ? 32u : 16u) && c.cpsr == (flags & ~0x0600fc00u), "pair fetch retry");
+         }
+}
+
 static void test_neon_sign_fetch_and_retry(void) {
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned negate = 0; negate < 2u; negate++)
@@ -618,6 +699,7 @@ static void test_signed_runner_entry_guards(void) {
 #endif
 
 int main(void) {
+    test_neon_pairs_and_retry();
     test_neon_sign_fetch_and_retry();
     test_neon_memory_and_retry();
     test_data_and_retry();

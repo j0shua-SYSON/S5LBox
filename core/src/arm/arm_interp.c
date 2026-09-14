@@ -669,6 +669,55 @@ static bool a8_neon_single_elements_space(const arm_cpu_t *c, uint32_t insn) {
     return type == 7u || type == 10u || type == 6u || type == 2u;
 }
 
+/* VLD2/VST2 multiple structures (A8.8.323/406), currently .32 only.
+ * Types8/9 select one register per component, adjacent or spaced by2;
+ * type3 selects two adjacent registers per component. */
+static bool a8_neon_pairs_space(const arm_cpu_t *c, uint32_t insn) {
+    uint32_t prefix = (c->cpsr & ARM_CPSR_T) ? 0xf9000000u : 0xf4000000u;
+    if (c->arch != ARM_ARCH_V7_CORTEX_A8 || (insn & 0xff900000u) != prefix) return false;
+    unsigned type = (insn >> 8) & 15u;
+    return type == 3u || type == 8u || type == 9u;
+}
+
+static arm_status_t exec_a8_neon_pairs(arm_cpu_t *c, uint32_t insn) {
+    unsigned type = (insn >> 8) & 15u, size = (insn >> 6) & 3u, align = (insn >> 4) & 3u;
+    unsigned regs = type == 3u ? 2u : 1u, inc = type == 8u ? 1u : 2u;
+    unsigned first = ((insn >> 12) & 15u) | ((insn >> 18) & 16u);
+    unsigned rn = (insn >> 16) & 15u, rm = insn & 15u;
+    bool load = (insn & (1u << 21)) != 0u;
+    if (size != 2u || rn == 15u || first + inc + regs > 32u || (regs == 1u && align == 3u)) return ARM_UNDEFINED;
+    if (!vfp_cpacr_permits(c) || !vfp_enabled(c)) return ARM_GUEST_UNDEFINED;
+    if (c->cpsr & ARM_CPSR_E) return ARM_UNDEFINED;
+    uint32_t address = c->r[rn];
+    unsigned alignment = align ? 4u << align : 4u;
+    if (address & (alignment - 1u)) {
+        if (align || (c->cp15.sctlr & ARM_SCTLR_A)) {
+            note_alignment_abort(c, address, !load);
+            return ARM_OK;
+        }
+        return ARM_UNDEFINED; /* Standard unaligned transfers remain separate. */
+    }
+    uint32_t updated = address + (rm == 13u ? 16u * regs : rm == 15u ? 0u : c->r[rm]);
+    for (unsigned r = 0; r < regs; r++)
+     for (unsigned element = 0; element < 2u; element++)
+      for (unsigned component = 0; component < 2u; component++, address += 4u) {
+        unsigned d = first + r + component * inc, shift = element * 32u;
+        if (load) {
+            uint32_t word = mem_r32(c, address);
+            if (c->abort_pending) return ARM_OK;
+            uint64_t mask = UINT64_C(0xffffffff) << shift;
+            vfp_set_d(c, d, (vfp_get_d(c, d) & ~mask) | (uint64_t)word << shift);
+        } else {
+            mem_w32(c, address, (uint32_t)(vfp_get_d(c, d) >> shift));
+            if (c->abort_pending) return ARM_OK;
+        }
+      }
+    /* Publish each completed .32 element in memory order, but keep the
+     * original base across guest aborts and checked host-bus failures. */
+    if (rm != 15u) c->r[rn] = updated;
+    return ARM_OK;
+}
+
 static arm_status_t exec_a8_neon_single_elements(arm_cpu_t *c, uint32_t insn) {
     unsigned type = (insn >> 8) & 15u, size = (insn >> 6) & 3u, align = (insn >> 4) & 3u;
     unsigned count = type == 7u ? 1u : type == 10u ? 2u : type == 6u ? 3u : 4u;
@@ -1011,7 +1060,7 @@ static bool vfp_lazy_enable_trap(const arm_cpu_t *c, uint32_t insn) {
     /* Checked A8 operations report every actual access denial explicitly as
      * ARM_GUEST_UNDEFINED. An unsupported ID or invalid encoding is still
      * a capability stop when EN=0, not a fault the guest can fix by enabling. */
-    if (a8_neon_single_elements_space(c, insn) || a8_neon_bitwise_space(c, insn) ||
+    if (a8_neon_single_elements_space(c, insn) || a8_neon_pairs_space(c, insn) || a8_neon_bitwise_space(c, insn) ||
         a8_neon_immediate_space(c, insn) || a8_neon_multiply_space(c, insn) || a8_neon_add_space(c, insn) ||
         a8_neon_extract_space(c, insn) || a8_neon_sign_space(c, insn)) return false;
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 &&
@@ -3546,6 +3595,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         return exec_a8_exclusive(c, insn, true);
     }
     if (a8_neon_single_elements_space(c, insn)) return exec_a8_neon_single_elements(c, insn);
+    if (a8_neon_pairs_space(c, insn)) return exec_a8_neon_pairs(c, insn);
     if (a8_neon_bitwise_space(c, insn)) return exec_a8_neon_bitwise(c, insn);
     if (a8_neon_immediate_space(c, insn)) return exec_a8_neon_immediate(c, insn);
     if (a8_neon_multiply_space(c, insn)) return exec_a8_neon_multiply(c, insn);
@@ -4208,8 +4258,8 @@ arm_status_t arm_step(arm_cpu_t *c) {
          * Decode A8 structure memory first; unsupported NEON forms must not
          * silently become preload hints. Actual PLD/PLI have bit20 set. */
         if (c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn & 0xff100000u) == 0xf4000000u) {
-            if (!a8_neon_single_elements_space(c, insn)) return ARM_UNDEFINED;
-            arm_status_t status = exec_a8_neon_single_elements(c, insn);
+            if (!a8_neon_single_elements_space(c, insn) && !a8_neon_pairs_space(c, insn)) return ARM_UNDEFINED;
+            arm_status_t status = a8_neon_pairs_space(c, insn) ? exec_a8_neon_pairs(c, insn) : exec_a8_neon_single_elements(c, insn);
             if (c->abort_pending) return take_pending_data_abort(c, pc);
             if (arm_bus_access_failed(c->bus)) return halt_failed_instruction(c);
             if (status == ARM_GUEST_UNDEFINED) return take_undefined_instruction(c, pc);

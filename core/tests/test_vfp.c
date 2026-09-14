@@ -652,6 +652,145 @@ static uint32_t a8_neon_memory(unsigned thumb, unsigned load, unsigned type, uns
         (rn << 16) | ((first & 15u) << 12) | (type << 8) | (size << 6) | (align << 4) | rm;
 }
 
+/* Independent memory-word -> register-word permutations from the manual's
+ * interleaving diagrams. The spaced pair leaves the intervening D untouched. */
+static const unsigned a8_pair_types[] = {8u,9u,3u};
+static const unsigned a8_pair_slots[3][8] = {{0u,2u,1u,3u}, {0u,4u,1u,5u}, {0u,4u,1u,5u,2u,6u,3u,7u}};
+
+static void a8_pair_check(unsigned thumb, unsigned load_, unsigned kind, unsigned first,
+                          unsigned align, unsigned rn, unsigned rm) {
+    arm_cpu_t c; a8_move_reset(&c, thumb);
+    uint32_t gpr[15];
+    for (unsigned r = 0; r < 15u; r++) c.r[r] = 0xa1100000u + r;
+    c.r[rn] = 0x2040u;
+    memcpy(gpr, c.r, sizeof gpr);
+    unsigned words = kind == 2u ? 8u : 4u, last = kind == 0u ? 1u : kind == 1u ? 2u : 3u;
+    bool valid = first + last < 32u && (kind == 2u || align != 3u);
+    uint64_t expected_fp[32];
+    for (unsigned d = 0; d < 32u; d++) {
+        expected_fp[d] = UINT64_C(0xff01234567890000) + d * UINT64_C(0x1234567);
+        vfp_set_d(&c, d, expected_fp[d]);
+    }
+    uint8_t expected[64];
+    memset(g_ram + 0x2030u, 0xa5, sizeof expected);
+    for (unsigned w = 0; w < 8u; w++) m_w32(NULL, 0x2040u + w * 4u, 0xabcdef01u + w * 0x87654321u);
+    memcpy(expected, g_ram + 0x2030u, sizeof expected);
+    if (valid) for (unsigned w = 0; w < words; w++) {
+        unsigned slot = a8_pair_slots[kind][w];
+        uint8_t bytes[8]; memcpy(bytes, &expected_fp[first + slot / 2u], 8u);
+        if (load_) { memcpy(bytes + (slot % 2u) * 4u, expected + 16u + w * 4u, 4u); memcpy(&expected_fp[first + slot / 2u], bytes, 8u); }
+        else memcpy(expected + 16u + w * 4u, bytes + (slot % 2u) * 4u, 4u);
+    }
+    uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+    uint32_t updated = gpr[rn] + (rm == 15u ? 0u : rm == 13u ? words * 4u : gpr[rm]);
+    CHECK(a8_move_step(&c, thumb, a8_neon_memory(thumb, load_, a8_pair_types[kind], 2u, align, first, rn, rm)) ==
+          (valid ? ARM_OK : ARM_UNDEFINED) && c.r[15] == (valid ? 0x104u : 0x100u) &&
+          c.cpsr == flags && c.vfp_fpscr == fpscr, "pair disposition T=%u L=%u kind=%u D=%u align=%u Rn=%u Rm=%u",
+          thumb, load_, kind, first, align, rn, rm);
+    bool same = !memcmp(g_ram + 0x2030u, expected, sizeof expected);
+    for (unsigned d = 0; d < 32u; d++) same &= vfp_get_d(&c, d) == expected_fp[d];
+    for (unsigned r = 0; r < 15u; r++) same &= c.r[r] == (valid && r == rn ? updated : gpr[r]);
+    CHECK(same, "pair interleaving, gap/canary preservation or original-base/offset writeback");
+}
+
+static void test_a8_neon_pair_registers(void) {
+    CHECK(a8_neon_memory(0u, 1u, 8u, 2u, 2u, 16u, 0u, 13u) == 0xf46008adu &&
+          a8_neon_memory(1u, 1u, 8u, 2u, 2u, 16u, 0u, 13u) == 0xf96008adu &&
+          a8_neon_memory(0u, 0u, 9u, 2u, 1u, 29u, 13u, 14u) == 0xf44dd99eu, "VLD2/VST2 encoding anchors");
+    static const unsigned offsets[] = {15u,13u,6u,5u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned load_ = 0; load_ < 2u; load_++)
+      for (unsigned kind = 0; kind < 3u; kind++) {
+        for (unsigned first = 0; first < 32u; first++)
+         for (unsigned align = 0; align < 4u; align++)
+          for (unsigned post = 0; post < 4u; post++)
+            a8_pair_check(thumb, load_, kind, first, align, 5u, offsets[post]);
+        for (unsigned rn = 0; rn < 15u; rn++)
+         for (unsigned rm = 0; rm < 16u; rm++)
+            a8_pair_check(thumb, load_, kind, kind == 1u ? 29u : 28u, 0u, rn, rm);
+      }
+}
+
+static void test_a8_neon_pair_alignment_and_access(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned load_ = 0; load_ < 2u; load_++)
+      for (unsigned kind = 0; kind < 3u; kind++)
+       for (unsigned align = 0; align < (kind == 2u ? 4u : 3u); align++)
+        for (unsigned a = 0; a < 2u; a++)
+         for (unsigned offset = 0; offset < 32u; offset++) {
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            c.cp15.sctlr = (c.cp15.sctlr & ~ARM_SCTLR_A) | (a ? ARM_SCTLR_A : 0u);
+            c.r[13] = 0x2040u + offset;
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            unsigned alignment = align ? 4u << align : 4u;
+            bool misaligned = (offset % alignment) != 0u, abort = misaligned && (align || a), unsupported = misaligned && !abort;
+            CHECK(a8_move_step(&c, thumb, a8_neon_memory(thumb, load_, a8_pair_types[kind], 2u, align, 28u, 13u, 13u)) ==
+                  (unsupported ? ARM_UNDEFINED : ARM_OK) && c.vfp_fpscr == fpscr, "pair alignment disposition");
+            if (abort) CHECK(c.r[15] == ARM_VEC_DATA_ABORT && c.r[14] == 0x108u && c.spsr[ARM_BANK_ABT] == flags &&
+                c.bank_r13[ARM_BANK_USR] == 0x2040u + offset && c.cp15.dfar == 0x2040u + offset &&
+                c.cp15.dfsr == (1u | (load_ ? 0u : 0x800u)), "pair alignment abort/writeback");
+            else CHECK(c.r[15] == (unsupported ? 0x100u : 0x104u) && c.cpsr == flags &&
+                c.r[13] == 0x2040u + offset + (unsupported ? 0u : kind == 2u ? 32u : 16u), "pair alignment success/guard");
+         }
+    static const unsigned permissions[] = {0u,1u,3u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned load_ = 0; load_ < 2u; load_++)
+      for (unsigned kind = 0; kind < 3u; kind++)
+       for (unsigned user = 0; user < 2u; user++)
+        for (unsigned enabled = 0; enabled < 2u; enabled++)
+         for (unsigned access = 0; access < 3u; access++) {
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permissions[access] * 0x00500000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            c.r[5] = 0x2040u; uint32_t flags = c.cpsr;
+            bool allowed = enabled && (permissions[access] == 3u || (permissions[access] == 1u && !user));
+            CHECK(a8_move_step(&c, thumb, a8_neon_memory(thumb, load_, a8_pair_types[kind], 2u, 0u, 28u, 5u, 13u)) == ARM_OK &&
+                  c.r[5] == (allowed ? 0x2040u + (kind == 2u ? 32u : 16u) : 0x2040u), "pair access/writeback");
+            CHECK(allowed ? c.r[15] == 0x104u && c.cpsr == flags : c.r[15] == ARM_VEC_UNDEFINED &&
+                  c.r[14] == (thumb ? 0x102u : 0x104u) && c.spsr[ARM_BANK_UND] == flags, "pair access exception");
+         }
+}
+
+static void test_a8_neon_pair_invalid_and_it(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned load_ = 0; load_ < 2u; load_++)
+      for (unsigned kind = 0; kind < 3u; kind++)
+       for (unsigned enabled = 0; enabled < 2u; enabled++)
+        for (unsigned skip = 0; skip < (thumb ? 2u : 1u); skip++)
+         for (unsigned bad = 0; bad < 8u; bad++) {
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            c.r[5] = 0x2040u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            if (skip) c.cp15.cpacr = 0u;
+            if (bad == 6u) c.cpsr |= ARM_CPSR_E;
+            unsigned size = bad < 3u ? (bad == 2u ? 3u : bad) : 2u;
+            unsigned first = bad == 3u ? 31u : 28u, rn = bad == 4u ? 15u : 5u;
+            uint32_t insn = a8_neon_memory(thumb, load_, a8_pair_types[kind], size, 0u, first, rn, 13u);
+            if (bad == 5u) insn |= 1u << 23; /* single-structure lane/replicate allocation */
+            if (thumb) { m_w16(NULL, 0x100u, skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK, "pair IT setup"); }
+            uint32_t pc = c.r[15], flags = c.cpsr, fpscr = c.vfp_fpscr;
+            uint8_t memory[32]; memset(memory, 0xa5, 32u); memcpy(g_ram + 0x2040u, memory, 32u);
+            bool valid = bad == 7u, denied = !enabled && bad >= 6u;
+            CHECK(a8_move_step(&c, thumb, insn) == (skip || valid || denied ? ARM_OK : ARM_UNDEFINED), "pair invalid/IT disposition");
+            if (skip || (!valid && !denied)) {
+                CHECK(c.r[15] == (skip ? pc + 4u : pc) && c.r[5] == 0x2040u && c.cpsr == (skip ? flags & ~0x0600fc00u : flags) &&
+                      c.vfp_fpscr == fpscr && !memcmp(g_ram + 0x2040u, memory, 32u), "pair invalid/skipped mutation");
+                bool same = true; for (unsigned d = 0; d < 32u; d++) same &= vfp_get_d(&c, d) == 0u;
+                CHECK(same, "pair invalid/skipped load changed FP registers");
+            } else if (denied) CHECK(c.r[15] == ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND] == flags && c.r[5] == 0x2040u,
+                "pair disabled valid encoding did not enter guest Undefined");
+            else CHECK(c.r[15] == pc + 4u && c.r[5] == 0x2040u + (kind == 2u ? 32u : 16u) &&
+                c.cpsr == (flags & ~0x0600fc00u), "pair valid IT retirement");
+         }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++)
+     for (unsigned load_ = 0; load_ < 2u; load_++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c, &g_bus, legacy[profile]), "legacy pair reset");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        CHECK(a8_move_step(&c, 0u, a8_neon_memory(0u, load_, 8u, 2u, 0u, 16u, 5u, 13u)) == ARM_UNDEFINED && c.r[15] == 0u,
+              "NEON pair memory leaked to legacy profile");
+     }
+}
+
 static void test_a8_neon_memory_registers(void) {
     static const unsigned types[] = {7u,10u,6u,2u}, offsets[] = {15u,13u,6u,5u};
     CHECK(a8_neon_memory(1u, 0u, 10u, 3u, 2u, 8u, 4u, 15u) == 0xf9048aefu &&
@@ -4104,6 +4243,9 @@ static void test_condition_codes_apply(void) {
 
 /* --------------------------------------------------------------- main ---- */
 int main(void) {
+    test_a8_neon_pair_registers();
+    test_a8_neon_pair_alignment_and_access();
+    test_a8_neon_pair_invalid_and_it();
     test_a8_neon_sign_registers();
     test_a8_neon_sign_access_and_host_state();
     test_a8_neon_sign_invalid_and_it();

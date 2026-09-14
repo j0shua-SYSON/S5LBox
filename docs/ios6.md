@@ -242,8 +242,17 @@ support naturally aligned little-endian accesses, optional 8/16/32-byte
 alignment assertions, and immediate or register post-index writeback.
 An assertion failure, or a standard alignment failure with SCTLR.A set,
 enters the guest Data Abort handler. Standard unaligned accesses with A=0,
-8/16-bit elements, big-endian accesses and other structure forms remain
+8/16-bit elements and big-endian accesses remain
 unsupported. See [DDI0406C.b, A3.2.1, A7.7.1 and A8.8.320/404](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+VLD2/VST2 multiple-structure forms additionally interleave or deinterleave
+32-bit elements into adjacent or spaced pairs of D registers, or four
+consecutive D registers. They use the same alignment and writeback rules;
+two-register forms reject a 32-byte alignment assertion. Each completed
+word publishes to its own interleaved register lane. Other element widths,
+single-lane/replicate forms and the remaining structure families are not
+implemented. See
+[DDI0406C.b, A8.8.323/406](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 
 Transfers use the current guest memory permissions. Writeback occurs only
 after completion, preserving the required base-restored abort behavior.
@@ -255,6 +264,9 @@ permissions, conditional execution, MMU and bus faults, and split Thumb
 fetch faults. The A8 ARM decoder handles NEON memory before its broad preload
 hint check, so D15/D31 transfers and unsupported structure forms cannot be
 swallowed as hints.
+For VLD2/VST2, independent register-word permutations verify the untouched
+spaced register and every partial-transfer boundary, including User page
+translation/permission faults and checked-bus failure followed by retry.
 
 ARM and Thumb NEON register VAND, VBIC, VORR, VORN, VEOR, VBSL, VBIT and
 VBIF now operate on all 32 D registers or 16 Q registers, including VORR's
@@ -308,6 +320,15 @@ exact per-byte access counts, whole-page canaries, preserved registers and
 FPSCR, the fifth stack argument and ARM-to-Thumb return. Its explicit
 CPUFAMILY_ARM_13 commpage input selects the prepared firmware path; actual
 commpage initialization, other paths, process launch and boot remain unverified.
+
+The opposite-output-stride path is prepared separately using the unchanged
+ARM_13-selected code, input stride 1 and output stride -1. Before VLD2 support,
+its first 32-element absolute-value case stopped at `0x3083f350` before reading
+vector data. The same fixture now reaches `VTRN.32` at `0x3083f374` after
+38 steps, five pair loads and three sign operations: 80 source bytes
+read, no output bytes written, and R4 saved on the stack. This is a verified
+execution prefix; the reverse-output case has not returned. The generic
+CPU-family branch, scalar tails and actual commpage setup remain unprepared.
 
 NEON register VMUL.F32, VADD.F32 and VSUB.F32 operate on two or four lanes
 across the full D/Q bank, using integer arithmetic and nearest-even rounding.
@@ -938,7 +959,8 @@ establish that result.
 - Cortex-A8 stores d0-d31 and supports system/core/memory transfers plus
   VFP copies, immediate constants and sign operations with short vectors,
   scalar comparisons across the full register bank, and the bounded
-  32/64-bit NEON VLD1/VST1 memory forms, register Boolean operations, VEXT, F32 VABS/VNEG,
+  32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms,
+  register Boolean operations, VEXT, F32 VABS/VNEG,
   immediate constants, core-register VDUP and register VMUL/VADD/VSUB.F32
   described above.
   Upper-bank VFP arithmetic, the remaining NEON families, and full
