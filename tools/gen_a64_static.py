@@ -3606,7 +3606,7 @@ def compact_register_memory(prefix: str) -> list[str]:
 
 
 def compact_register_a32() -> tuple[list[str], list[str]]:
-    """Live-word A32 execution with the same resident ABI as the Thumb tier.
+    """Live-word or data-decoded A32 execution with the resident Thumb ABI.
 
     Tables specialize ISA operands at build time, never guest code. Immediate
     DP, low-register unshifted DP, immediate word/byte transfers and B/BL stay
@@ -3713,17 +3713,52 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
             "    ldp w0, w1, [x19]", "    ldp w2, w3, [x19, #8]",
             "    ldp w4, w5, [x19, #16]", "    ldp w6, w7, [x19, #24]",
             "    ldr w28, [x20]", *table_address(16, prefix + "table"),
-            *table_address(17, prefix + "conditions"), f"    b {prefix}condition",
+            "    mov x17, xzr", f"    b {prefix}head",
             f"{prefix}sequential:", "    add w26, w26, #4",
             f"{prefix}retire:", "    add w29, w29, #1", "    subs w25, w25, #1",
-            f"    b.eq {prefix}exit", "    sub w8, w26, w23", "    cmp w8, w24",
-            f"    b.hs {prefix}window_miss", "    add w10, w8, #4",
-            "    cmp w10, w24", f"    b.hi {prefix}fallback",
+            f"    b.eq {prefix}exit", f"    cbnz x17, {prefix}cached_next",
+            f"{prefix}head:", "    sub w8, w26, w23", "    cmp w8, w24",
+            f"    b.hs {prefix}window_miss", "    sub w10, w24, w8",
+            "    cmp w10, #4", f"    b.lo {prefix}fallback",
+            "    ldr x17, [x27, #576]", f"    cbz x17, {prefix}live_fetch",
+            "    lsr w10, w26, #2", "    eor w10, w10, w26, lsr #12",
+            "    and w10, w10, #1023", "    lsl w10, w10, #9",
+            "    add x17, x17, w10, uxtw",
+            "    ldp w10, w11, [x17]", "    cmp w10, w26",
+            f"    b.ne {prefix}cache_cold", f"    cbz w11, {prefix}cache_cold",
+            "    cmp w11, #16", f"    b.hi {prefix}cache_cold",
+            "    sub w12, w24, w8", "    cmp w12, w11, lsl #2",
+            f"    b.lo {prefix}cache_cold", "    add x10, x22, w8, uxtw",
+            "    mov w8, w11", "    add x11, x17, #8",
+            # Compare all executing bytes before reusing a block. No store,
+            # callback or control-state change can occur before its last op.
+            f"{prefix}cache_compare:", "    cmp w8, #4",
+            f"    b.lo {prefix}cache_tail", "    ldp x12, x13, [x10], #16",
+            "    ldp x14, x15, [x11], #16", "    eor x12, x12, x14",
+            "    eor x13, x13, x15", "    orr x12, x12, x13",
+            f"    cbnz x12, {prefix}cache_cold", "    sub w8, w8, #4",
+            f"    b {prefix}cache_compare",
+            f"{prefix}cache_tail:", f"    tbz w8, #1, {prefix}cache_tail_word",
+            "    ldr x12, [x10], #8", "    ldr x13, [x11], #8",
+            "    cmp x12, x13", f"    b.ne {prefix}cache_cold",
+            f"{prefix}cache_tail_word:", f"    tbz w8, #0, {prefix}cache_hit",
+            "    ldr w12, [x10]", "    ldr w13, [x11]", "    cmp w12, w13",
+            f"    b.ne {prefix}cache_cold",
+            f"{prefix}cache_hit:", "    add x17, x17, #72",
+            f"    b {prefix}cached_fetch",
+            f"{prefix}cached_next:", "    add x17, x17, #16",
+            f"{prefix}cached_fetch:", "    ldp w9, w12, [x17]",
+            f"    cbz w12, {prefix}head", "    ldp w8, w11, [x17, #8]",
+            f"    b {prefix}condition",
+            f"{prefix}live_fetch:", "    sub w8, w26, w23",
             "    ldr w9, [x22, w8, uxtw]",
             f"{prefix}condition:", "    lsr w10, w9, #28", "    cmp w10, #14",
-            f"    b.eq {prefix}classify", f"    b.hi {prefix}fallback",
-            "    msr nzcv, x28", "    ldrsw x15, [x17, w10, uxtw #2]",
-            "    add x15, x17, x15", "    br x15",
+            f"    b.eq {prefix}admitted", f"    b.hi {prefix}fallback",
+            "    msr nzcv, x28", *table_address(15, prefix + "conditions"),
+            "    ldrsw x14, [x15, w10, uxtw #2]",
+            "    add x15, x15, x14", "    br x15",
+            f"{prefix}admitted:", f"    cbz x17, {prefix}classify",
+            "    add x15, x16, w12, sxtw", "    br x15",
             f"{prefix}classify:", "    ubfx w10, w9, #25, #3",
             "    cmp w10, #5", f"    b.eq {prefix}branch",
             "    cmp w10, #2", f"    b.eq {prefix}memory",
@@ -3745,24 +3780,44 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
             "    rorv w8, w8, w11", "    ubfx w10, w9, #12, #13",
             f"{prefix}dispatch:", "    ldrsw x15, [x16, w10, uxtw #2]",
             "    add x15, x16, x15", "    br x15",
-            f"{prefix}branch:", "    tbz w9, #24, 1f",
+            ".globl A64S_CSYM(a64_compact_resident_a32_branch)",
+            "A64S_CSYM(a64_compact_resident_a32_branch):",
+            f"{prefix}branch:", "    mov x17, xzr", "    tbz w9, #24, 1f",
             "    add w8, w26, #4", "    str w8, [x19, #56]", "1:",
             "    sbfx w8, w9, #0, #24", "    add w26, w26, #8",
             "    add w26, w26, w8, lsl #2", f"    b {prefix}retire"]
+    # Only a cold/mutated block leaves the register-resident decoder. Warm
+    # blocks dispatch existing handlers directly; no per-op C call or codegen.
+    body += [f"{prefix}cache_cold:", "    stp w0, w1, [x19]",
+             "    stp w2, w3, [x19, #8]", "    stp w4, w5, [x19, #16]",
+             "    stp w6, w7, [x19, #24]", "    str w28, [x20]",
+             "    str x16, [sp, #104]", "    bl .La64cr_fp_session_restore",
+             "    ldr x0, [x27, #576]", "    mov x1, x22", "    mov w2, w23",
+             "    mov w3, w24", "    mov w4, w26",
+             "    bl A64S_CSYM(a64_compact_decode_prepare)", "    mov x17, x0",
+             "    ldr x16, [sp, #104]", "    ldp w0, w1, [x19]",
+             "    ldp w2, w3, [x19, #8]", "    ldp w4, w5, [x19, #16]",
+             "    ldp w6, w7, [x19, #24]", "    ldr w28, [x20]",
+             f"    cbz x17, {prefix}live_fetch", f"    b {prefix}cache_hit"]
     for index, condition in enumerate(CONDITIONS):
-        body += [f"{prefix}condition_{index}:", f"    b.{condition} {prefix}classify",
+        body += [f"{prefix}condition_{index}:", f"    b.{condition} {prefix}admitted",
                  f"    b {prefix}sequential"]
     for name, target in (("decode", ".La64cr_condition_pass"),
                          ("window_miss", ".La64cr_window_miss"),
                          ("fallback", ".La64cr_fallback"),
                          ("exit", ".La64cr_exit")):
+        if name == "decode":
+            body += [".globl A64S_CSYM(a64_compact_resident_a32_decode)",
+                     "A64S_CSYM(a64_compact_resident_a32_decode):"]
         body += [f"{prefix}{name}:", "    stp w0, w1, [x19]",
                  "    stp w2, w3, [x19, #8]", "    stp w4, w5, [x19, #16]",
                  "    stp w6, w7, [x19, #24]", "    str w28, [x20]",
                  "    mov w28, #4", *table_address(16, ".La64cr_dp_table"),
                  *table_address(17, ".La64cr_cond_table"), f"    b {target}"]
     body += compact_register_memory(prefix)
-    table = ["", ".p2align 2", f"{prefix}table:"]
+    table = ["", ".p2align 2",
+             ".globl A64S_CSYM(a64_compact_resident_a32_table)",
+             "A64S_CSYM(a64_compact_resident_a32_table):", f"{prefix}table:"]
     handlers: dict[tuple[str, ...], str] = {}
 
     def append(instructions: list[str] | None) -> None:

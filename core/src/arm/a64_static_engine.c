@@ -166,6 +166,7 @@ typedef struct {
         refill_predictor[STATIC_A64_CACHE_ENTRIES];
     static_a64_compact_pending_t compact_pending;
     a64_static_graph_node_t graph_nodes[A64_STATIC_GRAPH_SLOTS];
+    a64_compact_decode_cache_t compact_decode_cache;
 } static_a64_state_t;
 
 static static_a64_state_t *static_state(const s5l8900_t *m) {
@@ -805,6 +806,7 @@ void s5l8900_static_a64_invalidate_derived(s5l8900_t *m) {
     memset(state->cache, 0, sizeof state->cache);
     memset(&state->compact_pending, 0, sizeof state->compact_pending);
     memset(state->graph_nodes, 0, sizeof state->graph_nodes);
+    memset(&state->compact_decode_cache, 0, sizeof state->compact_decode_cache);
     arm_ram_map_reset(state->compact_ram_map);
     arm_bulk_cache_reset(state->compact_bulk_cache);
     if (state->compact_bulk_enabled)
@@ -2138,6 +2140,7 @@ static unsigned try_compact_raw(
     fallback_context.fetch_block = fetch_block;
     const arm_ram_window_t *ram_window = &state->compact_ram_window;
     const a64_compact_raw_options_t options = {
+        .decode_cache = &state->compact_decode_cache,
         .window_cache_enabled = state->compact_raw_window_cache_enabled,
         .bulk_enabled = state->compact_bulk_enabled,
         .bulk_cache = state->compact_bulk_cache,
