@@ -122,6 +122,41 @@ static void test_neon_memory_and_retry(void) {
         }
 }
 
+static void test_neon_sign_fetch_and_retry(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned negate = 0; negate < 2u; negate++)
+      for (unsigned quad = 0; quad < 2u; quad++)
+       for (unsigned host = 0; host < 2u; host++)
+        for (unsigned enabled = 0; enabled < 2u; enabled++)
+         for (unsigned half = 0; half <= thumb; half++) {
+            fixture_t f; arm_bus_t bus; arm_cpu_t c;
+            setup(&f, &bus, &c, thumb != 0u, host != 0u);
+            if (thumb) c.cpsr |= 0x1800u;
+            c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u; c.vfp_fpscr = 0x0bc00080u;
+            c.excl_valid = true; c.excl_addr = 0x2468u; c.a8_excl_size = 8u;
+            uint32_t insn = (thumb ? 0xfff9e720u : 0xf3f9e720u) | (negate << 7) | (quad << 6);
+            if (thumb) { put16(&f, 0u, (uint16_t)(insn >> 16)); put16(&f, 2u, (uint16_t)insn); }
+            else put32(&f, 0u, insn);
+            vfp_set_d(&c, 16u, UINT64_C(0xff81234580000001)); vfp_set_d(&c, 17u, UINT64_C(0x7fcabcde807fffff));
+            vfp_set_d(&c, 30u, UINT64_C(0x0123456789abcdef)); vfp_set_d(&c, 31u, UINT64_C(0xfedcba9876543210));
+            uint32_t flags = c.cpsr;
+            f.fail_address = half * 2u; f.fail_size = thumb ? 2u : 4u;
+            CHECK(arm_step(&c) == ARM_HALT, "NEON sign failed fetch did not halt");
+            check_stop(&f, &c, 0u, flags);
+            CHECK(vfp_get_d(&c, 30u) == UINT64_C(0x0123456789abcdef) && vfp_get_d(&c, 31u) == UINT64_C(0xfedcba9876543210) &&
+                  c.vfp_fpscr == 0x0bc00080u && c.vfp_fpexc == (enabled ? ARM_FPEXC_EN : 0u) &&
+                  c.excl_valid && c.excl_addr == 0x2468u && c.a8_excl_size == 8u, "failed sign fetch altered FP/monitor state");
+            f.failed = false; f.fail_size = 0u; c.vfp_fpexc = ARM_FPEXC_EN;
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u && c.cpsr == (flags & ~0x0600fc00u) &&
+                  c.vfp_fpscr == 0x0bc00080u && c.excl_valid && c.a8_excl_size == 8u, "NEON sign retry retirement/status");
+            CHECK(vfp_get_d(&c, 30u) == UINT64_C(0x7f81234500000001) &&
+                  vfp_get_d(&c, 31u) == (quad ? (negate ? UINT64_C(0xffcabcde007fffff) : UINT64_C(0x7fcabcde007fffff)) :
+                    UINT64_C(0xfedcba9876543210)) &&
+                  vfp_get_d(&c, 16u) == UINT64_C(0xff81234580000001) && vfp_get_d(&c, 17u) == UINT64_C(0x7fcabcde807fffff),
+                  "NEON sign retry result or source preservation");
+         }
+}
+
 static void test_data_and_retry(void) {
     static const struct { uint32_t load, store; unsigned size; bool thumb, wide, writeback; } cases[] = {
         {0xe4912004u,0xe4812004u,4u,false,false,true},
@@ -583,6 +618,7 @@ static void test_signed_runner_entry_guards(void) {
 #endif
 
 int main(void) {
+    test_neon_sign_fetch_and_retry();
     test_neon_memory_and_retry();
     test_data_and_retry();
     test_table_branch_and_retry();

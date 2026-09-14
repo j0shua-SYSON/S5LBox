@@ -960,6 +960,170 @@ static void test_a8_neon_bitwise_invalid_and_it(void) {
      }
 }
 
+/* A8.8.280/355 A1/T1, F=1,size=2. These operations do not unpack FP values. */
+static uint32_t a8_neon_sign(unsigned thumb, unsigned negate, unsigned quad, unsigned dst, unsigned src) {
+    return (thumb ? 0xffb90700u : 0xf3b90700u) | (negate << 7) | (quad << 6) |
+        ((dst & 15u) << 12) | ((dst >> 4) << 22) | (src & 15u) | ((src >> 4) << 5);
+}
+
+static uint64_t a8_neon_sign_expected(uint64_t source, unsigned negate) {
+    /* Independently edit only bit7 of each F32 lane's final byte. */
+    uint64_t result = 0;
+    for (unsigned b = 0; b < 8u; b++) {
+        unsigned value = (unsigned)(source >> (b * 8u)) & 255u;
+        if (b % 4u == 3u) value = negate ? (value + 128u) % 256u : value % 128u;
+        result |= (uint64_t)value << (b * 8u);
+    }
+    return result;
+}
+
+static void test_a8_neon_sign_registers(void) {
+    static const uint32_t patterns[] = {0u,0x80000000u,1u,0x80000001u,0x007fffffu,0x807fffffu,
+        0x00800000u,0x80800000u,0x3fc00000u,0xbfc00000u,0x7f7fffffu,0xff7fffffu,
+        0x7f800000u,0xff800000u,0x7f812345u,0xff812345u,0x7fcabcdeu,0xffcabcdeu};
+    CHECK(a8_neon_sign(0u, 0u, 1u, 16u, 16u) == 0xf3f90760u &&
+          a8_neon_sign(0u, 1u, 1u, 16u, 16u) == 0xf3f907e0u &&
+          a8_neon_sign(1u, 0u, 0u, 31u, 16u) == 0xfff9f720u &&
+          a8_neon_sign(1u, 1u, 1u, 30u, 0u) == 0xfff9e7c0u, "NEON sign encoding anchors");
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned negate = 0; negate < 2u; negate++)
+      for (unsigned quad = 0; quad < 2u; quad++)
+       for (unsigned dst = 0; dst < 32u; dst += quad + 1u)
+        for (unsigned src = 0; src < 32u; src += quad + 1u) {
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            c.cpsr |= ARM_CPSR_E;
+            c.vfp_fpscr |= ARM_FPSCR_LEN | ARM_FPSCR_STRIDE | ARM_FPSCR_NZCV | ARM_FPSCR_ENABLES | ARM_FPSCR_DZC;
+            c.excl_valid = true; c.excl_addr = 0x2468u; c.a8_excl_size = 8u;
+            uint64_t expected[32], results[2];
+            for (unsigned d = 0; d < 32u; d++) {
+                expected[d] = (uint64_t)patterns[(d + dst) % 18u] |
+                    (uint64_t)patterns[(d + dst + 7u) % 18u] << 32;
+                vfp_set_d(&c, d, expected[d]);
+            }
+            for (unsigned r = 0; r <= quad; r++) results[r] = a8_neon_sign_expected(expected[src + r], negate);
+            for (unsigned r = 0; r <= quad; r++) expected[dst + r] = results[r];
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c, thumb, a8_neon_sign(thumb, negate, quad, dst, src)) == ARM_OK &&
+                  c.r[15] == 0x104u && c.cycles == 1u && c.cpsr == flags && c.vfp_fpscr == fpscr &&
+                  c.excl_valid && c.excl_addr == 0x2468u && c.a8_excl_size == 8u,
+                  "NEON sign state T=%u neg=%u Q=%u D=%u M=%u", thumb, negate, quad, dst, src);
+            bool same = true;
+            for (unsigned d = 0; d < 32u; d++) same &= vfp_get_d(&c, d) == expected[d];
+            for (unsigned r = 0; r < 15u; r++) same &= c.r[r] == 0u;
+            CHECK(same, "NEON sign source/destination alias or preserved registers");
+        }
+}
+
+static void test_a8_neon_sign_access_and_host_state(void) {
+    static const unsigned permissions[] = {0u,1u,3u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned negate = 0; negate < 2u; negate++)
+      for (unsigned quad = 0; quad < 2u; quad++)
+       for (unsigned user = 0; user < 2u; user++)
+        for (unsigned enabled = 0; enabled < 2u; enabled++)
+         for (unsigned access = 0; access < 3u; access++) {
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permissions[access] * 0x00500000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            vfp_set_d(&c, 16u, UINT64_C(0xff81234580000001));
+            vfp_set_d(&c, 17u, UINT64_C(0xffcabcde7f812345));
+            vfp_set_d(&c, 30u, UINT64_C(0x0123456789abcdef));
+            vfp_set_d(&c, 31u, UINT64_C(0xfedcba9876543210));
+            uint64_t expected[2];
+            bool allowed = enabled && (permissions[access] == 3u || (permissions[access] == 1u && !user));
+            for (unsigned r = 0; r < 2u; r++) expected[r] = allowed && r <= quad ?
+                a8_neon_sign_expected(vfp_get_d(&c, 16u + r), negate) : vfp_get_d(&c, 30u + r);
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c, thumb, a8_neon_sign(thumb, negate, quad, 30u, 16u)) == ARM_OK &&
+                  c.vfp_fpscr == fpscr, "NEON sign access disposition");
+            CHECK(allowed ? c.r[15] == 0x104u && c.cpsr == flags : c.r[15] == ARM_VEC_UNDEFINED &&
+                  c.r[14] == (thumb ? 0x102u : 0x104u) && c.spsr[ARM_BANK_UND] == flags,
+                  "NEON sign guest Undefined state");
+            CHECK(vfp_get_d(&c, 30u) == expected[0] && vfp_get_d(&c, 31u) == expected[1], "NEON sign access destination");
+         }
+    fenv_t saved; CHECK(fegetenv(&saved) == 0, "save sign host FP state");
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned negate = 0; negate < 2u; negate++)
+      for (unsigned quad = 0; quad < 2u; quad++)
+       for (unsigned host = 0; host < 4u; host++)
+        for (unsigned guest = 0; guest < 16u; guest++) {
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            c.vfp_fpscr = ARM_FPSCR_QC | ARM_FPSCR_DZC | ((guest & 3u) << 22) |
+                (guest & 4u ? ARM_FPSCR_FZ : 0u) | (guest & 8u ? ARM_FPSCR_DN : 0u);
+            vfp_set_d(&c, 16u, UINT64_C(0xff81234580000001)); vfp_set_d(&c, 17u, UINT64_C(0x7fcabcde807fffff));
+            uint32_t fpscr = c.vfp_fpscr;
+            CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 && feraiseexcept(FE_DIVBYZERO) == 0,
+                  "prepare sign host FP state");
+            int exceptions = fetestexcept(FE_ALL_EXCEPT);
+            CHECK(a8_move_step(&c, thumb, a8_neon_sign(thumb, negate, quad, 30u, 16u)) == ARM_OK &&
+                  fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == exceptions && c.vfp_fpscr == fpscr &&
+                  vfp_get_d(&c, 30u) == a8_neon_sign_expected(UINT64_C(0xff81234580000001), negate) &&
+                  vfp_get_d(&c, 31u) == (quad ? a8_neon_sign_expected(UINT64_C(0x7fcabcde807fffff), negate) : 0u),
+                  "NEON sign classified/rounded raw operands or touched host FP state");
+        }
+    CHECK(fesetenv(&saved) == 0, "restore sign host FP state");
+}
+
+static void test_a8_neon_sign_invalid_and_it(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned negate = 0; negate < 2u; negate++)
+      for (unsigned enabled = 0; enabled < 2u; enabled++)
+       for (unsigned skip = 0; skip < (thumb ? 2u : 1u); skip++)
+        for (unsigned kind = 0; kind < 8u; kind++) {
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            if (skip) c.cp15.cpacr = 0u;
+            if (thumb) { m_w16(NULL, 0x100u, skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK, "NEON sign IT setup"); }
+            uint64_t before[32];
+            for (unsigned d = 0; d < 32u; d++) { before[d] = UINT64_C(0xff81234580000000) + d; vfp_set_d(&c, d, before[d]); }
+            unsigned quad = kind == 7u ? 0u : 1u, dst = kind == 3u || kind == 5u ? 31u : 30u;
+            unsigned src = kind == 4u || kind == 5u ? 17u : 16u;
+            uint32_t insn = a8_neon_sign(thumb, negate, quad, dst, src);
+            if (kind < 3u) insn = (insn & ~0x000c0000u) | ((kind == 2u ? 3u : kind) << 18);
+            bool valid = kind >= 6u, executes = valid && enabled && !skip;
+            uint32_t pc = c.r[15], flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c, thumb, insn) == (skip || valid ? ARM_OK : ARM_UNDEFINED), "NEON sign invalid/IT disposition");
+            CHECK(c.vfp_fpscr == fpscr, "NEON sign invalid/IT altered FPSCR");
+            if (skip || !valid) CHECK(c.r[15] == (skip ? pc + 4u : pc) && c.cpsr == (skip ? flags & ~0x0600fc00u : flags),
+                "NEON sign invalid/skipped instruction changed state");
+            else if (!enabled) CHECK(c.r[15] == ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND] == flags, "NEON sign lazy access");
+            else CHECK(c.r[15] == pc + 4u && c.cpsr == (flags & ~0x0600fc00u), "NEON sign valid IT retirement");
+            bool same = true;
+            for (unsigned d = 0; d < 32u; d++) same &= vfp_get_d(&c, d) == (executes && d >= dst && d <= dst + quad ?
+                a8_neon_sign_expected(before[src + d - dst], negate) : before[d]);
+            CHECK(same, "NEON sign invalid/IT source or destination mutation");
+        }
+    /* Integer forms and adjacent comparison/other two-register allocations
+     * are separate work. Preserve their existing A32 lazy-enable fallback;
+     * with access enabled, none may be misdecoded as these sign operations.
+     * The invalid widths/odd Q operands inside our allocation are tested
+     * above and must halt even when EN=0. */
+    static const uint32_t toggles[] = {1u << 10,1u << 8,1u << 9,1u << 11,1u << 16,1u << 4};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned negate = 0; negate < 2u; negate++)
+      for (unsigned enabled = 0; enabled < 2u; enabled++)
+       for (unsigned field = 0; field < sizeof toggles / sizeof toggles[0]; field++) {
+            arm_cpu_t c; a8_move_reset(&c, thumb); c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            uint32_t insn = a8_neon_sign(thumb, negate, 0u, 31u, 16u) ^ toggles[field];
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            arm_status_t status = a8_move_step(&c, thumb, insn);
+            bool lazy = !thumb && !enabled;
+            CHECK(status == (lazy ? ARM_OK : ARM_UNDEFINED) && c.r[15] == (lazy ? ARM_VEC_UNDEFINED : 0x100u) &&
+                  (lazy ? c.spsr[ARM_BANK_UND] == flags && c.r[14] == 0x104u : c.cpsr == flags) &&
+                  c.vfp_fpscr == fpscr && vfp_get_d(&c, 31u) == 0u,
+                  "NEON sign neighboring allocation insn=%08x EN=%u status=%d pc=%08x", insn, enabled, (int)status, c.r[15]);
+       }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++)
+     for (unsigned negate = 0; negate < 2u; negate++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c, &g_bus, legacy[profile]), "legacy sign reset");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        CHECK(a8_move_step(&c, 0u, a8_neon_sign(0u, negate, 0u, 31u, 16u)) == ARM_UNDEFINED && c.r[15] == 0u,
+              "NEON sign leaked to legacy profile");
+     }
+}
+
 static uint32_t a8_neon_imm(unsigned thumb, unsigned op, unsigned mode, unsigned quad,
                             unsigned dst, unsigned imm) {
     return (thumb ? 0xef800010u : 0xf2800010u) | ((imm >> 7) << (thumb ? 28u : 24u)) |
@@ -3940,6 +4104,9 @@ static void test_condition_codes_apply(void) {
 
 /* --------------------------------------------------------------- main ---- */
 int main(void) {
+    test_a8_neon_sign_registers();
+    test_a8_neon_sign_access_and_host_state();
+    test_a8_neon_sign_invalid_and_it();
     test_a8_neon_bitwise_registers();
     test_a8_neon_bitwise_access_and_host_state();
     test_a8_neon_bitwise_invalid_and_it();

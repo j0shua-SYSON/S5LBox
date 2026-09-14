@@ -287,6 +287,28 @@ Tests independently construct the constant bytes for every immediate/mode
 combination and cover all register indices, permissions, conditionals,
 host FP preservation, split fetch faults and guest enable/retry.
 
+NEON VABS.F32 and VNEG.F32 operate on every D/Q register by clearing or
+inverting each lane's sign bit. Signaling NaN payloads and denormals remain
+intact, and FPSCR controls, exception flags, ARM flags and host FP state
+are preserved. Operands are staged before aliased writes. Reserved floating
+point widths and odd Q operands stop before access checks; integer forms
+remain separate work. Tests cover register combinations, raw value classes,
+access denials, IT execution, split fetch faults and checked-bus retry. See
+[DDI0406C.b, A8.8.280/355](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+The matching cache's unchanged ARM
+[`vDSP_vabs`](https://developer.apple.com/documentation/accelerate/vdsp_vabs)
+and [`vDSP_vneg`](https://developer.apple.com/documentation/accelerate/vdsp_vneg)
+forward vector paths now complete 34 prepared cases. These use unit strides,
+zero or 32/64/96/128 elements, all four word-aligned input positions within
+16 bytes, and aligned separate output buffers. Before this change, the first
+nonempty absolute-value case stopped at `VABS.F32` at `0x3083ee70` after
+32 source bytes were read. The unchanged fixture verifies raw output bits,
+exact per-byte access counts, whole-page canaries, preserved registers and
+FPSCR, the fifth stack argument and ARM-to-Thumb return. Its explicit
+CPUFAMILY_ARM_13 commpage input selects the prepared firmware path; actual
+commpage initialization, other paths, process launch and boot remain unverified.
+
 NEON register VMUL.F32, VADD.F32 and VSUB.F32 operate on two or four lanes
 across the full D/Q bank, using integer arithmetic and nearest-even rounding.
 Multiplication retains an exact 48-bit product; addition and subtraction
@@ -330,6 +352,16 @@ denormals return the expected bits, flags, stack accesses and preserved
 registers. The NaN paths execute the formerly unsupported VADD, retaining
 the earlier VCMPE status and adding IDC when NEON flushes a denormal input.
 Only this exact helper and the original function are prepared for execution.
+
+The unchanged ARM `fmod` at `0x392904b0` also completes 112 finite, nonzero
+input cases using existing instructions: 14 analytical pairs with both
+operand signs and both FPSCR.FZ settings. Normal, subnormal and large
+exponent-gap remainders match exact bit patterns with a 24-byte saved stack
+and preserved registers. Tiny computed results survive with FZ clear and
+flush with UFC set when FZ is set; an integer early return preserves its
+input without consulting FZ. These isolated results exercise the existing
+lower-bank VFP arithmetic. The mathematical contract follows
+[Apple's fmod(3)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/fmod.3.html).
 
 The cache's Cortex-A8-selected `memset` body now completes 21 bounded cases
 from its unchanged Thumb entry at `0x391ce5f8`. Tests check every destination
@@ -906,7 +938,7 @@ establish that result.
 - Cortex-A8 stores d0-d31 and supports system/core/memory transfers plus
   VFP copies, immediate constants and sign operations with short vectors,
   scalar comparisons across the full register bank, and the bounded
-  32/64-bit NEON VLD1/VST1 memory forms, register Boolean operations, VEXT,
+  32/64-bit NEON VLD1/VST1 memory forms, register Boolean operations, VEXT, F32 VABS/VNEG,
   immediate constants, core-register VDUP and register VMUL/VADD/VSUB.F32
   described above.
   Upper-bank VFP arithmetic, the remaining NEON families, and full
