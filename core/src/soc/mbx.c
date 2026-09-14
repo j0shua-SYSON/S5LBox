@@ -2880,9 +2880,14 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     /* Texture filtering and corner order are independent producer choices.
      * Direct packets retain row-major p00,p10,p01,p11 corners in both the
      * half-texel 0x8e form and Spotlight's measured full-extent 0x0e form.
-     * The older modulated 0x0e producer uses the alternate ordering below.
+     * Full-extent modulated dock reflections also use row-major rectangles;
+     * distinguish that geometry from the older alternate corner ordering.
      * No full-extent packet has established alternate-sampler semantics. */
-    bool row_major_corners = half_texel_layout || direct_sampler;
+    bool row_major_rectangle =
+        quad[8] == quad[12] && quad[10] == quad[14] &&
+        quad[9] == quad[11] && quad[13] == quad[15];
+    bool row_major_corners = half_texel_layout || direct_sampler ||
+        (modulated_sampler && row_major_rectangle);
     if (!half_texel_layout && scaled_sampler) {
         if (why) *why = "full-extent alternate sampler is unmeasured";
         return false;
@@ -2899,8 +2904,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
         }
     }
     bool axis_aligned = row_major_corners
-        ? quad[8] == quad[12] && quad[10] == quad[14] &&
-          quad[9] == quad[11] && quad[13] == quad[15]
+        ? row_major_rectangle
         : quad[8] == quad[10] && quad[12] == quad[14] &&
           quad[9] == quad[13] && quad[11] == quad[15];
     unsigned p00 = row_major_corners ? 0u : 1u;
@@ -2909,6 +2913,18 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     unsigned p11 = row_major_corners ? 3u : 2u;
     float x0 = destination_x[p00], y0 = destination_y[p00];
     float x1 = destination_x[p11], y1 = destination_y[p11];
+    /* The full-extent perspective-copy producer reflects dock textures by
+     * reversing destination Y while leaving its row-major UVs increasing.
+     * Canonicalize only the coverage bounds here. The strict 1:1 integer UV
+     * checks below still apply, and staging/rasterization retain the reversal.
+     * Filtered, compact, X-reversed and arbitrary affine forms are unchanged. */
+    bool mirror_y = axis_aligned && row_major_corners &&
+                    !half_texel_layout && !compact_copy && y0 > y1;
+    if (mirror_y) {
+        float temporary = y0;
+        y0 = y1;
+        y1 = temporary;
+    }
     struct mbx_affine_transform affine = {0};
     bool affine_sprite = !axis_aligned;
     if (compact_copy && affine_sprite) {
@@ -3396,8 +3412,11 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
         }
         source_x0 = source_left +
                     (uint32_t)(raster_left - raster_left_unclipped);
-        source_y0 = source_top +
-                    (uint32_t)(raster_top - raster_top_unclipped);
+        /* Stage in increasing source-address order, even for a reflection.
+         * Clipping its destination bottom removes the LOW source rows. */
+        source_y0 = source_top + (uint32_t)(mirror_y
+            ? raster_bottom_unclipped - raster_bottom
+            : raster_top - raster_top_unclipped);
         if (source_x0 + width > source_right ||
             source_y0 + height > source_bottom) {
             if (why) *why = "unfiltered sprite crop exceeds its source";
@@ -3719,7 +3738,8 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                     : mbx_linear_bgra8(vertical_left, vertical_right,
                                        sample_x->weight);
             } else {
-                src = mbx_load_le32(source_pixels + y * source_row_bytes +
+                uint32_t source_row = mirror_y ? height - 1u - y : y;
+                src = mbx_load_le32(source_pixels + source_row * source_row_bytes +
                                     x * 4u);
             }
             uint32_t pixel_offset = y * row_bytes + x * 4u;

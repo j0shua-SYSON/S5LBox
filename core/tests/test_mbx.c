@@ -4771,6 +4771,7 @@ struct mbx_test_status_form {
     bool boundary_override;
     bool zero_coverage;
     bool arbitrary_bgra_probe;
+    bool mirror_y;
     uint32_t tile_x0, tile_x1, tile_y0, tile_y1;
     uint32_t left, top, width, height;
     uint32_t source, source_x0, source_row0, source_stride, source_control;
@@ -5055,10 +5056,12 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
                     have_filtered_sample = true;
                 }
             } else {
-                src = test_sprite_source_pixel(x, y);
+                src = test_sprite_source_pixel(
+                    x, form->mirror_y ? form->height - 1u - y : y);
                 test_gpu_write32(&m,
                     form->source + (form->source_row0 + y) *
-                        form->source_stride + (form->source_x0 + x) * 4u, src);
+                        form->source_stride + (form->source_x0 + x) * 4u,
+                    test_sprite_source_pixel(x, y));
             }
             uint32_t dst = 0xff102030u + y * 0x00010101u + x;
             test_gpu_write32(&m,
@@ -5192,6 +5195,49 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
         test_gpu_write32(&m, object + 0x250u, form->quad[24]);
     }
     if (form->semantic_sprite) {
+        if (form->mirror_y) {
+            /* Preserve coherent duplicate coordinates in the malformed
+             * variants. Rejection must not depend on a redundant-word typo. */
+            for (unsigned variant = 0; variant < 3u; variant++) {
+                uint32_t changed[44];
+                memcpy(changed, form->quad, sizeof changed);
+                changed[2] = form->source_control | (form->source >> 7);
+                changed[5] = 0x0e500000u | (target >> 7);
+                if (variant == 0u) {
+                    changed[2] |= 0x80000000u; /* unmeasured filtered reflection */
+                } else if (variant == 1u) {
+                    changed[8] = changed[12] = form->quad[10];
+                    changed[10] = changed[14] = form->quad[8];
+                } else {
+                    changed[9] = changed[11] = test_float_word(
+                        test_float_value(form->quad[9]) - 1.0f);
+                }
+                for (unsigned vertex = 0; vertex < 4u; vertex++) {
+                    changed[27u + vertex * 5u] = test_float_word(
+                        test_float_value(changed[8u + vertex * 2u]) / 1024.0f);
+                    changed[28u + vertex * 5u] = test_float_word(
+                        test_float_value(changed[9u + vertex * 2u]) / 1024.0f);
+                }
+                for (unsigned i = 0; i < 44u; i++)
+                    test_gpu_write32(&m, object + 0x1f0u + i * 4u, changed[i]);
+                test_gpu_write32(&m, first, 0x89abcdefu);
+                test_gpu_write32(&m, last_destination, 0x76543210u);
+                m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+                CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+                      test_gpu_read32(&m, last_destination) == 0x76543210u,
+                      "%s invalid reflection %u partially committed",
+                      form->name, variant);
+                CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+                      "%s invalid reflection %u raised completion",
+                      form->name, variant);
+            }
+            for (unsigned i = 0; i < 44u; i++) {
+                uint32_t value = form->quad[i];
+                if (i == 2u) value = form->source_control | (form->source >> 7);
+                if (i == 5u) value = 0x0e500000u | (target >> 7);
+                test_gpu_write32(&m, object + 0x1f0u + i * 4u, value);
+            }
+        }
         uint32_t word_address = object + 0x1f0u + 27u * 4u;
         uint32_t saved_word = test_gpu_read32(&m, word_address);
         test_gpu_write32(&m, first, 0x89abcdefu);
@@ -5233,8 +5279,11 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
              * the captured integer crop.  Keep both redundant corners in
              * agreement so rejection proves the unfiltered path did not
              * silently invent nearest-neighbour rounding. */
-            uint32_t first_v_word = object + 0x1f0u + 31u * 4u;
-            uint32_t second_v_word = object + 0x1f0u + 41u * 4u;
+            bool row_major = form->mirror_y || form->quad[3] == 0xa6884710u;
+            uint32_t first_v_word = object + 0x1f0u +
+                                    (row_major ? 26u : 31u) * 4u;
+            uint32_t second_v_word = object + 0x1f0u +
+                                     (row_major ? 31u : 41u) * 4u;
             uint32_t first_v = test_gpu_read32(&m, first_v_word);
             uint32_t second_v = test_gpu_read32(&m, second_v_word);
             uint32_t texture_height =
@@ -5483,6 +5532,8 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
                                  form->quad[42]);
             }
 
+        }
+        if (form->scaled_sprite || form->mirror_y) {
             uint32_t source_table = m.bus.read32(m.bus.ctx,
                 MBX_BASE + REG_GART0 + (last_source >> 22) * 4u);
             uint32_t source_pte_address = source_table +
@@ -5495,14 +5546,14 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
             m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
             CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
                   test_gpu_read32(&m, last_destination) == 0x76543210u,
-                  "%s late missing filtered source PTE partially committed",
+                  "%s late missing sprite source PTE partially committed",
                   form->name);
             CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-                  "%s late missing filtered source PTE raised completion",
+                  "%s late missing sprite source PTE raised completion",
                   form->name);
             m.bus.write32(m.bus.ctx, source_pte_address, source_pte);
 
-            if (form->column_resample || form->row_resample) {
+            if (form->column_resample || form->row_resample || form->mirror_y) {
                 uint32_t target_table = m.bus.read32(m.bus.ctx,
                     MBX_BASE + REG_GART0 + (last_destination >> 22) * 4u);
                 uint32_t target_pte_address = target_table +
@@ -5659,6 +5710,96 @@ spotlight_home_narrow_strip_resample_form = {
         0x3e900001u, 0x3f780000u, 0x3e890000u, 0x3d640000u,
     },
 };
+
+/* Home/Settings transitions retain row-major full-extent dock reflections
+ * with both direct and modulated samplers. The 59x60 destination runs upward
+ * from y515 to y455; surface clipping leaves y455..479 sampling rows59..35.
+ * The rejection witness contains the exact quad and clip registers, but not
+ * the separate boundary object: reconstruct that integer clipped envelope.
+ * Pixel data is synthetic and deliberately different on every source row. */
+static void test_unfiltered_mirrored_sprites(void) {
+    struct mbx_test_status_form form = {
+        .name = "dock reflection modulated row-major crop",
+        .xclip = 0x013000f0u, .yclip = 0x01e001c0u,
+        .semantic_sprite = true, .mirror_y = true,
+        .boundary_override = true,
+        .tile_x0 = 30u, .tile_x1 = 37u,
+        .tile_y0 = 28u, .tile_y1 = 29u,
+        .left = 244u, .top = 455u, .width = 59u, .height = 25u,
+        .source = 0x00c2f080u, .source_row0 = 35u,
+        .source_stride = 256u, .source_control = 0x0e100000u,
+        .source_width = 59u, .source_height = 60u,
+        .expected_covered_pixels = 1475u,
+        .boundary = {
+            0x43740000u, 0x43f00000u, 0x43740000u, 0x43e38000u,
+            0x43978000u, 0x43f00000u, 0x43978000u, 0x43e38000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa3318000u, 0x0e1185e1u, 0xcd206c40u,
+            0xa7718000u, 0x0e5112e0u, 0xae504ea0u, 0x22250e80u,
+            0x43740000u, 0x4400c000u, 0x43978000u, 0x4400c000u,
+            0x43740000u, 0x43e38000u, 0x43978000u, 0x43e38000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0x05000000u, 0u, 0u, 0x3e740000u, 0x3f00c000u,
+            0x05000000u, 0x3f6c0000u, 0u, 0x3e978000u, 0x3f00c000u,
+            0x05000000u, 0u, 0x3f700000u, 0x3e740000u, 0x3ee38000u,
+            0x05000000u, 0x3f6c0000u, 0x3f700000u, 0x3e978000u, 0x3ee38000u,
+        },
+    };
+    test_captured_status_form(&form);
+    form.name = "dock reflection direct row-major crop";
+    form.quad[3] = 0xa6884710u;
+    for (unsigned i = 24u; i < 44u; i += 5u) form.quad[i] = 0xff000000u;
+    test_captured_status_form(&form);
+    form.name = "dock reflection fully faded modulated crop";
+    form.quad[3] = 0xcd206c40u;
+    for (unsigned i = 24u; i < 44u; i += 5u) form.quad[i] = 0u;
+    test_captured_status_form(&form);
+
+    /* A relocated texture and inward scissor must choose the opposite source
+     * end in Y, independently of the captured addresses or surface edge. */
+    form.name = "relocated reflection with four-sided scissor";
+    form.source = 0x00b72000u;
+    form.target = 0x00c98000u;
+    form.left = 248u; form.top = 460u;
+    form.width = 47u; form.height = 15u;
+    form.source_x0 = 4u; form.source_row0 = 40u;
+    form.expected_covered_pixels = 705u;
+    form.xclip = 0x012800f8u;
+    form.tile_x0 = 31u; form.tile_x1 = 36u;
+    const float bounds[8] = {248, 475, 248, 460, 295, 475, 295, 460};
+    for (unsigned i = 0; i < 8u; i++) form.boundary[i] = test_float_word(bounds[i]);
+    for (unsigned i = 24u; i < 44u; i += 5u) form.quad[i] = 0x80000000u;
+    test_captured_status_form(&form);
+
+    /* Nonzero UV origin: the same crop now samples rows57..43, not54..40. */
+    form.name = "mirrored nonzero UV origin with four-sided scissor";
+    form.source_x0 += 2u; form.source_row0 += 3u;
+    form.quad[25] = form.quad[35] = test_float_word(2.0f / 64.0f);
+    form.quad[30] = form.quad[40] = test_float_word(61.0f / 64.0f);
+    form.quad[26] = form.quad[31] = test_float_word(3.0f / 64.0f);
+    form.quad[36] = form.quad[41] = test_float_word(63.0f / 64.0f);
+    test_captured_status_form(&form);
+
+    form.name = "relocated reflection with complete source height";
+    form.left = 244u; form.top = 100u;
+    form.width = 59u; form.height = 60u;
+    form.source_x0 = 2u; form.source_row0 = 3u;
+    form.expected_covered_pixels = 3540u;
+    form.xclip = 0x013000f0u; form.yclip = 0x00a00060u;
+    form.tile_x0 = 30u; form.tile_x1 = 37u;
+    form.tile_y0 = 6u; form.tile_y1 = 9u;
+    const float full_bounds[8] = {244, 160, 244, 100, 303, 160, 303, 100};
+    for (unsigned i = 0; i < 8u; i++)
+        form.boundary[i] = test_float_word(full_bounds[i]);
+    for (unsigned vertex = 0; vertex < 4u; vertex++) {
+        float y = vertex < 2u ? 160.0f : 100.0f;
+        form.quad[9u + vertex * 2u] = test_float_word(y);
+        form.quad[28u + vertex * 5u] = test_float_word(y / 1024.0f);
+    }
+    test_captured_status_form(&form);
+}
 
 /* SpringBoard's Spotlight entry retained a direct-sampler, full-extent
  * texture packet. The direct sampler keeps the filtered producer's row-major
@@ -7179,6 +7320,7 @@ int main(void) {
     test_compact_full_extent_uniform_minification();
     test_compact_clipped_zero_coverage();
     test_pointer_selected_solid_quad();
+    test_unfiltered_mirrored_sprites();
     test_later_tiled_status_sprites();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

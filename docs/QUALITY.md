@@ -13,6 +13,24 @@ a green unit test nor a later lifecycle callback is presented as a rendered
 SpringBoard. Later test-only commits are recorded separately and do not inherit
 run21's firmware evidence.
 
+## 2026-09-14 full-extent mirrored sprite regression
+
+Home/Settings transitions rejected vertically mirrored row-major dock sprites
+on both `e213c22` and `69135df`; this family predates the latter CPU change.
+The renderer now retains the reflection when canonicalizing its destination
+bounds, stages the clipped source crop, and samples its rows in reverse order.
+It supports the witnessed direct and uniform-alpha modulated full-extent
+perspective-copy forms. Existing geometry, UV, pitch, scissor, tile and GART
+checks remain mandatory; filtered reflections and non-unity copies stay rejected.
+
+`test_unfiltered_mirrored_sprites` checks every output pixel for six fixtures,
+including fading, surface clipping, four-sided scissoring, relocated storage,
+nonzero UV origins and complete source height. Malformed geometry and missing
+source/target pages must reject without partial writes or completion events.
+The separate boundary object was not captured and is explicitly reconstructed
+in these fixtures. Host tests alone do not establish physical navigation,
+animation speed, long-session stability or readiness to make MBX the default.
+
 ## 2026-08-11 VFP short-vector and physical regression evidence
 
 Exact source commit `7f37acc426cc3aa563afede163e87e927344e630`
