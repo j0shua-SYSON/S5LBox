@@ -3680,7 +3680,7 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
         pre, up, byte, wb, load = (bool(key & (1 << bit)) for bit in (12, 11, 10, 9, 8))
         writeback = not pre or wb
         if (rd == 15 or (rn == 15 and writeback) or
-                (not pre and wb) or (load and writeback and rn == rd)):
+                (not pre and wb) or (writeback and rn == rd)):
             return None
         body, base = read(rn, 10)
         operation = "add" if up else "sub"
@@ -3698,7 +3698,7 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
             source, value = read(rd, 12)
             body += [*source, f"    {'strb' if byte else 'str'} {value}, [x11]"]
         # w10 survives the witness helper. Defer all base writes until after
-        # the access, so a miss/fault or an aliased STR observes original Rn.
+        # the access, so a miss/fault cannot publish speculative writeback.
         if writeback:
             if not pre:
                 body += ["    and w8, w9, #0xfff", f"    {operation} w10, w10, w8"]

@@ -6390,6 +6390,7 @@ static bool validate_compact_raw_a32_register_oracle(void) {
     const uint32_t nop = UINT32_C(0xe1a00000);
     arm_cpu_t initial, reference, compact;
     unsigned scalar_cases = 0u, memory_cases = 0u, condition_cases = 0u;
+    unsigned memory_refusals = 0u;
     seed_cpu_at(&initial, &nop, 1u, false, pc);
 
     /* Enumerate every operand-specialized scalar table entry, including all
@@ -6444,8 +6445,7 @@ static bool validate_compact_raw_a32_register_oracle(void) {
                 const bool pre = (mode & 16u) != 0u, up = (mode & 8u) != 0u;
                 const bool byte = (mode & 4u) != 0u, wb = (mode & 2u) != 0u;
                 const bool load = (mode & 1u) != 0u, writeback = !pre || wb;
-                if ((!pre && wb) || (rn == 15u && writeback) ||
-                    (load && writeback && rn == rd)) continue;
+                if ((!pre && wb) || (rn == 15u && writeback)) continue;
                 const unsigned offset = byte ? 3u : 12u;
                 const uint32_t insn = UINT32_C(0xe4000000) | (mode << 20) |
                                       (rn << 16) | (rd << 12) | offset;
@@ -6459,6 +6459,20 @@ static bool validate_compact_raw_a32_register_oracle(void) {
                 mem_w32(NULL, address, UINT32_C(0x89abcdef));
                 uint8_t before[4], expected[4];
                 memcpy(before, &g_ram[address], sizeof before);
+                if (writeback && rn == rd) {
+                    unsigned completed = UINT_MAX;
+                    if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                                             g_ram, sizeof g_ram, &completed) ||
+                        completed != 0u || memcmp(&reference, &compact, sizeof compact) ||
+                        memcmp(before, &g_ram[address], sizeof before) ||
+                        arm_step(&reference) != ARM_UNDEFINED) {
+                        fprintf(stderr, "jitbench: resident A32 writeback alias=%08" PRIx32
+                                " load=%u completed=%u\n", insn, load, completed);
+                        return false;
+                    }
+                    memory_refusals++;
+                    continue;
+                }
                 const arm_status_t status = arm_step(&reference);
                 memcpy(expected, &g_ram[address], sizeof expected);
                 memcpy(&g_ram[address], before, sizeof before);
@@ -6529,15 +6543,16 @@ static bool validate_compact_raw_a32_register_oracle(void) {
     modified[5] = UINT32_C(0xe1a00000);
     if (!compact_raw_compare("a32-register-live-store", modified, 6u,
                              pc, 4u, 4u, 4u)) return false;
-    if (scalar_cases != 375424u || memory_cases != 5400u || condition_cases != 1024u) {
-        fprintf(stderr, "jitbench: incomplete resident A32 matrix %u/%u/%u\n",
-                scalar_cases, memory_cases, condition_cases);
+    if (scalar_cases != 375424u || memory_cases != 5280u ||
+        memory_refusals != 240u || condition_cases != 1024u) {
+        fprintf(stderr, "jitbench: incomplete resident A32 matrix %u/%u/%u/%u\n",
+                scalar_cases, memory_cases, memory_refusals, condition_cases);
         return false;
     }
     printf("COMPACT-RAW-A32-REGISTER-ORACLE exact=yes scalar-cases=%u "
-           "memory-cases=%u condition-cases=%u budgets=65 "
+           "memory-cases=%u memory-refusals=%u condition-cases=%u budgets=65 "
            "live-store=yes raw-reentry=yes runtime-codegen=no\n",
-           scalar_cases, memory_cases, condition_cases);
+           scalar_cases, memory_cases, memory_refusals, condition_cases);
     return true;
 }
 
