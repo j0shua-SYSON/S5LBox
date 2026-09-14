@@ -19,6 +19,7 @@
 #include "vfp.h"
 
 #include <fenv.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -387,10 +388,10 @@ static void test_a8_vfp_bitwise_invalid_and_conditional(void) {
         CHECK(a8_move_step(&c, 0u, a8_fp_bits(op, 1u, 16u, 0u)) == ARM_UNDEFINED && c.r[15] == 0u &&
               c.vfp_s[0] == 0xff800001u, "A8 raw FP enabled on a legacy profile");
      }
-    /* Neither instruction-set prefix nor the neighboring sqrt/conversion
+    /* Neither instruction-set prefix nor the neighboring arithmetic/conversion
      * encodings may become a raw move. These upper-bank operations remain
      * unsupported with access enabled. CDP2 stays refused even with EN=0. */
-    static const uint32_t neighbors[] = {0xfef7fb00u,0xeef1fbe0u,0xeef7fbe0u,0xeef8fb60u};
+    static const uint32_t neighbors[] = {0xfef7fb00u,0xee40fba0u,0xeef7fbe0u,0xeef8fb60u};
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned n = 0; n < sizeof neighbors / sizeof neighbors[0]; n++) {
         arm_cpu_t c;
@@ -488,8 +489,14 @@ static uint32_t a8_fp_divide(unsigned dbl, unsigned dst, unsigned left, unsigned
     return a8_fp_add(0u,dbl,dst,left,right) ^ 0x00b00000u;
 }
 
+static uint32_t a8_fp_sqrt(unsigned dbl, unsigned dst, unsigned source) {
+    return 0xeeb10ac0u | (dbl << 8) |
+        (dbl ? ((dst & 15u) << 12) | ((dst >> 4) << 22) | (source & 15u) | ((source >> 4) << 5) :
+               ((dst >> 1) << 12) | ((dst & 1u) << 22) | (source >> 1) | ((source & 1u) << 5));
+}
+
 static uint32_t a8_fp_binary(unsigned op, unsigned dbl, unsigned dst, unsigned left, unsigned right) {
-    return op == 4u ? a8_fp_divide(dbl,dst,left,right) : op < 2u ? a8_fp_add(op,dbl,dst,left,right) :
+    return op == 5u ? a8_fp_sqrt(dbl,dst,left) : op == 4u ? a8_fp_divide(dbl,dst,left,right) : op < 2u ? a8_fp_add(op,dbl,dst,left,right) :
         a8_fp_multiply(op&1u,dbl,dst,left,right);
 }
 
@@ -716,7 +723,7 @@ static void test_a8_vfp_add_special_values(void) {
 static void test_a8_vfp_binary_vectors(void) {
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned dbl = 0; dbl < 2u; dbl++)
-      for (unsigned op = 0; op < 5u; op++)
+      for (unsigned op = 0; op < 6u; op++)
        for (unsigned len = 0; len < 8u; len++)
         for (unsigned stride = 0; stride < 4u; stride++)
          for (unsigned dst = 0; dst < 32u; dst++) {
@@ -732,7 +739,8 @@ static void test_a8_vfp_binary_vectors(void) {
                 if (!valid && (dst & 1u)) { c.vfp_fpexc = 0u; c.cp15.cpacr = 0u; }
                 for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c,d,UINT64_C(0xdead1234beef0000)+d);
                 for (unsigned r = 0; r < 32u; r++) a8_fp_value_set(&c,dbl,r,
-                    op == 4u ? a8_power_of_two(dbl,(int)r-16,r&1u) : a8_add_integer(dbl,(int)r+1));
+                    op == 4u ? a8_power_of_two(dbl,(int)r-16,r&1u) :
+                    a8_add_integer(dbl,op == 5u ? ((int)r+1)*((int)r+1) : (int)r+1));
                 uint64_t expected[32];
                 for (unsigned d = 0; d < 32u; d++) expected[d] = vfp_get_d(&c,d);
                 if (valid) for (unsigned lane = 0; lane < count; lane++) {
@@ -741,8 +749,9 @@ static void test_a8_vfp_binary_vectors(void) {
                     unsigned mr = right / bank * bank + (right % bank + lane*step) % bank;
                     if (scalar) { dr = dst; nr = left; mr = right; }
                     else if (dbl ? right % 16u < 4u : right < 8u) mr = right;
+                    if (op == 5u && (dbl ? left % 16u < 4u : left < 8u)) nr = left;
                     int x = (int)nr+1, y = (int)mr+1;
-                    int value = op == 0u ? x+y : op == 1u ? x-y : op == 2u ? x*y : -x*y;
+                    int value = op == 5u ? x : op == 0u ? x+y : op == 1u ? x-y : op == 2u ? x*y : -x*y;
                     a8_add_expected_set(expected,dbl,dr,op == 4u ?
                         a8_power_of_two(dbl,(int)nr-(int)mr,(nr^mr)&1u) : a8_add_integer(dbl,value));
                 }
@@ -780,7 +789,7 @@ static void test_a8_vfp_binary_access_and_invalid(void) {
     static const unsigned permissions[] = {0u,1u,3u};
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned dbl = 0; dbl < 2u; dbl++)
-      for (unsigned op = 0; op < 5u; op++)
+      for (unsigned op = 0; op < 6u; op++)
        for (unsigned user = 0; user < 2u; user++)
         for (unsigned enabled = 0; enabled < 2u; enabled++)
          for (unsigned access = 0; access < 3u; access++)
@@ -798,7 +807,8 @@ static void test_a8_vfp_binary_access_and_invalid(void) {
             uint64_t want = skip || !allowed ? 0x12345678u : dbl ? UINT64_C(0x7ff8000000000000) : UINT64_C(0x7fc00000);
             if (!skip && allowed && op == 3u) want ^= dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
             CHECK(a8_move_step(&c,thumb,insn) == ARM_OK && a8_fp_value(&c,dbl,31u) == want &&
-                  c.vfp_fpscr == (fpscr | (!skip && allowed ? ARM_FPSCR_IOC | ARM_FPSCR_IDC : 0u)), "VFP add access effects");
+                  c.vfp_fpscr == (fpscr | (!skip && allowed ? ARM_FPSCR_IOC | (op == 5u ? 0u : ARM_FPSCR_IDC) : 0u)),
+                  "VFP arithmetic access effects/unused sqrt operand");
             CHECK(skip || allowed ? c.r[15] == pc+4u &&
                   c.cpsr == (thumb ? (flags & ~0x0600fc00u) | 0x1800u : flags) :
                   c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == pc+(thumb ? 2u : 4u) &&
@@ -807,7 +817,7 @@ static void test_a8_vfp_binary_access_and_invalid(void) {
           }
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned dbl = 0; dbl < 2u; dbl++)
-      for (unsigned op = 0; op < 5u; op++)
+      for (unsigned op = 0; op < 6u; op++)
        for (unsigned bit = 0; bit < 32u; bit++) {
         if ((1u << bit) & ARM_FPSCR_A8_WMASK) continue;
         for (unsigned enabled = 0; enabled < 2u; enabled++)
@@ -829,7 +839,7 @@ static void test_a8_vfp_binary_access_and_invalid(void) {
        }
     const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
     for (unsigned profile = 0; profile < 2u; profile++)
-     for (unsigned op = 0; op < 5u; op++) {
+     for (unsigned op = 0; op < 6u; op++) {
         arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,legacy[profile]),"reset legacy add");
         c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
         vfp_set_d(&c,0u,UINT64_C(0x123456789abcdef0));
@@ -838,11 +848,12 @@ static void test_a8_vfp_binary_access_and_invalid(void) {
               vfp_get_d(&c,0u) == UINT64_C(0x123456789abcdef0), "A8 add upper bank leaked into legacy");
      }
     const uint32_t neighbors[] = {0xee500b00u,0xeee00b00u,0xee300c00u,0xee300900u,0xee200c00u,0xee200900u,
-        0xeec10be0u,0xee800c00u,0xee800900u};
+        0xeec10be0u,0xee800c00u,0xee800900u,0xeeb10cc0u,0xeeb109c0u};
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned n = 0; n < sizeof neighbors / sizeof neighbors[0]; n++) {
         arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = 0u;
         CHECK(!vfp_is_add_sub_data(neighbors[n]) && !vfp_is_multiply_data(neighbors[n]) && !vfp_is_divide_data(neighbors[n]) &&
+              !vfp_is_sqrt_data(neighbors[n]) &&
               a8_move_step(&c,thumb,neighbors[n]) == ARM_UNDEFINED,
               "VFP add consumed neighboring arithmetic/coprocessor encoding");
      }
@@ -1305,6 +1316,222 @@ static void test_a8_vfp_divide_special_values(void) {
               "VFP exact divide/VMRS lost accumulated flags");
     }
     CHECK(fesetenv(&saved) == 0,"restore special divide host state");
+}
+
+/* Exact square comparison for the independent oracle. Schoolbook base-2^16
+ * multiplication differs from the production restoring-root algorithm.
+ * Compare sig^2 * 2^(2*power) with the original positive finite input. */
+static int a8_sqrt_square_order(uint64_t sig, int power, uint64_t input, unsigned dbl) {
+    unsigned fraction = dbl ? 52u : 23u;
+    int bias = dbl ? 1023 : 127, exponent = (int)(input >> fraction);
+    uint64_t hidden = UINT64_C(1) << fraction;
+    uint64_t input_sig = (input & (hidden-1u)) | (exponent ? hidden : 0u);
+    int shift = (exponent ? exponent : 1) - bias - (int)fraction - 2*power;
+    if (shift < 0 || shift > 127 || (shift > 64 && (input_sig >> (128-shift)))) {
+        CHECK(false,"sqrt square oracle range"); return 0;
+    }
+    uint64_t limbs[8] = {0u};
+    for (unsigned i = 0; i < 4u; i++)
+     for (unsigned j = 0; j < 4u; j++) limbs[i+j] += ((sig >> (16u*i)) & 0xffffu) * ((sig >> (16u*j)) & 0xffffu);
+    for (unsigned i = 0; i < 7u; i++) { limbs[i+1u] += limbs[i] >> 16; limbs[i] &= 0xffffu; }
+    for (int bit = 127; bit >= 0; bit--) {
+        unsigned left = (unsigned)((limbs[(unsigned)bit/16u] >> ((unsigned)bit%16u)) & 1u);
+        unsigned right = bit >= shift && bit-shift < 64 ? (unsigned)((input_sig >> (bit-shift)) & 1u) : 0u;
+        if (left != right) return left ? 1 : -1;
+    }
+    return 0;
+}
+
+static void a8_sqrt_parts(uint64_t bits, unsigned dbl, uint64_t *sig, int *power) {
+    unsigned fraction = dbl ? 52u : 23u;
+    *sig = (bits & ((UINT64_C(1) << fraction)-1u)) | (UINT64_C(1) << fraction);
+    *power = (int)(bits >> fraction) - (dbl ? 1023 : 127) - (int)fraction;
+}
+
+static uint64_t a8_sqrt_oracle(uint64_t a, unsigned dbl, uint32_t fpscr, uint32_t *flags) {
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    uint64_t normal = dbl ? UINT64_C(0x0010000000000000) : UINT64_C(0x00800000);
+    uint64_t infinity = dbl ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
+    CHECK(a < infinity,"negative or nonfinite input reached native sqrt oracle");
+    *flags = 0u;
+    if (!a) return 0u;
+    if (a && a < normal && (fpscr & ARM_FPSCR_FZ)) { *flags = ARM_FPSCR_IDC; return 0u; }
+    fenv_t saved;
+    CHECK(fegetenv(&saved) == 0 && fesetround(rounds[(fpscr>>22)&3u]) == 0 &&
+          feclearexcept(FE_ALL_EXCEPT) == 0,"prepare native sqrt oracle");
+    uint64_t bits;
+    if (dbl) {
+        volatile double x = u2d(a);
+        volatile double y = sqrt(x); bits = d2u(y);
+    } else {
+        volatile float x = u2f((uint32_t)a);
+        volatile float y = sqrtf(x); bits = f2u(y);
+    }
+    int exceptions = fetestexcept(FE_ALL_EXCEPT);
+    CHECK(!(exceptions & (FE_INVALID | FE_DIVBYZERO | FE_OVERFLOW | FE_UNDERFLOW)),"unexpected finite sqrt exception");
+    CHECK(fesetenv(&saved) == 0,"restore native sqrt oracle host state");
+    /* Some hosts round an extended-precision square root again on conversion
+     * to double. Use the native result only as a candidate, then prove adjacent
+     * bounds and the midpoint with exact squares, including the inexact flag. */
+    uint64_t sig; int power;
+    a8_sqrt_parts(bits,dbl,&sig,&power);
+    uint64_t lower = bits - (a8_sqrt_square_order(sig,power,a,dbl) > 0 ? 1u : 0u), upper = lower+1u;
+    uint64_t lower_sig, upper_sig; int lower_power, upper_power;
+    a8_sqrt_parts(lower,dbl,&lower_sig,&lower_power); a8_sqrt_parts(upper,dbl,&upper_sig,&upper_power);
+    int lower_order = a8_sqrt_square_order(lower_sig,lower_power,a,dbl);
+    CHECK(lower_order <= 0 && a8_sqrt_square_order(upper_sig,upper_power,a,dbl) > 0,"native sqrt candidate bracket");
+    if (!lower_order) return lower;
+    *flags |= ARM_FPSCR_IXC;
+    unsigned mode = (fpscr >> 22) & 3u;
+    if (mode) return mode == 1u ? upper : lower;
+    int difference = upper_power-lower_power;
+    if (difference < 0 || difference > 1) { CHECK(false,"sqrt midpoint exponent gap"); return lower; }
+    uint64_t midpoint_sig = lower_sig + (upper_sig << (unsigned)difference);
+    int midpoint_order = a8_sqrt_square_order(midpoint_sig,lower_power-1,a,dbl);
+    return midpoint_order > 0 ? lower : midpoint_order < 0 ? upper : lower + (lower & 1u);
+}
+
+static void test_a8_vfp_sqrt_registers(void) {
+    CHECK(a8_fp_sqrt(1u,16u,16u) == 0xeef10be0u && a8_fp_sqrt(0u,0u,0u) == 0xeeb10ac0u &&
+          a8_fp_sqrt(0u,31u,16u) == 0xeef1fac8u && !vfp_is_sqrt_data(0xeeb00bc0u),"VFP sqrt encoding anchors");
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned dbl = 0; dbl < 2u; dbl++)
+      for (unsigned dst = 0; dst < 32u; dst++)
+       for (unsigned source = 0; source < 32u; source++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb);
+        c.vfp_fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC;
+        for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c,d,UINT64_C(0x7ff01234dead0000)+d);
+        for (unsigned r = 0; r < 32u; r++) a8_fp_value_set(&c,dbl,r,a8_add_integer(dbl,((int)r+1)*((int)r+1)));
+        uint64_t expected[32]; for (unsigned d = 0; d < 32u; d++) expected[d] = vfp_get_d(&c,d);
+        a8_add_expected_set(expected,dbl,dst,a8_add_integer(dbl,(int)source+1));
+        c.excl_valid = true; c.excl_addr = 0x12340u; c.a8_excl_size = 8u;
+        uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+        CHECK(a8_move_step(&c,thumb,a8_fp_sqrt(dbl,dst,source)) == ARM_OK &&
+              c.r[15] == 0x104u && c.cycles == 1u && c.cpsr == flags && c.vfp_fpscr == fpscr &&
+              c.excl_valid && c.excl_addr == 0x12340u && c.a8_excl_size == 8u,
+              "VFP sqrt register state T=%u D=%u dst/src=%u/%u",thumb,dbl,dst,source);
+        bool match = true;
+        for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c,d) == expected[d];
+        for (unsigned r = 0; r < 15u; r++) match &= c.r[r] == 0u;
+        CHECK(match,"VFP sqrt register/alias/exact-square oracle");
+       }
+}
+
+static void test_a8_vfp_sqrt_values_and_host_state(void) {
+    fenv_t saved; CHECK(fegetenv(&saved) == 0,"save VFP sqrt host state");
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    for (unsigned dbl = 0; dbl < 2u; dbl++) {
+        uint64_t normal = dbl ? UINT64_C(0x0010000000000000) : UINT64_C(0x00800000);
+        uint64_t infinity = dbl ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
+        uint64_t one = a8_power_of_two(dbl,0,0u), two = a8_power_of_two(dbl,1,0u), four = a8_power_of_two(dbl,2,0u);
+        uint64_t three = dbl ? UINT64_C(0x4008000000000000) : UINT64_C(0x40400000);
+        uint64_t root_two_low = dbl ? UINT64_C(0x3ff6a09e667f3bcc) : UINT64_C(0x3fb504f3);
+        uint64_t root_three_low = dbl ? UINT64_C(0x3ffbb67ae8584caa) : UINT64_C(0x3fddb3d7);
+        uint64_t root_normal = dbl ? UINT64_C(0x2000000000000000) : UINT64_C(0x20000000);
+        uint64_t root_min_low = dbl ? UINT64_C(0x1e60000000000000) : UINT64_C(0x1a3504f3);
+        uint64_t root_max_up = dbl ? UINT64_C(0x5ff0000000000000) : UINT64_C(0x5f800000);
+        const struct { uint64_t a,result[4]; uint32_t flags; } anchors[] = {
+            {0u,{0u,0u,0u,0u},0u}, {one,{one,one,one,one},0u}, {four,{two,two,two,two},0u},
+            {two,{root_two_low+dbl,root_two_low+1u,root_two_low,root_two_low},ARM_FPSCR_IXC},
+            {three,{root_three_low,root_three_low+1u,root_three_low,root_three_low},ARM_FPSCR_IXC},
+            {one+1u,{one,one+1u,one,one},ARM_FPSCR_IXC},
+            {one-1u,{one-1u,one,one-1u,one-1u},ARM_FPSCR_IXC},
+            {normal,{root_normal,root_normal,root_normal,root_normal},0u},
+            {normal-1u,{root_normal-1u,root_normal-1u,root_normal-2u,root_normal-2u},ARM_FPSCR_IXC},
+            {1u,{root_min_low,root_min_low+(dbl ? 0u : 1u),root_min_low,root_min_low},dbl ? 0u : ARM_FPSCR_IXC},
+            {infinity-1u,{root_max_up-1u,root_max_up,root_max_up-1u,root_max_up-1u},ARM_FPSCR_IXC}
+        };
+        for (unsigned row = 0; row < sizeof anchors / sizeof anchors[0]; row++)
+         for (unsigned controls = 0; controls < 16u; controls++) {
+            uint32_t fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC | ((controls&3u)<<22) |
+                (controls&4u ? ARM_FPSCR_FZ : 0u) | (controls&8u ? ARM_FPSCR_DN : 0u), exceptions;
+            bool flush = (controls&4u) && anchors[row].a && anchors[row].a < normal;
+            uint64_t want = flush ? 0u : anchors[row].result[controls&3u];
+            uint32_t want_flags = flush ? ARM_FPSCR_IDC : anchors[row].flags;
+            CHECK(a8_sqrt_oracle(anchors[row].a,dbl,fpscr,&exceptions) == want && exceptions == want_flags,
+                  "exact sqrt oracle anchor D=%u row=%u controls=%u",dbl,row,controls);
+            for (unsigned thumb = 0; thumb < 2u; thumb++) {
+                arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = fpscr;
+                a8_fp_value_set(&c,dbl,16u,anchors[row].a);
+                CHECK(a8_move_step(&c,thumb,a8_fp_sqrt(dbl,31u,16u)) == ARM_OK &&
+                      a8_fp_value(&c,dbl,31u) == want && c.vfp_fpscr == (fpscr | want_flags),
+                      "VFP sqrt analytical anchor D=%u T=%u row=%u controls=%u",dbl,thumb,row,controls);
+            }
+         }
+        /* Visit every finite exponent, including both parities and the entire
+         * subnormal normalization range, with deterministic mantissas. */
+        unsigned fraction = dbl ? 52u : 23u, max_exp = dbl ? 2047u : 255u;
+        uint64_t random = UINT64_C(0x123497dca8e5b6f0);
+        for (unsigned sample = 0; sample < 4096u + 2u*fraction; sample++) {
+            random ^= random << 13; random ^= random >> 7; random ^= random << 17;
+            uint64_t mantissa = (sample&3u)==0u ? 0u : (sample&3u)==1u ? normal-1u :
+                                (sample&3u)==2u ? 1u : random & (normal-1u);
+            uint64_t a = ((uint64_t)(sample % max_exp) << fraction) | mantissa;
+            if (sample >= 4096u) {
+                unsigned bit = (sample-4096u)/2u;
+                a = sample&1u ? (UINT64_C(1) << (bit+1u))-1u : UINT64_C(1) << bit;
+            }
+            for (unsigned controls = 0; controls < 16u; controls++) {
+                uint32_t fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC | ((controls&3u)<<22) |
+                    (controls&4u ? ARM_FPSCR_FZ : 0u) | (controls&8u ? ARM_FPSCR_DN : 0u), exceptions;
+                uint64_t want = a8_sqrt_oracle(a,dbl,fpscr,&exceptions);
+                for (unsigned thumb = 0; thumb < 2u; thumb++) {
+                    arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = fpscr; a8_fp_value_set(&c,dbl,16u,a);
+                    unsigned host = sample % 4u;
+                    CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
+                          (!(sample&1u) || feraiseexcept(FE_INVALID | FE_DIVBYZERO) == 0),"prepare sqrt host state");
+                    int pending = fetestexcept(FE_ALL_EXCEPT); uint32_t flags = c.cpsr;
+                    CHECK(a8_move_step(&c,thumb,a8_fp_sqrt(dbl,31u,16u)) == ARM_OK &&
+                          a8_fp_value(&c,dbl,31u) == want && c.vfp_fpscr == (fpscr | exceptions) && c.cpsr == flags,
+                          "VFP finite sqrt D=%u T=%u controls=%u sample=%u",dbl,thumb,controls,sample);
+                    CHECK(fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == pending,"VFP sqrt changed host FP state");
+                }
+            }
+        }
+        for (unsigned row = 0; row < sizeof a8_compare_values / sizeof a8_compare_values[0]; row++)
+         for (unsigned controls = 0; controls < 16u; controls++) {
+            uint64_t a = dbl ? a8_compare_values[row].dual : a8_compare_values[row].single;
+            uint64_t sign = dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000), quiet = normal >> 1;
+            uint32_t exceptions = 0u;
+            uint32_t fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ((controls&3u)<<22) |
+                (controls&4u ? ARM_FPSCR_FZ : 0u) | (controls&8u ? ARM_FPSCR_DN : 0u);
+            uint64_t want;
+            if (a8_compare_values[row].nan) {
+                want = controls&8u ? infinity | quiet : a | quiet;
+                if (a8_compare_values[row].signaling) exceptions = ARM_FPSCR_IOC;
+            } else if ((controls&4u) && a8_compare_values[row].denormal) { want = a & sign; exceptions = ARM_FPSCR_IDC; }
+            else if (a8_compare_values[row].rank < 8) { want = infinity | quiet; exceptions = ARM_FPSCR_IOC; }
+            else if (a8_compare_values[row].rank == 8 || row == 17u) want = a;
+            else want = a8_sqrt_oracle(a,dbl,fpscr,&exceptions);
+            for (unsigned thumb = 0; thumb < 2u; thumb++) {
+                arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = fpscr; a8_fp_value_set(&c,dbl,16u,a);
+                unsigned host = row % 4u;
+                CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
+                      (!(row&1u) || feraiseexcept(FE_INVALID | FE_DIVBYZERO) == 0),"prepare special sqrt host state");
+                int pending = fetestexcept(FE_ALL_EXCEPT);
+                CHECK(a8_move_step(&c,thumb,a8_fp_sqrt(dbl,31u,16u)) == ARM_OK &&
+                      a8_fp_value(&c,dbl,31u) == want && c.vfp_fpscr == (fpscr | exceptions),
+                      "VFP special sqrt D=%u T=%u controls=%u row=%u",dbl,thumb,controls,row);
+                CHECK(fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == pending,"special sqrt changed host FP state");
+            }
+         }
+    }
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = ARM_FPSCR_QC | ARM_FPSCR_FZ | (3u<<16);
+        vfp_set_d(&c,28u,UINT64_C(0xbff0000000000000)); vfp_set_d(&c,29u,UINT64_C(0x4000000000000000));
+        vfp_set_d(&c,30u,UINT64_C(0x8000000000000001)); vfp_set_d(&c,31u,UINT64_C(0x4010000000000000));
+        uint32_t flags = c.vfp_fpscr | ARM_FPSCR_IOC | ARM_FPSCR_IXC | ARM_FPSCR_IDC;
+        CHECK(a8_move_step(&c,thumb,a8_fp_sqrt(1u,31u,28u)) == ARM_OK &&
+              vfp_get_d(&c,31u) == UINT64_C(0x7ff8000000000000) && vfp_get_d(&c,28u) == UINT64_C(0x3ff6a09e667f3bcd) &&
+              vfp_get_d(&c,29u) == UINT64_C(0x8000000000000000) && vfp_get_d(&c,30u) == UINT64_C(0x4000000000000000) &&
+              c.vfp_fpscr == flags,"VFP sqrt vector staged inputs/sticky flags");
+        c.vfp_fpscr &= ~ARM_FPSCR_LEN; vfp_set_d(&c,0u,UINT64_C(0x4010000000000000));
+        CHECK(a8_move_step(&c,thumb,a8_fp_sqrt(1u,20u,0u)) == ARM_OK &&
+              vfp_get_d(&c,20u) == UINT64_C(0x4000000000000000) &&
+              a8_move_step(&c,thumb,VMRS(2u,1u)) == ARM_OK && c.r[2] == (flags & ~ARM_FPSCR_LEN),
+              "VFP exact sqrt/VMRS lost accumulated flags");
+    }
+    CHECK(fesetenv(&saved) == 0,"restore VFP sqrt host state");
 }
 
 static void test_a8_vfp_compare_registers_and_values(void) {
@@ -3635,12 +3862,12 @@ static void test_a8_vfp_core_move_refusals_and_it(void) {
       }
      }
     }
-    /* Upper-bank square root remains separate from the supported transfers/arithmetic. */
+    /* Upper-bank multiply-accumulate remains separate from the supported transfers/arithmetic. */
     arm_cpu_t c;
     a8_move_reset(&c, 0u);
     vfp_set_d(&c, 16u, UINT64_C(0x1122334455667788));
-    CHECK(a8_move_step(&c, 0u, VFP_DP(1,1,1,1,1,0,1,1,1,0,0)) == ARM_UNDEFINED &&
-          vfp_get_d(&c, 16u) == UINT64_C(0x1122334455667788), "core VMOV enabled upper-bank square root");
+    CHECK(a8_move_step(&c, 0u, VFP_DP(0,0,0,1,0,0,1,0,0,0,0)) == ARM_UNDEFINED &&
+          vfp_get_d(&c, 16u) == UINT64_C(0x1122334455667788), "core VMOV enabled upper-bank multiply-accumulate");
 }
 
 /* VLDR/VSTR use D:Vd for doublewords and Vd:D for singlewords. */
@@ -5552,6 +5779,8 @@ int main(void) {
     test_a8_vfp_divide_registers();
     test_a8_vfp_divide_values_and_host_state();
     test_a8_vfp_divide_special_values();
+    test_a8_vfp_sqrt_registers();
+    test_a8_vfp_sqrt_values_and_host_state();
     test_a8_vfp_add_registers();
     test_a8_vfp_add_values_and_host_state();
     test_a8_vfp_add_special_values();

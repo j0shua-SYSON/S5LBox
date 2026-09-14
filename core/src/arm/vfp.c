@@ -2,7 +2,7 @@
  * S5LBox — VFPv2 (the ARM1176JZF-S's VFP11 unit).
  *
  * Cortex-A8 transfers, raw-bit data operations, scalar comparisons and
- * VADD/VSUB, VMUL/VNMUL and VDIV use checked paths with D0-D31. Comparisons and
+ * VADD/VSUB, VMUL/VNMUL, VDIV and VSQRT use checked paths with D0-D31. Comparisons and
  * these arithmetic operations use integer bits and preserve the host FP environment. The
  * register-file and arithmetic descriptions below concern the legacy VFP11
  * implementation; they do not establish complete Cortex-A8 VFPv3/NEON support.
@@ -937,12 +937,56 @@ static uint64_t vfp_a8_divide(uint64_t a, uint64_t b, bool dbl,
     return vfp_a8_round(quotient, exp_a - exp_b + bias, result_sign, dbl, fpscr, exceptions);
 }
 
-/* A8.8.283/312/351/356/415 and Appendix K. Both S and D operations obey FPSCR;
+/* FPSqrt (A2.7.8). Extract the integer root of a conceptual significand
+ * shifted by fraction+6 bits, two radicand bits at a time. A 56-bit root
+ * and 58-bit remainder suffice for F64; no wide integer or host FP is used. */
+static uint64_t vfp_a8_sqrt(uint64_t a, bool dbl, uint32_t fpscr, uint32_t *exceptions) {
+    const unsigned fraction = dbl ? 52u : 23u;
+    const int bias = dbl ? 1023 : 127;
+    const uint64_t hidden = UINT64_C(1) << fraction;
+    const uint64_t sign = hidden << (dbl ? 11u : 8u);
+    const uint64_t infinity = (uint64_t)(dbl ? 2047u : 255u) << fraction;
+    const uint64_t quiet = hidden >> 1;
+    uint64_t magnitude = a & (sign - 1u);
+    if (magnitude > infinity) {
+        if (!(a & quiet)) *exceptions |= ARM_FPSCR_IOC;
+        return fpscr & ARM_FPSCR_DN ? infinity | quiet : a | quiet;
+    }
+    if (!magnitude) return a; /* Preserve negative zero. */
+    if (magnitude < hidden && (fpscr & ARM_FPSCR_FZ)) {
+        *exceptions |= ARM_FPSCR_IDC;
+        return a & sign; /* Flush before checking the sign of a subnormal. */
+    }
+    if (a & sign) { *exceptions |= ARM_FPSCR_IOC; return infinity | quiet; }
+    if (magnitude == infinity) return a;
+    int exponent = (int)(magnitude >> fraction);
+    uint64_t significand = (magnitude & (hidden - 1u)) | (exponent ? hidden : 0u);
+    exponent = (exponent ? exponent : 1) - bias;
+    while (significand < hidden) { significand <<= 1; exponent--; }
+    if (exponent % 2 != 0) { significand <<= 1; exponent--; }
+    uint64_t root = 0u, remainder = 0u;
+    const unsigned shift = fraction + 6u;
+    for (unsigned digit = fraction + 4u; digit-- > 0u;) {
+        unsigned bit = digit * 2u;
+        uint64_t pair = bit >= shift ? (significand >> (bit - shift)) & 3u :
+                        bit + 1u == shift ? (significand & 1u) << 1 : 0u;
+        remainder = (remainder << 2) | pair;
+        uint64_t trial = (root << 2) | 1u;
+        root <<= 1;
+        if (remainder >= trial) { remainder -= trial; root |= 1u; }
+    }
+    root |= remainder != 0u;
+    /* Every positive finite nonzero input has a normal square root. */
+    return vfp_a8_round(root, exponent / 2 + bias, 0u, dbl, fpscr, exceptions);
+}
+
+/* A8.8.283/312/351/356/401/415 and Appendix K. Both S and D operations obey FPSCR;
  * D16-D19 is a second scalar bank. Stage every lane before publication so
  * circular vectors and overlapping source/destination banks read originals. */
-static arm_status_t vfp_a8_binary_data(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
+static arm_status_t vfp_a8_arithmetic_data(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
     g_reason = NULL;
     bool dbl = BIT(8), sub_or_neg = BIT(6), multiply = vfp_is_multiply_data(insn), divide = vfp_is_divide_data(insn);
+    bool square_root = vfp_is_sqrt_data(insn);
     unsigned rd = dbl ? FIELD(12) | (BIT(22) << 4) : SREG(FIELD(12), BIT(22));
     unsigned rn = dbl ? FIELD(16) | (BIT(7) << 4) : SREG(FIELD(16), BIT(7));
     unsigned rm = dbl ? (insn & 15u) | (BIT(5) << 4) : SREG(insn & 15u, BIT(5));
@@ -957,19 +1001,22 @@ static arm_status_t vfp_a8_binary_data(arm_cpu_t *c, uint32_t pc, uint32_t insn)
     if (!vfp_short_vector_shape(c->vfp_fpscr, dbl, dbl ? rd & 15u : rd, &shape, &why))
         return vfp_trap(pc, insn, why);
     if (!vfp_cpacr_permits(c) || !vfp_enabled(c))
-        return vfp_guest_undefined("Cortex-A8 VFP binary arithmetic requires CPACR access and FPEXC.EN");
+        return vfp_guest_undefined("Cortex-A8 VFP arithmetic requires CPACR access and FPEXC.EN");
 
     bool scalar_m = dbl ? (rm & 15u) < 4u : rm < 8u;
     uint64_t result[8];
     uint32_t exceptions = 0u;
     for (unsigned lane = 0; lane < shape.count; lane++) {
-        unsigned nr = vfp_short_vector_reg(&shape, rn, lane, false);
         unsigned mr = scalar_m ? rm : vfp_short_vector_reg(&shape, rm, lane, false);
-        uint64_t a = dbl ? vfp_get_d(c, nr) : vfp_get_s(c, nr);
         uint64_t b = dbl ? vfp_get_d(c, mr) : vfp_get_s(c, mr);
-        result[lane] = divide ? vfp_a8_divide(a, b, dbl, c->vfp_fpscr, &exceptions) :
-                      multiply ? vfp_a8_multiply(a, b, dbl, c->vfp_fpscr, &exceptions) :
-                                 vfp_a8_add_sub(a, b, dbl, sub_or_neg, c->vfp_fpscr, &exceptions);
+        if (square_root) result[lane] = vfp_a8_sqrt(b, dbl, c->vfp_fpscr, &exceptions);
+        else {
+            unsigned nr = vfp_short_vector_reg(&shape, rn, lane, false);
+            uint64_t a = dbl ? vfp_get_d(c, nr) : vfp_get_s(c, nr);
+            result[lane] = divide ? vfp_a8_divide(a, b, dbl, c->vfp_fpscr, &exceptions) :
+                          multiply ? vfp_a8_multiply(a, b, dbl, c->vfp_fpscr, &exceptions) :
+                                     vfp_a8_add_sub(a, b, dbl, sub_or_neg, c->vfp_fpscr, &exceptions);
+        }
         /* VNMUL applies FPNeg after rounding, even to a NaN or signed zero. */
         if (multiply && sub_or_neg) result[lane] ^= dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
     }
@@ -1838,8 +1885,8 @@ arm_status_t vfp_execute(arm_cpu_t *c, uint32_t pc, uint32_t insn,
     if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_compare_data(insn))
         return vfp_a8_compare_data(c, pc, insn);
     if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 &&
-        (vfp_is_add_sub_data(insn) || vfp_is_multiply_data(insn) || vfp_is_divide_data(insn)))
-        return vfp_a8_binary_data(c, pc, insn);
+        (vfp_is_add_sub_data(insn) || vfp_is_multiply_data(insn) || vfp_is_divide_data(insn) || vfp_is_sqrt_data(insn)))
+        return vfp_a8_arithmetic_data(c, pc, insn);
     if (!c || (c->vfp_fpscr & ARM_FPSCR_RMODE) == 0u)
         return vfp_execute_inner(c, pc, insn, bus);
 

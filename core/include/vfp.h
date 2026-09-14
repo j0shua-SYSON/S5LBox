@@ -167,6 +167,11 @@ static inline bool vfp_is_divide_data(uint32_t insn) {
     return (insn & 0x0fb00e50u) == 0x0e800a00u;
 }
 
+/* VFP VSQRT F32/F64, with full destination and source register fields. */
+static inline bool vfp_is_sqrt_data(uint32_t insn) {
+    return (insn & 0x0fbf0ed0u) == 0x0eb10ac0u;
+}
+
 /*
  * Execute one VFP encoding. `insn` must already have been identified as a
  * cp10/cp11 encoding by the caller and its condition code must already have

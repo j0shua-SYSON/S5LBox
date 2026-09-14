@@ -525,6 +525,47 @@ kernel-entry fixture still matches the complete prior trace, normalizing
 line endings only, and stops after 61,650 steps at the same L2 parity/ECC
 configuration boundary.
 
+VFP VSQRT supports F32 and F64 in the checked ARM/Thumb scalar and
+short-vector paths, including upper D registers and scalar-bank broadcasts.
+It extracts the root two input bits at a time with integer arithmetic, then
+uses the common rounding path with remainder-derived sticky information.
+Positive finite nonzero inputs always produce normal roots. Negative zero
+keeps its sign; FZ flushes subnormal inputs before the negative-input check.
+Other negative inputs raise IOC. NaNs preserve their payload/sign unless DN
+selects the default NaN, and signaling NaNs raise IOC. See
+[DDI0406C.b, A2.7.8 and A8.8.401](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Tests cover every source/destination register pair, exact squares, every
+finite exponent, every subnormal normalization shift, rounding boundaries,
+all input classes, vector aliases, cumulative flags and guest/host controls.
+The arithmetic access, invalid-state, conditional, full-fetch and guest
+enable/return retry matrices also include square root. The first focused
+run exposed double rounding in the Windows host oracle: its x87 square root
+of the double just below one rounded again to one. The emulator's raw
+analytical anchors were correct. The oracle now treats native results as
+candidates and proves adjacent roots and their midpoint using exact integer
+squares; this also determines inexact status. The numerical implementation
+and raw anchors required no correction.
+
+The unchanged libsystem_m routines `sqrtf` (16 ARM bytes at
+`0x39295a08..0x39295a18`) and `sqrt` (14 Thumb bytes at
+`0x39295a18..0x39295a26`) complete all 640 prepared calls. Before this
+addition, the first double-precision case stopped after two instructions
+at `0x39295a1c`, on `VSQRT.F64 d16, d16`, with eight instruction bytes read.
+The unchanged fixture uses twenty raw inputs per precision and all sixteen
+rounding/FZ/DN combinations. Its forty analytical anchor rows are separately
+proved by exact rational squares and squared midpoints before execution.
+Each completed call executes four original instructions, with exact fetch
+byte counts and no data or stack access. Checks cover all FP and general
+registers, FPSCR, CPSR, the exclusive monitor, return state and unchanged
+RAM. These are isolated calls with prepared User code mappings; they do not
+establish process execution, board boot, timing or physical behavior.
+
+The existing vector division, unit F64 ramp, F32 ramp and F64 remainder
+fixtures retain all 1,536, 336, 1,824 and 112 passing calls. The complete
+guarded kernel-entry trace remains unchanged through its 61,650-step L2
+parity/ECC stop.
+
 The unchanged ARM [`vDSP_vma`](https://developer.apple.com/documentation/accelerate/vdsp_vma)
 at `0x30825f94` now completes 144 calls through its scalar body. Before
 multiply-accumulate support, the first nonempty case stopped at `0x30826144`
@@ -644,7 +685,7 @@ both original halves. Tests cover complete register lists, both stack
 aliases, invalid modes/ranges, access/conditional behavior and faults after
 partial progress, including with host memory shortcuts enabled. A separate
 test places the odd-length trailing gap on an unmapped page. Upper-bank
-VFP arithmetic beyond VADD/VSUB/VMUL/VNMUL/VDIV and the remaining NEON families are still unfinished.
+VFP arithmetic beyond VADD/VSUB/VMUL/VNMUL/VDIV/VSQRT and the remaining NEON families are still unfinished.
 
 An isolated host fixture executed the matching kernel's
 `_enable_kernel_vfp_context` routine with unchanged instructions and synthetic
@@ -675,7 +716,7 @@ flags and IT state unchanged. IT conditions, privileged
 state changes and permitted User thread-ID/barrier accesses retain their
 normal semantics. CP14 and Swift CP15 transfers remain unsupported in
 Thumb; supported VFP instructions cover the A8 transfers, raw data operations,
-comparisons and VADD/VSUB/VMUL/VNMUL/VDIV above.
+comparisons and VADD/VSUB/VMUL/VNMUL/VDIV/VSQRT above.
 CP15 MRC2/MCR2 encodings are undefined and refused. The ARM1176
 instruction path is unchanged.
 See [DDI0406C.b, A8.8.98/107](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
@@ -1178,7 +1219,7 @@ establish that result.
   Cortex-A8 MRC/MCR transfers cover the currently implemented CP15 registers.
 - Cortex-A8 stores d0-d31 and supports system/core/memory transfers plus
   VFP copies, immediate constants and sign operations with short vectors,
-  scalar comparisons and F32/F64 VADD/VSUB/VMUL/VNMUL/VDIV across the full register bank, and the bounded
+  scalar comparisons and F32/F64 VADD/VSUB/VMUL/VNMUL/VDIV/VSQRT across the full register bank, and the bounded
   32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms,
   register Boolean operations, VEXT, 8/16/32-bit VTRN, F32 VABS/VNEG,
   immediate constants, core-register VDUP, register VMUL/VADD/VSUB/VMLA/VMLS.F32
