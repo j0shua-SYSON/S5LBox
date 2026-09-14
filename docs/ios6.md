@@ -289,6 +289,16 @@ register indices, operand order and boundaries against the word-based
 implementation. See
 [DDI0406C.b, A8.8.316](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 
+NEON VTRN transposes 8-, 16- or 32-bit elements across two D or Q operands,
+staging both complete results before updating either operand. It preserves
+ARM flags, FPSCR and the host FP environment. Reserved widths and odd Q
+operands stop before access checks. Identical operands have an architecturally
+UNKNOWN result; that case remains an explicit capability stop after valid
+access checks. Tests cover every register pairing, an independent byte-array
+oracle, permission and enable checks, IT execution, neighboring encodings,
+split fetch faults, checked-bus retry and guest enable/exception-return retry.
+See [DDI0406C.b, A8.8.420](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
 NEON immediate VMOV, VMVN, VORR and VBIC also cover the full D/Q bank.
 The decoder expands the encoded integer or F32 constant as raw bits,
 including byte masks for VMOV.I64 and the trailing-one forms. It rejects
@@ -321,14 +331,28 @@ FPSCR, the fifth stack argument and ARM-to-Thumb return. Its explicit
 CPUFAMILY_ARM_13 commpage input selects the prepared firmware path; actual
 commpage initialization, other paths, process launch and boot remain unverified.
 
-The opposite-output-stride path is prepared separately using the unchanged
-ARM_13-selected code, input stride 1 and output stride -1. Before VLD2 support,
-its first 32-element absolute-value case stopped at `0x3083f350` before reading
-vector data. The same fixture now reaches `VTRN.32` at `0x3083f374` after
-38 steps, five pair loads and three sign operations: 80 source bytes
-read, no output bytes written, and R4 saved on the stack. This is a verified
-execution prefix; the reverse-output case has not returned. The generic
-CPU-family branch, scalar tails and actual commpage setup remain unprepared.
+The opposite-output-stride paths now also return correctly in all 34 prepared
+cases, using the unchanged ARM_13-selected code, input stride 1 and output
+stride -1. These cover zero or 32/64/96/128 elements, all four word-aligned
+input positions within 16 bytes, and aligned separate output blocks. Before
+VLD2 support, the first nonempty absolute-value case stopped at `0x3083f350`;
+after pair transfers it reached `VTRN.32` at `0x3083f374`, with 80 source bytes
+read and no output written. Adding VTRN lets the unchanged fixture verify
+the complete reversed raw-bit results, exactly one read/write per requested
+source/output byte, whole-page canaries, one saved/restored R4, all FP
+registers, preserved ABI registers, FPSCR and ARM-to-Thumb return. The generic
+CPU-family branch, scalar tails, actual commpage setup and boot remain unverified.
+
+The unchanged ARM [`vDSP_vfill`](https://developer.apple.com/documentation/accelerate/vdsp_vfill)
+at `0x3083cddc` completes 744 additional cases using existing instructions.
+These cover 25 boundary lengths from 0 through 257, strides +/-1, +/-2 and
++/-3, all four word-aligned output positions within 16 bytes, and 18 raw
+F32 value classes. The fixture verifies scalar and vector paths, alignment
+prefixes and scalar tails, one scalar read for nonempty calls, exactly one
+write per selected output byte, untouched gaps and page canaries, all FP
+registers, preserved ABI registers, FPSCR and return state. Its explicit
+ARM_13 family input excludes the other-family integer path; no stack access
+is prepared. Source/output aliasing and actual commpage setup remain unverified.
 
 NEON register VMUL.F32, VADD.F32 and VSUB.F32 operate on two or four lanes
 across the full D/Q bank, using integer arithmetic and nearest-even rounding.
@@ -960,7 +984,7 @@ establish that result.
   VFP copies, immediate constants and sign operations with short vectors,
   scalar comparisons across the full register bank, and the bounded
   32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms,
-  register Boolean operations, VEXT, F32 VABS/VNEG,
+  register Boolean operations, VEXT, 8/16/32-bit VTRN, F32 VABS/VNEG,
   immediate constants, core-register VDUP and register VMUL/VADD/VSUB.F32
   described above.
   Upper-bank VFP arithmetic, the remaining NEON families, and full

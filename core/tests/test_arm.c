@@ -7951,6 +7951,69 @@ static void test_cortex_a8_neon_pair_faults(void) {
        }
 }
 
+static void test_cortex_a8_neon_transpose_fetch_and_retry(void) {
+    const uint64_t a = UINT64_C(0x0123456789abcdef), b = UINT64_C(0xffeeddccbbaa9988);
+    static const uint64_t expected[3][2] = {
+        {UINT64_C(0xee23cc67aaab88ef),UINT64_C(0xff01dd45bb8999cd)},
+        {UINT64_C(0xddcc45679988cdef),UINT64_C(0xffee0123bbaa89ab)},
+        {UINT64_C(0xbbaa998889abcdef),UINT64_C(0xffeeddcc01234567)}
+    };
+    for (unsigned host = 0; host < 2u; host++)
+     for (unsigned size = 0; size < 3u; size++)
+      for (unsigned quad = 0; quad < 2u; quad++)
+       for (unsigned fault = 0; fault < 4u; fault++) {
+        memset(g_ram, 0, sizeof g_ram);
+        arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "transpose split fetch reset");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP; c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u; c.cp15.cpacr = 0x00f00000u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N | test_it_bits(0x1cu);
+        c.r[15] = 0xffeu; c.vfp_fpscr = 0x0bc00080u; c.vfp_fpexc = fault ? 0u : ARM_FPEXC_EN;
+        c.a8_vfp_hi[14] = c.a8_vfp_hi[15] = a; c.a8_vfp_hi[0] = c.a8_vfp_hi[1] = b;
+        uint32_t insn = 0xfff2e0a0u | (size << 18) | (quad << 6), flags = c.cpsr;
+        m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x8032u);
+        m_w32(NULL, 0x6004u, fault == 1u ? 0u : fault == 2u ? 0xa033u : fault == 3u ? 0xa012u : 0xa032u);
+        m_w16(NULL, 0x8ffeu, (uint16_t)(insn >> 16)); m_w16(NULL, 0xa000u, (uint16_t)insn);
+        m_w16(NULL, 0x9000u, 0u); /* Wrong physical neighbor must not complete this instruction. */
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u && c.vfp_fpscr == 0x0bc00080u, "transpose split fetch disposition");
+        if (fault) CHECK(c.r[15] == ARM_VEC_PREFETCH && c.r[14] == 0x1002u && c.spsr[ARM_BANK_ABT] == flags &&
+            c.cp15.ifar == 0x1000u && (c.cp15.ifsr & 15u) == (fault == 1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION) &&
+            !(c.cpsr & (ARM_CPSR_T | TEST_IT_MASK)) && c.vfp_fpexc == 0u &&
+            c.a8_vfp_hi[14] == a && c.a8_vfp_hi[15] == a && c.a8_vfp_hi[0] == b && c.a8_vfp_hi[1] == b,
+            "transpose checked access/changed either operand before full fetch");
+        else CHECK(c.r[15] == 0x1002u && c.cpsr == ((flags & ~TEST_IT_MASK) | test_it_bits(0x18u)) &&
+            c.a8_vfp_hi[14] == expected[size][0] && c.a8_vfp_hi[0] == expected[size][1] &&
+            c.a8_vfp_hi[15] == (quad ? expected[size][0] : a) && c.a8_vfp_hi[1] == (quad ? expected[size][1] : b),
+            "transpose used wrong halfword or changed IT/register order");
+       }
+    for (unsigned size = 0; size < 3u; size++)
+     for (unsigned quad = 0; quad < 2u; quad++) {
+        memset(g_ram, 0, sizeof g_ram);
+        arm_cpu_t c; CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "transpose lazy retry reset");
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_Z | ARM_CPSR_Q; c.cp15.cpacr = 0x00f00000u;
+        c.a8_vfp_hi[14] = c.a8_vfp_hi[15] = a; c.a8_vfp_hi[0] = c.a8_vfp_hi[1] = b;
+        c.r[15] = 0x100u; c.r[5] = ARM_FPEXC_EN; c.vfp_fpscr = 0x0bc00080u;
+        uint32_t insn = 0xfff2e0a0u | (size << 18) | (quad << 6);
+        m_w16(NULL, 0x100u, 0xbf04u); /* ITT EQ */
+        m_w16(NULL, 0x102u, (uint16_t)(insn >> 16)); m_w16(NULL, 0x104u, (uint16_t)insn);
+        m_w16(NULL, 0x106u, 0x2201u);
+        put_vfp_system_transfer(0u, ARM_VEC_UNDEFINED, 0u, 8u, 5u); m_w32(NULL, 8u, 0xe25ef002u);
+        CHECK(arm_step(&c) == ARM_OK, "transpose lazy retry IT setup");
+        uint32_t flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == 0x104u && c.spsr[ARM_BANK_UND] == flags &&
+              c.a8_vfp_hi[14] == a && c.a8_vfp_hi[15] == a && c.a8_vfp_hi[0] == b && c.a8_vfp_hi[1] == b,
+              "transpose lazy access altered either operand");
+        CHECK(arm_step(&c) == ARM_OK && c.vfp_fpexc == ARM_FPEXC_EN, "transpose handler enable");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x102u && c.cpsr == flags, "transpose exception return");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x106u && c.cpsr == ((flags & ~TEST_IT_MASK) | test_it_bits(0x08u)) &&
+              c.vfp_fpscr == 0x0bc00080u && c.a8_vfp_hi[14] == expected[size][0] && c.a8_vfp_hi[0] == expected[size][1] &&
+              c.a8_vfp_hi[15] == (quad ? expected[size][0] : a) && c.a8_vfp_hi[1] == (quad ? expected[size][1] : b),
+              "transpose guest enable/retry did not publish both results exactly once");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x108u && c.r[2] == 1u && c.cpsr == (flags & ~TEST_IT_MASK) && c.cycles == 6u,
+              "transpose retry changed following IT condition");
+     }
+}
+
 static void test_cortex_a8_vfp_data_fetch_and_retry(void) {
     static const uint32_t insns[] = {
         0xeef7fb00u,0xeef0fb60u,0xeef0fbe0u,0xeef1fb60u,
@@ -11598,6 +11661,7 @@ int main(void) {
     test_cortex_a8_vfp_data_fetch_and_retry();
     test_cortex_a8_neon_memory_faults();
     test_cortex_a8_neon_pair_faults();
+    test_cortex_a8_neon_transpose_fetch_and_retry();
     test_cortex_a8_vfp_single_memory_aborts();
     test_cortex_a8_vfp_multiple_memory_aborts();
     test_cortex_a8_vfp_fetch_and_refusals();

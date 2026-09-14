@@ -203,6 +203,44 @@ static void test_neon_pairs_and_retry(void) {
          }
 }
 
+static void test_neon_transpose_fetch_and_retry(void) {
+    const uint64_t a = UINT64_C(0x0123456789abcdef), b = UINT64_C(0xffeeddccbbaa9988);
+    static const uint64_t expected[3][2] = {
+        {UINT64_C(0xee23cc67aaab88ef),UINT64_C(0xff01dd45bb8999cd)},
+        {UINT64_C(0xddcc45679988cdef),UINT64_C(0xffee0123bbaa89ab)},
+        {UINT64_C(0xbbaa998889abcdef),UINT64_C(0xffeeddcc01234567)}
+    };
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned size = 0; size < 3u; size++)
+      for (unsigned quad = 0; quad < 2u; quad++)
+       for (unsigned host = 0; host < 2u; host++)
+        for (unsigned enabled = 0; enabled < 2u; enabled++)
+         for (unsigned half = 0; half <= thumb; half++) {
+            fixture_t f; arm_bus_t bus; arm_cpu_t c;
+            setup(&f, &bus, &c, thumb != 0u, host != 0u);
+            if (thumb) c.cpsr |= 0x1800u;
+            c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u; c.vfp_fpscr = 0x0bc00080u;
+            c.excl_valid = true; c.excl_addr = 0x2468u; c.a8_excl_size = 8u;
+            uint32_t insn = (thumb ? 0xfff2e0a0u : 0xf3f2e0a0u) | (size << 18) | (quad << 6);
+            if (thumb) { put16(&f, 0u, (uint16_t)(insn >> 16)); put16(&f, 2u, (uint16_t)insn); }
+            else put32(&f, 0u, insn);
+            vfp_set_d(&c, 30u, a); vfp_set_d(&c, 31u, a); vfp_set_d(&c, 16u, b); vfp_set_d(&c, 17u, b);
+            uint32_t flags = c.cpsr;
+            f.fail_address = half * 2u; f.fail_size = thumb ? 2u : 4u;
+            CHECK(arm_step(&c) == ARM_HALT, "transpose failed fetch did not halt");
+            check_stop(&f, &c, 0u, flags);
+            CHECK(vfp_get_d(&c, 30u) == a && vfp_get_d(&c, 31u) == a && vfp_get_d(&c, 16u) == b && vfp_get_d(&c, 17u) == b &&
+                  c.vfp_fpscr == 0x0bc00080u && c.vfp_fpexc == (enabled ? ARM_FPEXC_EN : 0u) &&
+                  c.excl_valid && c.excl_addr == 0x2468u && c.a8_excl_size == 8u, "failed transpose fetch altered operands/control/monitor");
+            f.failed = false; f.fail_size = 0u; c.vfp_fpexc = ARM_FPEXC_EN;
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u && c.cpsr == (flags & ~0x0600fc00u) &&
+                  c.vfp_fpscr == 0x0bc00080u && c.excl_valid && c.a8_excl_size == 8u, "transpose retry retirement/status");
+            CHECK(vfp_get_d(&c, 30u) == expected[size][0] && vfp_get_d(&c, 16u) == expected[size][1] &&
+                  vfp_get_d(&c, 31u) == (quad ? expected[size][0] : a) && vfp_get_d(&c, 17u) == (quad ? expected[size][1] : b),
+                  "transpose retry result/operand order/upper halves");
+         }
+}
+
 static void test_neon_sign_fetch_and_retry(void) {
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned negate = 0; negate < 2u; negate++)
@@ -699,6 +737,7 @@ static void test_signed_runner_entry_guards(void) {
 #endif
 
 int main(void) {
+    test_neon_transpose_fetch_and_retry();
     test_neon_pairs_and_retry();
     test_neon_sign_fetch_and_retry();
     test_neon_memory_and_retry();
