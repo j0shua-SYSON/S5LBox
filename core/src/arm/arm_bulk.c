@@ -154,19 +154,38 @@ static uint16_t read16(const uint8_t *p) {
     return (uint16_t)((uint16_t)p[0] | (uint16_t)p[1] << 8);
 }
 
-static const uint8_t *chain_word_at(const arm_cpu_t *cpu,
-                                    const arm_bulk_memory_t *memory,
+/* One invocation is serialized and read-only: no guest store, callback or
+ * device work can change translation controls, descriptor bytes or RAM grants.
+ * Retain just the last cold/TLB page proof until this invocation returns. It
+ * is not a CPU cache entry and cannot outlive this read-only interval. Logical
+ * loads retain their original witness class even when its proof is reused. */
+typedef struct {
+    const arm_cpu_t *cpu;
+    const arm_bulk_memory_t *memory;
+    const uint8_t *host;
+    uint32_t page;
+    bool walked;
+} chain_reader_t;
+
+static const uint8_t *chain_word_at(chain_reader_t *reader,
                                     uint32_t address, unsigned *tlb_reads,
                                     unsigned *walk_reads) {
     if (address & 3u) return NULL;
-    const uint8_t *p = word_at(cpu, memory, address);
-    if (p || !memory->ram_window) return p;
-    bool walked = false;
-    p = arm_ram_window_read_resolve(memory->ram_window, cpu, address, &walked);
-    if (!p) return NULL;
-    if (walked) (*walk_reads)++;
+    const uint8_t *p = word_at(reader->cpu, reader->memory, address);
+    if (p || !reader->memory->ram_window) return p;
+    const uint32_t page = address & ~UINT32_C(1023);
+    if (!reader->host || reader->page != page) {
+        bool walked = false;
+        p = arm_ram_window_read_resolve(reader->memory->ram_window,
+                                         reader->cpu, address, &walked);
+        if (!p) return NULL;
+        reader->host = p;
+        reader->page = page;
+        reader->walked = walked;
+    }
+    if (reader->walked) (*walk_reads)++;
     else (*tlb_reads)++;
-    return p + (address & 1023u);
+    return reader->host + (address & 1023u);
 }
 
 static uint32_t segment_hash(unsigned kind, uint32_t start,
@@ -410,13 +429,14 @@ static void segment_finish(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
  * Logical load accounting uses each page's live witness classification. */
 static bool segment_validate(arm_cpu_t *cpu,
                                const arm_bulk_memory_t *memory,
+                               chain_reader_t *reader,
                                bulk_segment_t *entry,
                                unsigned *tlb_reads, unsigned *walk_reads) {
     unsigned reads = 0u, walks = 0u;
     for (unsigned i = 0u; i < entry->result.pages; i++) {
         bulk_page_t *page = &entry->page[i];
         unsigned read = 0u, walk = 0u;
-        const uint8_t *p = chain_word_at(cpu, memory, page->address, &read, &walk);
+        const uint8_t *p = chain_word_at(reader, page->address, &read, &walk);
         if (!p) goto invalid;
         uint64_t stamp = arm_ram_watch_capture(memory->watch, cpu, p);
         bool unchanged = stamp && entry->result.watch == memory->watch && page->stamp == stamp;
@@ -502,13 +522,14 @@ static unsigned thumb_ordered_chain(arm_cpu_t *cpu,
     bulk_segment_t *building = NULL;
     bulk_index_entry_t joined = {0};
     unsigned pieces = 0u;
+    chain_reader_t reader = {.cpu = cpu, .memory = memory};
     while (count < budget / 10u) {
         if (part == 0u) {
             bulk_segment_t *entry = segment_slot(memory, 1u, walker, offsets,
                                                   budget - count * 10u);
             if (segment_key(entry, 1u, walker, offsets, budget - count * 10u) &&
                 wanted > entry->result.high &&
-                segment_validate(cpu, memory, entry, &tlb_reads, &walk_reads)) {
+                segment_validate(cpu, memory, &reader, entry, &tlb_reads, &walk_reads)) {
                 segment_join(memory, &joined, &pieces, entry);
                 prev = entry->result.previous; cur = walker = entry->result.current;
                 key = entry->result.value; count += entry->result.iterations;
@@ -518,12 +539,12 @@ static unsigned thumb_ordered_chain(arm_cpu_t *cpu,
             segment_begin(building, 1u, walker, offsets);
         }
         unsigned iteration_reads = 0u, iteration_walks = 0u;
-        const uint8_t *np = chain_word_at(cpu, memory,
+        const uint8_t *np = chain_word_at(&reader,
             walker + cpu->r[next_offset], &iteration_reads, &iteration_walks);
         if (!np) break;
         uint32_t next = read32(np);
         if (!next) break;
-        const uint8_t *kp = chain_word_at(cpu, memory,
+        const uint8_t *kp = chain_word_at(&reader,
             next + cpu->r[key_offset], &iteration_reads, &iteration_walks);
         if (!kp) break;
         uint32_t next_key = read32(kp);
@@ -605,14 +626,15 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
         read16(memory->code + offset + 24u) != 0xd1f0u ||
         read16(memory->code + offset - 4u) != 0x4641u ||
         read16(memory->code + offset - 2u) != 0x585au)) return 0u;
+    chain_reader_t reader = {.cpu = cpu, .memory = memory};
     unsigned invariant_reads = 0u, invariant_walks = 0u;
     uint32_t wanted = 0u;
     if (same_depth) {
         uint32_t stack_offset = (read16(memory->code + offset + 30u) & 255u) * 4u;
-        const uint8_t *slot = chain_word_at(cpu, memory,
+        const uint8_t *slot = chain_word_at(&reader,
             cpu->r[13] + stack_offset, &invariant_reads, &invariant_walks);
         if (!slot) return 0u;
-        const uint8_t *target = chain_word_at(cpu, memory, read32(slot),
+        const uint8_t *target = chain_word_at(&reader, read32(slot),
                                              &invariant_reads, &invariant_walks);
         if (!target) return 0u;
         wanted = read32(target);
@@ -635,7 +657,7 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
                 outside(cpu->r[12], entry->result.head_low, entry->result.head_high) &&
                 (!same_depth || outside(wanted, entry->result.low, entry->result.high)) &&
                 (!entry->result.empty_path || thumb_filtered_empty_path(memory, offset)) &&
-                segment_validate(cpu, memory, entry, &tlb_reads, &walk_reads)) {
+                segment_validate(cpu, memory, &reader, entry, &tlb_reads, &walk_reads)) {
                 segment_join(memory, &joined, &pieces, entry);
                 previous = entry->result.previous; current = entry->result.current;
                 value = entry->result.value; retired += entry->result.retired;
@@ -651,7 +673,7 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
         unsigned iteration_reads = invariant_reads;
         unsigned iteration_walks = invariant_walks;
         const uint8_t *child = NULL, *sibling = NULL;
-        const uint8_t *payload = chain_word_at(cpu, memory,
+        const uint8_t *payload = chain_word_at(&reader,
             current + cpu->r[4], &iteration_reads, &iteration_walks);
         if (!payload) break;
         if (!read32(payload)) {
@@ -661,21 +683,21 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
                 if (!thumb_filtered_empty_path(memory, offset)) break;
                 empty_path_witnessed = true;
             }
-            child = chain_word_at(cpu, memory,
+            child = chain_word_at(&reader,
                 current + cpu->r[9], &iteration_reads, &iteration_walks);
             if (!child || !read32(child)) break;
-            sibling = chain_word_at(cpu, memory,
+            sibling = chain_word_at(&reader,
                 current + cpu->r[5], &iteration_reads, &iteration_walks);
             if (!sibling || !read32(sibling)) break;
             iteration_loads += 2u;
         }
         if (value == cpu->r[12]) break;
-        const uint8_t *link = chain_word_at(cpu, memory,
+        const uint8_t *link = chain_word_at(&reader,
             current + cpu->r[5], &iteration_reads, &iteration_walks);
         if (!link) break;
         uint32_t next = read32(link);
         if (!next) break;
-        const uint8_t *key = chain_word_at(cpu, memory,
+        const uint8_t *key = chain_word_at(&reader,
             next + cpu->r[8], &iteration_reads, &iteration_walks);
         if (!key) break;
         uint32_t next_value = read32(key);

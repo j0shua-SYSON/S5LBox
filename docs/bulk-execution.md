@@ -61,6 +61,16 @@ reads as TLB misses, not DREAD/TLB hits, including invariant reads whose proofs
 are reused within one read-only interval. Refused iterations commit no counters.
 This remains behind the existing bulk option; physical speedup is unverified.
 
+Within one serialized read-only search call, the executor retains the last
+cold/TLB page proof so successive loads from that 1 KiB page need not repeat
+the permission walk. The pointer is automatic call-local state, not a new
+persistent mapping cache; no CPU READ entry is published. Each logical load
+keeps its original cold/TLB classification. Guest stores, callbacks and device
+work remain outside the interval, and the next call resolves against its new
+context. Regression covers permission revocation, a newly cached fault, changed
+data, changed translation controls and revoked bus identity between prefixes.
+No instruction/device budget changes, and no physical speed gain is assumed.
+
 The filtered pointer search also admits its different-depth path and the
 empty-payload detour when both child and sibling are nonzero. Unlike untaken
 exit branches, every taken internal edge must lead to separately matched live

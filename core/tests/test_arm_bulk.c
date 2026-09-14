@@ -652,6 +652,38 @@ static void test_thumb_chain_tlb(void) {
     }
 }
 
+/* A successful cold page proof may be reused only inside its read-only call.
+ * The next call must see changed descriptors, cached faults and grants even
+ * when the last page of the first prefix is its first requested page. */
+static void test_chain_reader_lifetime(void) {
+    for (unsigned kind = 0u; kind < 2u; kind++)
+        for (unsigned scenario = 0u; scenario < 5u; scenario++) {
+            arm_cpu_t cpu; arm_bulk_memory_t memory; arm_ram_window_t window;
+            chain_tlb_setup(&cpu, &memory, &window, kind);
+            memset(cpu.tlb, 0, sizeof cpu.tlb);
+            memset(cpu.dread, 0, sizeof cpu.dread);
+            const unsigned stride = kind ? 19u : 10u;
+            CHECK(chain_differential(&cpu, &memory, stride, kind) == stride,
+                  "cold proof lifetime first prefix");
+            arm_bus_t altered = full_bus;
+            switch (scenario) {
+            case 0: w32(NULL, 0x844u, 0x2012u); break; /* Revoke User READ. */
+            case 1: w32(NULL, 0x2000u + (kind ? 8u : 0u), 0u); break;
+            case 2: {
+                const uint32_t va = 0x11000u;
+                const unsigned slot = (va >> 10) & (ARM_TLB_ENTRIES - 1u);
+                cpu.tlb[slot].gen = cpu.tlb_gen;
+                cpu.tlb[slot].tag = (va >> 10) << 3;
+                cpu.tlb[slot].fsr = 13u;
+                break;
+            }
+            case 3: cpu.cp15.context_id++; break;
+            case 4: altered.read32 = NULL; cpu.bus = &altered; break;
+            }
+            refusal(&cpu, &memory, 4096u);
+        }
+}
+
 static void test_thumb_chain_cold(void) {
     for (unsigned kind = 0u; kind < 2u; kind++) {
         const unsigned stride = kind ? 19u : 10u;
@@ -1582,6 +1614,7 @@ int main(void) {
     test_compare_prefixes();
     test_thumb_chains();
     test_thumb_chain_tlb();
+    test_chain_reader_lifetime();
     test_thumb_chain_cold();
     test_thumb_filtered_paths();
     test_chain_reuse();
