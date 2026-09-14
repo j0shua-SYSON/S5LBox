@@ -203,6 +203,38 @@ static void test_neon_pairs_and_retry(void) {
          }
 }
 
+static void test_neon_macc_fetch_and_retry(void) {
+    const uint64_t a = UINT64_C(0x3fc000003fc00000), b = UINT64_C(0x4000000040000000), accumulator = UINT64_C(0x3f8000003f800000);
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned subtract = 0; subtract < 2u; subtract++)
+      for (unsigned quad = 0; quad < 2u; quad++)
+       for (unsigned host = 0; host < 2u; host++)
+        for (unsigned enabled = 0; enabled < 2u; enabled++)
+         for (unsigned half = 0; half <= thumb; half++) {
+            fixture_t f; arm_bus_t bus; arm_cpu_t c;
+            setup(&f, &bus, &c, thumb != 0u, host != 0u); if (thumb) c.cpsr |= 0x1800u;
+            c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u; c.vfp_fpscr = 0x0bc00080u;
+            c.excl_valid = true; c.excl_addr = 0x2468u; c.a8_excl_size = 8u;
+            uint32_t insn = (thumb ? 0xef40edb2u : 0xf240edb2u) | (subtract << 21) | (quad << 6);
+            if (thumb) { put16(&f, 0u, (uint16_t)(insn >> 16)); put16(&f, 2u, (uint16_t)insn); } else put32(&f, 0u, insn);
+            vfp_set_d(&c, 16u, a); vfp_set_d(&c, 17u, a); vfp_set_d(&c, 18u, b); vfp_set_d(&c, 19u, b);
+            vfp_set_d(&c, 30u, accumulator); vfp_set_d(&c, 31u, accumulator);
+            uint32_t flags = c.cpsr;
+            f.fail_address = half * 2u; f.fail_size = thumb ? 2u : 4u;
+            CHECK(arm_step(&c) == ARM_HALT, "macc failed fetch did not halt"); check_stop(&f, &c, 0u, flags);
+            CHECK(vfp_get_d(&c, 30u) == accumulator && vfp_get_d(&c, 31u) == accumulator &&
+                  c.vfp_fpscr == 0x0bc00080u && c.vfp_fpexc == (enabled ? ARM_FPEXC_EN : 0u) &&
+                  c.excl_valid && c.excl_addr == 0x2468u && c.a8_excl_size == 8u, "failed macc fetch altered accumulator/status/monitor");
+            f.failed = false; f.fail_size = 0u; c.vfp_fpexc = ARM_FPEXC_EN;
+            uint64_t expected = subtract ? UINT64_C(0xc0000000c0000000) : UINT64_C(0x4080000040800000);
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u && c.cpsr == (flags & ~0x0600fc00u) &&
+                  c.vfp_fpscr == 0x0bc00080u && c.excl_valid && c.a8_excl_size == 8u &&
+                  vfp_get_d(&c, 30u) == expected && vfp_get_d(&c, 31u) == (quad ? expected : accumulator), "macc retry did not accumulate exactly once");
+            CHECK(vfp_get_d(&c, 16u) == a && vfp_get_d(&c, 17u) == a && vfp_get_d(&c, 18u) == b && vfp_get_d(&c, 19u) == b,
+                  "macc fetch/retry changed a source");
+         }
+}
+
 static void test_neon_transpose_fetch_and_retry(void) {
     const uint64_t a = UINT64_C(0x0123456789abcdef), b = UINT64_C(0xffeeddccbbaa9988);
     static const uint64_t expected[3][2] = {
@@ -737,6 +769,7 @@ static void test_signed_runner_entry_guards(void) {
 #endif
 
 int main(void) {
+    test_neon_macc_fetch_and_retry();
     test_neon_transpose_fetch_and_retry();
     test_neon_pairs_and_retry();
     test_neon_sign_fetch_and_retry();

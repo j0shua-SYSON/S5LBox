@@ -1099,6 +1099,184 @@ static void test_a8_neon_bitwise_invalid_and_it(void) {
      }
 }
 
+static uint32_t a8_neon_macc(unsigned thumb, unsigned subtract, unsigned quad, unsigned d, unsigned n, unsigned m) {
+    return (thumb ? 0xef000d10u : 0xf2000d10u) | (subtract << 21) | (quad << 6) |
+        ((d & 15u) << 12) | ((d >> 4) << 22) | ((n & 15u) << 16) | ((n >> 4) << 7) | (m & 15u) | ((m >> 4) << 5);
+}
+
+/* All integers used by the register oracle are exact F32 values. */
+static uint32_t a8_macc_int_bits(int value) {
+    if (!value) return 0u;
+    unsigned magnitude = (unsigned)(value < 0 ? -value : value), exponent = 0;
+    while ((magnitude >> (exponent + 1u)) != 0u) exponent++;
+    return (value < 0 ? 0x80000000u : 0u) | ((127u + exponent) << 23) |
+        ((magnitude - (1u << exponent)) << (23u - exponent));
+}
+
+static void test_a8_neon_macc_registers(void) {
+    CHECK(a8_neon_macc(0u, 0u, 0u, 3u, 0u, 1u) == 0xf2003d11u &&
+          a8_neon_macc(1u, 1u, 1u, 30u, 16u, 18u) == 0xef60edf2u, "NEON multiply-accumulate encoding anchors");
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned subtract = 0; subtract < 2u; subtract++)
+      for (unsigned quad = 0; quad < 2u; quad++)
+       for (unsigned d = 0; d < 32u; d += quad + 1u)
+        for (unsigned n = 0; n < 32u; n += quad + 1u)
+         for (unsigned m = 0; m < 32u; m += quad + 1u) {
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            c.cpsr |= ARM_CPSR_E; c.vfp_fpscr = 0xfff79f9fu;
+            c.excl_valid = true; c.excl_addr = 0x2468u; c.a8_excl_size = 8u;
+            uint64_t expected[32];
+            for (unsigned r = 0; r < 32u; r++) {
+                expected[r] = a8_macc_int_bits((int)((2u * r) % 9u) - 4) |
+                    (uint64_t)a8_macc_int_bits((int)((2u * r + 1u) % 9u) - 4) << 32;
+                vfp_set_d(&c, r, expected[r]);
+            }
+            for (unsigned r = 0; r <= quad; r++) {
+                uint32_t result[2];
+                for (unsigned lane = 0; lane < 2u; lane++) {
+                    int a = (int)((2u * (n + r) + lane) % 9u) - 4, b = (int)((2u * (m + r) + lane) % 9u) - 4;
+                    int accumulator = (int)((2u * (d + r) + lane) % 9u) - 4;
+                    result[lane] = a8_macc_int_bits(accumulator + (subtract ? -a * b : a * b));
+                }
+                expected[d + r] = (uint64_t)result[1] << 32 | result[0];
+            }
+            uint32_t flags = c.cpsr;
+            CHECK(a8_move_step(&c, thumb, a8_neon_macc(thumb, subtract, quad, d, n, m)) == ARM_OK && c.r[15] == 0x104u &&
+                  c.cycles == 1u && c.cpsr == flags && c.vfp_fpscr == 0xfff79f9fu &&
+                  c.excl_valid && c.excl_addr == 0x2468u && c.a8_excl_size == 8u, "macc register/status");
+            bool same = true;
+            for (unsigned r = 0; r < 32u; r++) same &= vfp_get_d(&c, r) == expected[r];
+            for (unsigned r = 0; r < 15u; r++) same &= c.r[r] == 0u;
+            CHECK(same, "macc original accumulator/source alias T=%u sub=%u Q=%u D=%u N=%u M=%u", thumb, subtract, quad, d, n, m);
+         }
+}
+
+typedef struct { uint32_t a, b, c, add, subtract, add_flags, subtract_flags; } a8_macc_case_t;
+static const a8_macc_case_t a8_macc_cases[] = {
+    {0x3fc00000u,0x40000000u,0x3f800000u,0x40800000u,0xc0000000u,0u,0u},
+    {0xbf800000u,0x3f000000u,0x40000000u,0x3fc00000u,0x40200000u,0u,0u},
+    {0x40800000u,0x3e800000u,0xbf800000u,0u,0xc0000000u,0u,0u},
+    /* (1+2^-23)*(1-2^-24) rounds to1 before +/-1 cancels it. */
+    {0x3f800001u,0x3f7fffffu,0xbf800000u,0u,0xc0000000u,ARM_FPSCR_IXC,ARM_FPSCR_IXC},
+    {0x7f7fffffu,0x40000000u,0xff800000u,0x7fc00000u,0xff800000u,
+        ARM_FPSCR_OFC | ARM_FPSCR_IXC | ARM_FPSCR_IOC,ARM_FPSCR_OFC | ARM_FPSCR_IXC},
+    {0x00800000u,0x3f000000u,0x3f800000u,0x3f800000u,0x3f800000u,ARM_FPSCR_UFC,ARM_FPSCR_UFC},
+    {1u,0x3f800000u,0x3f800000u,0x3f800000u,0x3f800000u,ARM_FPSCR_IDC,ARM_FPSCR_IDC},
+    {0x7f812345u,0x3f800000u,0x3f800000u,0x7fc00000u,0x7fc00000u,ARM_FPSCR_IOC,ARM_FPSCR_IOC},
+    {0x80000000u,0x3f800000u,0x80000000u,0x80000000u,0u,0u,0u},
+    {0x7fcabcdeu,0x80000001u,0xff812345u,0x7fc00000u,0x7fc00000u,ARM_FPSCR_IOC | ARM_FPSCR_IDC,ARM_FPSCR_IOC | ARM_FPSCR_IDC},
+    {0x7f7fffffu,0x40000000u,0u,0x7f800000u,0xff800000u,ARM_FPSCR_OFC | ARM_FPSCR_IXC,ARM_FPSCR_OFC | ARM_FPSCR_IXC},
+    /* Tiny before rounding, even though rounding without FZ would reach min-normal. */
+    {0x00800000u,0x3f7fffffu,0x80000000u,0u,0x80000000u,ARM_FPSCR_UFC,ARM_FPSCR_UFC},
+    {0u,0x7f800000u,0x7fcabcdeu,0x7fc00000u,0x7fc00000u,ARM_FPSCR_IOC,ARM_FPSCR_IOC},
+    {0x3f800000u,0x3f800000u,1u,0x3f800000u,0xbf800000u,ARM_FPSCR_IDC,ARM_FPSCR_IDC},
+    {0u,0x3f800000u,0x80000001u,0u,0x80000000u,ARM_FPSCR_IDC,ARM_FPSCR_IDC},
+    {0x7f800000u,0x3f800000u,0x7f800000u,0x7f800000u,0x7fc00000u,0u,ARM_FPSCR_IOC},
+    {0xff800000u,0x3f800000u,0x7f800000u,0x7fc00000u,0x7f800000u,ARM_FPSCR_IOC,0u},
+    /* Addition tie versus exactly representable subtraction below1. */
+    {0x3f800000u,0x3f800000u,0x33800000u,0x3f800000u,0xbf7fffffu,ARM_FPSCR_IXC,0u},
+    {0x3f800001u,0x3f800000u,0x33800000u,0x3f800002u,0xbf800000u,ARM_FPSCR_IXC,ARM_FPSCR_IXC},
+    {0x00800000u,0x3f800000u,0x80800001u,0x80000000u,0x81000000u,ARM_FPSCR_UFC,ARM_FPSCR_IXC},
+    {0x00800000u,0x3f800000u,0x80800000u,0u,0x81000000u,0u,0u},
+    {0x3f800001u,0x3f800001u,0xbf800000u,0x34800000u,0xc0000001u,ARM_FPSCR_IXC,ARM_FPSCR_IXC},
+    {0x3f7fffffu,0x3f7fffffu,0x3f800000u,0x3fffffffu,0x34000000u,ARM_FPSCR_IXC,ARM_FPSCR_IXC},
+    {0x7f7fffffu,0x3f800000u,0x7f7fffffu,0x7f800000u,0u,ARM_FPSCR_OFC | ARM_FPSCR_IXC,0u},
+    {0xbf800000u,0u,0u,0u,0u,0u,0u}
+};
+
+static void test_a8_neon_macc_values_and_host_state(void) {
+    fenv_t saved; CHECK(fegetenv(&saved) == 0, "save macc host FP state");
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    const unsigned count = sizeof a8_macc_cases / sizeof a8_macc_cases[0];
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned subtract = 0; subtract < 2u; subtract++)
+      for (unsigned quad = 0; quad < 2u; quad++)
+       for (unsigned host = 0; host < 4u; host++)
+        for (unsigned guest = 0; guest < 16u; guest++)
+         for (unsigned row = 0; row < count; row++) {
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            c.vfp_fpscr = ARM_FPSCR_QC | ARM_FPSCR_DZC | ARM_FPSCR_NZCV | ARM_FPSCR_ENABLES | ARM_FPSCR_LEN | ARM_FPSCR_STRIDE |
+                ((guest & 3u) << 22) | (guest & 4u ? ARM_FPSCR_FZ : 0u) | (guest & 8u ? ARM_FPSCR_DN : 0u);
+            uint32_t fpscr = c.vfp_fpscr; uint64_t expected[2] = {0};
+            for (unsigned r = 0; r <= quad; r++) {
+                uint64_t a = 0u, b = 0u, accumulator = 0u;
+                for (unsigned lane = 0; lane < 2u; lane++) {
+                    const a8_macc_case_t *entry = &a8_macc_cases[(row + 7u * lane + 13u * r) % count];
+                    a |= (uint64_t)entry->a << (32u * lane); b |= (uint64_t)entry->b << (32u * lane);
+                    accumulator |= (uint64_t)entry->c << (32u * lane);
+                    expected[r] |= (uint64_t)(subtract ? entry->subtract : entry->add) << (32u * lane);
+                    fpscr |= subtract ? entry->subtract_flags : entry->add_flags;
+                }
+                vfp_set_d(&c, 16u + r, a); vfp_set_d(&c, 18u + r, b); vfp_set_d(&c, 30u + r, accumulator);
+            }
+            uint32_t flags = c.cpsr;
+            CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 && feraiseexcept(FE_DIVBYZERO) == 0, "prepare macc host state");
+            int exceptions = fetestexcept(FE_ALL_EXCEPT);
+            CHECK(a8_move_step(&c, thumb, a8_neon_macc(thumb, subtract, quad, 30u, 16u, 18u)) == ARM_OK &&
+                  c.vfp_fpscr == fpscr && c.cpsr == flags && vfp_get_d(&c, 30u) == expected[0] && vfp_get_d(&c, 31u) == expected[1] &&
+                  fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == exceptions,
+                  "macc separate rounding/flags/host state T=%u sub=%u Q=%u host=%u guest=%u row=%u", thumb, subtract, quad, host, guest, row);
+         }
+    CHECK(fesetenv(&saved) == 0, "restore macc host state");
+}
+
+static void test_a8_neon_macc_access_invalid_and_it(void) {
+    static const unsigned permissions[] = {0u,1u,3u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned subtract = 0; subtract < 2u; subtract++)
+      for (unsigned quad = 0; quad < 2u; quad++)
+       for (unsigned user = 0; user < 2u; user++)
+        for (unsigned enabled = 0; enabled < 2u; enabled++)
+         for (unsigned access = 0; access < 3u; access++) {
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permissions[access] * 0x00500000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            vfp_set_d(&c, 16u, UINT64_C(0x3fc000003fc00000)); vfp_set_d(&c, 17u, UINT64_C(0x3fc000003fc00000));
+            vfp_set_d(&c, 18u, UINT64_C(0x4000000040000000)); vfp_set_d(&c, 19u, UINT64_C(0x4000000040000000));
+            vfp_set_d(&c, 30u, UINT64_C(0x3f8000003f800000)); vfp_set_d(&c, 31u, UINT64_C(0x3f8000003f800000));
+            bool allowed = enabled && (permissions[access] == 3u || (permissions[access] == 1u && !user));
+            uint64_t result = !allowed ? UINT64_C(0x3f8000003f800000) : subtract ? UINT64_C(0xc0000000c0000000) : UINT64_C(0x4080000040800000);
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c, thumb, a8_neon_macc(thumb, subtract, quad, 30u, 16u, 18u)) == ARM_OK && c.vfp_fpscr == fpscr &&
+                  vfp_get_d(&c, 30u) == result && vfp_get_d(&c, 31u) == (quad ? result : UINT64_C(0x3f8000003f800000)), "macc access effects");
+            CHECK(allowed ? c.r[15] == 0x104u && c.cpsr == flags : c.r[15] == ARM_VEC_UNDEFINED &&
+                  c.r[14] == (thumb ? 0x102u : 0x104u) && c.spsr[ARM_BANK_UND] == flags, "macc access exception");
+         }
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned subtract = 0; subtract < 2u; subtract++)
+      for (unsigned enabled = 0; enabled < 2u; enabled++)
+       for (unsigned skip = 0; skip < (thumb ? 2u : 1u); skip++)
+        for (unsigned bad = 0; bad < 5u; bad++) {
+            arm_cpu_t c; a8_move_reset(&c, thumb); c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            if (skip) c.cp15.cpacr = 0u;
+            uint32_t insn = a8_neon_macc(thumb, subtract, 1u, bad == 1u ? 31u : 30u, bad == 2u ? 17u : 16u, bad == 3u ? 19u : 18u);
+            if (!bad) insn |= 1u << 20;
+            if (thumb) { m_w16(NULL, 0x100u, skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK, "macc IT setup"); }
+            uint32_t flags = c.cpsr, pc = c.r[15], fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c, thumb, insn) == (skip || bad == 4u ? ARM_OK : ARM_UNDEFINED), "macc invalid/IT disposition");
+            if (skip || bad < 4u) CHECK(c.r[15] == (skip ? pc + 4u : pc) && c.cpsr == (skip ? flags & ~0x0600fc00u : flags), "macc invalid/IT state");
+            else if (!enabled) CHECK(c.r[15] == ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND] == flags, "macc lazy trap");
+            else CHECK(c.r[15] == pc + 4u && c.cpsr == (flags & ~0x0600fc00u), "macc IT retirement");
+            CHECK(c.vfp_fpscr == fpscr, "macc invalid/IT status");
+            for (unsigned r = 0; r < 32u; r++) CHECK(vfp_get_d(&c, r) == 0u, "macc invalid/IT register mutation");
+        }
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned enabled = 0; enabled < 2u; enabled++)
+      for (unsigned bit = 8u; bit < 12u; bit++) {
+        arm_cpu_t c; a8_move_reset(&c, thumb); c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+        uint32_t flags = c.cpsr, insn = a8_neon_macc(thumb, 0u, 0u, 31u, 16u, 18u) ^ (1u << bit);
+        bool lazy = !thumb && !enabled;
+        CHECK(a8_move_step(&c, thumb, insn) == (lazy ? ARM_OK : ARM_UNDEFINED) &&
+              (lazy ? c.r[15] == ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND] == flags : c.r[15] == 0x100u && c.cpsr == flags), "macc neighbor allocation");
+      }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c, &g_bus, legacy[profile]), "legacy macc reset");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        CHECK(a8_move_step(&c, 0u, a8_neon_macc(0u, 0u, 0u, 31u, 16u, 18u)) == ARM_UNDEFINED && c.r[15] == 0u, "macc leaked to legacy");
+    }
+}
+
 static uint32_t a8_neon_transpose(unsigned thumb, unsigned size, unsigned quad, unsigned d, unsigned m) {
     return (thumb ? 0xffb20080u : 0xf3b20080u) | (size << 18) | (quad << 6) |
         ((d & 15u) << 12) | ((d >> 4) << 22) | (m & 15u) | ((m >> 4) << 5);
@@ -2105,8 +2283,14 @@ static void test_a8_neon_add_access_and_invalid(void) {
       for (unsigned field = 0; field < sizeof toggles / sizeof toggles[0]; field++) {
         arm_cpu_t c;
         a8_move_reset(&c, thumb);
-        CHECK(a8_move_step(&c, thumb, a8_neon_add(thumb, sub, 0u, 31u, 16u, 16u) ^ toggles[field]) == ARM_UNDEFINED &&
-              c.r[15] == 0x100u && vfp_get_d(&c, 31u) == 0u, "NEON addition swallowed neighboring allocation");
+        bool macc = toggles[field] == 0x10u;
+        if (macc) {
+            vfp_set_d(&c, 16u, UINT64_C(0x4000000040000000));
+            vfp_set_d(&c, 31u, UINT64_C(0x3f8000003f800000));
+        }
+        uint64_t expected = !macc ? 0u : sub ? UINT64_C(0xc0400000c0400000) : UINT64_C(0x40a0000040a00000);
+        CHECK(a8_move_step(&c, thumb, a8_neon_add(thumb, sub, 0u, 31u, 16u, 16u) ^ toggles[field]) == (macc ? ARM_OK : ARM_UNDEFINED) &&
+              c.r[15] == (macc ? 0x104u : 0x100u) && vfp_get_d(&c, 31u) == expected, "NEON addition/neighbor decoding");
       }
     for (unsigned thumb = 0; thumb < 2u; thumb++) for (unsigned sub = 0; sub < 2u; sub++) {
         arm_cpu_t c;
@@ -4384,6 +4568,9 @@ static void test_condition_codes_apply(void) {
 
 /* --------------------------------------------------------------- main ---- */
 int main(void) {
+    test_a8_neon_macc_registers();
+    test_a8_neon_macc_values_and_host_state();
+    test_a8_neon_macc_access_invalid_and_it();
     test_a8_neon_transpose_registers();
     test_a8_neon_transpose_access_and_host_state();
     test_a8_neon_transpose_invalid_and_it();

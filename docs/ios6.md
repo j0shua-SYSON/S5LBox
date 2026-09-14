@@ -372,8 +372,31 @@ The addition oracle retains a residual to detect inexact results across
 large exponent gaps. Tests also cover cancellation, signed zeros and
 sticky flags across an exceptional result, an exact result and VMRS.
 Odd Q operands and the reserved size encoding stop before access checks.
+
+NEON VMLA.F32 and VMLS.F32 also cover the full D/Q bank. The product is
+rounded and flushed before a separate addition; VMLS negates the rounded
+product. Both steps contribute their cumulative exception flags. Original
+accumulator and source operands are staged before publication. These use
+the same standard NEON controls, with permission, invalid encoding and
+complete-fetch checks before execution. Tests cover every register triple
+using an exact small-integer oracle, 25 analytical F32 cases, guest controls,
+host rounding/exception preservation, IT, checked-bus retry and guest
+enable/exception-return retry. See
+[DDI0406C.b, A8.8.337](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 Other NEON arithmetic and full-bank Cortex-A8 VFP arithmetic remain
 separate work.
+
+The unchanged ARM [`vDSP_vma`](https://developer.apple.com/documentation/accelerate/vdsp_vma)
+at `0x30825f94` now completes 144 calls through its scalar body. Before
+multiply-accumulate support, the first nonempty case stopped at `0x30826144`
+after one element was read from each input and before any output write.
+The same fixture covers selected counts from 0 through 31, four stride
+tuples, four pointer alignments and 12 analytical input triples. It verifies
+intermediate rounding/overflow/underflow, NaNs, signed zero, final FP flags,
+exact buffer access counts and canaries, the 28-byte frame and five stack
+arguments, all FP registers, preserved ABI registers and return state.
+Unused upper scalar lanes start at zero. Vectorized paths, process launch
+and boot are outside this fixture.
 
 The matching cache's unchanged `fmodf` now returns the expected raw results
 for eight normal-input cases in an isolated User-mode fixture. These cover
@@ -985,7 +1008,7 @@ establish that result.
   scalar comparisons across the full register bank, and the bounded
   32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms,
   register Boolean operations, VEXT, 8/16/32-bit VTRN, F32 VABS/VNEG,
-  immediate constants, core-register VDUP and register VMUL/VADD/VSUB.F32
+  immediate constants, core-register VDUP and register VMUL/VADD/VSUB/VMLA/VMLS.F32
   described above.
   Upper-bank VFP arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Shared lower-bank arithmetic
