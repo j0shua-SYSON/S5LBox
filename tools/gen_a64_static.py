@@ -3567,6 +3567,222 @@ def compact_system_coprocessor_body() -> list[str]:
     ]
 
 
+def compact_register_memory(prefix: str) -> list[str]:
+    """Resident memory witness checks; misses leave before any guest mutation.
+
+    w10 is the address, x11 the returned pointer. Only x11-x15 are clobbered;
+    each caller supplies its own spill/decode exit, including instruction width.
+    """
+    body: list[str] = []
+    for direction, cache, count in (("read", 16, 32), ("write", 24, 40)):
+        for width in (4, 2, 1):
+            body += [f"{prefix}{direction}{width}:"]
+            if width > 1:
+                body += [f"    tst w10, #{width - 1}", f"    b.ne {prefix}decode"]
+            body += [f"    b {prefix}{direction}_memory"]
+        body += [f"{prefix}{direction}_memory:", "    ldr x11, [x27]",
+                 f"    cbnz x11, {prefix}flat_memory",
+                 f"    ldr x11, [x27, #{cache}]", f"    ldr x12, [x27, #{count}]",
+                 f"    b {prefix}cached_memory"]
+    body += [f"{prefix}cached_memory:", f"    cbz x11, {prefix}decode",
+             f"    cbz x12, {prefix}decode", "    ldr w13, [x27, #84]",
+             "    lsr w14, w10, #10", "    add w14, w14, w13, lsl #5",
+             "    and w14, w14, #63", "    add x11, x11, w14, uxtw #4",
+             "    ldr x14, [x11]", f"    cbz x14, {prefix}decode",
+             "    and w15, w10, #0xfffffc00", "    orr w15, w15, w13",
+             "    ldr w13, [x11, #8]", "    cmp w13, w15",
+             f"    b.ne {prefix}decode", "    ldr w13, [x11, #12]",
+             "    ldr w15, [x27, #80]", "    cmp w13, w15",
+             f"    b.ne {prefix}decode", "    and w13, w10, #0x3ff",
+             "    add x11, x14, w13, uxtw", "    ldr x13, [x12]",
+             "    add x13, x13, #1", "    str x13, [x12]", "    ret",
+             f"{prefix}flat_memory:", "    ldr w12, [x27, #8]",
+             "    and w12, w10, w12", "    add x11, x11, w12, uxtw", "    ret"]
+    return body
+
+
+def compact_register_a32() -> tuple[list[str], list[str]]:
+    """Live-word A32 execution with the same resident ABI as the Thumb tier.
+
+    Tables specialize ISA operands at build time, never guest code. Immediate
+    DP, low-register unshifted DP, immediate word/byte transfers and B/BL stay
+    resident. Everything else spills into the old decoder exactly once. No
+    guest state changes before an instruction's final guard has succeeded.
+    """
+    prefix = ".La64ra_"
+    sequential = [f"    b {prefix}sequential"]
+
+    def table_address(reg: int, name: str) -> list[str]:
+        return ["#if defined(__APPLE__)",
+                f"    adrp x{reg}, {name}@PAGE",
+                f"    add x{reg}, x{reg}, {name}@PAGEOFF", "#else",
+                f"    adrp x{reg}, {name}",
+                f"    add x{reg}, x{reg}, :lo12:{name}", "#endif"]
+
+    def read(reg: int, scratch: int) -> tuple[list[str], str]:
+        if reg < 8:
+            return [], f"w{reg}"
+        name = f"w{scratch}"
+        if reg == 15:
+            return [f"    add {name}, w26, #8"], name
+        return [f"    ldr {name}, [x19, #{reg * 4}]"], name
+
+    def write(reg: int, value: str) -> list[str]:
+        return ([f"    mov w{reg}, {value}"] if reg < 8 else
+                [f"    str {value}, [x19, #{reg * 4}]"])
+
+    def flags(bits: int) -> list[str]:
+        shift = 32 - bits
+        return ["    mrs x13, nzcv", f"    lsr w13, w13, #{shift}",
+                f"    bfi w28, w13, #{shift}, #{bits}"]
+
+    def dp(op: int, setting: bool, rn: int, rd: int,
+           rm: int | None) -> list[str] | None:
+        writes = op < 8 or op >= 12
+        # Preserve miscellaneous/PC handling, including exception returns.
+        if rd == 15 or rn == 15 or (not writes and not setting):
+            return None
+        body, lhs = read(rn, 10) if op not in (13, 15) else ([], "wzr")
+        rhs = "w8" if rm is None else f"w{rm}"
+        result = f"w{rd}" if writes and rd < 8 else "w12"
+        logical = op in (0, 1, 8, 9, 12, 13, 14, 15)
+        # This exact low-register SUB also starts an existing bulk search.
+        if (op, setting, rn, rd, rm) == (2, False, 2, 3, 1):
+            body += ["    ldr x14, [x27, #344]", "    cbz x14, 1f",
+                     "    mov w15, #0x3001", "    movk w15, #0xe042, lsl #16",
+                     "    cmp w9, w15", "    b.ne 1f", f"    b {prefix}decode", "1:"]
+        if op in (5, 6, 7):
+            body += ["    msr nzcv, x28"]
+        if logical:
+            operation = {0: "and", 1: "eor", 8: "and", 9: "eor",
+                         12: "orr", 13: "mov", 14: "bic", 15: "mvn"}[op]
+            args = rhs if op in (13, 15) else f"{lhs}, {rhs}"
+        else:
+            operation = {2: "sub", 3: "sub", 4: "add", 5: "adc",
+                         6: "sbc", 7: "sbc", 10: "sub", 11: "add"}[op]
+            operation += "s" if setting else ""
+            args = f"{rhs}, {lhs}" if op in (3, 7) else f"{lhs}, {rhs}"
+        body += [f"    {operation} {result}, {args}"]
+        if setting:
+            if logical:
+                if rm is None:
+                    body += ["    cbz w11, 2f", "    lsr w13, w8, #31",
+                             "    bfi w28, w13, #29, #1", "2:"]
+                body += [f"    ands wzr, {result}, {result}", *flags(2)]
+            else:
+                body += flags(4)
+        if writes and rd >= 8:
+            body += write(rd, result)
+        return [*body, *sequential]
+
+    def memory(key: int) -> list[str] | None:
+        rn, rd = (key >> 4) & 15, key & 15
+        pre, up, byte, wb, load = (bool(key & (1 << bit)) for bit in (12, 11, 10, 9, 8))
+        writeback = not pre or wb
+        if (rd == 15 or (rn == 15 and writeback) or
+                (not pre and wb) or (load and writeback and rn == rd)):
+            return None
+        body, base = read(rn, 10)
+        operation = "add" if up else "sub"
+        if pre:
+            body += ["    and w8, w9, #0xfff", f"    {operation} w10, {base}, w8"]
+        elif base != "w10":
+            body += [f"    mov w10, {base}"]
+        body += [f"    bl {prefix}{'read' if load else 'write'}{1 if byte else 4}"]
+        if load:
+            result = f"w{rd}" if rd < 8 else "w12"
+            body += [f"    {'ldrb' if byte else 'ldr'} {result}, [x11]"]
+            if rd >= 8:
+                body += write(rd, result)
+        else:
+            source, value = read(rd, 12)
+            body += [*source, f"    {'strb' if byte else 'str'} {value}, [x11]"]
+        # w10 survives the witness helper. Defer all base writes until after
+        # the access, so a miss/fault or an aliased STR observes original Rn.
+        if writeback:
+            if not pre:
+                body += ["    and w8, w9, #0xfff", f"    {operation} w10, w10, w8"]
+            body += write(rn, "w10")
+        return [*body, *sequential]
+
+    body = [f"{prefix}enter:",
+            "    ldp w0, w1, [x19]", "    ldp w2, w3, [x19, #8]",
+            "    ldp w4, w5, [x19, #16]", "    ldp w6, w7, [x19, #24]",
+            "    ldr w28, [x20]", *table_address(16, prefix + "table"),
+            *table_address(17, prefix + "conditions"), f"    b {prefix}condition",
+            f"{prefix}sequential:", "    add w26, w26, #4",
+            f"{prefix}retire:", "    add w29, w29, #1", "    subs w25, w25, #1",
+            f"    b.eq {prefix}exit", "    sub w8, w26, w23", "    cmp w8, w24",
+            f"    b.hs {prefix}window_miss", "    add w10, w8, #4",
+            "    cmp w10, w24", f"    b.hi {prefix}fallback",
+            "    ldr w9, [x22, w8, uxtw]",
+            f"{prefix}condition:", "    lsr w10, w9, #28", "    cmp w10, #14",
+            f"    b.eq {prefix}classify", f"    b.hi {prefix}fallback",
+            "    msr nzcv, x28", "    ldrsw x15, [x17, w10, uxtw #2]",
+            "    add x15, x17, x15", "    br x15",
+            f"{prefix}classify:", "    ubfx w10, w9, #25, #3",
+            "    cmp w10, #5", f"    b.eq {prefix}branch",
+            "    cmp w10, #2", f"    b.eq {prefix}memory",
+            "    cmp w10, #1", f"    b.eq {prefix}immediate",
+            f"    cbnz w10, {prefix}decode",
+            # Only the ordinary unshifted, all-low-register form. The high
+            # register and shift bits also reject BX/MSR/multiply/extra space.
+            "    mov w11, #0x8ff8", "    movk w11, #8, lsl #16",
+            "    tst w9, w11", f"    b.ne {prefix}decode",
+            "    ubfx w10, w9, #20, #5", "    ubfx w11, w9, #16, #3",
+            "    add w10, w11, w10, lsl #3", "    ubfx w11, w9, #12, #3",
+            "    add w10, w11, w10, lsl #3", "    and w11, w9, #7",
+            "    add w10, w11, w10, lsl #3", "    add w10, w10, #2, lsl #12",
+            f"    b {prefix}dispatch",
+            f"{prefix}memory:", "    ubfx w10, w9, #12, #13",
+            "    add w10, w10, #6, lsl #12", f"    b {prefix}dispatch",
+            f"{prefix}immediate:", "    and w8, w9, #255",
+            "    ubfx w11, w9, #8, #4", "    lsl w11, w11, #1",
+            "    rorv w8, w8, w11", "    ubfx w10, w9, #12, #13",
+            f"{prefix}dispatch:", "    ldrsw x15, [x16, w10, uxtw #2]",
+            "    add x15, x16, x15", "    br x15",
+            f"{prefix}branch:", "    tbz w9, #24, 1f",
+            "    add w8, w26, #4", "    str w8, [x19, #56]", "1:",
+            "    sbfx w8, w9, #0, #24", "    add w26, w26, #8",
+            "    add w26, w26, w8, lsl #2", f"    b {prefix}retire"]
+    for index, condition in enumerate(CONDITIONS):
+        body += [f"{prefix}condition_{index}:", f"    b.{condition} {prefix}classify",
+                 f"    b {prefix}sequential"]
+    for name, target in (("decode", ".La64cr_condition_pass"),
+                         ("window_miss", ".La64cr_window_miss"),
+                         ("fallback", ".La64cr_fallback"),
+                         ("exit", ".La64cr_exit")):
+        body += [f"{prefix}{name}:", "    stp w0, w1, [x19]",
+                 "    stp w2, w3, [x19, #8]", "    stp w4, w5, [x19, #16]",
+                 "    stp w6, w7, [x19, #24]", "    str w28, [x20]",
+                 "    mov w28, #4", *table_address(16, ".La64cr_dp_table"),
+                 *table_address(17, ".La64cr_cond_table"), f"    b {target}"]
+    body += compact_register_memory(prefix)
+    table = ["", ".p2align 2", f"{prefix}table:"]
+    handlers: dict[tuple[str, ...], str] = {}
+
+    def append(instructions: list[str] | None) -> None:
+        label = prefix + "decode"
+        if instructions is not None:
+            key = tuple(instructions)
+            if key not in handlers:
+                handlers[key] = f"{prefix}op_{len(handlers)}"
+                body.extend([f"{handlers[key]}:", *instructions])
+            label = handlers[key]
+        table.append(f"    .long {label} - {prefix}table")
+
+    for key in range(8192):
+        append(dp(key >> 9, bool(key & 256), (key >> 4) & 15, key & 15, None))
+    for key in range(16384):
+        append(dp(key >> 10, bool(key & 512), (key >> 6) & 7,
+                  (key >> 3) & 7, key & 7))
+    for key in range(8192):
+        append(memory(key))
+    table += [f"{prefix}conditions:"]
+    table += [f"    .long {prefix}condition_{i} - {prefix}conditions" for i in range(14)]
+    return body, table
+
+
 def compact_register_thumb() -> tuple[list[str], list[str]]:
     """Signed live-halfword dispatch with r0-r7 and CPSR resident.
 
@@ -3784,33 +4000,7 @@ def compact_register_thumb() -> tuple[list[str], list[str]]:
                  "    add x16, x16, :lo12:.La64cr_dp_table", "#endif",
                  f"    b {target}"]
 
-    # The witness rules are identical to the existing raw memory helper:
-    # natural alignment, exact privilege/tag/generation, and explicit write
-    # consent. A miss spills before the old decoder can refill, fault or call C.
-    for direction, cache, count in (("read", 16, 32), ("write", 24, 40)):
-        for width in (4, 2, 1):
-            body += [f"{prefix}{direction}{width}:"]
-            if width > 1:
-                body += [f"    tst w10, #{width - 1}", f"    b.ne {prefix}decode"]
-            body += [f"    b {prefix}{direction}_memory"]
-        body += [f"{prefix}{direction}_memory:", "    ldr x11, [x27]",
-                 f"    cbnz x11, {prefix}flat_memory",
-                 f"    ldr x11, [x27, #{cache}]", f"    ldr x12, [x27, #{count}]",
-                 f"    b {prefix}cached_memory"]
-    body += [f"{prefix}cached_memory:", f"    cbz x11, {prefix}decode",
-             f"    cbz x12, {prefix}decode", "    ldr w13, [x27, #84]",
-             "    lsr w14, w10, #10", "    add w14, w14, w13, lsl #5",
-             "    and w14, w14, #63", "    add x11, x11, w14, uxtw #4",
-             "    ldr x14, [x11]", f"    cbz x14, {prefix}decode",
-             "    and w15, w10, #0xfffffc00", "    orr w15, w15, w13",
-             "    ldr w13, [x11, #8]", "    cmp w13, w15",
-             f"    b.ne {prefix}decode", "    ldr w13, [x11, #12]",
-             "    ldr w15, [x27, #80]", "    cmp w13, w15",
-             f"    b.ne {prefix}decode", "    and w13, w10, #0x3ff",
-             "    add x11, x14, w13, uxtw", "    ldr x13, [x12]",
-             "    add x13, x13, #1", "    str x13, [x12]", "    ret",
-             f"{prefix}flat_memory:", "    ldr w12, [x27, #8]",
-             "    and w12, w10, w12", "    add x11, x11, w12, uxtw", "    ret"]
+    body += compact_register_memory(prefix)
 
     # Register shifts use the low byte, not AArch64's modulo-32 count.
     # w8=value/result, w10=count, w11=carry; guest r0-r7 remain untouched.
@@ -3873,6 +4063,7 @@ def compact_raw_function() -> list[str]:
     always the exact retired prefix, with no runtime code generation.
     """
     register_body, register_table = compact_register_thumb()
+    a32_register_body, a32_register_table = compact_register_a32()
     return [
         "",
         ".p2align 2",
@@ -3948,6 +4139,7 @@ def compact_raw_function() -> list[str]:
         "    cmp w11, w24",
         "    b.hi .La64cr_fallback",
         "    ldr w9, [x22, w8, uxtw]",
+        "    b .La64ra_enter",
         # ARM and AArch64 share the fourteen ordinary condition predicates.
         # Keep AL on a direct fast path; other predicates use a tiny signed
         # branch table after loading the guest's NZCV.  A failed condition
@@ -5894,7 +6086,10 @@ def compact_raw_function() -> list[str]:
         "#endif",
         "    b .La64cr_loop",
         "",
-        # Keep this out of the old decoder's short TBZ/TBNZ branch spans.
+        # Keep the resident tiers out of the old decoder's short TBZ spans.
+        ".globl A64S_CSYM(a64_compact_raw_profile_a32_register)",
+        "A64S_CSYM(a64_compact_raw_profile_a32_register):",
+        *a32_register_body,
         ".globl A64S_CSYM(a64_compact_raw_profile_thumb_register)",
         "A64S_CSYM(a64_compact_raw_profile_thumb_register):",
         *register_body,
@@ -5931,6 +6126,7 @@ def compact_raw_function() -> list[str]:
         ".size A64S_CSYM(a64_compact_raw_execute), .-A64S_CSYM(a64_compact_raw_execute)",
         "#endif",
         *register_table,
+        *a32_register_table,
         "",
         ".p2align 2",
         ".La64cr_dp_table:",

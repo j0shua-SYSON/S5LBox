@@ -1187,6 +1187,40 @@ static void test_native_integration(void) {
         return;
     }
     test_native_resident_bulk_transitions();
+    /* Enter the word-scan candidate after resident code changes r2 and NZCV.
+     * Test the successful bridge, a changed-body refusal, and a window ending
+     * just after SUB. The latter must not read unproven following words. */
+    uint64_t a32_transitions = 0u;
+    static const unsigned transition_budgets[] = {1u, 2u, 3u, 4u, 5u, 8u, 16u, 64u};
+    for (unsigned scenario = 0u; scenario < 3u; scenario++)
+        for (unsigned flags = 0u; flags < 16u; flags++)
+            for (unsigned enabled = 0u; enabled < 2u; enabled++)
+                for (unsigned b = 0u; b < sizeof transition_budgets /
+                                              sizeof transition_budgets[0]; b++) {
+                    arm_cpu_t cpu; arm_bulk_memory_t memory;
+                    cached_setup(&cpu, &memory, DATA, 127u);
+                    cpu.cpsr |= flags << 28;
+                    for (unsigned i = 0u; i < 12u && cpu.r[15] != CODE + 48u; i++)
+                        CHECK(arm_step(&cpu) == ARM_OK, "A32 scan prefix fault");
+                    CHECK(cpu.r[15] == CODE + 48u, "A32 scan prefix did not reach SUB");
+                    cpu.r[5] = cpu.r[2]; cpu.r[2] = 0u;
+                    w32(NULL, CODE - 12u, 0xe1a02005u); /* MOV r2,r5 */
+                    w32(NULL, CODE - 8u, 0xe3570001u);  /* CMP r7,#1 */
+                    w32(NULL, CODE - 4u, 0xea00000bu);  /* B scan SUB */
+                    memory.code_base -= 12u; memory.code -= 12u;
+                    memory.code_bytes += 12u; cpu.r[15] = CODE - 12u;
+                    if (scenario == 1u)
+                        w32(NULL, CODE + 52u, 0xe1c33003u); /* changed BIC */
+                    if (scenario == 2u) memory.code_bytes = 64u;
+                    uint64_t accepted = native_differential(&cpu, &memory,
+                        transition_budgets[b], enabled != 0u);
+                    CHECK((enabled && scenario == 0u) || accepted == 0u,
+                          "A32 scan refusal executed bulk");
+                    a32_transitions += accepted;
+                }
+    CHECK(a32_transitions > 0u, "resident A32 bulk transition never executed");
+    printf("arm_bulk resident A32 transitions: %llu accepted bulk calls\n",
+           (unsigned long long)a32_transitions);
     uint64_t calls = 0u;
     static const unsigned lengths[] = {0u, 1u, 7u, 31u, 127u, 511u};
     static const unsigned budgets[] = {1u, 5u, 16u, 64u, 256u};

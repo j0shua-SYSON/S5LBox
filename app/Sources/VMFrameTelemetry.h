@@ -288,6 +288,7 @@ typedef struct {
     uint64_t compact_pc_profile_a32_condition;
     uint64_t compact_pc_profile_retire;
     uint64_t compact_pc_profile_fallback;
+    uint64_t compact_pc_profile_a32_register;
     uint64_t compact_pc_profile_exit;
     uint64_t compact_pc_profile_reference_pc;
     uint64_t compact_pc_profile_outside_pc_captured;

@@ -499,6 +499,7 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
              "compact_pc_profile_a32_condition=%llu,"
              "compact_pc_profile_retire=%llu,"
              "compact_pc_profile_fallback=%llu,"
+             "compact_pc_profile_a32_register=%llu,"
              "compact_pc_profile_exit=%llu",
             state.execution_consistent ? 1u : 0u,
             (unsigned long long)state.execution_observations,
@@ -618,6 +619,8 @@ static const char *VMDevicePowerTraceEventName(uint8_t event) {
             (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_retire),
             (unsigned long long)VM_EXEC_DELTA(
                 compact_pc_profile_fallback),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_pc_profile_a32_register),
             (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_exit)];
 
         /* Touch latency has three independent boundaries: UIKit queues a

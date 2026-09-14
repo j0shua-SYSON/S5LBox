@@ -197,6 +197,7 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.compact_pc_profile_thumb_memory_access = base + 73u;
     value.compact_pc_profile_thumb_condition = base + 74u;
     value.compact_pc_profile_a32_condition = base + 75u;
+    value.compact_pc_profile_a32_register = base + 401u;
     for (unsigned i = 0u; i < VM_COMPACT_PC_PROFILE_HOT_COUNT; i++) {
         value.compact_pc_profile_outside_hot_pc[i] =
             UINT64_C(0x200000000) + base + (uint64_t)i * UINT64_C(0x100);
@@ -541,6 +542,7 @@ static void test_boundaries_and_sampled_changes(void) {
                2073u &&
            state.execution_last.compact_pc_profile_thumb_condition == 2074u &&
            state.execution_last.compact_pc_profile_a32_condition == 2075u &&
+           state.execution_last.compact_pc_profile_a32_register == 2401u &&
            state.execution_last.compact_pc_profile_retire == 2050u &&
            state.execution_last.compact_pc_profile_fallback == 2051u &&
            state.execution_last.compact_pc_profile_exit == 2052u &&

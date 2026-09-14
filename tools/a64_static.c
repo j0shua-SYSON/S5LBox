@@ -2274,6 +2274,7 @@ extern const unsigned char a64_compact_raw_profile_thumb_condition[];
 extern const unsigned char a64_compact_raw_profile_a32_condition[];
 extern const unsigned char a64_compact_raw_profile_retire[];
 extern const unsigned char a64_compact_raw_profile_fallback[];
+extern const unsigned char a64_compact_raw_profile_a32_register[];
 extern const unsigned char a64_compact_raw_profile_thumb_register[];
 extern const unsigned char a64_compact_raw_profile_exit[];
 extern const unsigned char a64_compact_raw_profile_end[];
@@ -2298,6 +2299,7 @@ static const unsigned char *const g_compact_profile_boundary[] = {
     a64_compact_raw_profile_a32_condition,
     a64_compact_raw_profile_retire,
     a64_compact_raw_profile_fallback,
+    a64_compact_raw_profile_a32_register,
     a64_compact_raw_profile_exit,
     a64_compact_raw_profile_end,
 };
@@ -2403,7 +2405,7 @@ static bool compact_profile_layout_valid(void) {
     return (uintptr_t)a64_compact_raw_profile_guest_live_begin >
                (uintptr_t)a64_compact_raw_profile_entry &&
            (uintptr_t)a64_compact_raw_profile_thumb_register >
-               (uintptr_t)a64_compact_raw_profile_fallback &&
+               (uintptr_t)a64_compact_raw_profile_a32_register &&
            (uintptr_t)a64_compact_raw_profile_thumb_register <
                (uintptr_t)a64_compact_raw_profile_exit &&
            (uintptr_t)a64_compact_raw_profile_guest_live_begin <
@@ -2427,8 +2429,8 @@ static void compact_profile_sample_pc_locked(uintptr_t pc) {
         compact_profile_capture_outside_pc_locked(pc);
         return;
     }
-    /* The out-of-line resident Thumb decoder occupies part of the old
-     * fallback-to-exit span. Attribute it to the existing Thumb bucket. */
+    /* The resident Thumb tier follows resident A32. Its separate boundary
+     * keeps both tiers out of the fallback bucket without sampling overhead. */
     if (pc >= (uintptr_t)a64_compact_raw_profile_thumb_register &&
         pc < (uintptr_t)a64_compact_raw_profile_exit) {
         compact_profile_increment(&g_compact_profile_region[

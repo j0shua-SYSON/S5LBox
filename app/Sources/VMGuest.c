@@ -544,6 +544,8 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                 S5L_STATIC_A64_COMPACT_PC_RETIRE];
             execution.compact_pc_profile_fallback = pc_profile.region[
                 S5L_STATIC_A64_COMPACT_PC_FALLBACK];
+            execution.compact_pc_profile_a32_register = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_A32_REGISTER];
             execution.compact_pc_profile_exit = pc_profile.region[
                 S5L_STATIC_A64_COMPACT_PC_EXIT];
             _Static_assert(VM_COMPACT_PC_PROFILE_HOT_COUNT ==
