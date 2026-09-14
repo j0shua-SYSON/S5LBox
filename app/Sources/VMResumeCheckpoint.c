@@ -166,7 +166,6 @@ vm_resume_checkpoint_state_t vm_resume_checkpoint_probe_state(
     uint64_t bridge_size = 0u;
     char marker_bytes[sizeof request - 1u];
     external_md_sidecar_t sidecar;
-    s5l8900_t machine;
 
     resume_detail(detail, detail_capacity, "");
     if (!work_directory || !*work_directory || media_size == 0u ||
@@ -221,13 +220,16 @@ vm_resume_checkpoint_state_t vm_resume_checkpoint_probe_state(
         return VM_RESUME_CHECKPOINT_INVALID;
     }
 
-    memset(&machine, 0, sizeof machine);
-    if (!s5l8900_init(&machine, ram_base, ram_size)) {
+    /* Verification can be nested below a caller already holding machines and
+     * sidecars. Derived CPU caches must not consume another large stack frame. */
+    s5l8900_t *machine = calloc(1u, sizeof *machine);
+    if (!machine || !s5l8900_init(machine, ram_base, ram_size)) {
+        free(machine);
         resume_detail(detail, detail_capacity,
                       "Memory for checkpoint verification is unavailable.");
         return VM_RESUME_CHECKPOINT_INVALID;
     }
-    snapshot_status_t loaded = snapshot_load(&machine, state);
+    snapshot_status_t loaded = snapshot_load(machine, state);
     if (loaded != SNAP_OK) {
         char failure[VM_FW_BOOT_DETAIL_CAPACITY];
         (void)snprintf(failure, sizeof failure,
@@ -235,11 +237,13 @@ vm_resume_checkpoint_state_t vm_resume_checkpoint_probe_state(
                        snapshot_strerror(loaded));
         failure[sizeof failure - 1u] = '\0';
         resume_detail(detail, detail_capacity, failure);
-        s5l8900_free(&machine);
+        s5l8900_free(machine);
+        free(machine);
         return VM_RESUME_CHECKPOINT_INVALID;
     }
-    bool powered_off = s5l_pcf50635_in_standby(&machine.pmu);
-    s5l8900_free(&machine);
+    bool powered_off = s5l_pcf50635_in_standby(&machine->pmu);
+    s5l8900_free(machine);
+    free(machine);
     resume_detail(detail, detail_capacity,
                   powered_off
                       ? "The automatic checkpoint proves full guest power-off."

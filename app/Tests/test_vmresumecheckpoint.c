@@ -87,8 +87,9 @@ int main(void) {
     }
     remove_checkpoint_files();
 
-    s5l8900_t source;
-    s5l8900_t restored;
+    /* Leave stack space for nested checkpoint IO and the independent sidecars. */
+    static s5l8900_t source;
+    static s5l8900_t restored;
     CHECK(s5l8900_init(&source, 0u, TEST_RAM_SIZE), "source init failed");
     CHECK(s5l8900_init(&restored, 0u, TEST_RAM_SIZE), "restore init failed");
 

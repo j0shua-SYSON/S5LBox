@@ -764,12 +764,14 @@ static void fill_arm_nops(uint32_t *program, unsigned count) {
 }
 
 static void test_active_host_clock_is_optional_bounded_and_fail_closed(void) {
+    /* Four full machines do not fit a default 1 MiB Windows stack. Each is
+     * independently initialized/freed; this serial fixture needs no stack copy. */
     uint32_t program[512];
     fill_arm_nops(program, sizeof program / sizeof program[0]);
 
     /* With no callback, active execution retains the literal historical
      * instruction clock exactly. */
-    s5l8900_t deterministic;
+    static s5l8900_t deterministic;
     CHECK(s5l8900_init(&deterministic, 0, 1u << 20),
           "deterministic active-clock control init failed");
     s5l8900_load(&deterministic, 0, program, sizeof program);
@@ -784,7 +786,7 @@ static void test_active_host_clock_is_optional_bounded_and_fail_closed(void) {
           (int)st, ran, (unsigned long long)deterministic.timer.ticks);
     s5l8900_free(&deterministic);
 
-    s5l8900_t active;
+    static s5l8900_t active;
     CHECK(s5l8900_init(&active, 0, 1u << 20),
           "active-clock machine init failed");
     s5l8900_load(&active, 0, program, sizeof program);
@@ -878,7 +880,7 @@ static void test_active_host_clock_is_optional_bounded_and_fail_closed(void) {
     /* Failure after a successful anchor is more dangerous than failure at run
      * entry: all 300 instructions are pending. They must all receive their old
      * exact ticks, and the remainder of this run must stay on that old path. */
-    s5l8900_t mid_batch_failure;
+    static s5l8900_t mid_batch_failure;
     CHECK(s5l8900_init(&mid_batch_failure, 0, 1u << 20),
           "mid-batch failure machine init failed");
     s5l8900_load(&mid_batch_failure, 0, program, sizeof program);
@@ -910,7 +912,7 @@ static void test_active_host_clock_is_optional_bounded_and_fail_closed(void) {
     /* A continuously busy guest cannot be credited more active clock than its
      * retired work can support.  This interval is below the ordinary 8 ms host
      * clamp (1,000 ticks) but above ten retirements' 8-tick budget (80). */
-    s5l8900_t work_bounded;
+    static s5l8900_t work_bounded;
     CHECK(s5l8900_init(&work_bounded, 0, 1u << 20),
           "work-bounded active-clock machine init failed");
     CHECK(work_bounded.active_clock_max_ticks_per_retirement ==
@@ -3197,7 +3199,8 @@ static void test_nor_reads_are_nor_at_the_boot_ram_size(void) {
  * device tomorrow and it is covered without touching this test.
  */
 static void test_no_window_the_machine_decodes_is_shadowed_by_ram(void) {
-    s5l8900_t base_m;
+    /* Keep the multi-machine fixture off the bounded test-thread stack. */
+    static s5l8900_t base_m;
     CHECK(s5l8900_init(&base_m, 0, 1u << 20), "machine init failed");
     s5l_window_t w[S5L_WINDOW_MAX];
     unsigned nw = s5l8900_windows(&base_m, w, S5L_WINDOW_MAX);
@@ -3210,7 +3213,7 @@ static void test_no_window_the_machine_decodes_is_shadowed_by_ram(void) {
          * tiny: if the guard were broken the test must fail, not allocate a
          * gigabyte. */
         uint32_t rb = w[i].base - 0x1000u, rs = 0x2000u;
-        s5l8900_t t;
+        static s5l8900_t t;
         if (!s5l8900_init(&t, rb, rs)) {
             /* Refused. That is a correct outcome, and it must be explicable. */
             CHECK(s5l8900_ram_conflict(rb, rs) != NULL,
@@ -3233,7 +3236,7 @@ static void test_no_window_the_machine_decodes_is_shadowed_by_ram(void) {
 
     /* Adjacency is not overlap: RAM ending exactly at a window's base is fine,
      * and is precisely the -R 512 case. */
-    s5l8900_t ok;
+    static s5l8900_t ok;
     CHECK(s5l8900_init(&ok, S5L8900_NOR_BASE - 0x1000u, 0x1000u),
           "RAM ending exactly at the NOR base must be allowed");
     CHECK(s5l8900_ram_conflict(S5L8900_NOR_BASE - 0x1000u, 0x1000u) == NULL,
@@ -3243,7 +3246,7 @@ static void test_no_window_the_machine_decodes_is_shadowed_by_ram(void) {
     /* And one byte more must not be. */
     CHECK(s5l8900_ram_conflict(S5L8900_NOR_BASE - 0x1000u, 0x1001u) != NULL,
           "RAM overlapping the NOR by one byte must be a conflict");
-    s5l8900_t bad;
+    static s5l8900_t bad;
     CHECK(!s5l8900_init(&bad, S5L8900_SDRAM_BASE, 0x20100000u),
           "a DRAM window that reaches into the NOR must be refused, not aliased");
 }
