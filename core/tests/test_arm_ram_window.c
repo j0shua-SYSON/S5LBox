@@ -1142,9 +1142,9 @@ static void test_native_live_code(void) {
 }
 
 /* Ordinary arithmetic, condition flags, sequential FETCH and direct branches
- * cross the 1 KiB boundary while every low register is live. BX tests alone
- * do not exercise this path: interworking deliberately leaves the register
- * tier before switching windows. */
+ * cross the 1 KiB boundary with every low register dirty. Keep this oracle
+ * after rejecting the resident-refill experiment: it also proves the exact
+ * spill/refill/re-entry protocol. BX alone leaves the tier before the miss. */
 static void test_resident_fetch_windows(void) {
     if (!a64_static_host_available()) return;
     unsigned runs = 0u;

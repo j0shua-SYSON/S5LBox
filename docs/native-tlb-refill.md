@@ -34,13 +34,15 @@ counts its normal DREAD/DWRITE hit once.
 Capabilities and counters are derived host state, never snapshot data.
 The frontend reacquires the capability after restore/reset.
 
-The ARM and Thumb register-resident tiers reuse this same FETCH proof without
-spilling guest r0-r7, CPSR, or their dispatch-table bases at an ordinary window
-crossing. Only six scratch registers are reassigned in the generated proof;
-the permission checks and three-way FETCH publication are shared with the raw
-runner. Failure still spills the exact retired prefix to the existing exit.
-Interworking, unsupported instructions and callbacks keep their original
-boundaries. This adds no cache, runtime switch, or larger retirement budget.
+The ARM and Thumb register-resident tiers spill their retired prefix before
+entering the existing window-refill path. Keeping registers resident through
+the FETCH proof was tested, but is not retained: a matched A9 phone refresh
+on 2026-09-19 took (148.937, 151.603] seconds with that candidate versus
+(126.443, 129.430] seconds with the spill/refill control. Both restored the
+same paired disk/checkpoint, used the same options and launch delay, and
+produced matching repository-index bytes and timestamps. This single pair
+rejects promotion; it does not establish a universal regression or its cause.
+The additional exact-boundary and refusal tests remain as regression coverage.
 
 ## Control and evidence
 
