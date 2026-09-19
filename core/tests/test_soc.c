@@ -661,6 +661,139 @@ static void test_timer_lump_matches_literal_countdown(void) {
           (unsigned long long)huge.ticks, huge.t4_value, huge.irqlatch);
 }
 
+static void test_timer_kernel_pwm_deadline(void) {
+    s5l_timer_t t;
+    s5l_timer_reset(&t);
+    /* Actual 7E18 pe_arm_init_interrupts + set_decrementer sequence. */
+    s5l_timer_write(&t, TIMER4_CONFIG, 0x1450u);
+    s5l_timer_write(&t, TIMER4_COUNTBUF2, UINT32_MAX);
+    s5l_timer_write(&t, TIMER4_COUNTBUF, 10u);
+    s5l_timer_write(&t, TIMER4_STATE, 3u);
+    CHECK(s5l_timer_read(&t, TIMER4_VALUE) == 0u &&
+          s5l_timer_read(&t, TIMER4_STATE) == 1u,
+          "clear did not expose zero elapsed or self-clear the command bit");
+    CHECK(!s5l_timer_tick(&t, 4u) &&
+          s5l_timer_read(&t, TIMER4_VALUE) == 4u &&
+          s5l_timer_read(&t, TIMER4_COUNTBUF) -
+              s5l_timer_read(&t, TIMER4_VALUE) == 6u,
+          "kernel get_decrementer must return remaining, not elapsed");
+    CHECK(s5l_timer_ticks_to_irq(&t) == 6u && s5l_timer_tick(&t, 6u) &&
+          t.irqlatch == TIMER4_INT0 && s5l_timer_read(&t, TIMER4_VALUE) == 10u,
+          "first PWM compare reset the counter or raised the wrong source");
+    s5l_timer_write(&t, TIMER_IRQACK, TIMER4_IRQ_BITS);
+    CHECK(!s5l_timer_tick(&t, 100u) && t.irqlatch == 0u &&
+          s5l_timer_read(&t, TIMER4_VALUE) == 110u,
+          "acknowledged short deadline repeated during handler work");
+    CHECK(s5l_timer_ticks_to_irq(&t) == UINT32_MAX - 110u + 10u,
+          "WFI still treats the first PWM compare as a reload");
+    s5l_timer_write(&t, TIMER4_COUNTBUF, 20u);
+    CHECK(s5l_timer_read(&t, TIMER4_VALUE) == 110u,
+          "DATA0 write fabricated a counter reset before STATE=3");
+    s5l_timer_write(&t, TIMER4_STATE, 3u);
+    CHECK(s5l_timer_read(&t, TIMER4_VALUE) == 0u &&
+          s5l_timer_ticks_to_irq(&t) == 20u && s5l_timer_tick(&t, 20u),
+          "explicit kernel rearm did not deliver its next deadline");
+
+    s5l_timer_write(&t, TIMER_IRQACK, TIMER4_IRQ_BITS);
+    s5l_timer_write(&t, TIMER4_STATE, 0u);
+    CHECK(!s5l_timer_tick(&t, 10u) && s5l_timer_ticks_to_irq(&t) == 0u &&
+          s5l_timer_read(&t, TIMER4_VALUE) == 20u && t.ticks == 140u,
+          "stopped timer changed phase or gated the free-running clock");
+
+    /* The old checkpoint encoding is still remaining-to-DATA0. A saved
+     * phase before the deadline must retain its exact distance on resume. */
+    t.t4_state = 3u;
+    t.t4_count = 60000u;
+    t.t4_value = 4711u;
+    CHECK(s5l_timer_read(&t, TIMER4_VALUE) == 55289u &&
+          s5l_timer_ticks_to_irq(&t) == 4711u,
+          "existing checkpoint countdown phase was reinterpreted");
+    CHECK(s5l_timer_tick(&t, 4711u), "restored deadline did not fire");
+    s5l_timer_write(&t, TIMER_IRQACK, TIMER4_IRQ_BITS);
+    CHECK(!s5l_timer_tick(&t, 60000u), "restored timer still repeats DATA0");
+}
+
+static void test_timer_pwm_lump_and_wake_match_upcounter(void) {
+    /* Independent one-tick up-counter oracle. Compare first/second matches,
+     * masks, equal/zero compares, multiple periods, and nonzero phases. */
+    for (uint32_t period = 1u; period <= 9u; ++period) {
+        for (uint32_t compare = 0u; compare <= 11u; ++compare) {
+            for (uint32_t phase = 0u; phase < period; ++phase) {
+                for (uint32_t mask = 0u; mask < 4u; ++mask) {
+                    s5l_timer_t initial = {0};
+                    initial.t4_config = TIMER4_MODE_PWM | (mask << 12);
+                    initial.t4_state = TIMER4_STATE_START;
+                    initial.t4_count = compare;
+                    initial.t4_count2 = period;
+                    initial.t4_value = compare - phase;
+                    uint32_t counter = phase, latch = 0u, wake = 0u;
+                    for (uint32_t ticks = 0u; ticks <= 35u; ++ticks) {
+                        if (ticks) {
+                            ++counter;
+                            if (counter == compare) latch |= TIMER4_INT0;
+                            if (counter == period) {
+                                latch |= TIMER4_INT1;
+                                counter = 0u;
+                                if (!compare) latch |= TIMER4_INT0;
+                            }
+                            if (!wake && (latch & (mask << 16))) wake = ticks;
+                        }
+                        s5l_timer_t fast = initial;
+                        bool irq = s5l_timer_tick(&fast, ticks);
+                        CHECK(s5l_timer_read(&fast, TIMER4_VALUE) == counter &&
+                              fast.irqlatch == latch && fast.ticks == ticks &&
+                              irq == ((latch & (mask << 16)) != 0u),
+                              "PWM p=%u c=%u phase=%u mask=%u ticks=%u",
+                              period, compare, phase, mask, ticks);
+                    }
+                    CHECK(s5l_timer_ticks_to_irq(&initial) == wake,
+                          "PWM wake p=%u c=%u phase=%u mask=%u got=%u want=%u",
+                          period, compare, phase, mask,
+                          s5l_timer_ticks_to_irq(&initial), wake);
+                }
+            }
+        }
+    }
+    s5l_timer_t huge = {0};
+    huge.t4_config = 0x1450u;
+    huge.t4_state = 3u;
+    huge.t4_count = huge.t4_value = 10u;
+    huge.t4_count2 = UINT32_MAX;
+    CHECK(s5l_timer_tick(&huge, UINT32_MAX) &&
+          s5l_timer_read(&huge, TIMER4_VALUE) == 0u &&
+          huge.irqlatch == TIMER4_IRQ_BITS,
+          "full PWM period lost a match or overflowed its phase");
+    s5l_timer_write(&huge, TIMER_IRQACK, TIMER4_INT0);
+    CHECK(!s5l_timer_tick(&huge, 0u) && huge.irqlatch == TIMER4_INT1 &&
+          s5l_timer_ticks_to_irq(&huge) == 10u,
+          "masked second compare still drives the line or wakes WFI");
+    s5l_timer_write(&huge, TIMER4_CONFIG, TIMER4_MODE_PWM | TIMER4_INT1_EN);
+    CHECK(s5l_timer_tick(&huge, 0u), "unmask did not expose pending match1");
+}
+
+static void test_timer_pwm_wfi_uses_next_compare(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 16), "machine init failed");
+    const uint32_t wfi = 0xee070f90u;
+    s5l8900_load(&m, 0, &wfi, sizeof wfi);
+    m.cpu_hz = m.tb_hz = 1u;
+    m.vic[0].enable = 1u << S5L8900_IRQ_TIMER;
+    m.cpu.cpsr |= ARM_CPSR_I;
+    s5l_timer_write(&m.timer, TIMER4_CONFIG, 0x1450u);
+    s5l_timer_write(&m.timer, TIMER4_COUNTBUF, 10u);
+    s5l_timer_write(&m.timer, TIMER4_COUNTBUF2, 100u);
+    s5l_timer_write(&m.timer, TIMER4_STATE, 3u);
+    CHECK(arm_step(&m.cpu) == ARM_OK && m.timer.ticks == 10u &&
+          m.cpu.irq_line, "WFI missed PWM first compare");
+    s5l_timer_write(&m.timer, TIMER_IRQACK, TIMER4_IRQ_BITS);
+    s5l8900_tick(&m, 0u);
+    m.cpu.r[15] = 0u;
+    CHECK(arm_step(&m.cpu) == ARM_OK && m.timer.ticks == 110u &&
+          m.cpu.irq_line && s5l_timer_read(&m.timer, TIMER4_VALUE) == 10u,
+          "WFI fabricated a repeated short deadline instead of waiting a period");
+    s5l8900_free(&m);
+}
+
 static void test_wfi_fast_forwards_to_the_timer_boundary(void) {
     s5l8900_t m;
     CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
@@ -7028,6 +7161,9 @@ int main(void) {
     test_timer_period_is_exact();
     test_timer_ack_mask_matches_the_kernels();
     test_timer_lump_matches_literal_countdown();
+    test_timer_kernel_pwm_deadline();
+    test_timer_pwm_lump_and_wake_match_upcounter();
+    test_timer_pwm_wfi_uses_next_compare();
     test_wfi_fast_forwards_to_the_timer_boundary();
     test_wfi_host_pacing_is_optional_exact_and_yields();
     test_wfi_host_pacing_bounds_long_and_failed_waits();

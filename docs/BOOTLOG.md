@@ -300,6 +300,20 @@ to agree, and each was wrong at some point:
   block at physical 0x3e200000 (`/device-tree/arm-io/timer`,
   `core/src/soc/timer.c`), and routes **VIC line 7 to FIQ** — not IRQ.
 - `_s5l8900x_set_decrementer` writes the next deadline to 0xA8.
+- Timer correction (2026-09-19): 7E18 `_s5l8900x_get_decrementer` at
+  `0xc006a0a4` subtracts VALUE (0xB4) from DATA0 (0xA8); VALUE is elapsed,
+  not remaining. The setter at `0xc006a0b8` follows DATA0 with STATE=3,
+  clearing that up-counter. Init selects `0x1450` (PWM, match0 enabled),
+  with DATA1=`0xffffffff`. Match0 must not reset/repeat at DATA0: PWM resets
+  at DATA1. The previous unconditional DATA0 reload could reassert FIQ
+  repeatedly during deadline handling. The related Samsung timer's
+  [mode and compare definitions](https://files.freemyipod.org/misc/S5L8700X-DS.pdf#page=306)
+  corroborate this interpretation; it is not an S5L8900-specific datasheet.
+  Internal `t4_value` remains DATA0 minus elapsed modulo 2^32, preserving
+  existing checkpoint phase encoding. MMIO translates it to elapsed, and WFI
+  uses the next enabled compare. This change covers the observed kernel PWM
+  sequence, not unimplemented capture/one-shot, prescaler, or deferred-buffer
+  updates without a clear. Host tests are not evidence of a device speedup.
 - `_fleh_fiq_s5l8900x` acknowledges by writing `0x00030000` to the latch. Our
   acknowledge mask has to be exactly that: latch any bit the handler's write
   does not clear and the line stays asserted, the handler re-enters immediately,

@@ -693,6 +693,35 @@ static void test_device_state_round_trips(void) {
     s5l8900_free(a); s5l8900_free(b);
 }
 
+static void test_timer_pwm_post_compare_round_trip(void) {
+    s5l8900_t a, b;
+    CHECK(s5l8900_init(&a, 0, RAMSZ), "init a");
+    CHECK(s5l8900_init(&b, 0, RAMSZ), "init b");
+    s5l_timer_write(&a.timer, TIMER4_CONFIG, 0x1450u);
+    s5l_timer_write(&a.timer, TIMER4_COUNTBUF, 10u);
+    s5l_timer_write(&a.timer, TIMER4_COUNTBUF2, 100u);
+    s5l_timer_write(&a.timer, TIMER4_STATE, 3u);
+    (void)s5l_timer_tick(&a.timer, 30u);
+    s5l_timer_write(&a.timer, TIMER_IRQACK, TIMER4_IRQ_BITS);
+    uint8_t *buf = NULL;
+    size_t len = 0u;
+    CHECK(snapshot_save_mem(&a, &buf, &len) == SNAP_OK, "save post-compare");
+    CHECK(snapshot_load_mem(&b, buf, len) == SNAP_OK, "load post-compare");
+    free(buf);
+    CHECK(s5l_timer_read(&b.timer, TIMER4_VALUE) == 30u &&
+          s5l_timer_ticks_to_irq(&b.timer) == 80u &&
+          b.timer.t4_value == a.timer.t4_value,
+          "restore lost elapsed phase beyond the first compare");
+    CHECK(!s5l_timer_tick(&a.timer, 79u) && !s5l_timer_tick(&b.timer, 79u),
+          "post-compare restore fabricated an early interrupt");
+    CHECK(s5l_timer_tick(&a.timer, 1u) && s5l_timer_tick(&b.timer, 1u) &&
+          a.timer.t4_value == b.timer.t4_value &&
+          a.timer.irqlatch == b.timer.irqlatch && a.timer.ticks == b.timer.ticks,
+          "restored PWM diverged at the next real deadline");
+    s5l8900_free(&a);
+    s5l8900_free(&b);
+}
+
 static void test_tvout_snapshot_invariants(void) {
     s5l8900_t m;
     CHECK(s5l8900_init(&m, 0, RAMSZ), "init");
@@ -1215,6 +1244,7 @@ int main(void) {
     test_mbx_ta_fifo_midstream_round_trip();
     test_cpu_state_round_trips();
     test_device_state_round_trips();
+    test_timer_pwm_post_compare_round_trip();
     test_tvout_snapshot_invariants();
     test_stub_windows_round_trip();
     test_ram_round_trips();

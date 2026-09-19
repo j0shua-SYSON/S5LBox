@@ -992,12 +992,10 @@ static bool wake_line_enabled(const s5l8900_t *m, unsigned line) {
     return (m->vic[line / 32u].enable & (1u << (line % 32u))) != 0u;
 }
 
-/* Timer 4's decrementer.  A zero live value has not been loaded yet, so the
- * first tick reloads it from the buffered count; zero in both is a timer that
- * has stopped and will not expire again. */
+/* Ask the timer itself: the PWM first compare does not reset the counter,
+ * and its masked second compare must not be mistaken for a wake source. */
 static s5l_wake_kind_t wake_edge_timer(const s5l8900_t *m, uint32_t *ticks) {
-    if ((m->timer.t4_state & TIMER4_STATE_START) == 0u) return S5L_WAKE_NEVER;
-    uint32_t until = m->timer.t4_value ? m->timer.t4_value : m->timer.t4_count;
+    uint32_t until = s5l_timer_ticks_to_irq(&m->timer);
     if (until == 0u) return S5L_WAKE_NEVER;
     *ticks = until;
     return S5L_WAKE_AT;

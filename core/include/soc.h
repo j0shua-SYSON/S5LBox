@@ -588,10 +588,10 @@ uint32_t s5l_vic_vectaddr(const s5l_vic_t *v, unsigned base_source);
 #define TIMER_TICKSLOW   0x0084u   /* free-running counter, low word  */
 #define TIMER_CONFIG     0x0088u
 #define TIMER4_CONFIG    0x00a0u
-#define TIMER4_STATE     0x00a4u   /* bit0 start, bit1 update-from-buffer */
+#define TIMER4_STATE     0x00a4u   /* bit0 start, bit1 clear/load buffers */
 #define TIMER4_COUNTBUF  0x00a8u   /* deadline written by set_decrementer  */
 #define TIMER4_COUNTBUF2 0x00acu
-#define TIMER4_VALUE     0x00b4u   /* live down-count */
+#define TIMER4_VALUE     0x00b4u   /* elapsed up-count */
 #define TIMER_IRQACK     0x00f4u   /* write-1-to-clear */
 #define TIMER_IRQLATCH   0x00f8u
 #define TIMER_IRQSTATUS  0x10000u  /* alias, outside the 4 KB window */
@@ -599,6 +599,12 @@ uint32_t s5l_vic_vectaddr(const s5l_vic_t *v, unsigned base_source);
 #define TIMER4_STATE_START  (1u << 0)
 #define TIMER4_STATE_UPDATE (1u << 1)
 #define TIMER4_IRQ_BITS  0x00030000u  /* what _fleh_fiq_s5l8900x acks */
+#define TIMER4_MODE_MASK 0x30u
+#define TIMER4_MODE_PWM  0x10u
+#define TIMER4_INT0_EN   0x1000u
+#define TIMER4_INT1_EN   0x2000u
+#define TIMER4_INT0      0x00010000u
+#define TIMER4_INT1      0x00020000u
 
 /* Widened so TIMER_IRQSTATUS at 0x10000 falls inside the timer's window. */
 #define S5L8900_TIMER_SIZE 0x00011000u
@@ -630,6 +636,9 @@ typedef struct {
     uint32_t config;
     uint32_t t4_config, t4_state;
     uint32_t t4_count, t4_count2, t4_value;
+    /* t4_value retains the checkpoint encoding COUNTBUF - elapsed (mod 2^32).
+     * It is NOT the MMIO VALUE register. This also represents elapsed time
+     * after the first PWM compare without adding or reinterpreting state. */
     uint32_t irqlatch;
 } s5l_timer_t;
 
@@ -638,6 +647,8 @@ uint32_t s5l_timer_read(s5l_timer_t *t, uint32_t off);
 void s5l_timer_write(s5l_timer_t *t, uint32_t off, uint32_t val);
 /* Advance by `ticks`; returns true while an interrupt is pending. */
 bool s5l_timer_tick(s5l_timer_t *t, uint32_t ticks);
+/* Ticks to the next enabled timer edge, or zero if none is scheduled. */
+uint32_t s5l_timer_ticks_to_irq(const s5l_timer_t *t);
 
 /* ----------------------------------------------------------- NOR flash ---
  * On the S5L8900 the low-level boot images (LLB, iBoot, the device tree, the
