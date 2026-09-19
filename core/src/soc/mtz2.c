@@ -1498,8 +1498,8 @@ unsigned s5l_mtz2_encode(const s5l_mtz2_t *dev, const s5l_mt_contact_t *c,
 }
 
 
-bool s5l_mtz2_set_contacts(s5l_mtz2_t *dev, const s5l_mt_contact_t *c,
-                           unsigned n) {
+static bool set_contacts_at(s5l_mtz2_t *dev, const s5l_mt_contact_t *c,
+                            unsigned n, uint32_t timestamp_ms) {
     uint8_t payload[MTZ2_PAYLOAD_LIMIT];
     unsigned len;
     if (!dev) return false;
@@ -1529,7 +1529,7 @@ bool s5l_mtz2_set_contacts(s5l_mtz2_t *dev, const s5l_mt_contact_t *c,
     if (dev->frame_len)              { dev->injects_refused++; return false; }
 
     len = s5l_mtz2_encode(dev, c, n, (uint8_t)(dev->frame_seq + 1u),
-                          dev->frame_ms + MTZ2_FRAME_PERIOD_MS, payload);
+                          timestamp_ms, payload);
     if (!len || len > MTZ2_PAYLOAD_LIMIT) { dev->injects_refused++; return false; }
 
     memcpy(dev->frame, payload, len);
@@ -1539,11 +1539,42 @@ bool s5l_mtz2_set_contacts(s5l_mtz2_t *dev, const s5l_mt_contact_t *c,
     /* Monotone and never zero: the parser logs "timestamp invalid!" on a zero
      * and "time travel, eh?" on a decrease, and posts notification 0x66 to the
      * driver for either. */
-    dev->frame_ms += MTZ2_FRAME_PERIOD_MS;
+    dev->frame_ms = timestamp_ms;
     dev->frames_queued++;
     /* The attention line is a LEVEL and it goes up here. gpioic.c latches it
      * into group 4 bit 27 on the next refresh; it comes down at the last byte
      * of the data read that carries this report. */
     dev->atn = true;
     return true;
+}
+
+bool s5l_mtz2_set_contacts(s5l_mtz2_t *dev, const s5l_mt_contact_t *c,
+                           unsigned n) {
+    if (!dev) return false;
+    uint32_t next = dev->frame_ms > UINT32_MAX - MTZ2_FRAME_PERIOD_MS
+        ? UINT32_MAX : dev->frame_ms + MTZ2_FRAME_PERIOD_MS;
+    return set_contacts_at(dev, c, n, next);
+}
+
+bool s5l8900_set_contacts(s5l8900_t *m, const s5l_mt_contact_t *c, unsigned n) {
+    if (!m) return false;
+    if (!m->tb_hz) return s5l_mtz2_set_contacts(&m->mtz2, c, n);
+
+    /* The 0xCC parser copies wire milliseconds into its time-state input:
+     * 7E18 MultitouchSupport 0x33cfbb70..0x33cfbb7c, then
+     * mt_ProcessPathFrame -> alg_UpdateTimeState (0x33d000e8/0x33d008d4).
+     * Sixteen milliseconds per report loses both idle time and held time.
+     * Sample the guest's timebase, not the host clock: pause/restore must not
+     * inject wall-clock time that the guest itself has never experienced. */
+    uint64_t seconds = m->timer.ticks / m->tb_hz;
+    uint64_t ms = seconds > UINT32_MAX / 1000u ? UINT32_MAX :
+        seconds * 1000u + (m->timer.ticks % m->tb_hz) * 1000u / m->tb_hz;
+    if (ms > UINT32_MAX) ms = UINT32_MAX;
+    if (!ms) ms = 1u;
+    /* Old checkpoints carry a report-count timestamp. Do not send a
+     * decreasing value while their timebase catches up. The parser accepts
+     * equal values; inventing another millisecond per report would recreate
+     * the drift. Saturate at the wire limit rather than wrapping to zero. */
+    if (ms < m->mtz2.frame_ms) ms = m->mtz2.frame_ms;
+    return set_contacts_at(&m->mtz2, c, n, (uint32_t)ms);
 }

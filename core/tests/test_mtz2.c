@@ -1529,11 +1529,76 @@ static void test_injection_refuses_when_the_device_cannot_report(void) {
           "a report survived a reset with the attention line still up");
 }
 
-/*
- * Five contacts, the panel's limit, through the whole path — the case where
- * the payload is longest and every length in the model is closest to its
- * bound.
- */
+static uint32_t read_report_timestamp(s5l_spi_slave_t *s) {
+    uint8_t rxdata[MTZ2_PAYLOAD_LIMIT + 8];
+    const uint8_t *payload = NULL;
+    unsigned L = 0, plen = 0;
+    bool ok = read_one_frame(s, rxdata, &L, &payload, &plen);
+    CHECK(ok && payload && plen >= MTZ2_FRAME_HEADER,
+          "timestamp report did not survive the wire");
+    if (!ok || !payload || plen < MTZ2_FRAME_HEADER) return 0u;
+    return (uint32_t)payload[6] | ((uint32_t)payload[7] << 8) |
+        ((uint32_t)payload[8] << 16) | ((uint32_t)payload[9] << 24);
+}
+
+static void test_machine_contact_time_follows_guest_time(void) {
+    s5l8900_t m, restored;
+    s5l_spi_slave_t s;
+    CHECK(s5l8900_init(&m, 0u, 1u << 16), "machine init failed");
+    CHECK(s5l8900_init(&restored, 0u, 1u << 16), "restore init failed");
+    bring_up(&m.mtz2, &s);
+    s5l_mt_contact_t c = one_finger(160u, 240u, MTZ2_PHASE_MAKE_TOUCH);
+
+    CHECK(!s5l8900_set_contacts(NULL, &c, 1u), "null machine accepted");
+    CHECK(s5l8900_set_contacts(&m, &c, 1u), "first contact refused");
+    CHECK(read_report_timestamp(&s) == 1u, "zero time must stay nonzero");
+    CHECK(s5l8900_set_contacts(&m, &c, 1u), "same-time report refused");
+    CHECK(read_report_timestamp(&s) == 1u, "reports manufactured elapsed time");
+
+    /* Guest idle time and a half-second hold are not two 16 ms steps. */
+    m.timer.ticks = (uint64_t)m.tb_hz * 120u + m.tb_hz / 4u;
+    CHECK(s5l8900_set_contacts(&m, &c, 1u), "idle contact refused");
+    CHECK(m.mtz2.frame_ms == 120250u, "idle interval lost");
+    uint8_t pending[MTZ2_PAYLOAD_LIMIT];
+    memcpy(pending, m.mtz2.frame, sizeof pending);
+    m.timer.ticks += m.tb_hz / 2u;
+    CHECK(!s5l8900_set_contacts(&m, &c, 1u), "pending frame overwritten");
+    CHECK(m.mtz2.frame_ms == 120250u &&
+          memcmp(pending, m.mtz2.frame, sizeof pending) == 0,
+          "refusal changed the unread report or timestamp");
+    uint32_t down = read_report_timestamp(&s);
+    c.phase = MTZ2_PHASE_BREAK_TOUCH;
+    c.pressure = 0u;
+    CHECK(s5l8900_set_contacts(&m, &c, 1u), "release refused");
+    CHECK(read_report_timestamp(&s) - down == 500u, "held time lost");
+
+    /* Both the last report and its clock already belong to the snapshot. */
+    uint8_t *blob = NULL;
+    size_t blob_len = 0;
+    CHECK(snapshot_save_mem(&m, &blob, &blob_len) == SNAP_OK, "save failed");
+    CHECK(snapshot_load_mem(&restored, blob, blob_len) == SNAP_OK, "load failed");
+    free(blob);
+    s5l_spi_slave_t rs = restored.spi[1].slaves[0];
+    CHECK(s5l8900_set_contacts(&restored, &c, 1u), "restored contact refused");
+    CHECK(read_report_timestamp(&rs) == 120750u,
+          "restore introduced elapsed host time or a synthetic frame step");
+
+    /* Legacy count timestamps can be ahead of a tiny synthetic timebase. */
+    restored.timer.ticks = 0u;
+    CHECK(s5l8900_set_contacts(&restored, &c, 1u), "legacy contact refused");
+    CHECK(read_report_timestamp(&rs) == 120750u, "legacy time went backwards");
+    restored.timer.ticks = UINT64_MAX;
+    restored.tb_hz = 1u;
+    CHECK(s5l8900_set_contacts(&restored, &c, 1u), "large time refused");
+    CHECK(read_report_timestamp(&rs) == UINT32_MAX, "time conversion overflow");
+    restored.tb_hz = 0u;
+    CHECK(s5l8900_set_contacts(&restored, &c, 1u), "no-timebase fallback refused");
+    CHECK(read_report_timestamp(&rs) == UINT32_MAX, "fallback wrapped to zero");
+    s5l8900_free(&restored);
+    s5l8900_free(&m);
+}
+
+/* Five contacts through the longest payload this panel can report. */
 static void test_five_contacts_fit_and_survive_the_wire(void) {
     s5l_mtz2_t dev;
     s5l_spi_slave_t s;
@@ -2079,6 +2144,7 @@ int main(void) {
     test_the_payload_is_the_frame_userspace_parses();
     test_a_coordinate_maps_back_to_the_pixel_it_came_from();
     test_injection_refuses_when_the_device_cannot_report();
+    test_machine_contact_time_follows_guest_time();
     test_five_contacts_fit_and_survive_the_wire();
     test_mutations_are_caught();
     test_an_injection_reaches_the_cpu_through_the_cascade();

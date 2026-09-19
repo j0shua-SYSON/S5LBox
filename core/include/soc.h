@@ -3253,8 +3253,7 @@ typedef struct {
      * that "wraps at 256" too.
      */
     uint8_t  frame_seq;
-    /* The frame timestamp, in the milliseconds the parser expects. Advanced by
-     * MTZ2_FRAME_PERIOD_MS per queued report; see that constant. */
+    /* Timestamp of the last accepted report, in guest milliseconds. */
     uint32_t frame_ms;
     /*
      * The power LDO, /arm-io/spi1/multi-touch's `function-power_ldo`
@@ -3501,13 +3500,9 @@ void     s5l_mtz2_power_pin(void *ctx, bool level);
 #define MTZ2_FRAME_HEADER   10u
 #define MTZ2_CONTACT_STRIDE 32u
 /*
- * Milliseconds the device advances its frame timestamp by per report. This
- * device has no time base of its own; the timestamp exists because
- * _mt_CheckForTimestampErrors (0x33cfb2b4) logs "timestamp invalid!" on a zero
- * and "time travel, eh?" on a decreasing one and posts notification 0x66 to
- * the driver. Non-zero and non-decreasing are the only properties anything was
- * observed to require, and 16 ms is one frame at the ~60 Hz a part like this
- * scans at.
+ * Synthetic cadence for isolated device tests/callers without a machine
+ * clock. Real machine input must use s5l8900_set_contacts(): the guest uses
+ * the timestamp for gesture time deltas, not just zero/decrease validation.
  */
 #define MTZ2_FRAME_PERIOD_MS 16u
 
@@ -4460,6 +4455,12 @@ bool s5l8900_overlaps(uint32_t a, uint32_t alen, uint32_t b, uint32_t blen);
  * for why a refresh has to be asked for rather than assumed.
  */
 void s5l8900_tick(s5l8900_t *m, uint32_t ticks);
+
+/* Same device/backpressure contract as s5l_mtz2_set_contacts, timestamped in
+ * the guest timebase. The caller still refreshes input levels with tick(0).
+ * No timebase (tb_hz == 0) retains the isolated-device synthetic cadence. */
+bool s5l8900_set_contacts(s5l8900_t *m, const s5l_mt_contact_t *contacts,
+                          unsigned n);
 
 /*
  * Wake a PMU-standby machine through the retained-RAM reset path without

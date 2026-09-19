@@ -1258,7 +1258,7 @@ static double vm_engine_now_seconds(void) {
         return;
     }
 
-    if (s5l_mtz2_set_contacts(&_machine.mtz2, &c, 1u)) {
+    if (s5l8900_set_contacts(&_machine, &c, 1u)) {
         vm_touch_queue_pop(&_touch);
         vm_touch_delivery_note_accepted(&_touchDelivery, &c);
         _touchDelivered++;

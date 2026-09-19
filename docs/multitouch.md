@@ -1,5 +1,21 @@
 # Multi-touch: the chain from a finger to a UIKit event
 
+## Current timing correction
+
+The bring-up narrative below is historical; the controller now accepts input.
+Real machine reports use guest timebase milliseconds, not 16 ms per report.
+The 7E18 0xCC parser copies wire time into the parsed frame at
+`0x33cfbb70..0x33cfbb7c`; `_mt_ProcessPathFrame` passes it to
+`_alg_UpdateTimeState` at `0x33d000e8..0x33d000f0`. Thus idle and hold intervals
+matter beyond the zero/decreasing checks. Isolated device tests retain their
+synthetic cadence. Existing saved timebase/report fields suffice for restore;
+no host elapsed time is injected. Wire time is nonzero/nondecreasing and
+saturates at its 32-bit limit. Portable tests cover idle, hold, backpressure,
+same-time reports, restore, old timestamps and overflow. This is not yet proof
+of a physical keyboard-latency or animation-speed improvement.
+
+## Historical bring-up investigation
+
 Everything below is measured — from `firmware/kernel.macho`, from the armv6
 dyld shared cache at `work/analysis/dsc_armv6`, and from raw guest RAM in
 `work/run96-base/snap-3.5e9.bin`. Where something is inferred it says so.

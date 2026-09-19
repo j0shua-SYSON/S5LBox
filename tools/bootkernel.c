@@ -18432,7 +18432,7 @@ static BOOTKERNEL_NOINLINE void touch_tap_step(uint64_t n) {
         c.major    = 24u;
         c.minor    = 20u;
 
-        if (!s5l_mtz2_set_contacts(&G.mach->mtz2, &c, 1u)) {
+        if (!s5l8900_set_contacts(G.mach, &c, 1u)) {
             t->refusals++;
             continue;      /* the device is busy or not ready; try next step */
         }
@@ -18516,7 +18516,7 @@ static BOOTKERNEL_NOINLINE void touch_drag_step(uint64_t n) {
          * the injection instead of feeding the device something undescribed. */
         if (!mt_drag_contact(&d->g, d->accepted, &c)) continue;
 
-        if (!s5l_mtz2_set_contacts(&G.mach->mtz2, &c, 1u)) {
+        if (!s5l8900_set_contacts(G.mach, &c, 1u)) {
             d->refusals++;
             continue;      /* the device is busy or not ready; try next step */
         }
@@ -18559,7 +18559,7 @@ static BOOTKERNEL_NOINLINE void touch_pinch_step(uint64_t n) {
          * single finger teleporting between them every frame. */
         c[1].id = (uint8_t)(MT_DRAG_CONTACT_ID + 1u);
 
-        if (!s5l_mtz2_set_contacts(&G.mach->mtz2, c, 2u)) {
+        if (!s5l8900_set_contacts(G.mach, c, 2u)) {
             p->refusals++;
             continue;      /* the device is busy or not ready; try next step */
         }
