@@ -917,8 +917,17 @@ Invalid registration, wrong minor, missing mappings, and native user-buffer
 fault handling retain their strict checks. Native-copy continuations retain the
 accepted device identity, even if the registration changes before completion.
 Host regression tests cover changing registrations, reads and writes, invalid
-devices, nonidentity kernel mappings, and fault continuations. Physical cold-boot
-validation of this fix is pending; this is not a keyboard or animation verdict.
+devices, nonidentity kernel mappings, and fault continuations.
+
+Physical validation of `61ec87e` used the byte-identical disk that failed before,
+with work budget 4 unchanged. The checker completed, `/dev/md0` mounted, PPP
+negotiated, and SpringBoard reached its lock screen and Home screen. The saved
+sidecar contained 405 successful raw reads (13,271,040 bytes), one raw write
+(32,768 bytes), 405 native-copy redirects/completions, and zero guest errors or
+bridge failures. A normal save and relaunch restored Safari and its typed text
+at 10,858.0 M instructions. This establishes the reproduced raw-disk failure's
+repair, not a keyboard or animation fix. Local Release tests passed 77/77;
+the exact commit's hosted core matrix and iOS build both passed.
 
 ### Historical instruction-resume narrative
 
