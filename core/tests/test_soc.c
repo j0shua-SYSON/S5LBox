@@ -1084,6 +1084,30 @@ static void test_active_host_clock_is_optional_bounded_and_fail_closed(void) {
           (int)st, ran, (unsigned long long)work_bounded.timer.ticks,
           (unsigned long long)work_bounded.active_clock_added_ticks,
           (unsigned long long)work_bounded.active_clock_clamps);
+
+    /* Pin the calibrated product policy separately from the 8-tick override.
+     * It still discards excess host debt, and cannot run ahead of wall time. */
+    CHECK(S5L8900_ACTIVE_CLOCK_DEFAULT_WORK_TICKS == 16u &&
+          s5l8900_set_active_clock_work_budget(
+              &work_bounded, S5L8900_ACTIVE_CLOCK_DEFAULT_WORK_TICKS),
+          "could not select the calibrated product work budget");
+    ran = s5l8900_run(&work_bounded, 1u, &st);
+    CHECK(st == ARM_OK && ran == 1u && work_bounded.timer.ticks == 80u,
+          "changing the product budget did not re-anchor without adding time");
+    bounded_probe.now_ns += UINT64_C(1000000);
+    ran = s5l8900_run(&work_bounded, 10u, &st);
+    CHECK(st == ARM_OK && ran == 10u &&
+          work_bounded.timer.ticks == 240u &&
+          work_bounded.active_clock_added_ticks == 240u &&
+          work_bounded.active_clock_clamps == 2u,
+          "product work budget did not limit ten retirements to 160 ticks");
+    bounded_probe.now_ns += UINT64_C(10000);
+    ran = s5l8900_run(&work_bounded, 10u, &st);
+    CHECK(st == ARM_OK && ran == 10u &&
+          work_bounded.timer.ticks == 250u &&
+          work_bounded.active_clock_added_ticks == 250u &&
+          work_bounded.active_clock_clamps == 2u,
+          "product work budget ran ahead of host time or retained old debt");
     s5l8900_free(&work_bounded);
 }
 

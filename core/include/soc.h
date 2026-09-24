@@ -4018,15 +4018,16 @@ typedef bool (*s5l_restart_host_service_fn)(void *ctx);
 #define S5L8900_ACTIVE_CLOCK_MAX_STEP_NS UINT64_C(8000000)
 /* Active wall time may not outrun the CPU work that the host actually retired.
  * The interpreter has no cycle model, so this is an empirical safety bound,
- * not a claim that every ARM11 instruction costs four cycles. A physical A9
- * replay at budget 4 survived Weather and its info view, Voice Memos' list,
- * Safari tabs, Spotlight typing, pause/resume, backgrounding and snapshot
- * restore. Budget 5 rendered Weather but then retired another 680 million
- * instructions without new display work; 6 and 8 failed still earlier. Four
- * is therefore the fastest measured-safe product default. A bounded same-
- * binary control may vary it during calibration, but never beyond the
- * defensive ceiling below. Paced WFI remains real-time. */
-#define S5L8900_ACTIVE_CLOCK_DEFAULT_WORK_TICKS 4u
+ * not a claim about each ARM11 instruction's cycle cost. With the PWM compare
+ * and raw-device registration corrections, physical A9 runs at budget 16
+ * passed cold boot, Weather/info, Voice Memos, Safari, navigation, typing,
+ * pause/background, wake and checkpoint restore. Earlier budget 5--8 stalls
+ * preceded the PWM correction; retaining 4 unnecessarily stretches active UI
+ * time on this host. Sixteen is the calibrated product bound, not a promise
+ * of real-time execution or a cure for input latency. The same-binary control
+ * remains available up to the defensive ceiling below. Neither this cap nor
+ * its override accelerates time beyond the host clock. Paced WFI is unchanged. */
+#define S5L8900_ACTIVE_CLOCK_DEFAULT_WORK_TICKS 16u
 #define S5L8900_ACTIVE_CLOCK_MAX_WORK_TICKS     64u
 /* Accepted input normally keeps the active host clock: that is what gives UI
  * timers real-time cadence. Only a foreground interval that is still not

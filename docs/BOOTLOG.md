@@ -929,6 +929,31 @@ at 10,858.0 M instructions. This establishes the reproduced raw-disk failure's
 repair, not a keyboard or animation fix. Local Release tests passed 77/77;
 the exact commit's hosted core matrix and iOS build both passed.
 
+### Calibrated active-time budget (2026-09-24)
+
+The interactive work bound is now 16 rather than 4 ticks per retired
+instruction. This is a ceiling on credited host time, not an instruction-cycle
+model or a multiplier that can run the guest ahead of wall time. The 8 ms
+catch-up bound, deadline shield, deterministic mode, and paced WFI are unchanged.
+Snapshots still exclude host clock policy; an explicit per-machine budget
+continues to override the default.
+
+Earlier higher-budget navigation failures preceded the PWM correction above.
+After that correction, same-binary budget-16 trials completed Weather/info,
+Voice Memos, Safari, Settings back navigation, pause/background, and checkpoint
+restore. Screenshot upper bounds for Home/Safari were about 1.95/2.04 seconds,
+versus 2.89/2.96 at budget 4 on that baseline. These are not event-to-photon
+measurements or a comparison with original hardware. A budget-64 trial did not
+establish an advantage over 16.
+
+After the raw-device fix, an uninterrupted budget-16 cold run completed the
+filesystem check, mounted the root, negotiated PPP, and reached a working lock
+screen and Home after Power wake and unlock. In a separate continuous Safari
+typing trial, all ten letters were visible by the 1.93-second capture after a
+1.81-second burst; all touch reports were read, with no drops. That residual
+lag and first-focus behavior remain open. The new default improves calibrated
+active-time pacing; it does not declare keyboard or animation work complete.
+
 ### Historical instruction-resume narrative
 
 Two interpreter changes make the current instruction counts different from the
