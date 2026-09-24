@@ -356,6 +356,40 @@ static void test_vfp_integer_fetch_and_retry(void) {
         }
 }
 
+static void test_neon_minmax_fetch_and_retry(void) {
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned op=0;op<2u;op++)
+      for (unsigned quad=0;quad<2u;quad++)
+       for (unsigned host=0;host<2u;host++)
+        for (unsigned enabled=0;enabled<2u;enabled++)
+         for (unsigned half=0;half<=thumb;half++) {
+            fixture_t f; arm_bus_t bus; arm_cpu_t c;
+            setup(&f,&bus,&c,thumb!=0u,host!=0u); if (thumb) c.cpsr|=0x1800u;
+            c.cp15.cpacr=0x00f00000u; c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u; c.vfp_fpscr=0x08c00002u;
+            c.excl_valid=true; c.excl_addr=0x2468u; c.a8_excl_size=8u;
+            uint32_t insn=(thumb ? 0xef40ef80u : 0xf240ef80u)|(op<<21)|(quad<<6);
+            if (thumb) { put16(&f,0u,(uint16_t)(insn>>16)); put16(&f,2u,(uint16_t)insn); } else put32(&f,0u,insn);
+            for (unsigned r=0;r<32u;r++) vfp_set_d(&c,r,UINT64_C(0xdead1234beef0000)+r);
+            vfp_set_d(&c,16u,UINT64_C(0x7f80000100000001)); vfp_set_d(&c,0u,UINT64_C(0x3f80000080000000));
+            vfp_set_d(&c,17u,UINT64_C(0x3f800000bf800000)); vfp_set_d(&c,1u,0u);
+            uint64_t expected[32]; for (unsigned r=0;r<32u;r++) expected[r]=vfp_get_d(&c,r);
+            uint32_t flags=c.cpsr;
+            f.fail_address=half*2u; f.fail_size=thumb ? 2u : 4u;
+            CHECK(arm_step(&c)==ARM_HALT,"max/min partial fetch did not halt"); check_stop(&f,&c,0u,flags);
+            bool match=true; for (unsigned r=0;r<32u;r++) match&=vfp_get_d(&c,r)==expected[r];
+            CHECK(match && c.vfp_fpscr==0x08c00002u && c.vfp_fpexc==(enabled ? ARM_FPEXC_EN : 0u) &&
+                  c.excl_valid && c.excl_addr==0x2468u && c.a8_excl_size==8u,"max/min effects preceded full fetch");
+            f.failed=false; f.fail_size=0u; c.vfp_fpexc=ARM_FPEXC_EN;
+            expected[30]=op ? UINT64_C(0x7fc0000080000000) : UINT64_C(0x7fc0000000000000);
+            if (quad) expected[31]=op ? UINT64_C(0x00000000bf800000) : UINT64_C(0x3f80000000000000);
+            CHECK(arm_step(&c)==ARM_OK && c.r[15]==4u && c.cycles==1u && c.cpsr==(flags&~0x0600fc00u) &&
+                  c.vfp_fpscr==0x08c00083u && c.excl_valid && c.excl_addr==0x2468u && c.a8_excl_size==8u,
+                  "max/min checked fetch retry");
+            match=true; for (unsigned r=0;r<32u;r++) match&=vfp_get_d(&c,r)==expected[r];
+            CHECK(match,"max/min retry full register state");
+         }
+}
+
 static void test_neon_integer_fetch_and_retry(void) {
     static const uint64_t inputs[]={UINT64_C(0xfefffffd01000003),UINT64_C(0x80000000ffffffff),
         UINT64_C(0x800000013fc00000),UINT64_C(0x7fc12345bf000000)};
@@ -1024,6 +1058,7 @@ int main(void) {
     test_vfp_macc_fetch_and_retry();
     test_vfp_integer_fetch_and_retry();
     test_neon_integer_fetch_and_retry();
+    test_neon_minmax_fetch_and_retry();
     test_neon_by_scalar_fetch_and_retry();
     test_thumb_byte_reverse_fetch_retry();
     test_neon_macc_fetch_and_retry();

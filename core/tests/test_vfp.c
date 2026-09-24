@@ -3122,9 +3122,8 @@ static void test_a8_neon_macc_access_invalid_and_it(void) {
       for (unsigned bit = 8u; bit < 12u; bit++) {
         arm_cpu_t c; a8_move_reset(&c, thumb); c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
         uint32_t flags = c.cpsr, insn = a8_neon_macc(thumb, 0u, 0u, 31u, 16u, 18u) ^ (1u << bit);
-        bool lazy = !thumb && !enabled;
-        CHECK(a8_move_step(&c, thumb, insn) == (lazy ? ARM_OK : ARM_UNDEFINED) &&
-              (lazy ? c.r[15] == ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND] == flags : c.r[15] == 0x100u && c.cpsr == flags), "macc neighbor allocation");
+        CHECK(a8_move_step(&c, thumb, insn) == ARM_UNDEFINED &&
+              c.r[15] == 0x100u && c.cpsr == flags, "macc neighbor allocation");
       }
     const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
     for (unsigned profile = 0; profile < 2u; profile++) {
@@ -3261,9 +3260,8 @@ static void test_a8_neon_transpose_invalid_and_it(void) {
         arm_cpu_t c; a8_move_reset(&c, thumb); c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
         uint32_t flags = c.cpsr;
         uint32_t insn = a8_neon_transpose(thumb, 2u, 0u, 31u, 16u) ^ (1u << fields[field]);
-        bool lazy = !thumb && !enabled; /* Existing broad A32 neighbor fallback. */
-        CHECK(a8_move_step(&c, thumb, insn) == (lazy ? ARM_OK : ARM_UNDEFINED) &&
-              (lazy ? c.r[15] == ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND] == flags : c.r[15] == 0x100u && c.cpsr == flags),
+        CHECK(a8_move_step(&c, thumb, insn) == ARM_UNDEFINED &&
+              c.r[15] == 0x100u && c.cpsr == flags,
               "transpose claimed neighboring allocation T=%u EN=%u bit=%u", thumb, enabled, fields[field]);
       }
     const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
@@ -3410,10 +3408,8 @@ static void test_a8_neon_sign_invalid_and_it(void) {
             CHECK(same, "NEON sign invalid/IT source or destination mutation");
         }
     /* Integer forms and adjacent comparison/other two-register allocations
-     * are separate work. Preserve their existing A32 lazy-enable fallback;
-     * with access enabled, none may be misdecoded as these sign operations.
-     * The invalid widths/odd Q operands inside our allocation are tested
-     * above and must halt even when EN=0. */
+     * are separate work. Their capability stops, like invalid widths/odd Q
+     * operands above, must not turn into lazy-enable traps when EN=0. */
     static const uint32_t toggles[] = {1u << 10,1u << 8,1u << 9,1u << 11,1u << 16,1u << 4};
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned negate = 0; negate < 2u; negate++)
@@ -3423,9 +3419,7 @@ static void test_a8_neon_sign_invalid_and_it(void) {
             uint32_t insn = a8_neon_sign(thumb, negate, 0u, 31u, 16u) ^ toggles[field];
             uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
             arm_status_t status = a8_move_step(&c, thumb, insn);
-            bool lazy = !thumb && !enabled;
-            CHECK(status == (lazy ? ARM_OK : ARM_UNDEFINED) && c.r[15] == (lazy ? ARM_VEC_UNDEFINED : 0x100u) &&
-                  (lazy ? c.spsr[ARM_BANK_UND] == flags && c.r[14] == 0x104u : c.cpsr == flags) &&
+            CHECK(status == ARM_UNDEFINED && c.r[15] == 0x100u && c.cpsr == flags &&
                   c.vfp_fpscr == fpscr && vfp_get_d(&c, 31u) == 0u,
                   "NEON sign neighboring allocation insn=%08x EN=%u status=%d pc=%08x", insn, enabled, (int)status, c.r[15]);
        }
@@ -3986,6 +3980,239 @@ static void test_a8_neon_multiply_access_and_invalid(void) {
 }
 
 /* op: signed/unsigned int-to-F32, then F32-to-signed/unsigned int. */
+static uint32_t a8_neon_minmax(unsigned thumb,unsigned minimum,unsigned quad,unsigned d,unsigned n,unsigned m) {
+    return (thumb ? 0xef000f00u : 0xf2000f00u)|(minimum<<21)|(quad<<6)|
+        ((d&15u)<<12)|((d>>4)<<22)|((n&15u)<<16)|((n>>4)<<7)|(m&15u)|((m>>4)<<5);
+}
+
+/* Host comparison is exact for sanitized F32 operands. NaNs and flushed
+ * inputs are classified explicitly; no production integer ordering is used. */
+static uint32_t a8_minmax_reference(uint32_t a,uint32_t b,bool minimum,uint32_t *raised) {
+    uint32_t inputs[]={a,b}; bool nan=false;
+    for (unsigned i=0;i<2u;i++) {
+        uint32_t magnitude=inputs[i]&0x7fffffffu;
+        if (magnitude>0x7f800000u) {
+            nan=true; if (!(inputs[i]&0x00400000u)) *raised|=ARM_FPSCR_IOC;
+        } else if (magnitude && magnitude<0x00800000u) {
+            *raised|=ARM_FPSCR_IDC; inputs[i]&=0x80000000u;
+        }
+    }
+    if (nan) return 0x7fc00000u;
+    float x,y; memcpy(&x,&inputs[0],4u); memcpy(&y,&inputs[1],4u);
+    if (x==0.0f && y==0.0f) {
+        bool negative=minimum ? signbit(x)||signbit(y) : signbit(x)&&signbit(y);
+        return negative ? 0x80000000u : 0u;
+    }
+    return (minimum ? x<y : x>y) ? inputs[0] : inputs[1];
+}
+
+static void a8_minmax_check(arm_cpu_t *c,unsigned thumb,unsigned minimum,unsigned quad,unsigned host) {
+    static const int rounds[]={FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    uint64_t expected[32]; for (unsigned d=0;d<32u;d++) expected[d]=vfp_get_d(c,d);
+    uint32_t raised=0u;
+    for (unsigned r=0;r<=quad;r++) {
+        uint32_t lo=a8_minmax_reference((uint32_t)expected[16u+r],(uint32_t)expected[r],minimum!=0u,&raised);
+        uint32_t hi=a8_minmax_reference((uint32_t)(expected[16u+r]>>32),(uint32_t)(expected[r]>>32),minimum!=0u,&raised);
+        expected[30u+r]=((uint64_t)hi<<32)|lo;
+    }
+    uint32_t flags=c->cpsr,fpscr=c->vfp_fpscr;
+    c->excl_valid=true; c->excl_addr=0x2468u; c->a8_excl_size=8u;
+    CHECK(fesetround(rounds[host])==0 && feclearexcept(FE_ALL_EXCEPT)==0 &&
+          feraiseexcept(FE_DIVBYZERO|FE_INEXACT)==0,"prepare max/min host state");
+    int host_flags=fetestexcept(FE_ALL_EXCEPT);
+    CHECK(a8_move_step(c,thumb,a8_neon_minmax(thumb,minimum,quad,30u,16u,0u))==ARM_OK &&
+          c->r[15]==0x104u && c->cycles==1u && c->cpsr==flags && c->vfp_fpscr==(fpscr|raised) &&
+          c->vfp_fpexc==ARM_FPEXC_EN && c->excl_valid && c->excl_addr==0x2468u && c->a8_excl_size==8u,
+          "max/min result status T=%u min=%u Q=%u",thumb,minimum,quad);
+    bool match=true; for (unsigned d=0;d<32u;d++) match&=vfp_get_d(c,d)==expected[d];
+    for (unsigned r=0;r<15u;r++) match&=c->r[r]==0u;
+    CHECK(match,"max/min complete register state");
+    CHECK(fegetround()==rounds[host] && fetestexcept(FE_ALL_EXCEPT)==host_flags,"max/min changed host state");
+}
+
+static void test_a8_neon_minmax_registers(void) {
+    CHECK(a8_neon_minmax(0u,0u,0u,2u,1u,0u)==0xf2012f00u &&
+          a8_neon_minmax(0u,1u,0u,2u,1u,0u)==0xf2212f00u &&
+          a8_neon_minmax(1u,0u,1u,30u,16u,0u)==0xef40efc0u,"max/min encoding anchors");
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned minimum=0;minimum<2u;minimum++)
+      for (unsigned quad=0;quad<2u;quad++)
+       for (unsigned d=0;d<32u;d+=quad+1u)
+        for (unsigned n=0;n<32u;n+=quad+1u)
+         for (unsigned m=0;m<32u;m+=quad+1u) {
+            arm_cpu_t c; a8_move_reset(&c,thumb); c.cpsr|=ARM_CPSR_E; c.vfp_fpscr=0xfff79f9fu;
+            c.excl_valid=true; c.excl_addr=0x2468u; c.a8_excl_size=8u;
+            uint64_t expected[32];
+            for (unsigned r=0;r<32u;r++) {
+                expected[r]=((uint64_t)a8_macc_int_bits(31-(int)r)<<32)|a8_macc_int_bits((int)r-16);
+                vfp_set_d(&c,r,expected[r]);
+            }
+            for (unsigned r=0;r<=quad;r++) {
+                unsigned lo=minimum ? (n<m ? n : m) : (n>m ? n : m);
+                unsigned hi=minimum ? (n>m ? n : m) : (n<m ? n : m);
+                expected[d+r]=((uint64_t)a8_macc_int_bits(31-(int)(hi+r))<<32)|a8_macc_int_bits((int)(lo+r)-16);
+            }
+            uint32_t flags=c.cpsr;
+            CHECK(a8_move_step(&c,thumb,a8_neon_minmax(thumb,minimum,quad,d,n,m))==ARM_OK && c.cycles==1u &&
+                  c.r[15]==0x104u && c.cpsr==flags && c.vfp_fpscr==0xfff79f9fu && c.vfp_fpexc==ARM_FPEXC_EN &&
+                  c.excl_valid && c.excl_addr==0x2468u && c.a8_excl_size==8u,"max/min register status");
+            bool match=true; for (unsigned r=0;r<32u;r++) match&=vfp_get_d(&c,r)==expected[r];
+            for (unsigned r=0;r<15u;r++) match&=c.r[r]==0u;
+            CHECK(match,"max/min register aliases T=%u min=%u Q=%u D/N/M=%u/%u/%u",thumb,minimum,quad,d,n,m);
+         }
+}
+
+static void test_a8_neon_minmax_values(void) {
+    fenv_t saved; CHECK(fegetenv(&saved)==0,"save max/min host state");
+    /* a,b,max,min,flags: finite ordering, signed zeros, NaNs and both-input FZ. */
+    static const uint32_t anchors[][5]={
+        {0u,0x80000000u,0u,0x80000000u,0u},
+        {0x80000000u,0x80000000u,0x80000000u,0x80000000u,0u},
+        {1u,0x80000001u,0u,0x80000000u,0x80u},
+        {0x80000001u,0x00800000u,0x00800000u,0x80000000u,0x80u},
+        {0x3f800000u,0x40000000u,0x40000000u,0x3f800000u,0u},
+        {0xc0000000u,0xbf800000u,0xbf800000u,0xc0000000u,0u},
+        {0xff800000u,0x7f800000u,0x7f800000u,0xff800000u,0u},
+        {0x7f7fffffu,0x7f800000u,0x7f800000u,0x7f7fffffu,0u},
+        {0xff800000u,0xff7fffffu,0xff7fffffu,0xff800000u,0u},
+        {0x7fc12345u,0x3f800000u,0x7fc00000u,0x7fc00000u,0u},
+        {0xbf800000u,0xffc12345u,0x7fc00000u,0x7fc00000u,0u},
+        {0x7f800001u,0x3f800000u,0x7fc00000u,0x7fc00000u,1u},
+        {0u,0xff800001u,0x7fc00000u,0x7fc00000u,1u},
+        {0x7fc12345u,1u,0x7fc00000u,0x7fc00000u,0x80u},
+        {0x80000001u,0xff800001u,0x7fc00000u,0x7fc00000u,0x81u},
+        {0x00800000u,0x80800000u,0x00800000u,0x80800000u,0u},
+        {0x3f800001u,0x3f800000u,0x3f800001u,0x3f800000u,0u},
+        {0xbf800001u,0xbf800000u,0xbf800000u,0xbf800001u,0u},
+        {0x40490fdbu,0x40490fdbu,0x40490fdbu,0x40490fdbu,0u}
+    };
+    unsigned anchor_count=sizeof anchors/sizeof anchors[0];
+    for (unsigned i=0;i<anchor_count;i++) for (unsigned op=0;op<2u;op++) for (unsigned order=0;order<2u;order++) {
+        uint32_t raised=0u;
+        CHECK(a8_minmax_reference(anchors[i][order],anchors[i][1u-order],op!=0u,&raised)==anchors[i][2u+op] &&
+              raised==anchors[i][4],"max/min independent raw anchor row=%u min=%u order=%u",i,op,order);
+    }
+    for (unsigned controls=0;controls<512u;controls++)
+     for (unsigned op=0;op<2u;op++)
+      for (unsigned quad=0;quad<2u;quad++)
+       for (unsigned thumb=0;thumb<2u;thumb++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb);
+        c.vfp_fpscr=ARM_FPSCR_NZCV|ARM_FPSCR_QC|ARM_FPSCR_DZC|ARM_FPSCR_ENABLES|(1u<<26)|
+            ((controls&3u)<<22)|(controls&4u ? ARM_FPSCR_FZ : 0u)|(controls&8u ? ARM_FPSCR_DN : 0u)|
+            (((controls>>4)&7u)<<16)|((controls>>7)<<20);
+        for (unsigned r=0;r<2u;r++) {
+            const uint32_t *low=anchors[(controls+2u*r)%anchor_count],*high=anchors[(controls+2u*r+1u)%anchor_count];
+            unsigned order=(controls>>1)&1u;
+            vfp_set_d(&c,16u+r,((uint64_t)high[order]<<32)|low[order]);
+            vfp_set_d(&c,r,((uint64_t)high[1u-order]<<32)|low[1u-order]);
+        }
+        a8_minmax_check(&c,thumb,op,quad,controls&3u);
+       }
+    unsigned classes=sizeof a8_compare_values/sizeof a8_compare_values[0];
+    uint32_t random=0xa52dc138u;
+    for (unsigned sample=0;sample<classes*classes+1024u;sample++) {
+        uint32_t a[4],b[4];
+        for (unsigned lane=0;lane<4u;lane++) {
+            random^=random<<13; random^=random>>17; random^=random<<5; a[lane]=random;
+            random^=random<<13; random^=random>>17; random^=random<<5; b[lane]=random;
+            if (sample<classes*classes) {
+                a[lane]=a8_compare_values[(sample/classes+lane)%classes].single;
+                b[lane]=a8_compare_values[(sample%classes+3u*lane)%classes].single;
+            }
+        }
+        for (unsigned controls=0;controls<16u;controls++)
+         for (unsigned op=0;op<2u;op++)
+          for (unsigned quad=0;quad<2u;quad++)
+           for (unsigned thumb=0;thumb<2u;thumb++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.vfp_fpscr=ARM_FPSCR_NZCV|ARM_FPSCR_QC|ARM_FPSCR_DZC|((controls&3u)<<22)|
+                (controls&4u ? ARM_FPSCR_FZ : 0u)|(controls&8u ? ARM_FPSCR_DN : 0u);
+            for (unsigned r=0;r<2u;r++) {
+                vfp_set_d(&c,16u+r,((uint64_t)a[2u*r+1u]<<32)|a[2u*r]);
+                vfp_set_d(&c,r,((uint64_t)b[2u*r+1u]<<32)|b[2u*r]);
+            }
+            a8_minmax_check(&c,thumb,op,quad,(sample+controls)&3u);
+           }
+    }
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned op=0;op<2u;op++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr=ARM_FPSCR_NZCV|ARM_FPSCR_QC|ARM_FPSCR_DZC;
+        static const uint32_t inputs[]={1u,0x7f800001u,0x3f800000u};
+        uint32_t want=c.vfp_fpscr;
+        for (unsigned i=0;i<3u;i++) {
+            vfp_set_d(&c,16u,inputs[i]); vfp_set_d(&c,0u,0u);
+            CHECK(a8_move_step(&c,thumb,a8_neon_minmax(thumb,op,0u,30u,16u,0u))==ARM_OK,"max/min cumulative operation");
+            want|=i==0u ? ARM_FPSCR_IDC : i==1u ? ARM_FPSCR_IOC : 0u;
+            CHECK(c.vfp_fpscr==want,"max/min cumulative flags");
+            CHECK(a8_move_step(&c,thumb,VMRS(3u,1u))==ARM_OK && c.r[3]==want,"max/min VMRS visibility");
+        }
+    }
+    CHECK(fesetenv(&saved)==0,"restore max/min host state");
+}
+
+static void test_a8_neon_minmax_access_invalid_and_it(void) {
+    static const unsigned permissions[]={0u,1u,3u};
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned op=0;op<2u;op++)
+      for (unsigned quad=0;quad<2u;quad++)
+       for (unsigned user=0;user<2u;user++)
+        for (unsigned enabled=0;enabled<2u;enabled++)
+         for (unsigned access=0;access<3u;access++)
+          for (unsigned variant=0;variant<(quad ? 16u : 2u);variant++)
+           for (unsigned skip=0;skip<(thumb ? 2u : 1u);skip++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.cpsr=(c.cpsr&~ARM_CPSR_MODE_MASK)|(user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr=permissions[access]*0x00500000u; c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u;
+            c.vfp_fpscr=ARM_FPSCR_QC|ARM_FPSCR_DZC|(3u<<22)|ARM_FPSCR_LEN|ARM_FPSCR_STRIDE;
+            for (unsigned r=0;r<32u;r++) vfp_set_d(&c,r,UINT64_C(0x7f800001dead0000)+r);
+            vfp_set_d(&c,16u,UINT64_C(0x7f80000100000001)); vfp_set_d(&c,0u,UINT64_C(0x3f80000080000000));
+            vfp_set_d(&c,17u,UINT64_C(0x3f800000bf800000)); vfp_set_d(&c,1u,0u);
+            uint64_t expected[32]; for (unsigned r=0;r<32u;r++) expected[r]=vfp_get_d(&c,r);
+            if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c)==ARM_OK,"max/min IT setup"); }
+            unsigned odd=variant>>1;
+            uint32_t insn=a8_neon_minmax(thumb,op,quad,30u+(odd&1u),16u+((odd>>1)&1u),(odd>>2)&1u)|((variant&1u)<<20);
+            uint32_t pc=c.r[15],flags=c.cpsr,fpscr=c.vfp_fpscr; uint64_t cycles=c.cycles;
+            bool valid=variant==0u,allowed=enabled && (permissions[access]==3u || (permissions[access]==1u && !user));
+            uint32_t raised=0u;
+            if (valid && allowed && !skip) {
+                raised=ARM_FPSCR_IOC|ARM_FPSCR_IDC;
+                expected[30]=op ? UINT64_C(0x7fc0000080000000) : UINT64_C(0x7fc0000000000000);
+                if (quad) expected[31]=op ? UINT64_C(0x00000000bf800000) : UINT64_C(0x3f80000000000000);
+            }
+            CHECK(a8_move_step(&c,thumb,insn)==(skip || valid ? ARM_OK : ARM_UNDEFINED) && c.cycles==cycles+1u &&
+                  c.vfp_fpscr==(fpscr|raised) && c.vfp_fpexc==(enabled ? ARM_FPEXC_EN : 0u),"max/min access/encoding disposition");
+            CHECK(skip ? c.r[15]==pc+4u && c.cpsr==(flags&~0x0600fc00u) :
+                  !valid ? c.r[15]==pc && c.cpsr==flags : allowed ? c.r[15]==pc+4u && c.cpsr==(flags&~0x0600fc00u) :
+                  c.r[15]==ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND]==flags && c.r[14]==pc+(thumb ? 2u : 4u),
+                  "max/min access precedence/IT retirement");
+            bool match=true; for (unsigned r=0;r<32u;r++) match&=vfp_get_d(&c,r)==expected[r];
+            CHECK(match,"max/min invalid/access/result preservation");
+           }
+    const arm_arch_t legacy[]={ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned p=0;p<2u;p++) for (unsigned op=0;op<2u;op++) for (unsigned quad=0;quad<2u;quad++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,legacy[p]),"legacy max/min reset");
+        c.cp15.cpacr=0x00f00000u; c.vfp_fpexc=ARM_FPEXC_EN;
+        for (unsigned r=0;r<32u;r++) c.vfp_s[r]=0xdead0000u+r;
+        for (unsigned r=0;r<16u;r++) c.a8_vfp_hi[r]=UINT64_C(0x7f800001beef0000)+r;
+        uint32_t singles[32],fpscr=c.vfp_fpscr; uint64_t upper[16];
+        memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
+        CHECK(a8_move_step(&c,0u,a8_neon_minmax(0u,op,quad,30u,16u,0u))==ARM_UNDEFINED && c.r[15]==0u &&
+              c.vfp_fpscr==fpscr && !memcmp(singles,c.vfp_s,sizeof singles) && !memcmp(upper,c.a8_vfp_hi,sizeof upper),
+              "max/min leaked into legacy");
+    }
+    /* Adjacent reciprocal-step and pairwise-max/min spaces stay unsupported. */
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned op=0;op<2u;op++) for (unsigned neighbor=0;neighbor<2u;neighbor++)
+     for (unsigned enabled=0;enabled<2u;enabled++) for (unsigned access=0;access<3u;access++) for (unsigned user=0;user<2u;user++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u;
+        c.cp15.cpacr=permissions[access]*0x00500000u;
+        c.cpsr=(c.cpsr&~ARM_CPSR_MODE_MASK)|(user ? ARM_MODE_USR : ARM_MODE_SVC);
+        uint32_t insn=a8_neon_minmax(thumb,op,0u,30u,16u,0u)^(neighbor ? 1u<<(thumb ? 28u : 24u) : 1u<<4);
+        uint32_t flags=c.cpsr,fpscr=c.vfp_fpscr;
+        CHECK(a8_move_step(&c,thumb,insn)==ARM_UNDEFINED && c.r[15]==0x100u && c.cpsr==flags &&
+              c.vfp_fpscr==fpscr && vfp_get_d(&c,30u)==0u,
+              "max/min consumed unsupported neighbor T=%u min=%u neighbor=%u EN=%u access=%u user=%u",thumb,op,neighbor,enabled,access,user);
+    }
+}
+
 static uint32_t a8_neon_integer(unsigned thumb, unsigned op, unsigned quad,
                                 unsigned d, unsigned m, unsigned size) {
     return (thumb ? 0xffb30600u : 0xf3b30600u) | (size<<18) | (op<<7) | (quad<<6) |
@@ -4339,9 +4566,7 @@ static void test_a8_neon_by_scalar_access_invalid_and_it(void) {
       for (unsigned k=0;k<sizeof toggles/sizeof toggles[0];k++) {
         arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u;
         uint32_t flags=c.cpsr, insn=a8_neon_by_scalar(thumb,0u,0u,31u,16u,15u,1u)^toggles[k];
-        bool lazy=!thumb && !enabled;
-        CHECK(a8_move_step(&c,thumb,insn)==(lazy ? ARM_OK : ARM_UNDEFINED) &&
-              (lazy ? c.r[15]==ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND]==flags : c.r[15]==0x100u && c.cpsr==flags),"scalar neighboring allocation");
+        CHECK(a8_move_step(&c,thumb,insn)==ARM_UNDEFINED && c.r[15]==0x100u && c.cpsr==flags,"scalar neighboring allocation");
       }
     const arm_arch_t legacy[]={ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
     for (unsigned p=0;p<2u;p++)
@@ -4507,14 +4732,15 @@ static void test_a8_neon_add_access_and_invalid(void) {
       for (unsigned field = 0; field < sizeof toggles / sizeof toggles[0]; field++) {
         arm_cpu_t c;
         a8_move_reset(&c, thumb);
-        bool macc = toggles[field] == 0x10u;
-        if (macc) {
+        bool macc = toggles[field] == 0x10u, minmax = toggles[field] == 0x200u;
+        if (macc || minmax) {
             vfp_set_d(&c, 16u, UINT64_C(0x4000000040000000));
             vfp_set_d(&c, 31u, UINT64_C(0x3f8000003f800000));
         }
-        uint64_t expected = !macc ? 0u : sub ? UINT64_C(0xc0400000c0400000) : UINT64_C(0x40a0000040a00000);
-        CHECK(a8_move_step(&c, thumb, a8_neon_add(thumb, sub, 0u, 31u, 16u, 16u) ^ toggles[field]) == (macc ? ARM_OK : ARM_UNDEFINED) &&
-              c.r[15] == (macc ? 0x104u : 0x100u) && vfp_get_d(&c, 31u) == expected, "NEON addition/neighbor decoding");
+        uint64_t expected = minmax ? UINT64_C(0x4000000040000000) : !macc ? 0u :
+            sub ? UINT64_C(0xc0400000c0400000) : UINT64_C(0x40a0000040a00000);
+        CHECK(a8_move_step(&c, thumb, a8_neon_add(thumb, sub, 0u, 31u, 16u, 16u) ^ toggles[field]) == (macc || minmax ? ARM_OK : ARM_UNDEFINED) &&
+              c.r[15] == (macc || minmax ? 0x104u : 0x100u) && vfp_get_d(&c, 31u) == expected, "NEON addition/neighbor decoding");
       }
     for (unsigned thumb = 0; thumb < 2u; thumb++) for (unsigned sub = 0; sub < 2u; sub++) {
         arm_cpu_t c;
@@ -6837,6 +7063,9 @@ int main(void) {
     test_a8_neon_multiply_results();
     test_a8_neon_multiply_access_and_invalid();
     test_a8_neon_integer_registers();
+    test_a8_neon_minmax_registers();
+    test_a8_neon_minmax_values();
+    test_a8_neon_minmax_access_invalid_and_it();
     test_a8_neon_integer_values_and_host_state();
     test_a8_neon_integer_access_invalid_and_it();
     test_a8_neon_by_scalar_registers();

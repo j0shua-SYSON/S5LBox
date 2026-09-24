@@ -810,6 +810,21 @@ static bool vfp_a8_unpack_pair(uint64_t *a, uint64_t *b, bool dbl, uint32_t fpsc
     return false;
 }
 
+/* A2.7 FPMax/FPMin with StandardFPSCRValue. Unpack both operands before
+ * NaN selection, then compare monotonic integer keys. Every finite result
+ * is an already representable input, so no host FP or rounding is needed. */
+uint32_t vfp_a8_neon_minmax(uint32_t left, uint32_t right, bool minimum,
+                             uint32_t *exceptions) {
+    uint64_t a = left, b = right, nan_result;
+    if (vfp_a8_unpack_pair(&a, &b, false, ARM_FPSCR_FZ | ARM_FPSCR_DN,
+                           exceptions, &nan_result)) return (uint32_t)nan_result;
+    left = (uint32_t)a; right = (uint32_t)b;
+    if (!((left | right) & 0x7fffffffu)) return minimum ? left | right : left & right;
+    uint32_t key_a = left ^ ((left & 0x80000000u) ? UINT32_MAX : 0x80000000u);
+    uint32_t key_b = right ^ ((right & 0x80000000u) ? UINT32_MAX : 0x80000000u);
+    return (minimum ? key_a < key_b : key_a > key_b) ? left : right;
+}
+
 static uint64_t vfp_a8_add_sub(uint64_t a, uint64_t b, bool dbl, bool sub,
                                uint32_t fpscr, uint32_t *exceptions) {
     const unsigned fraction = dbl ? 52u : 23u;

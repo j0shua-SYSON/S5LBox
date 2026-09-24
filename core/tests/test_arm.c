@@ -8014,6 +8014,74 @@ static void test_cortex_a8_neon_transpose_fetch_and_retry(void) {
      }
 }
 
+static void test_cortex_a8_neon_minmax_fetch_and_retry(void) {
+    for (unsigned host=0;host<2u;host++)
+     for (unsigned op=0;op<2u;op++)
+      for (unsigned quad=0;quad<2u;quad++)
+       for (unsigned fault=0;fault<4u;fault++) {
+        memset(g_ram,0,sizeof g_ram); arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&bus,ARM_ARCH_V7_CORTEX_A8),"max/min split fetch reset");
+        c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u; c.cp15.cpacr=0x00f00000u;
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|test_it_bits(0x1cu);
+        c.r[15]=0xffeu; c.vfp_fpscr=0x08c00002u; c.vfp_fpexc=fault ? 0u : ARM_FPEXC_EN;
+        for (unsigned r=0;r<32u;r++) c.vfp_s[r]=0xdead0000u+r;
+        for (unsigned r=0;r<16u;r++) c.a8_vfp_hi[r]=UINT64_C(0x7f800001beef0000)+r;
+        c.a8_vfp_hi[0]=UINT64_C(0x7f80000100000001); c.a8_vfp_hi[1]=UINT64_C(0x3f800000bf800000);
+        c.vfp_s[0]=0x80000000u; c.vfp_s[1]=0x3f800000u; c.vfp_s[2]=c.vfp_s[3]=0u;
+        uint32_t singles[32],flags=c.cpsr; uint64_t upper[16];
+        memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
+        uint32_t insn=0xef40ef80u|(op<<21)|(quad<<6);
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x8032u);
+        m_w32(NULL,0x6004u,fault==1u ? 0u : fault==2u ? 0xa033u : fault==3u ? 0xa012u : 0xa032u);
+        m_w16(NULL,0x8ffeu,(uint16_t)(insn>>16)); m_w16(NULL,0xa000u,(uint16_t)insn); m_w16(NULL,0x9000u,0u);
+        CHECK(arm_step(&c)==ARM_OK && c.cycles==1u && c.vfp_fpscr==(fault ? 0x08c00002u : 0x08c00083u),
+              "max/min split fetch disposition");
+        if (fault) CHECK(c.r[15]==ARM_VEC_PREFETCH && c.r[14]==0x1002u && c.spsr[ARM_BANK_ABT]==flags &&
+            c.cp15.ifar==0x1000u && (c.cp15.ifsr&15u)==(fault==1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION) &&
+            !(c.cpsr&(ARM_CPSR_T|TEST_IT_MASK)) && c.vfp_fpexc==0u,"max/min effects preceded full User fetch");
+        else {
+            upper[14]=op ? UINT64_C(0x7fc0000080000000) : UINT64_C(0x7fc0000000000000);
+            if (quad) upper[15]=op ? UINT64_C(0x00000000bf800000) : UINT64_C(0x3f80000000000000);
+            CHECK(c.r[15]==0x1002u && c.cpsr==((flags&~TEST_IT_MASK)|test_it_bits(0x18u)),"max/min split fetch IT");
+        }
+        CHECK(!memcmp(singles,c.vfp_s,sizeof singles) && !memcmp(upper,c.a8_vfp_hi,sizeof upper),"max/min User fetch full register state");
+       }
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned op=0;op<2u;op++)
+      for (unsigned quad=0;quad<2u;quad++) {
+        memset(g_ram,0,sizeof g_ram); arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"max/min lazy retry reset");
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_Z|ARM_CPSR_Q|(thumb ? ARM_CPSR_T : 0u); c.cp15.cpacr=0x00f00000u;
+        for (unsigned r=0;r<32u;r++) c.vfp_s[r]=0xdead0000u+r;
+        for (unsigned r=0;r<16u;r++) c.a8_vfp_hi[r]=UINT64_C(0x7f800001beef0000)+r;
+        c.a8_vfp_hi[0]=UINT64_C(0x7f80000100000001); c.a8_vfp_hi[1]=UINT64_C(0x3f800000bf800000);
+        c.vfp_s[0]=0x80000000u; c.vfp_s[1]=0x3f800000u; c.vfp_s[2]=c.vfp_s[3]=0u;
+        uint32_t singles[32]; uint64_t upper[16];
+        memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
+        c.r[15]=0x100u; c.r[5]=ARM_FPEXC_EN; c.r[2]=0x12345678u; c.vfp_fpscr=0x08c00002u;
+        uint32_t insn=(thumb ? 0xef40ef80u : 0xf240ef80u)|(op<<21)|(quad<<6);
+        if (thumb) {
+            m_w16(NULL,0x100u,0xbf04u); m_w16(NULL,0x102u,(uint16_t)(insn>>16));
+            m_w16(NULL,0x104u,(uint16_t)insn); m_w16(NULL,0x106u,0x2201u);
+        } else { m_w32(NULL,0x100u,insn); m_w32(NULL,0x104u,0xe3a02001u); }
+        put_vfp_system_transfer(0u,ARM_VEC_UNDEFINED,0u,8u,5u); m_w32(NULL,8u,thumb ? 0xe25ef002u : 0xe25ef004u);
+        if (thumb) CHECK(arm_step(&c)==ARM_OK,"max/min lazy IT setup");
+        uint32_t flags=c.cpsr,pc=c.r[15];
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==ARM_VEC_UNDEFINED && c.r[14]==pc+(thumb ? 2u : 4u) &&
+              c.spsr[ARM_BANK_UND]==flags && c.vfp_fpscr==0x08c00002u && !memcmp(singles,c.vfp_s,sizeof singles) &&
+              !memcmp(upper,c.a8_vfp_hi,sizeof upper),"max/min changed FP state before guest enable");
+        CHECK(arm_step(&c)==ARM_OK && c.vfp_fpexc==ARM_FPEXC_EN,"max/min guest enable");
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==pc && c.cpsr==flags,"max/min exception return");
+        upper[14]=op ? UINT64_C(0x7fc0000080000000) : UINT64_C(0x7fc0000000000000);
+        if (quad) upper[15]=op ? UINT64_C(0x00000000bf800000) : UINT64_C(0x3f80000000000000);
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==pc+4u && c.cpsr==(thumb ? (flags&~TEST_IT_MASK)|test_it_bits(0x08u) : flags) &&
+              c.vfp_fpscr==0x08c00083u && !memcmp(singles,c.vfp_s,sizeof singles) && !memcmp(upper,c.a8_vfp_hi,sizeof upper),
+              "max/min guest exact retry");
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==0x108u && c.r[2]==1u && c.cpsr==(flags&~TEST_IT_MASK) &&
+              c.cycles==(thumb ? 6u : 5u),"max/min retry changed following condition");
+      }
+}
+
 static void test_cortex_a8_neon_integer_fetch_and_retry(void) {
     static const uint64_t inputs[]={UINT64_C(0xfefffffd01000003),UINT64_C(0x80000000ffffffff),
         UINT64_C(0x800000013fc00000),UINT64_C(0x7fc12345bf000000)};
@@ -12260,6 +12328,7 @@ int main(void) {
     test_cortex_a8_neon_transpose_fetch_and_retry();
     test_cortex_a8_neon_macc_fetch_and_retry();
     test_cortex_a8_neon_integer_fetch_and_retry();
+    test_cortex_a8_neon_minmax_fetch_and_retry();
     test_cortex_a8_neon_by_scalar_fetch_and_retry();
     test_cortex_a8_vfp_single_memory_aborts();
     test_cortex_a8_vfp_multiple_memory_aborts();

@@ -713,6 +713,66 @@ unit F64 ramp, F32 ramp and F64 remainder fixtures retain their 6,144,
 4,096, 4,096, 640, 1,536, 336, 1,824 and 112 passing calls. The entire
 guarded kernel-entry trace is identical through the 61,650-step ECC stop.
 
+Advanced SIMD VMAX/VMIN.F32 cover both instruction sets and every D/Q
+register. Both operands are unpacked with standard FZ/default-NaN controls
+before selection. Quiet NaNs produce the positive default NaN; signaling
+NaNs additionally set IOC, and flushed subnormals set IDC even when the
+other operand is a NaN. Maximum chooses positive zero and minimum negative
+zero when their signs differ. Finite selection uses integer ordering and
+does not introduce rounding exceptions or use host floating-point state.
+Results from all active lanes are staged before publication, preserving
+overlapping sources. Invalid sizes and odd Q operands are refused before
+coprocessor availability is considered. This follows
+[DDI0406C.b, A2.7.8 and A8.8.335](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Tests cover all destination/source register triples, both operations/ISAs,
+D/Q widths, all 512 rounding/FZ/DN/LEN/STRIDE control combinations and ignored
+trap/AHP fields. Nineteen raw anchors verify an independent native-comparison
+oracle in both operand orders. All pairs of 22 classes and 1,024 random
+four-lane pairs exercise sixteen guest controls and four host rounding modes
+with pending host exceptions. Further checks cover cumulative flags/VMRS,
+access denial, invalid encodings, IT conditions, legacy and adjacent
+allocations, checked host fetch failures, split-page User faults, and
+guest enable/return retries. The first run exposed four refusals incorrectly
+reclassified as guest lazy-enable traps: unsupported neighboring ARM SIMD
+instructions inherited the legacy broad SIMD mask while FPEXC was disabled.
+Cortex-A8 now keeps those missing operations as capability stops regardless
+of availability; supported operations still report explicit guest access
+faults. Twenty-seven older neighbor assertions were updated to require this
+capability-stop behavior. ARM1176 and Swift behavior is unchanged. The numerical
+implementation, raw anchors and independent oracle required no corrections.
+
+Original ARM `vDSP_vmax` and `vDSP_vmin` scalar paths complete 6,912 prepared
+calls. Their exact 376-byte images start at `0x308582d0` and `0x308593d0`;
+these are bounded scalar images, not the entire functions. Before support,
+256 empty-input calls passed and the first nonempty call stopped after
+seventeen steps at `0x30858438`, `VMAX.F32 d2, d1, d0`, after four bytes from
+each input, twenty stack writes and twelve argument bytes, with no output.
+The frozen fixture and runner were unchanged for the first successful run.
+Unit strides cover nine counts from zero through 15; three signed nonunit
+stride tuples additionally cover 16, 17, 31, 32, 33 and 65. Four word-alignment
+tuples and sixteen guest rounding/FZ/DN combinations exercise twenty raw
+input pairs. An exact-rational oracle supplies forty main and eight upper
+lane rows, checked against twenty raw anchors in both operand orders.
+
+The scalar routines also compute an unstored upper lane from S1 and S3.
+Four prepared upper-lane pairs tied to alignment exercise signed zero,
+signaling NaN, subnormal/infinity and quiet-NaN/subnormal cases. Both result
+lanes and cumulative FPSCR/CPSR are checked after every SIMD operation.
+The fixture checks all FP/general registers, flags, monitor and return state,
+the entire RAM image, instruction counts and exact per-byte fetch/input/output,
+twenty-byte frame and twelve-byte argument accesses. Empty calls read only
+the four-byte count argument. No CPU-family input is prepared or read. These
+results do not cover large unit-stride/vector paths, source/output aliases,
+process launch, board boot, timing or physical behavior.
+
+After max/min support and the refusal-path correction, all 77 strict and
+72 shipping tests pass. The existing dot-product, NEON integer, VFP integer,
+precision, square-root, division, unit F64 ramp, F32 ramp and F64 remainder
+fixtures retain their 3,456, 6,144, 4,096, 4,096, 640, 1,536, 336, 1,824 and
+112 passing calls. The complete guarded kernel-entry trace remains identical
+through the 61,650-step L2 ECC stop.
+
 Advanced SIMD conversions between F32 and signed/unsigned 32-bit integers
 now cover every D/Q register and both instruction sets. They use the same
 integer arithmetic with standard NEON controls: nearest-even for integer
@@ -1421,7 +1481,7 @@ establish that result.
   32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms,
   register Boolean operations, VEXT, 8/16/32-bit VTRN, F32 VABS/VNEG,
   immediate constants, core-register VDUP, register VMUL/VADD/VSUB/VMLA/VMLS.F32,
-  F32 VMUL/VMLA/VMLS by scalar, and F32/signed/unsigned 32-bit NEON conversion
+  F32 VMUL/VMLA/VMLS by scalar, VMAX/VMIN.F32, and F32/signed/unsigned 32-bit NEON conversion
   described above.
   Other upper-bank VFP arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Remaining shared lower-bank
