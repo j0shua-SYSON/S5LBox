@@ -979,6 +979,25 @@ Safari field including its final typed letter. The installed executable was
 matched to the build artifact; installation preserved disk and checkpoint
 hashes. This is not a claim that uninterrupted keyboard latency is fixed.
 
+### Compact integer-to-floating conversion coverage (2026-09-24)
+
+A bounded keyboard profile located repeated integer-to-floating conversions
+inside guest key-shadow drawing. The compact runner previously sent that
+instruction family back through the literal interpreter for every execution.
+The new signed-text path implements scalar `VCVT.F32/F64.S32/U32` directly,
+using integer normalization and rounding. It is ISA-wide, not a guest-library
+replacement: no firmware address, symbol, drawing shortcut or generated code
+is part of the implementation.
+
+The path preserves all four rounding modes, cumulative inexact status, register
+aliasing and scalar conversion behavior with LEN/STRIDE set. F32 retains the
+literal exception-enable fallback; exact F64 conversion does not raise an
+exception. Disabled VFP/access and unavailable double registers still reject
+before mutation. No host floating-point state is touched. Native regression
+coverage compares 16,384 cases with the interpreter, plus rejection, condition,
+partial-prefix and host-state checks. Physical speed and latency remain to be
+measured; extending instruction coverage alone does not establish a speedup.
+
 ### Historical instruction-resume narrative
 
 Two interpreter changes make the current instruction counts different from the

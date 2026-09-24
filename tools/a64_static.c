@@ -1709,6 +1709,18 @@ static a64_compact_raw_admission_t compact_raw_classify_vfp(
         (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
     const bool enabled = (cpu->vfp_fpexc & ARM_FPEXC_EN) != 0u;
 
+    /* Live scalar integer conversions do not use the traced handler table.
+     * Their integer-only implementation honors all rounding modes and sticky
+     * flags, and conversions remain scalar even with LEN/STRIDE set. */
+    if ((insn & UINT32_C(0x0fbf0e50)) == UINT32_C(0x0eb80a40)) {
+        const bool dbl = (insn & (1u << 8)) != 0u;
+        if (!enabled || !vfp_cpacr_permits(cpu) ||
+            (dbl && (insn & (1u << 22))) ||
+            (!dbl && (cpu->vfp_fpscr & ARM_FPSCR_ENABLES)))
+            return A64_COMPACT_RAW_REJECT_VFP;
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
+
     memset(ops, 0, sizeof ops);
     if (!decode_vfp_transfer(insn, cpu->r[15] + 8u, true, ops, &written) ||
         !written || written > 2u)

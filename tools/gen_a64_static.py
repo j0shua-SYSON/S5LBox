@@ -2484,6 +2484,109 @@ def compact_vfp_arithmetic_body(width: int) -> list[str]:
     return body
 
 
+def compact_vfp_integer_to_float_body() -> list[str]:
+    """Scalar VCVT.F32/F64.S32/U32, without touching the host FP state."""
+    p = ".La64cr_vfp_integer_to_float"
+    return [
+        f"{p}:",
+        "    bl .La64cr_vfp_guard_enabled",
+        "    cbz w0, .La64cr_fallback",
+        "    ldr x1, [x27, #120]",
+        "    cbz x1, .La64cr_fallback",
+        "    ldr w8, [x1]",
+        "    tbnz w9, #8, " + p + "_double_guard",
+        # Match the literal F32 exception-enable contract even for exact input.
+        "    mov w10, #0x9f00",
+        "    tst w8, w10",
+        "    b.ne .La64cr_fallback",
+        f"    b {p}_decode",
+        f"{p}_double_guard:",
+        "    tbnz w9, #22, .La64cr_fallback",
+        f"{p}_decode:",
+        "    ubfx w2, w9, #12, #4",
+        "    ubfx w10, w9, #22, #1",
+        "    orr w2, w10, w2, lsl #1",
+        "    and w3, w9, #0xf",
+        "    ubfx w10, w9, #5, #1",
+        "    orr w3, w10, w3, lsl #1",
+        "    ldr x0, [x27, #104]",
+        "    ldr w4, [x0, w3, uxtw #2]",
+        "    mov w5, wzr",
+        "    tbz w9, #7, " + p + "_magnitude",
+        "    and w5, w4, #0x80000000",
+        "    cbz w5, " + p + "_magnitude",
+        # W-register negation intentionally keeps INT32_MIN's unsigned magnitude.
+        "    neg w4, w4",
+        f"{p}_magnitude:",
+        "    mov x6, xzr",
+        "    cbz w4, " + p + "_store",
+        "    clz w7, w4",
+        "    mov w10, #31",
+        "    sub w7, w10, w7",  # highest set bit, 0..31
+        "    tbnz w9, #8, " + p + "_double",
+        "    cmp w7, #23",
+        "    b.hi " + p + "_round",
+        "    mov w10, #23",
+        "    sub w10, w10, w7",
+        "    lsl w11, w4, w10",
+        "    b " + p + "_pack_single",
+        f"{p}_round:",
+        "    sub w10, w7, #23",  # discard only 1..8 bits
+        "    lsr w11, w4, w10",
+        "    mov w12, #1",
+        "    lsl w12, w12, w10",
+        "    sub w13, w12, #1",
+        "    and w13, w13, w4",
+        "    cbz w13, " + p + "_pack_single",
+        "    orr w8, w8, #0x10",  # inexact is sticky; no other exception possible
+        "    ubfx w14, w8, #22, #2",
+        "    cbz w14, " + p + "_nearest",
+        "    cmp w14, #3",
+        "    b.eq " + p + "_pack_single",  # toward zero
+        "    cmp w14, #1",
+        "    b.ne " + p + "_negative",
+        "    cbnz w5, " + p + "_pack_single",  # toward +infinity
+        "    b " + p + "_increment",
+        f"{p}_negative:",
+        "    cbz w5, " + p + "_pack_single",  # toward -infinity
+        "    b " + p + "_increment",
+        f"{p}_nearest:",
+        "    lsr w12, w12, #1",
+        "    cmp w13, w12",
+        "    b.lo " + p + "_pack_single",
+        "    b.hi " + p + "_increment",
+        "    tbz w11, #0, " + p + "_pack_single",  # ties to even
+        f"{p}_increment:",
+        "    add w11, w11, #1",
+        f"{p}_pack_single:",
+        # Include the leading bit by adding to exponent-1. A rounded carry
+        # then increments the exponent naturally, including UINT32_MAX -> 2^32.
+        "    add w6, w7, #126",
+        "    lsl w6, w6, #23",
+        "    add w6, w6, w11",
+        "    orr w6, w6, w5",
+        "    b " + p + "_store",
+        f"{p}_double:",
+        # Every signed/unsigned 32-bit integer is exactly representable in F64.
+        "    mov w10, #52",
+        "    sub w10, w10, w7",
+        "    lsl x6, x4, x10",
+        "    and x6, x6, #0x000fffffffffffff",
+        "    add w10, w7, #1023",
+        "    orr x6, x6, x10, lsl #52",
+        "    orr x6, x6, x5, lsl #32",
+        f"{p}_store:",
+        "    add x0, x0, w2, uxtw #2",
+        "    tbnz w9, #8, " + p + "_store_double",
+        "    str w6, [x0]",
+        "    str w8, [x1]",
+        "    b .La64cr_vfp_done",
+        f"{p}_store_double:",
+        "    str x6, [x0]",
+        "    b .La64cr_vfp_done",
+    ]
+
+
 def compact_vfp_narrow_body() -> list[str]:
     """Return transactional VCVT.F32.F64 for the audited live contract."""
     p = ".La64cr_vfp_narrow_64"
@@ -3195,6 +3298,8 @@ def compact_vfp_nonarith_body() -> list[str]:
         "    b.eq .La64cr_vfp_compare_select",
         "    cmp w10, #7",
         "    b.eq .La64cr_vfp_convert_select",
+        "    cmp w10, #8",
+        "    b.eq .La64cr_vfp_integer_to_float",
         "    cbz w10, .La64cr_vfp_unary_mov_abs",
         "    cmp w10, #1",
         "    b.ne .La64cr_fallback",
@@ -3341,6 +3446,8 @@ def compact_vfp_nonarith_body() -> list[str]:
         "    b .La64cr_vfp_done",
         "",
         *compact_vfp_narrow_body(),
+        "",
+        *compact_vfp_integer_to_float_body(),
         "",
         *compact_vfp_memory_body(),
         "",

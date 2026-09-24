@@ -7698,6 +7698,155 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
     return true;
 }
 
+static bool validate_compact_raw_vfp_integer_to_float_oracles(void) {
+    const bool native = a64_static_host_available();
+    const uint32_t pc = UINT32_C(0x18a00);
+    uint32_t random = UINT32_C(0x5a194327);
+    unsigned cases = 0u;
+    arm_cpu_t reference, compact, before;
+    unsigned completed;
+    for (unsigned i = 0u; i < 1024u; i++) {
+        uint32_t input;
+        if (i < 256u) input = i;
+        else if (i < 512u) input = 0u - (i - 256u);
+        else if (i < 736u) {
+            unsigned offset = i - 512u;
+            input = (UINT32_C(1) << (offset / 7u)) + offset % 7u - 3u;
+        } else {
+            random = random * UINT32_C(1664525) + UINT32_C(1013904223);
+            input = random;
+        }
+        for (unsigned mode = 0u; mode < 16u; mode++) {
+            bool dbl = (mode & 1u) != 0u;
+            unsigned sign = (mode >> 1) & 1u;
+            unsigned rd = i & (dbl ? 30u : 31u);
+            unsigned rm = (i * 13u + 7u) & 31u;
+            if ((i & 3u) == 0u) rm = rd;
+            else if (dbl && (i & 3u) == 1u) rm = rd + 1u;
+            uint32_t insn = VFP_UN_S(8, sign, rd, rm) |
+                            (dbl ? (1u << 8) : 0u);
+            seed_vfp_oracle(&reference, &insn, 1u, pc, true);
+            reference.vfp_s[rm] = input;
+            reference.vfp_fpscr = ((mode >> 2) << 22) |
+                (((i >> 1) & 15u) << 28) |
+                ((i & 1u) ? ARM_FPSCR_FZ | ARM_FPSCR_DN |
+                             ARM_FPSCR_LEN | ARM_FPSCR_STRIDE : 0u) |
+                ((i & 2u) ? UINT32_C(0x9f) : 0u) |
+                ((dbl && (i & 4u)) ? ARM_FPSCR_ENABLES : 0u);
+            if (a64_compact_raw_classify_instruction(
+                    &reference, insn, false) != A64_COMPACT_RAW_ADMIT_EXECUTE) {
+                fprintf(stderr, "jitbench: integer-to-float admission %u/%u\n",
+                        i, mode);
+                return false;
+            }
+            if (!native) continue;
+            compact = reference;
+            completed = UINT_MAX;
+            if (arm_step(&reference) != ARM_OK ||
+                !a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                                     g_ram, sizeof g_ram, &completed) ||
+                completed != 1u ||
+                !static_vfp_states_equal(&reference, &compact)) {
+                fprintf(stderr, "jitbench: integer-to-float state %u/%u "
+                        "input=%08x expected=%08x:%08x actual=%08x:%08x "
+                        "fpscr=%08x/%08x completed=%u\n", i, mode, input,
+                        reference.vfp_s[rd], reference.vfp_s[rd + (dbl ? 1u : 0u)],
+                        compact.vfp_s[rd], compact.vfp_s[rd + (dbl ? 1u : 0u)],
+                        reference.vfp_fpscr, compact.vfp_fpscr, completed);
+                return false;
+            }
+            cases++;
+        }
+    }
+
+    for (unsigned rejection = 0u; rejection < 5u; rejection++) {
+        uint32_t insn = VFP_UN_S(8, 1, 15, 31);
+        if (rejection == 4u) insn |= 1u << 8; /* nonexistent d23 */
+        seed_vfp_oracle(&compact, &insn, 1u, pc, true);
+        if (rejection == 0u) compact.vfp_fpexc = 0u;
+        if (rejection == 1u) compact.cp15.cpacr = 0u;
+        if (rejection == 2u) compact.vfp_fpscr = ARM_FPSCR_IOE;
+        if (rejection == 3u) compact.vfp_fpscr = ARM_FPSCR_IXE;
+        before = compact;
+        completed = UINT_MAX;
+        if (a64_compact_raw_classify_instruction(&compact, insn, false) !=
+                A64_COMPACT_RAW_REJECT_VFP ||
+            (native && (!a64_compact_raw_run(
+                &compact, &g_ram[pc], pc, 4u, 1u, g_ram, sizeof g_ram,
+                &completed) || completed != 0u ||
+                !static_vfp_states_equal(&before, &compact)))) {
+            fprintf(stderr, "jitbench: integer-to-float refusal %u\n", rejection);
+            return false;
+        }
+    }
+    if (!native) {
+        printf("COMPACT-RAW-VFP-INTEGER-ORACLE admission=16384 refusals=5 "
+               "SKIP: no signed AArch64 handlers\n");
+        return true;
+    }
+
+    /* Failed condition wins even over disabled access and exception enables. */
+    uint32_t skipped = VFP_UN_S(8, 1, 0, 0) & UINT32_C(0x0fffffff);
+    seed_vfp_oracle(&reference, &skipped, 1u, pc, false);
+    reference.cpsr &= ~ARM_CPSR_Z;
+    reference.cp15.cpacr = 0u;
+    reference.vfp_fpscr = ARM_FPSCR_ENABLES;
+    compact = reference;
+    if (arm_step(&reference) != ARM_OK ||
+        !a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                             g_ram, sizeof g_ram, &completed) ||
+        completed != 1u || !static_vfp_states_equal(&reference, &compact)) {
+        fprintf(stderr, "jitbench: integer-to-float condition-before-guard\n");
+        return false;
+    }
+    const uint32_t partial[] = {
+        VFP_UN_S(8, 0, 0, 31), VFP_VMSR(1, 0), VFP_UN_S(8, 1, 1, 30),
+    };
+    seed_vfp_oracle(&reference, partial, 3u, pc, true);
+    reference.r[0] = ARM_FPSCR_IXE;
+    compact = reference;
+    if (arm_step(&reference) != ARM_OK || arm_step(&reference) != ARM_OK ||
+        !a64_compact_raw_run(&compact, &g_ram[pc], pc, 12u, 3u,
+                             g_ram, sizeof g_ram, &completed) ||
+        completed != 2u || !static_vfp_states_equal(&reference, &compact)) {
+        fprintf(stderr, "jitbench: integer-to-float partial-prefix\n");
+        return false;
+    }
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    for (unsigned rejection = 0u; rejection < 2u; rejection++) {
+        const uint32_t insn = VFP_UN_S(8, 0, 31, 31);
+        seed_vfp_oracle(&reference, &insn, 1u, pc, rejection == 0u);
+        reference.vfp_s[31] = UINT32_MAX;
+        compact = before = reference;
+        if (!rejection && arm_step(&reference) != ARM_OK) return false;
+        uint64_t old_fpcr = static_host_fpcr_read();
+        uint64_t old_fpsr = static_host_fpsr_read();
+        static_host_fpcr_write((old_fpcr & ~(UINT64_C(3) << 22)) |
+                              (UINT64_C(2) << 22));
+        static_host_fpsr_write(UINT64_C(0x08000015));
+        uint64_t installed_fpcr = static_host_fpcr_read();
+        uint64_t installed_fpsr = static_host_fpsr_read();
+        bool ok = a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                                      g_ram, sizeof g_ram, &completed);
+        uint64_t after_fpcr = static_host_fpcr_read();
+        uint64_t after_fpsr = static_host_fpsr_read();
+        static_host_fpsr_write(old_fpsr);
+        static_host_fpcr_write(old_fpcr);
+        if (!ok || after_fpcr != installed_fpcr || after_fpsr != installed_fpsr ||
+            completed != (rejection ? 0u : 1u) ||
+            !static_vfp_states_equal(rejection ? &before : &reference, &compact)) {
+            fprintf(stderr, "jitbench: integer-to-float host FP state\n");
+            return false;
+        }
+    }
+#endif
+    printf("COMPACT-RAW-VFP-INTEGER-ORACLE exact=yes cases=%u widths=2 "
+           "signedness=both rounding=all aliases=yes scalar-len=yes "
+           "sticky-flags=yes refusals=5 conditions=yes partial-prefix=yes "
+           "host-fp-state=yes runtime-codegen=no\n", cases);
+    return true;
+}
+
 static bool validate_compact_raw_vfp_narrow_oracles(void) {
     static const struct {
         uint32_t insn;
@@ -9522,6 +9671,8 @@ static bool validate_compact_raw_oracles(void) {
     if (!validate_compact_raw_vfp_arithmetic_oracles())
         return false;
     if (!validate_compact_raw_vfp_narrow_oracles())
+        return false;
+    if (!validate_compact_raw_vfp_integer_to_float_oracles())
         return false;
     if (!validate_compact_raw_vfp_memory_oracles())
         return false;
@@ -14531,6 +14682,7 @@ int main(int argc, char **argv) {
     }
     if (!validate_compact_raw_admission_shapes()) return 1;
     if (!jit_host_can_execute()) {
+        if (!validate_compact_raw_vfp_integer_to_float_oracles()) return 1;
         printf("SKIP: not an arm64 execution host.\n");
         return 0;
     }
