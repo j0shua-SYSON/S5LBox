@@ -982,13 +982,13 @@ static uint64_t vfp_a8_sqrt(uint64_t a, bool dbl, uint32_t fpscr, uint32_t *exce
     return vfp_a8_round(root, exponent / 2 + bias, 0u, dbl, fpscr, exceptions);
 }
 
-/* A8.8.283/312/351/356/401/415 and Appendix K. Both S and D operations obey FPSCR;
+/* A8.8.283/312/337/351/356/401/415 and Appendix K. Both S and D operations obey FPSCR;
  * D16-D19 is a second scalar bank. Stage every lane before publication so
  * circular vectors and overlapping source/destination banks read originals. */
 static arm_status_t vfp_a8_arithmetic_data(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
     g_reason = NULL;
     bool dbl = BIT(8), sub_or_neg = BIT(6), multiply = vfp_is_multiply_data(insn), divide = vfp_is_divide_data(insn);
-    bool square_root = vfp_is_sqrt_data(insn);
+    bool square_root = vfp_is_sqrt_data(insn), accumulate = vfp_is_macc_data(insn);
     unsigned rd = dbl ? FIELD(12) | (BIT(22) << 4) : SREG(FIELD(12), BIT(22));
     unsigned rn = dbl ? FIELD(16) | (BIT(7) << 4) : SREG(FIELD(16), BIT(7));
     unsigned rm = dbl ? (insn & 15u) | (BIT(5) << 4) : SREG(insn & 15u, BIT(5));
@@ -1015,9 +1015,17 @@ static arm_status_t vfp_a8_arithmetic_data(arm_cpu_t *c, uint32_t pc, uint32_t i
         else {
             unsigned nr = vfp_short_vector_reg(&shape, rn, lane, false);
             uint64_t a = dbl ? vfp_get_d(c, nr) : vfp_get_s(c, nr);
-            result[lane] = divide ? vfp_a8_divide(a, b, dbl, c->vfp_fpscr, &exceptions) :
-                          multiply ? vfp_a8_multiply(a, b, dbl, c->vfp_fpscr, &exceptions) :
-                                     vfp_a8_add_sub(a, b, dbl, sub_or_neg, c->vfp_fpscr, &exceptions);
+            if (accumulate) {
+                uint64_t product = vfp_a8_multiply(a, b, dbl, c->vfp_fpscr, &exceptions);
+                /* VMLS negates the rounded product, including a NaN. The
+                 * accumulator is the first FPAdd operand for NaN priority. */
+                if (sub_or_neg) product ^= dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+                unsigned dr = vfp_short_vector_reg(&shape, rd, lane, false);
+                uint64_t accumulator = dbl ? vfp_get_d(c, dr) : vfp_get_s(c, dr);
+                result[lane] = vfp_a8_add_sub(accumulator, product, dbl, false, c->vfp_fpscr, &exceptions);
+            } else result[lane] = divide ? vfp_a8_divide(a, b, dbl, c->vfp_fpscr, &exceptions) :
+                                 multiply ? vfp_a8_multiply(a, b, dbl, c->vfp_fpscr, &exceptions) :
+                                            vfp_a8_add_sub(a, b, dbl, sub_or_neg, c->vfp_fpscr, &exceptions);
         }
         /* VNMUL applies FPNeg after rounding, even to a NaN or signed zero. */
         if (multiply && sub_or_neg) result[lane] ^= dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
@@ -2019,7 +2027,7 @@ arm_status_t vfp_execute(arm_cpu_t *c, uint32_t pc, uint32_t insn,
     if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_integer_data(insn))
         return vfp_a8_integer_data(c, pc, insn);
     if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 &&
-        (vfp_is_add_sub_data(insn) || vfp_is_multiply_data(insn) || vfp_is_divide_data(insn) || vfp_is_sqrt_data(insn)))
+        (vfp_is_add_sub_data(insn) || vfp_is_multiply_data(insn) || vfp_is_divide_data(insn) || vfp_is_sqrt_data(insn) || vfp_is_macc_data(insn)))
         return vfp_a8_arithmetic_data(c, pc, insn);
     if (!c || (c->vfp_fpscr & ARM_FPSCR_RMODE) == 0u)
         return vfp_execute_inner(c, pc, insn, bus);

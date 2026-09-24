@@ -281,6 +281,42 @@ static void test_vfp_precision_fetch_and_retry(void) {
         }
 }
 
+static void test_vfp_macc_fetch_and_retry(void) {
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned dbl=0;dbl<2u;dbl++)
+      for (unsigned sub=0;sub<2u;sub++)
+       for (unsigned host=0;host<2u;host++)
+        for (unsigned enabled=0;enabled<2u;enabled++)
+         for (unsigned half=0;half<=thumb;half++) {
+            fixture_t f; arm_bus_t bus; arm_cpu_t c;
+            setup(&f,&bus,&c,thumb!=0u,host!=0u); if (thumb) c.cpsr|=0x1800u;
+            c.cp15.cpacr=0x00f00000u; c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u; c.vfp_fpscr=0x0b000002u;
+            c.excl_valid=true; c.excl_addr=0x2468u; c.a8_excl_size=8u;
+            uint32_t insn=(dbl ? 0xee40fb81u : 0xee48fa20u)|(sub<<6);
+            if (thumb) { put16(&f,0u,(uint16_t)(insn>>16)); put16(&f,2u,(uint16_t)insn); } else put32(&f,0u,insn);
+            for (unsigned d=0;d<32u;d++) vfp_set_d(&c,d,UINT64_C(0xdead1234beef0000)+d);
+            if (dbl) {
+                vfp_set_d(&c,31u,UINT64_C(0xbff0000000000000)); vfp_set_d(&c,16u,UINT64_C(0x3ff0000000000001));
+                vfp_set_d(&c,1u,UINT64_C(0x3feffffffffffffe));
+            } else { vfp_set_s(&c,31u,0xbf800000u); vfp_set_s(&c,16u,0x3f800001u); vfp_set_s(&c,1u,0x3f7ffffeu); }
+            uint64_t expected[32]; for (unsigned d=0;d<32u;d++) expected[d]=vfp_get_d(&c,d);
+            uint32_t flags=c.cpsr;
+            f.fail_address=half*2u; f.fail_size=thumb ? 2u : 4u;
+            CHECK(arm_step(&c)==ARM_HALT,"VFP macc partial fetch did not halt"); check_stop(&f,&c,0u,flags);
+            bool match=true; for (unsigned d=0;d<32u;d++) match&=vfp_get_d(&c,d)==expected[d];
+            CHECK(match && c.vfp_fpscr==0x0b000002u && c.vfp_fpexc==(enabled ? ARM_FPEXC_EN : 0u) &&
+                  c.excl_valid && c.excl_addr==0x2468u && c.a8_excl_size==8u,"VFP macc effects preceded full fetch");
+            f.failed=false; f.fail_size=0u; c.vfp_fpexc=ARM_FPEXC_EN;
+            if (dbl) expected[31]=sub ? UINT64_C(0xc000000000000000) : 0u;
+            else expected[15]=(expected[15]&UINT64_C(0xffffffff))|(sub ? UINT64_C(0xc000000000000000) : 0u);
+            CHECK(arm_step(&c)==ARM_OK && c.r[15]==4u && c.cycles==1u && c.cpsr==(flags&~0x0600fc00u) &&
+                  c.vfp_fpscr==(0x0b000002u|ARM_FPSCR_IXC) && c.excl_valid && c.excl_addr==0x2468u && c.a8_excl_size==8u,
+                  "VFP macc checked fetch exact retry");
+            match=true; for (unsigned d=0;d<32u;d++) match&=vfp_get_d(&c,d)==expected[d];
+            CHECK(match,"VFP macc retry full register state");
+         }
+}
+
 static void test_vfp_integer_fetch_and_retry(void) {
     /* kind order matches int-to-FP, VCVTR, VCVT; F32/F64 and unsigned/signed. */
     static const uint32_t insns[] = {0xeef8fa48u,0xeef8fb48u,0xeef8fac8u,0xeef8fbc8u,
@@ -985,6 +1021,7 @@ static void test_signed_runner_entry_guards(void) {
 int main(void) {
     test_vfp_binary_fetch_and_retry();
     test_vfp_precision_fetch_and_retry();
+    test_vfp_macc_fetch_and_retry();
     test_vfp_integer_fetch_and_retry();
     test_neon_integer_fetch_and_retry();
     test_neon_by_scalar_fetch_and_retry();

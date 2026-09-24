@@ -667,6 +667,52 @@ unit F64 ramp, F32 ramp and F64 remainder fixtures retain all 4,096, 640,
 (77 strict and 72 shipping tests). The entire guarded kernel-entry trace
 remains identical through the same 61,650-step L2 parity/ECC stop.
 
+VFP VMLA/VMLS now cover F32/F64 and the full register bank, including short
+vectors. The product and addition round separately using guest controls;
+VMLS negates the rounded product before addition, including a NaN product.
+The original accumulator is the first addition operand, which also determines
+NaN precedence. Both stages contribute cumulative exception flags. Staged
+results preserve the original sources and accumulators for overlapping
+vectors. Guest controls and access are checked before arithmetic. This
+follows [DDI0406C.b, A8.8.337 and Appendix K](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Tests cover every scalar register triple and both formats/operations/ISAs,
+short-vector banks and strides, independent native arithmetic for each stage,
+raw anchors distinguishing fused arithmetic, intermediate overflow/underflow,
+and all triples of the 22 value classes under sixteen guest controls. Host
+rounding and pending exceptions remain intact. Tests also cover cumulative
+flags, access/conditions, invalid state, legacy and neighboring allocations,
+checked host fetches, split-page User faults and guest enable/return retries.
+The first run found one mistaken NaN-sign anchor and two obsolete refusal
+sites: VMLS preserves the negated invalid-product NaN when DN is clear, and
+VMLA is now supported. Correcting those expectations removed nine failures;
+the production arithmetic and native oracle were unchanged. All three
+focused tests then passed.
+
+The unchanged 1,036-byte ARM `vDSP_dotprD` routine at
+`0x3085763c..0x30857a48` completes 3,456 prepared calls on paths that do not
+read the CPU-family commpage. Before this addition, 1,024 calls passed and
+the first four-element unit-stride call stopped after seventeen instructions
+at `0x308579bc`, on `VMLA.F64 d0, d16, d24`, after reading both 32-byte inputs
+and before the output write. The fixture and runner were unchanged for the
+first successful run. Unit strides cover nine counts from zero through 15;
+three nonunit signed-stride pairs additionally cover 16, 17, 31, 32, 33 and
+65. Four word-alignment tuples, four small-integer input patterns and all
+four FZ/DN combinations use nearest-even rounding and LEN/STRIDE zero.
+Independent closed-form sums and twenty raw integer anchors check results.
+The fixture also checks every instruction fetch and input/output byte,
+the 64-byte saved FP frame and eight-byte argument block, all FP/general
+registers, flags, exclusive state, return state, instruction counts and
+whole RAM. No CPU identity is supplied or overridden. These selected paths
+do not establish large unit-stride execution, fractional/special inputs,
+process launch, board boot, timing or physical behavior.
+
+After VFP multiply-accumulate support, all 77 strict and 72 shipping tests
+pass. The NEON integer, VFP integer, precision, square-root, division,
+unit F64 ramp, F32 ramp and F64 remainder fixtures retain their 6,144,
+4,096, 4,096, 640, 1,536, 336, 1,824 and 112 passing calls. The entire
+guarded kernel-entry trace is identical through the 61,650-step ECC stop.
+
 Advanced SIMD conversions between F32 and signed/unsigned 32-bit integers
 now cover every D/Q register and both instruction sets. They use the same
 integer arithmetic with standard NEON controls: nearest-even for integer
@@ -833,7 +879,7 @@ both original halves. Tests cover complete register lists, both stack
 aliases, invalid modes/ranges, access/conditional behavior and faults after
 partial progress, including with host memory shortcuts enabled. A separate
 test places the odd-length trailing gap on an unmapped page. Upper-bank
-VFP arithmetic beyond VADD/VSUB/VMUL/VNMUL/VDIV/VSQRT, F32/F64 precision
+VFP arithmetic beyond VADD/VSUB/VMUL/VNMUL/VDIV/VSQRT/VMLA/VMLS, F32/F64 precision
 conversion and 32-bit integer conversion, and the remaining NEON families,
 are still unfinished.
 
@@ -866,7 +912,7 @@ flags and IT state unchanged. IT conditions, privileged
 state changes and permitted User thread-ID/barrier accesses retain their
 normal semantics. CP14 and Swift CP15 transfers remain unsupported in
 Thumb; supported VFP instructions cover the A8 transfers, raw data operations,
-comparisons, VADD/VSUB/VMUL/VNMUL/VDIV/VSQRT, F32/F64 precision conversion
+comparisons, VADD/VSUB/VMUL/VNMUL/VDIV/VSQRT/VMLA/VMLS, F32/F64 precision conversion
 and 32-bit integer conversion above.
 CP15 MRC2/MCR2 encodings are undefined and refused. The ARM1176
 instruction path is unchanged.
@@ -1371,10 +1417,10 @@ establish that result.
 - Cortex-A8 stores d0-d31 and supports system/core/memory transfers plus
   VFP copies, immediate constants and sign operations with short vectors,
   scalar comparisons, F32/F64 precision conversion, 32-bit integer conversion and
-  VADD/VSUB/VMUL/VNMUL/VDIV/VSQRT across the full register bank, and the bounded
+  VADD/VSUB/VMUL/VNMUL/VDIV/VSQRT/VMLA/VMLS across the full register bank, and the bounded
   32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms,
   register Boolean operations, VEXT, 8/16/32-bit VTRN, F32 VABS/VNEG,
-  immediate constants, core-register VDUP, register VMUL/VADD/VSUB/VMLA/VMLS.F32
+  immediate constants, core-register VDUP, register VMUL/VADD/VSUB/VMLA/VMLS.F32,
   F32 VMUL/VMLA/VMLS by scalar, and F32/signed/unsigned 32-bit NEON conversion
   described above.
   Other upper-bank VFP arithmetic, the remaining NEON families, and full

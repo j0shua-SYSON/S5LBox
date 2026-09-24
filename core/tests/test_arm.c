@@ -8328,6 +8328,79 @@ static void test_cortex_a8_vfp_precision_fetch_and_retry(void) {
     }
 }
 
+static void test_cortex_a8_vfp_macc_fetch_and_retry(void) {
+    for (unsigned host=0;host<2u;host++)
+     for (unsigned dbl=0;dbl<2u;dbl++)
+      for (unsigned sub=0;sub<2u;sub++)
+       for (unsigned fault=0;fault<4u;fault++) {
+        memset(g_ram,0,sizeof g_ram); arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&bus,ARM_ARCH_V7_CORTEX_A8),"VFP macc split fetch reset");
+        c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u; c.cp15.cpacr=0x00f00000u;
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|test_it_bits(0x1cu);
+        c.r[15]=0xffeu; c.vfp_fpscr=0x0b000002u; c.vfp_fpexc=fault ? 0u : ARM_FPEXC_EN;
+        for (unsigned r=0;r<32u;r++) c.vfp_s[r]=0xdead0000u+r;
+        for (unsigned r=0;r<16u;r++) c.a8_vfp_hi[r]=UINT64_C(0x7ff01234beef0000)+r;
+        if (dbl) {
+            c.a8_vfp_hi[15]=UINT64_C(0xbff0000000000000); c.a8_vfp_hi[0]=UINT64_C(0x3ff0000000000001);
+            c.vfp_s[2]=0xfffffffeu; c.vfp_s[3]=0x3fefffffu;
+        } else { c.vfp_s[31]=0xbf800000u; c.vfp_s[16]=0x3f800001u; c.vfp_s[1]=0x3f7ffffeu; }
+        uint32_t singles[32], flags=c.cpsr; uint64_t upper[16];
+        memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
+        uint32_t insn=(dbl ? 0xee40fb81u : 0xee48fa20u)|(sub<<6);
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x8032u);
+        m_w32(NULL,0x6004u,fault==1u ? 0u : fault==2u ? 0xa033u : fault==3u ? 0xa012u : 0xa032u);
+        m_w16(NULL,0x8ffeu,(uint16_t)(insn>>16)); m_w16(NULL,0xa000u,(uint16_t)insn); m_w16(NULL,0x9000u,0u);
+        CHECK(arm_step(&c)==ARM_OK && c.cycles==1u && c.vfp_fpscr==(0x0b000002u|(fault ? 0u : 0x10u)),
+              "VFP macc split fetch disposition");
+        if (fault) CHECK(c.r[15]==ARM_VEC_PREFETCH && c.r[14]==0x1002u && c.spsr[ARM_BANK_ABT]==flags &&
+            c.cp15.ifar==0x1000u && (c.cp15.ifsr&15u)==(fault==1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION) &&
+            !(c.cpsr&(ARM_CPSR_T|TEST_IT_MASK)) && c.vfp_fpexc==0u,"VFP macc effects preceded full User fetch");
+        else {
+            if (dbl) upper[15]=sub ? UINT64_C(0xc000000000000000) : 0u; else singles[31]=sub ? 0xc0000000u : 0u;
+            CHECK(c.r[15]==0x1002u && c.cpsr==((flags&~TEST_IT_MASK)|test_it_bits(0x18u)),"VFP macc split fetch IT");
+        }
+        CHECK(memcmp(singles,c.vfp_s,sizeof singles)==0 && memcmp(upper,c.a8_vfp_hi,sizeof upper)==0,
+              "VFP macc User fetch full register state");
+       }
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned dbl=0;dbl<2u;dbl++)
+      for (unsigned sub=0;sub<2u;sub++) {
+        memset(g_ram,0,sizeof g_ram); arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"VFP macc lazy retry reset");
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_Z|ARM_CPSR_Q|(thumb ? ARM_CPSR_T : 0u); c.cp15.cpacr=0x00f00000u;
+        for (unsigned r=0;r<32u;r++) c.vfp_s[r]=0xdead0000u+r;
+        for (unsigned r=0;r<16u;r++) c.a8_vfp_hi[r]=UINT64_C(0x7ff01234beef0000)+r;
+        if (dbl) {
+            c.a8_vfp_hi[15]=UINT64_C(0xbff0000000000000); c.a8_vfp_hi[0]=UINT64_C(0x3ff0000000000001);
+            c.vfp_s[2]=0xfffffffeu; c.vfp_s[3]=0x3fefffffu;
+        } else { c.vfp_s[31]=0xbf800000u; c.vfp_s[16]=0x3f800001u; c.vfp_s[1]=0x3f7ffffeu; }
+        uint32_t singles[32]; uint64_t upper[16];
+        memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
+        c.r[15]=0x100u; c.r[5]=ARM_FPEXC_EN; c.r[2]=0x12345678u; c.vfp_fpscr=0x0b000002u;
+        uint32_t insn=(dbl ? 0xee40fb81u : 0xee48fa20u)|(sub<<6);
+        if (thumb) {
+            m_w16(NULL,0x100u,0xbf04u); m_w16(NULL,0x102u,(uint16_t)(insn>>16));
+            m_w16(NULL,0x104u,(uint16_t)insn); m_w16(NULL,0x106u,0x2201u);
+        } else { m_w32(NULL,0x100u,insn); m_w32(NULL,0x104u,0xe3a02001u); }
+        put_vfp_system_transfer(0u,ARM_VEC_UNDEFINED,0u,8u,5u); m_w32(NULL,8u,thumb ? 0xe25ef002u : 0xe25ef004u);
+        if (thumb) CHECK(arm_step(&c)==ARM_OK,"VFP macc lazy IT setup");
+        uint32_t flags=c.cpsr, pc=c.r[15];
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==ARM_VEC_UNDEFINED && c.r[14]==pc+(thumb ? 2u : 4u) &&
+              c.spsr[ARM_BANK_UND]==flags && c.vfp_fpscr==0x0b000002u &&
+              memcmp(singles,c.vfp_s,sizeof singles)==0 && memcmp(upper,c.a8_vfp_hi,sizeof upper)==0,
+              "VFP macc changed accumulator before guest enable");
+        CHECK(arm_step(&c)==ARM_OK && c.vfp_fpexc==ARM_FPEXC_EN,"VFP macc guest enable");
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==pc && c.cpsr==flags,"VFP macc exception return");
+        if (dbl) upper[15]=sub ? UINT64_C(0xc000000000000000) : 0u; else singles[31]=sub ? 0xc0000000u : 0u;
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==pc+4u &&
+              c.cpsr==(thumb ? (flags&~TEST_IT_MASK)|test_it_bits(0x08u) : flags) &&
+              c.vfp_fpscr==0x0b000012u && memcmp(singles,c.vfp_s,sizeof singles)==0 &&
+              memcmp(upper,c.a8_vfp_hi,sizeof upper)==0,"VFP macc guest exact retry");
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==0x108u && c.r[2]==1u && c.cpsr==(flags&~TEST_IT_MASK) &&
+              c.cycles==(thumb ? 6u : 5u),"VFP macc retry changed following condition");
+      }
+}
+
 static void test_cortex_a8_vfp_integer_fetch_and_retry(void) {
     static const uint32_t insns[] = {0xeef8fa48u,0xeef8fb48u,0xeef8fac8u,0xeef8fbc8u,
         0xeefcfa48u,0xeefcfb60u,0xeefdfa48u,0xeefdfb60u,0xeefcfac8u,0xeefcfbe0u,0xeefdfac8u,0xeefdfbe0u};
@@ -12172,6 +12245,7 @@ static void test_a8_exclusive_invalid_and_conditions(void) {
 int main(void) {
     test_cortex_a8_vfp_binary_fetch_and_retry();
     test_cortex_a8_vfp_precision_fetch_and_retry();
+    test_cortex_a8_vfp_macc_fetch_and_retry();
     test_cortex_a8_vfp_integer_fetch_and_retry();
     test_a8_exclusive_registers();
     test_a8_exclusive_monitor_and_faults();

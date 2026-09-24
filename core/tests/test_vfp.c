@@ -391,7 +391,7 @@ static void test_a8_vfp_bitwise_invalid_and_conditional(void) {
     /* Neither instruction-set prefix nor the neighboring arithmetic/conversion
      * encodings may become a raw move. These upper-bank operations remain
      * unsupported with access enabled. CDP2 stays refused even with EN=0. */
-    static const uint32_t neighbors[] = {0xfef7fb00u,0xee40fba0u,0xeefafb60u};
+    static const uint32_t neighbors[] = {0xfef7fb00u,0xee50fba0u,0xeefafb60u};
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned n = 0; n < sizeof neighbors / sizeof neighbors[0]; n++) {
         arm_cpu_t c;
@@ -485,6 +485,10 @@ static uint32_t a8_fp_multiply(unsigned neg, unsigned dbl, unsigned dst, unsigne
     return a8_fp_add(neg,dbl,dst,left,right) ^ 0x00100000u;
 }
 
+static uint32_t a8_fp_macc(unsigned sub, unsigned dbl, unsigned dst, unsigned left, unsigned right) {
+    return a8_fp_add(sub,dbl,dst,left,right) ^ 0x00300000u;
+}
+
 static uint32_t a8_fp_divide(unsigned dbl, unsigned dst, unsigned left, unsigned right) {
     return a8_fp_add(0u,dbl,dst,left,right) ^ 0x00b00000u;
 }
@@ -512,7 +516,7 @@ static uint32_t a8_fp_integer(unsigned kind, unsigned dst, unsigned source) {
 }
 
 static uint32_t a8_fp_binary(unsigned op, unsigned dbl, unsigned dst, unsigned left, unsigned right) {
-    return op == 5u ? a8_fp_sqrt(dbl,dst,left) : op == 4u ? a8_fp_divide(dbl,dst,left,right) : op < 2u ? a8_fp_add(op,dbl,dst,left,right) :
+    return op >= 6u ? a8_fp_macc(op&1u,dbl,dst,left,right) : op == 5u ? a8_fp_sqrt(dbl,dst,left) : op == 4u ? a8_fp_divide(dbl,dst,left,right) : op < 2u ? a8_fp_add(op,dbl,dst,left,right) :
         a8_fp_multiply(op&1u,dbl,dst,left,right);
 }
 
@@ -739,7 +743,7 @@ static void test_a8_vfp_add_special_values(void) {
 static void test_a8_vfp_binary_vectors(void) {
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned dbl = 0; dbl < 2u; dbl++)
-      for (unsigned op = 0; op < 6u; op++)
+      for (unsigned op = 0; op < 8u; op++)
        for (unsigned len = 0; len < 8u; len++)
         for (unsigned stride = 0; stride < 4u; stride++)
          for (unsigned dst = 0; dst < 32u; dst++) {
@@ -768,6 +772,7 @@ static void test_a8_vfp_binary_vectors(void) {
                     if (op == 5u && (dbl ? left % 16u < 4u : left < 8u)) nr = left;
                     int x = (int)nr+1, y = (int)mr+1;
                     int value = op == 5u ? x : op == 0u ? x+y : op == 1u ? x-y : op == 2u ? x*y : -x*y;
+                    if (op >= 6u) value = (int)dr+1+(op == 6u ? x*y : -x*y);
                     a8_add_expected_set(expected,dbl,dr,op == 4u ?
                         a8_power_of_two(dbl,(int)nr-(int)mr,(nr^mr)&1u) : a8_add_integer(dbl,value));
                 }
@@ -805,7 +810,7 @@ static void test_a8_vfp_binary_access_and_invalid(void) {
     static const unsigned permissions[] = {0u,1u,3u};
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned dbl = 0; dbl < 2u; dbl++)
-      for (unsigned op = 0; op < 6u; op++)
+      for (unsigned op = 0; op < 8u; op++)
        for (unsigned user = 0; user < 2u; user++)
         for (unsigned enabled = 0; enabled < 2u; enabled++)
          for (unsigned access = 0; access < 3u; access++)
@@ -833,7 +838,7 @@ static void test_a8_vfp_binary_access_and_invalid(void) {
           }
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned dbl = 0; dbl < 2u; dbl++)
-      for (unsigned op = 0; op < 6u; op++)
+      for (unsigned op = 0; op < 8u; op++)
        for (unsigned bit = 0; bit < 32u; bit++) {
         if ((1u << bit) & ARM_FPSCR_A8_WMASK) continue;
         for (unsigned enabled = 0; enabled < 2u; enabled++)
@@ -855,7 +860,7 @@ static void test_a8_vfp_binary_access_and_invalid(void) {
        }
     const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
     for (unsigned profile = 0; profile < 2u; profile++)
-     for (unsigned op = 0; op < 6u; op++) {
+     for (unsigned op = 0; op < 8u; op++) {
         arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,legacy[profile]),"reset legacy add");
         c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
         vfp_set_d(&c,0u,UINT64_C(0x123456789abcdef0));
@@ -864,12 +869,12 @@ static void test_a8_vfp_binary_access_and_invalid(void) {
               vfp_get_d(&c,0u) == UINT64_C(0x123456789abcdef0), "A8 add upper bank leaked into legacy");
      }
     const uint32_t neighbors[] = {0xee500b00u,0xeee00b00u,0xee300c00u,0xee300900u,0xee200c00u,0xee200900u,
-        0xeec10be0u,0xee800c00u,0xee800900u,0xeeb10cc0u,0xeeb109c0u};
+        0xeec10be0u,0xee800c00u,0xee800900u,0xeeb10cc0u,0xeeb109c0u,0xee000c00u,0xee000900u};
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned n = 0; n < sizeof neighbors / sizeof neighbors[0]; n++) {
         arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = 0u;
         CHECK(!vfp_is_add_sub_data(neighbors[n]) && !vfp_is_multiply_data(neighbors[n]) && !vfp_is_divide_data(neighbors[n]) &&
-              !vfp_is_sqrt_data(neighbors[n]) &&
+              !vfp_is_sqrt_data(neighbors[n]) && !vfp_is_macc_data(neighbors[n]) &&
               a8_move_step(&c,thumb,neighbors[n]) == ARM_UNDEFINED,
               "VFP add consumed neighboring arithmetic/coprocessor encoding");
      }
@@ -930,6 +935,198 @@ static uint64_t a8_multiply_native(uint64_t a, uint64_t b, unsigned dbl, unsigne
      * use after-rounding tininess and is deliberately not the flag oracle. */
     CHECK(fesetenv(&saved) == 0,"restore native multiply oracle host state");
     return bits ^ (neg ? sign : 0u);
+}
+
+/* Independent per-stage oracle: handle architectural nonfinite/FZ inputs,
+ * then use native operations for finite arithmetic and separate rounding. */
+static uint64_t a8_macc_stage_reference(uint64_t a, uint64_t b, unsigned dbl, unsigned multiply,
+                                        uint32_t fpscr, uint32_t *flags) {
+    uint64_t sign=dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+    uint64_t normal=dbl ? UINT64_C(0x0010000000000000) : UINT64_C(0x00800000);
+    uint64_t infinity=dbl ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000), quiet=normal>>1;
+    *flags=0u;
+    if (fpscr&ARM_FPSCR_FZ) {
+        if ((a&~sign) && (a&~sign)<normal) { a&=sign; *flags|=ARM_FPSCR_IDC; }
+        if ((b&~sign) && (b&~sign)<normal) { b&=sign; *flags|=ARM_FPSCR_IDC; }
+    }
+    uint64_t ma=a&~sign, mb=b&~sign;
+    bool na=ma>infinity, nb=mb>infinity, sa=na && !(a&quiet), sb=nb && !(b&quiet);
+    if (na || nb) {
+        uint64_t selected=sa ? a : sb ? b : na ? a : b;
+        if (sa || sb) *flags|=ARM_FPSCR_IOC;
+        return fpscr&ARM_FPSCR_DN ? infinity|quiet : selected|quiet;
+    }
+    if (ma==infinity || mb==infinity) {
+        bool invalid=multiply ? !ma || !mb : ma==infinity && mb==infinity && ((a^b)&sign);
+        if (invalid) { *flags|=ARM_FPSCR_IOC; return infinity|quiet; }
+        return multiply ? infinity|((a^b)&sign) : ma==infinity ? a : b;
+    }
+    uint32_t raised;
+    uint64_t result=multiply ? a8_multiply_native(a,b,dbl,0u,fpscr,&raised) : a8_add_native(a,b,dbl,0u,fpscr,&raised);
+    *flags|=raised; return result;
+}
+
+static uint64_t a8_macc_reference(uint64_t accumulator, uint64_t a, uint64_t b,
+                                  unsigned dbl, unsigned sub, uint32_t fpscr, uint32_t *flags) {
+    uint32_t product_flags, sum_flags;
+    uint64_t product=a8_macc_stage_reference(a,b,dbl,1u,fpscr,&product_flags);
+    if (sub) product^=dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+    uint64_t result=a8_macc_stage_reference(accumulator,product,dbl,0u,fpscr,&sum_flags);
+    *flags=product_flags|sum_flags; return result;
+}
+
+static void test_a8_vfp_macc_registers(void) {
+    CHECK(a8_fp_macc(0u,1u,0u,16u,24u)==0xee000ba8u &&
+          a8_fp_macc(0u,1u,0u,4u,6u)==0xee040b06u,"VFP macc firmware encoding anchors");
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned dbl=0;dbl<2u;dbl++)
+      for (unsigned sub=0;sub<2u;sub++)
+       for (unsigned dst=0;dst<32u;dst++)
+        for (unsigned left=0;left<32u;left++)
+         for (unsigned right=0;right<32u;right++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr=ARM_FPSCR_NZCV|ARM_FPSCR_QC|ARM_FPSCR_DZC;
+            for (unsigned d=0;d<32u;d++) vfp_set_d(&c,d,UINT64_C(0xdead1234beef0000)+d);
+            for (unsigned r=0;r<32u;r++) a8_fp_value_set(&c,dbl,r,a8_add_integer(dbl,(int)r-16));
+            uint64_t expected[32]; for (unsigned d=0;d<32u;d++) expected[d]=vfp_get_d(&c,d);
+            int product=((int)left-16)*((int)right-16), value=(int)dst-16+(sub ? -product : product);
+            a8_add_expected_set(expected,dbl,dst,a8_add_integer(dbl,value));
+            c.excl_valid=true; c.excl_addr=0x12340u; c.a8_excl_size=8u;
+            uint32_t flags=c.cpsr, fpscr=c.vfp_fpscr;
+            CHECK(a8_move_step(&c,thumb,a8_fp_macc(sub,dbl,dst,left,right))==ARM_OK && c.cycles==1u &&
+                  c.r[15]==0x104u && c.cpsr==flags && c.vfp_fpscr==fpscr && c.excl_valid &&
+                  c.excl_addr==0x12340u && c.a8_excl_size==8u,"VFP macc register status");
+            bool match=true;
+            for (unsigned d=0;d<32u;d++) match&=vfp_get_d(&c,d)==expected[d];
+            for (unsigned r=0;r<15u;r++) match&=c.r[r]==0u;
+            CHECK(match,"VFP macc original-accumulator/alias T=%u D=%u sub=%u d/n/m=%u/%u/%u",thumb,dbl,sub,dst,left,right);
+         }
+}
+
+static void test_a8_vfp_macc_values_and_host_state(void) {
+    fenv_t saved; CHECK(fegetenv(&saved)==0,"save VFP macc host state");
+    static const int rounds[]={FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    for (unsigned dbl=0;dbl<2u;dbl++) {
+        uint64_t sign=dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+        uint64_t normal=dbl ? UINT64_C(0x0010000000000000) : UINT64_C(0x00800000);
+        uint64_t infinity=dbl ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000), quiet=normal>>1;
+        uint64_t one=a8_power_of_two(dbl,0,0u), two=a8_power_of_two(dbl,1,0u), half=a8_power_of_two(dbl,-1,0u);
+        uint64_t qnan=infinity|quiet|0x12345u, snan=sign|infinity|0x54321u, default_nan=infinity|quiet;
+        const struct { uint64_t c,a,b,result[2]; uint32_t flags[2], controls; } anchors[]={
+            {sign|one,one+1u,one-2u,{0u,sign|two},{0x10u,0x10u},0u},
+            {one,one+1u,one-2u,{two,0u},{0x10u,0x10u},0u},
+            {0u,normal,half,{normal/2u,sign|normal/2u},{0u,0u},0u},
+            {0u,normal,half,{0u,0u},{8u,8u},ARM_FPSCR_FZ},
+            {one,infinity-1u,two,{infinity,sign|infinity},{0x14u,0x14u},0u},
+            {sign|infinity,infinity-1u,two,{default_nan,sign|infinity},{0x15u,0x14u},0u},
+            {qnan,snan,1u,{qnan,qnan},{0x81u,0x81u},ARM_FPSCR_FZ},
+            {snan,qnan,1u,{snan|quiet,snan|quiet},{0x81u,0x81u},ARM_FPSCR_FZ},
+            {0u,qnan,one,{qnan,sign|qnan},{0u,0u},0u},
+            {0u,qnan,one,{default_nan,default_nan},{0u,0u},ARM_FPSCR_DN},
+            {1u,0u,infinity,{default_nan,sign|default_nan},{0x81u,0x81u},ARM_FPSCR_FZ}
+        };
+        for (unsigned row=0;row<sizeof anchors/sizeof anchors[0];row++)
+         for (unsigned sub=0;sub<2u;sub++) {
+            uint32_t raised;
+            CHECK(a8_macc_reference(anchors[row].c,anchors[row].a,anchors[row].b,dbl,sub,anchors[row].controls,&raised)==anchors[row].result[sub] &&
+                  raised==anchors[row].flags[sub],"native VFP macc raw anchor D=%u row=%u sub=%u",dbl,row,sub);
+            for (unsigned thumb=0;thumb<2u;thumb++) {
+                arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr=ARM_FPSCR_QC|anchors[row].controls;
+                a8_fp_value_set(&c,dbl,31u,anchors[row].c); a8_fp_value_set(&c,dbl,16u,anchors[row].a); a8_fp_value_set(&c,dbl,1u,anchors[row].b);
+                CHECK(a8_move_step(&c,thumb,a8_fp_macc(sub,dbl,31u,16u,1u))==ARM_OK &&
+                      a8_fp_value(&c,dbl,31u)==anchors[row].result[sub] && c.vfp_fpscr==(ARM_FPSCR_QC|anchors[row].controls|anchors[row].flags[sub]),
+                      "VFP macc separate-rounding/NaN/FZ anchor T=%u D=%u row=%u sub=%u",thumb,dbl,row,sub);
+            }
+         }
+        uint64_t random=UINT64_C(0x93481adfeb127501);
+        for (unsigned sample=0;sample<1024u;sample++) {
+            uint64_t values[3];
+            for (unsigned i=0;i<3u;i++) {
+                random^=random<<13; random^=random>>7; random^=random<<17;
+                values[i]=dbl ? random : (uint32_t)random;
+                if ((values[i]&~sign)>=infinity) values[i]&=~infinity;
+            }
+            if (sample%8u==0u) { values[0]=sign|(infinity-1u); values[1]=infinity-1u; values[2]=two; }
+            if (sample%8u==1u) { values[0]=sign|one; values[1]=one+1u; values[2]=one-2u; }
+            if (sample%8u==2u) { values[0]=normal; values[1]=normal; values[2]=half; }
+            if (sample%8u==3u) { values[0]=1u; values[1]=1u; values[2]=half; }
+            if (sample%8u==4u) values[2]&=sign|(normal-1u);
+            if (sample%8u==5u) values[0]&=sign|(normal-1u);
+            for (unsigned controls=0;controls<16u;controls++)
+             for (unsigned sub=0;sub<2u;sub++) {
+                uint32_t fpscr=ARM_FPSCR_NZCV|ARM_FPSCR_QC|ARM_FPSCR_DZC|((controls&3u)<<22)|
+                    (controls&4u ? ARM_FPSCR_FZ : 0u)|(controls&8u ? ARM_FPSCR_DN : 0u), raised;
+                uint64_t want=a8_macc_reference(values[0],values[1],values[2],dbl,sub,fpscr,&raised);
+                for (unsigned thumb=0;thumb<2u;thumb++) {
+                    arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr=fpscr;
+                    for (unsigned d=0;d<32u;d++) vfp_set_d(&c,d,UINT64_C(0x7ff01234dead0000)+d);
+                    a8_fp_value_set(&c,dbl,31u,values[0]); a8_fp_value_set(&c,dbl,16u,values[1]); a8_fp_value_set(&c,dbl,1u,values[2]);
+                    uint64_t expected[32]; for (unsigned d=0;d<32u;d++) expected[d]=vfp_get_d(&c,d);
+                    a8_add_expected_set(expected,dbl,31u,want);
+                    unsigned host=(sample+controls)%4u;
+                    CHECK(fesetround(rounds[host])==0 && feclearexcept(FE_ALL_EXCEPT)==0 &&
+                          (!(sample&1u) || feraiseexcept(FE_INVALID|FE_DIVBYZERO)==0),"prepare VFP macc host state");
+                    int pending=fetestexcept(FE_ALL_EXCEPT); uint32_t flags=c.cpsr;
+                    CHECK(a8_move_step(&c,thumb,a8_fp_macc(sub,dbl,31u,16u,1u))==ARM_OK && c.cpsr==flags &&
+                          c.vfp_fpscr==(fpscr|raised),"VFP finite macc T=%u D=%u sub=%u controls=%u sample=%u",thumb,dbl,sub,controls,sample);
+                    CHECK(fegetround()==rounds[host] && fetestexcept(FE_ALL_EXCEPT)==pending,"VFP macc changed host FP state");
+                    bool match=true; for (unsigned d=0;d<32u;d++) match&=vfp_get_d(&c,d)==expected[d];
+                    CHECK(match,"VFP finite macc result/register preservation");
+                }
+             }
+        }
+    }
+    CHECK(fesetenv(&saved)==0,"restore VFP macc host state");
+}
+
+static void test_a8_vfp_macc_special_values(void) {
+    fenv_t saved; CHECK(fegetenv(&saved)==0,"save special VFP macc host state");
+    static const int rounds[]={FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    unsigned count=sizeof a8_compare_values/sizeof a8_compare_values[0];
+    for (unsigned dbl=0;dbl<2u;dbl++)
+     for (unsigned controls=0;controls<16u;controls++)
+      for (unsigned sub=0;sub<2u;sub++)
+       for (unsigned acc=0;acc<count;acc++)
+        for (unsigned x=0;x<count;x++)
+         for (unsigned y=0;y<count;y++) {
+            uint64_t a=dbl ? a8_compare_values[x].dual : a8_compare_values[x].single;
+            uint64_t b=dbl ? a8_compare_values[y].dual : a8_compare_values[y].single;
+            uint64_t accumulator=dbl ? a8_compare_values[acc].dual : a8_compare_values[acc].single;
+            uint32_t fpscr=ARM_FPSCR_NZCV|ARM_FPSCR_QC|ARM_FPSCR_DZC|((controls&3u)<<22)|
+                (controls&4u ? ARM_FPSCR_FZ : 0u)|(controls&8u ? ARM_FPSCR_DN : 0u), raised;
+            uint64_t want=a8_macc_reference(accumulator,a,b,dbl,sub,fpscr,&raised);
+            for (unsigned thumb=0;thumb<2u;thumb++) {
+                arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr=fpscr;
+                a8_fp_value_set(&c,dbl,31u,accumulator); a8_fp_value_set(&c,dbl,16u,a); a8_fp_value_set(&c,dbl,1u,b);
+                unsigned host=(acc+x+y)%4u;
+                CHECK(fesetround(rounds[host])==0 && feclearexcept(FE_ALL_EXCEPT)==0 &&
+                      (!((acc+x+y)&1u) || feraiseexcept(FE_INVALID|FE_DIVBYZERO)==0),"prepare special VFP macc host state");
+                int pending=fetestexcept(FE_ALL_EXCEPT); uint32_t flags=c.cpsr;
+                CHECK(a8_move_step(&c,thumb,a8_fp_macc(sub,dbl,31u,16u,1u))==ARM_OK &&
+                      c.cycles==1u && c.r[15]==0x104u && c.cpsr==flags && c.vfp_fpscr==(fpscr|raised) &&
+                      a8_fp_value(&c,dbl,31u)==want && a8_fp_value(&c,dbl,16u)==a && a8_fp_value(&c,dbl,1u)==b,
+                      "VFP macc class triple T=%u D=%u sub=%u controls=%u acc/n/m=%u/%u/%u",thumb,dbl,sub,controls,acc,x,y);
+                CHECK(fegetround()==rounds[host] && fetestexcept(FE_ALL_EXCEPT)==pending,"special VFP macc changed host FP state");
+            }
+         }
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned dbl=0;dbl<2u;dbl++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr=ARM_FPSCR_QC|ARM_FPSCR_DZC|ARM_FPSCR_FZ|ARM_FPSCR_DN;
+        uint64_t normal=dbl ? UINT64_C(0x0010000000000000) : UINT64_C(0x00800000);
+        uint64_t infinity=dbl ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000), one=a8_power_of_two(dbl,0,0u);
+        a8_fp_value_set(&c,dbl,31u,0u); a8_fp_value_set(&c,dbl,16u,normal); a8_fp_value_set(&c,dbl,1u,a8_power_of_two(dbl,-1,0u));
+        CHECK(a8_move_step(&c,thumb,a8_fp_macc(0u,dbl,31u,16u,1u))==ARM_OK,"macc cumulative underflow");
+        a8_fp_value_set(&c,dbl,16u,one+1u); a8_fp_value_set(&c,dbl,1u,one-2u);
+        CHECK(a8_move_step(&c,thumb,a8_fp_macc(0u,dbl,31u,16u,1u))==ARM_OK,"macc cumulative inexact product");
+        a8_fp_value_set(&c,dbl,31u,1u); a8_fp_value_set(&c,dbl,16u,0u); a8_fp_value_set(&c,dbl,1u,infinity);
+        CHECK(a8_move_step(&c,thumb,a8_fp_macc(0u,dbl,31u,16u,1u))==ARM_OK,"macc cumulative invalid/denormal");
+        a8_fp_value_set(&c,dbl,31u,a8_add_integer(dbl,2)); a8_fp_value_set(&c,dbl,16u,a8_add_integer(dbl,2));
+        a8_fp_value_set(&c,dbl,1u,a8_add_integer(dbl,3));
+        CHECK(a8_move_step(&c,thumb,a8_fp_macc(0u,dbl,31u,16u,1u))==ARM_OK && a8_fp_value(&c,dbl,31u)==a8_add_integer(dbl,8) &&
+              a8_move_step(&c,thumb,VMRS(2u,1u))==ARM_OK &&
+              c.r[2]==(ARM_FPSCR_QC|ARM_FPSCR_DZC|ARM_FPSCR_FZ|ARM_FPSCR_DN|ARM_FPSCR_UFC|ARM_FPSCR_IXC|ARM_FPSCR_IOC|ARM_FPSCR_IDC),
+              "macc exact result/VMRS lost cumulative stage exceptions");
+     }
+    CHECK(fesetenv(&saved)==0,"restore special VFP macc host state");
 }
 
 static void test_a8_vfp_multiply_registers(void) {
@@ -4684,12 +4881,12 @@ static void test_a8_vfp_core_move_refusals_and_it(void) {
       }
      }
     }
-    /* Upper-bank multiply-accumulate remains separate from the supported transfers/arithmetic. */
+    /* Upper-bank negative multiply-accumulate remains unsupported. */
     arm_cpu_t c;
     a8_move_reset(&c, 0u);
     vfp_set_d(&c, 16u, UINT64_C(0x1122334455667788));
-    CHECK(a8_move_step(&c, 0u, VFP_DP(0,0,0,1,0,0,1,0,0,0,0)) == ARM_UNDEFINED &&
-          vfp_get_d(&c, 16u) == UINT64_C(0x1122334455667788), "core VMOV enabled upper-bank multiply-accumulate");
+    CHECK(a8_move_step(&c, 0u, VFP_DP(0,0,1,1,0,0,1,0,0,0,0)) == ARM_UNDEFINED &&
+          vfp_get_d(&c, 16u) == UINT64_C(0x1122334455667788), "core VMOV enabled upper-bank negative multiply-accumulate");
 }
 
 /* VLDR/VSTR use D:Vd for doublewords and Vd:D for singlewords. */
@@ -6595,6 +6792,9 @@ static void test_condition_codes_apply(void) {
 
 /* --------------------------------------------------------------- main ---- */
 int main(void) {
+    test_a8_vfp_macc_registers();
+    test_a8_vfp_macc_values_and_host_state();
+    test_a8_vfp_macc_special_values();
     test_a8_vfp_multiply_registers();
     test_a8_vfp_multiply_values_and_host_state();
     test_a8_vfp_multiply_special_values();
