@@ -7804,11 +7804,12 @@ static void test_cortex_a8_vfp_multiple_memory_aborts(void) {
 static void test_cortex_a8_neon_lane_faults(void) {
     static const unsigned offsets[]={15u,13u,4u};
     static const uint32_t types[]={0x0cu,4u,0u}; /* Normal, Device, Strongly-ordered. */
-    for (unsigned host=0;host<2u;host++) for (unsigned thumb=0;thumb<2u;thumb++)
+    for (unsigned host=0;host<2u;host++) for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned load=0;load<2u;load++)
      for (unsigned lane=0;lane<2u;lane++) for (unsigned align=0;align<2u;align++)
       for (unsigned post=0;post<3u;post++) for (unsigned type=0;type<3u;type++)
-       for (unsigned fault=0;fault<4u;fault++) {
-        memset(g_ram,0xee,sizeof g_ram); arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
+       for (unsigned fault=0;fault<5u;fault++) {
+        memset(g_ram,0xee,sizeof g_ram); arm_bus_t bus=g_bus;
+        if (host) { bus.host_ram=m_host_ram; bus.host_ram_write=m_host_ram_write; }
         arm_cpu_t c; CHECK(arm_reset_profile(&c,&bus,ARM_ARCH_V7_CORTEX_A8),"lane MMU reset");
         c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u; c.cp15.cpacr=0x00f00000u;
         c.vfp_fpexc=ARM_FPEXC_EN; c.vfp_fpscr=0x0bc00080u;
@@ -7818,33 +7819,36 @@ static void test_cortex_a8_neon_lane_faults(void) {
         for (unsigned r=0;r<16u;r++) c.a8_vfp_hi[r]=UINT64_C(0x123456789abc0000)+r;
         uint32_t singles[32]; uint64_t upper[16]; memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
         m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x803eu);
-        m_w32(NULL,0x6004u,fault==1u || fault==3u ? 0u : (fault==2u ? 0xa012u : 0xa032u)|types[type]);
+        m_w32(NULL,0x6004u,fault==1u || fault==3u ? 0u : (fault==2u ? 0xa012u : fault==4u ? 0xa232u : 0xa032u)|types[type]);
         m_w32(NULL,0x6008u,0u); /* A load must not touch the unmapped next page. */
         unsigned rm=offsets[post];
-        uint32_t insn=(thumb ? 0xf9e4f800u : 0xf4e4f800u)|(lane<<7)|(align || fault==3u ? 0x30u : 0u)|rm;
+        uint32_t insn=(thumb ? 0xf9c4f800u : 0xf4c4f800u)|(load<<21)|(lane<<7)|(align || fault==3u ? 0x30u : 0u)|rm;
         if (thumb) { m_w16(NULL,0x8000u,(uint16_t)(insn>>16)); m_w16(NULL,0x8002u,(uint16_t)insn); }
         else m_w32(NULL,0x8000u,insn);
         m_w32(NULL,0xaffcu,0x7f800001u); m_w32(NULL,0xb000u,0x13579bdfu);
         g_watch_addr=0xaffcu; g_watch_reads32=g_watch_writes32=0u;
-        uint32_t flags=c.cpsr;
+        uint32_t flags=c.cpsr,stored=(uint32_t)(upper[15]>>(32u*lane));
+        bool aborted=fault!=0u && (fault!=4u || !load);
         CHECK(arm_step(&c)==ARM_OK && c.cycles==1u && c.vfp_fpscr==0x0bc00080u,"lane MMU disposition");
-        if (fault) CHECK(c.r[15]==ARM_VEC_DATA_ABORT && c.r[14]==8u && c.spsr[ARM_BANK_ABT]==flags && c.r[4]==base &&
-            c.cp15.dfar==base && c.cp15.dfsr==(fault==1u ? ARM_FSR_PAGE_TRANSLATION : fault==2u ? ARM_FSR_PAGE_PERMISSION : 1u) &&
+        if (aborted) CHECK(c.r[15]==ARM_VEC_DATA_ABORT && c.r[14]==8u && c.spsr[ARM_BANK_ABT]==flags && c.r[4]==base &&
+            c.cp15.dfar==base && c.cp15.dfsr==((fault==1u ? ARM_FSR_PAGE_TRANSLATION : fault==3u ? 1u : ARM_FSR_PAGE_PERMISSION)|(load ? 0u : 1u<<11)) &&
             g_watch_reads32==0u && g_watch_writes32==0u,"lane MMU/alignment fault preservation");
         else {
             uint32_t updated=base+(rm==15u ? 0u : rm==13u ? 4u : base);
             CHECK(c.r[15]==4u && c.r[4]==updated && c.cpsr==(flags&~TEST_IT_MASK) &&
-                  g_watch_reads32==1u && g_watch_writes32==0u,"lane one-word page-end read/writeback");
+                  g_watch_reads32==load && g_watch_writes32==!load,"lane one-word page-end access/writeback");
             uint8_t bytes[8]; memcpy(bytes,&upper[15],8u); uint32_t raw=0x7f800001u;
-            memcpy(bytes+4u*lane,&raw,4u); memcpy(&upper[15],bytes,8u);
+            if (load) { memcpy(bytes+4u*lane,&raw,4u); memcpy(&upper[15],bytes,8u); }
         }
         CHECK(!memcmp(singles,c.vfp_s,sizeof singles) && !memcmp(upper,c.a8_vfp_hi,sizeof upper),"lane MMU whole FP bank");
         g_watch_addr=UINT32_MAX;
-        CHECK(m_r32(NULL,0xaffcu)==0x7f800001u && m_r32(NULL,0xb000u)==0x13579bdfu,"lane load changed RAM");
+        CHECK(m_r32(NULL,0xaffcu)==(aborted || load ? 0x7f800001u : stored) && m_r32(NULL,0xb000u)==0x13579bdfu,
+              "lane transfer changed unselected RAM");
        }
-    for (unsigned host=0;host<2u;host++) for (unsigned lane=0;lane<2u;lane++)
+    for (unsigned host=0;host<2u;host++) for (unsigned load=0;load<2u;load++) for (unsigned lane=0;lane<2u;lane++)
      for (unsigned align=0;align<2u;align++) for (unsigned fault=0;fault<4u;fault++) {
-        memset(g_ram,0,sizeof g_ram); arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
+        memset(g_ram,0,sizeof g_ram); arm_bus_t bus=g_bus;
+        if (host) { bus.host_ram=m_host_ram; bus.host_ram_write=m_host_ram_write; }
         arm_cpu_t c; CHECK(arm_reset_profile(&c,&bus,ARM_ARCH_V7_CORTEX_A8),"lane split fetch reset");
         c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u; c.cp15.cpacr=0x00f00000u;
         c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|test_it_bits(0x1cu);
@@ -7853,7 +7857,7 @@ static void test_cortex_a8_neon_lane_faults(void) {
         for (unsigned r=0;r<16u;r++) c.a8_vfp_hi[r]=UINT64_C(0x123456789abc0000)+r;
         uint32_t singles[32],flags=c.cpsr; uint64_t upper[16];
         memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
-        uint32_t insn=0xf9e4f80du|(lane<<7)|(align ? 0x30u : 0u);
+        uint32_t insn=0xf9c4f80du|(load<<21)|(lane<<7)|(align ? 0x30u : 0u),stored=(uint32_t)(upper[15]>>(32u*lane));
         m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x8032u);
         m_w32(NULL,0x6004u,fault==1u ? 0u : fault==2u ? 0xa033u : fault==3u ? 0xa012u : 0xa032u);
         m_w32(NULL,0x600cu,0xc03eu); m_w32(NULL,0xc000u,0x7f800001u);
@@ -7863,21 +7867,23 @@ static void test_cortex_a8_neon_lane_faults(void) {
         if (fault) CHECK(c.r[15]==ARM_VEC_PREFETCH && c.r[14]==0x1002u && c.spsr[ARM_BANK_ABT]==flags &&
             c.cp15.ifar==0x1000u && (c.cp15.ifsr&15u)==(fault==1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION) &&
             !(c.cpsr&(ARM_CPSR_T|TEST_IT_MASK)) && c.vfp_fpexc==0u && c.r[4]==0x3000u && g_watch_reads32==0u,
-            "lane availability/load preceded full User fetch");
+            "lane availability/transfer preceded full User fetch");
         else {
             CHECK(c.r[15]==0x1002u && c.r[4]==0x3004u && c.cpsr==((flags&~TEST_IT_MASK)|test_it_bits(0x18u)) &&
-                  g_watch_reads32==1u,"lane split fetch result/IT");
+                  g_watch_reads32==load,"lane split fetch result/IT");
             uint8_t bytes[8]; memcpy(bytes,&upper[15],8u); uint32_t raw=0x7f800001u;
-            memcpy(bytes+4u*lane,&raw,4u); memcpy(&upper[15],bytes,8u);
+            if (load) { memcpy(bytes+4u*lane,&raw,4u); memcpy(&upper[15],bytes,8u); }
         }
-        CHECK(!memcmp(singles,c.vfp_s,sizeof singles) && !memcmp(upper,c.a8_vfp_hi,sizeof upper) && g_watch_writes32==0u,
+        CHECK(!memcmp(singles,c.vfp_s,sizeof singles) && !memcmp(upper,c.a8_vfp_hi,sizeof upper) && g_watch_writes32==(fault ? 0u : !load),
               "lane split fetch whole register bank");
         g_watch_addr=UINT32_MAX;
+        CHECK(m_r32(NULL,0xc000u)==(fault || load ? 0x7f800001u : stored),"lane split fetch changed uncompleted RAM");
      }
 }
 
 static void test_cortex_a8_neon_lane_guest_retry(void) {
-    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned lane=0;lane<2u;lane++) for (unsigned align=0;align<2u;align++) {
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned load=0;load<2u;load++)
+     for (unsigned lane=0;lane<2u;lane++) for (unsigned align=0;align<2u;align++) {
         memset(g_ram,0,sizeof g_ram); arm_cpu_t c;
         CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"lane guest retry reset");
         c.cpsr=ARM_MODE_USR|ARM_CPSR_Z|ARM_CPSR_Q|(thumb ? ARM_CPSR_T : 0u); c.cp15.cpacr=0x00f00000u;
@@ -7886,7 +7892,8 @@ static void test_cortex_a8_neon_lane_guest_retry(void) {
         uint32_t singles[32]; uint64_t upper[16]; memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
         c.r[15]=0x100u; c.r[5]=ARM_FPEXC_EN; c.r[4]=0x2000u; c.r[2]=0x12345678u; c.vfp_fpscr=0x0bc00080u;
         m_w32(NULL,0x2000u,0x7f800001u);
-        uint32_t insn=(thumb ? 0xf9e4f80du : 0xf4e4f80du)|(lane<<7)|(align ? 0x30u : 0u);
+        uint32_t insn=(thumb ? 0xf9c4f80du : 0xf4c4f80du)|(load<<21)|(lane<<7)|(align ? 0x30u : 0u);
+        uint32_t stored=(uint32_t)(upper[15]>>(32u*lane));
         if (thumb) {
             m_w16(NULL,0x100u,0xbf04u); m_w16(NULL,0x102u,(uint16_t)(insn>>16));
             m_w16(NULL,0x104u,(uint16_t)insn); m_w16(NULL,0x106u,0x2201u);
@@ -7895,19 +7902,20 @@ static void test_cortex_a8_neon_lane_guest_retry(void) {
         if (thumb) CHECK(arm_step(&c)==ARM_OK,"lane guest IT setup");
         uint32_t flags=c.cpsr,pc=c.r[15]; g_watch_addr=0x2000u; g_watch_reads32=g_watch_writes32=0u;
         CHECK(arm_step(&c)==ARM_OK && c.r[15]==ARM_VEC_UNDEFINED && c.r[14]==pc+(thumb ? 2u : 4u) &&
-              c.spsr[ARM_BANK_UND]==flags && c.r[4]==0x2000u && c.vfp_fpscr==0x0bc00080u && g_watch_reads32==0u &&
+              c.spsr[ARM_BANK_UND]==flags && c.r[4]==0x2000u && c.vfp_fpscr==0x0bc00080u && g_watch_reads32==0u && g_watch_writes32==0u &&
               !memcmp(singles,c.vfp_s,sizeof singles) && !memcmp(upper,c.a8_vfp_hi,sizeof upper),"lane effects preceded guest enable");
         CHECK(arm_step(&c)==ARM_OK && c.vfp_fpexc==ARM_FPEXC_EN,"lane guest enable");
         CHECK(arm_step(&c)==ARM_OK && c.r[15]==pc && c.cpsr==flags,"lane guest exception return");
         uint8_t bytes[8]; memcpy(bytes,&upper[15],8u); uint32_t raw=0x7f800001u;
-        memcpy(bytes+4u*lane,&raw,4u); memcpy(&upper[15],bytes,8u);
+        if (load) { memcpy(bytes+4u*lane,&raw,4u); memcpy(&upper[15],bytes,8u); }
         CHECK(arm_step(&c)==ARM_OK && c.r[15]==pc+4u && c.r[4]==0x2004u &&
               c.cpsr==(thumb ? (flags&~TEST_IT_MASK)|test_it_bits(0x08u) : flags) && c.vfp_fpscr==0x0bc00080u &&
-              !memcmp(singles,c.vfp_s,sizeof singles) && !memcmp(upper,c.a8_vfp_hi,sizeof upper) && g_watch_reads32==1u,
+              !memcmp(singles,c.vfp_s,sizeof singles) && !memcmp(upper,c.a8_vfp_hi,sizeof upper) && g_watch_reads32==load && g_watch_writes32==!load,
               "lane guest retry exact data/writeback");
         CHECK(arm_step(&c)==ARM_OK && c.r[15]==0x108u && c.r[2]==1u && c.cpsr==(flags&~TEST_IT_MASK) &&
-              c.cycles==(thumb ? 6u : 5u) && g_watch_reads32==1u && g_watch_writes32==0u,"lane retry changed following condition");
+              c.cycles==(thumb ? 6u : 5u) && g_watch_reads32==load && g_watch_writes32==!load,"lane retry changed following condition");
         g_watch_addr=UINT32_MAX;
+        CHECK(m_r32(NULL,0x2000u)==(load ? 0x7f800001u : stored),"lane guest retry stored wrong lane");
     }
 }
 
