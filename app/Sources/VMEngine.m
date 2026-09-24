@@ -1263,13 +1263,6 @@ static double vm_engine_now_seconds(void) {
         vm_touch_delivery_note_accepted(&_touchDelivery, &c);
         _touchDelivered++;
         pthread_mutex_unlock(&_lock);
-        if (_touchDelivered <= 8u) {
-            [self appendConsole:[NSString stringWithFormat:
-                @"[touch-time] n=%llu phase=%u x=%u y=%u wire_ms=%u host_ns=%llu\n",
-                (unsigned long long)_touchDelivered, (unsigned)c.phase,
-                (unsigned)c.x, (unsigned)c.y, _machine.mtz2.frame_ms,
-                (unsigned long long)vm_now_ns()]];
-        }
         /* The attention line moved behind the bus. `level_dirty` in soc.h says
          * why a machine that is not told re-derives the cascade up to 68
          * instructions later instead of at this chunk boundary. */

@@ -3239,13 +3239,25 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                 scale_x > 0.0f && scale_y > 0.0f &&
                 scale_x <= 1.0f + epsilon && scale_y <= 1.0f + epsilon &&
                 scale_difference <= 0.00001f;
+            /* Home/Settings navigation also emits this sampler with a
+             * 320x60 source envelope stretched to 320x83. Its scissor can
+             * expose only the final rows. Preserve the horizontal 1:1
+             * invariant while admitting vertical magnification; sampling,
+             * allocation, clip, tile and atomic GART checks are unchanged. */
+            bool alternate_vertical_magnification =
+                scaled_sampler && half_texel_layout &&
+                source_width > 2u && source_height > 2u &&
+                dx >= (float)source_width - epsilon &&
+                dx <= (float)source_width + epsilon &&
+                scale_y > 1.0f + epsilon;
             if (source_width > MBX_3D_WIDTH || source_height > 480u ||
                 (!direct_magnification && !direct_uniform_minification &&
                  !direct_horizontal_minification &&
                  !compact_full_extent_uniform_minification &&
                  !filtered_narrow_strip_resample &&
                  !modulated_uniform_scale &&
-                 !alternate_uniform_minification)) {
+                 !alternate_uniform_minification &&
+                 !alternate_vertical_magnification)) {
                 if (mbx_trace_state == 1) {
                     fprintf(stderr,
                             "MBX3D transform reject: sampler=%s half=%u "

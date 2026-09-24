@@ -4767,6 +4767,7 @@ struct mbx_test_status_form {
     bool scaled_sprite;
     bool column_resample;
     bool row_resample;
+    bool vertical_resample;
     bool variable_vertex_alpha;
     bool boundary_override;
     bool zero_coverage;
@@ -5553,7 +5554,8 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
                   form->name);
             m.bus.write32(m.bus.ctx, source_pte_address, source_pte);
 
-            if (form->column_resample || form->row_resample || form->mirror_y) {
+            if (form->column_resample || form->row_resample ||
+                form->vertical_resample || form->mirror_y) {
                 uint32_t target_table = m.bus.read32(m.bus.ctx,
                     MBX_BASE + REG_GART0 + (last_destination >> 22) * 4u);
                 uint32_t target_pte_address = target_table +
@@ -5588,6 +5590,46 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
     free(expected);
     s5l8900_free(&m);
 }
+
+/* Retained during Home/Settings navigation: a 320x60 source envelope becomes
+ * 320x83, with the context scissor exposing only its final seven rows. The
+ * alternate filtered sampler is independent of this one-axis magnification.
+ * Region and boundary fixtures below are derived from the captured scissor;
+ * the 44-word draw and render registers are the device witness. */
+static const struct mbx_test_status_form navigation_vertical_resample_form = {
+    .name = "navigation alternate filtered vertical magnification",
+    .xclip = 0x01400000u, .yclip = 0x00700060u,
+    .target = 0x00d2c000u,
+    .semantic_sprite = true,
+    .scaled_sprite = true,
+    .vertical_resample = true,
+    .boundary_override = true,
+    .arbitrary_bgra_probe = true,
+    .tile_x0 = 0u, .tile_x1 = 0x27u,
+    .tile_y0 = 6u, .tile_y1 = 6u,
+    .left = 0u, .top = 96u, .width = 320u, .height = 7u,
+    .source = 0x00bc4080u,
+    .source_stride = 0x500u, .source_control = 0x8e500000u,
+    .source_width = 320u, .source_height = 60u,
+    .expected_covered_pixels = 2240u,
+    .boundary = {
+        0x00000000u, 0x42ce0000u, 0x00000000u, 0x42c00000u,
+        0x43a00000u, 0x42ce0000u, 0x43a00000u, 0x42c00000u,
+    },
+    .quad = {
+        0xe0000000u, 0xa6318000u, 0x8e517881u, 0xd6887610u,
+        0xa7718000u, 0x0e51a580u, 0xa3104620u, 0x22250e80u,
+        0x00000000u, 0x41a00000u, 0x43a00000u, 0x41a00000u,
+        0x00000000u, 0x42ce0000u, 0x43a00000u, 0x42ce0000u,
+        0u, 0u, 0u, 0u,
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        0xff000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+        0x3ca00000u, 0xff000000u, 0x3f200000u, 0x00000000u,
+        0x3ea00000u, 0x3ca00000u, 0xff000000u, 0x00000000u,
+        0x3f6e0000u, 0x00000000u, 0x3dce0000u, 0xff000000u,
+        0x3f200000u, 0x3f6e0000u, 0x3ea00000u, 0x3dce0000u,
+    },
+};
 
 /* Safari's tabs transition retained this exact alternate-sampler packet. It
  * stretches a half-texel-wide source column over the 320-pixel surface while
@@ -7322,6 +7364,20 @@ int main(void) {
     test_pointer_selected_solid_quad();
     test_unfiltered_mirrored_sprites();
     test_later_tiled_status_sprites();
+    test_captured_status_form(&navigation_vertical_resample_form);
+    struct mbx_test_status_form vertical = navigation_vertical_resample_form;
+    vertical.name = "relocated navigation vertical magnification";
+    vertical.source = 0x00b72000u;
+    vertical.target = 0x00c98000u;
+    test_captured_status_form(&vertical);
+    vertical.name = "navigation vertical magnification full-height coverage";
+    vertical.yclip = 0x00700010u;
+    vertical.tile_y0 = 1u;
+    vertical.top = 20u;
+    vertical.height = 83u;
+    vertical.expected_covered_pixels = 320u * 83u;
+    vertical.boundary[3] = vertical.boundary[7] = 0x41a00000u;
+    test_captured_status_form(&vertical);
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

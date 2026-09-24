@@ -1087,6 +1087,26 @@ both control and candidate omitted the first Q in a roughly half-second
 ten-key burst despite accepting and reading all 20 touch reports. An isolated
 follow-up Q worked. Controller receipt alone does not prove usable input.
 
+### Navigation vertical resampling (2026-09-24)
+
+A physical Home/Settings navigation sequence retained a 44-word alternate-
+filtered draw with a 320x60 source envelope, a 320x83 destination and a context
+scissor exposing its final seven rows. The renderer rejected it solely because
+that sampler's accepted scale families excluded one-axis magnification. The
+existing bilinear sampler handles it without new sampling or blending rules;
+the added case retains horizontal 1:1 geometry, bounded source dimensions,
+positive vertical magnification, and all allocation, scissor, tile and atomic
+mapping checks. It does not admit arbitrary two-axis scaling or new samplers.
+
+The retained draw/register fixture failed before the change (all 2,240 pixels
+unwritten) and now passes. Its surrounding region/boundary fixture is derived
+from the captured scissor, not claimed as captured memory. Relocated and full-
+height variants also pass, including arbitrary BGRA8 inputs, inconsistent
+horizontal scale/UV/clip rejection and missing source/target mapping atomicity.
+The targeted MBX suite passes 2,265 checks. Native CI and physical replay remain
+pending. The temporary eight-contact console trace has been removed; its three
+typing trials passed and did not establish the cause of the earlier lost key.
+
 ### Historical instruction-resume narrative
 
 Two interpreter changes make the current instruction counts different from the
