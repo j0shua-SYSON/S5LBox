@@ -970,9 +970,14 @@ pauses cannot renew the genuine running-work deadline. Invalid or backward
 clock samples discard stale anchors without clearing an existing shield.
 This adds no serialized state and does not change deterministic execution.
 Portable regression cases cover long/repeated pauses, exact deadline edges,
-unanchored input, existing shields, failed samples and overflow. The updated
-application still requires the paired physical-device validation; this is
-not a claim that uninterrupted keyboard latency is fixed.
+unanchored input, existing shields, failed samples and overflow. The exact
+updated application passed the paired device test: the same 18-second pause
+left shield/quiescence counters unchanged, kept the guard active, and reported
+no clock failure. An 18-second background/foreground round trip did the same.
+Saving directly from a long user pause completed, and reopening restored the
+Safari field including its final typed letter. The installed executable was
+matched to the build artifact; installation preserved disk and checkpoint
+hashes. This is not a claim that uninterrupted keyboard latency is fixed.
 
 ### Historical instruction-resume narrative
 
