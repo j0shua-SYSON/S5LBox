@@ -8256,6 +8256,76 @@ static void test_cortex_a8_vfp_precision_fetch_and_retry(void) {
     }
 }
 
+static void test_cortex_a8_vfp_integer_fetch_and_retry(void) {
+    static const uint32_t insns[] = {0xeef8fa48u,0xeef8fb48u,0xeef8fac8u,0xeef8fbc8u,
+        0xeefcfa48u,0xeefcfb60u,0xeefdfa48u,0xeefdfb60u,0xeefcfac8u,0xeefcfbe0u,0xeefdfac8u,0xeefdfbe0u};
+    for (unsigned host = 0; host < 2u; host++)
+     for (unsigned kind = 0; kind < 12u; kind++)
+      for (unsigned fault = 0; fault < 4u; fault++) {
+        memset(g_ram,0,sizeof g_ram);
+        arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&bus,ARM_ARCH_V7_CORTEX_A8),"reset integer fetch");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP; c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = fault ? 0u : 0x40000000u; c.vfp_fpscr = 0x4bc00080u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N | test_it_bits(0x1cu); c.r[15] = 0xffeu;
+        for (unsigned s = 0; s < 32u; s++) c.vfp_s[s] = 0xdead0000u+s;
+        for (unsigned d = 0; d < 16u; d++) c.a8_vfp_hi[d] = UINT64_C(0x7ff01234beef0000)+d;
+        c.vfp_s[16] = kind<4u ? 0x01000003u : 0xbfc00000u; c.a8_vfp_hi[0] = UINT64_C(0xbff8000000000000);
+        uint32_t singles[32], flags = c.cpsr; uint64_t upper[16];
+        memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x8032u);
+        m_w32(NULL,0x6004u,fault == 1u ? 0u : fault == 2u ? 0xa033u : fault == 3u ? 0xa012u : 0xa032u);
+        m_w16(NULL,0x8ffeu,(uint16_t)(insns[kind]>>16)); m_w16(NULL,0xa000u,(uint16_t)insns[kind]);
+        m_w16(NULL,0x9000u,0u);
+        uint64_t result = kind<4u ? (kind&1u ? UINT64_C(0x4170000030000000) : UINT64_C(0x4b800001)) : kind&2u ? UINT32_MAX : 0u;
+        uint32_t exceptions = kind<4u ? (kind&1u ? 0u : 0x10u) : kind&2u ? 0x10u : 0x1u;
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u &&
+              c.vfp_fpscr == (0x4bc00080u | (fault ? 0u : exceptions)),"integer split fetch disposition");
+        if (!fault) {
+            if (kind<4u && (kind&1u)) upper[15] = result; else singles[31] = (uint32_t)result;
+            CHECK(c.r[15] == 0x1002u && c.cpsr == ((flags & ~TEST_IT_MASK) | test_it_bits(0x18u)),"integer split fetch/IT");
+        } else CHECK(c.r[15] == ARM_VEC_PREFETCH && c.r[14] == 0x1002u && c.cp15.ifar == 0x1000u &&
+            c.spsr[ARM_BANK_ABT] == flags && !(c.cpsr & (ARM_CPSR_T | TEST_IT_MASK)) && c.vfp_fpexc == 0u &&
+            (c.cp15.ifsr & 15u) == (fault == 1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION),
+            "integer availability/effects preceded second-half User fetch");
+        CHECK(memcmp(singles,c.vfp_s,sizeof singles) == 0 && memcmp(upper,c.a8_vfp_hi,sizeof upper) == 0,
+              "integer split fetch register result/preservation");
+      }
+    for (unsigned kind = 0; kind < 12u; kind++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset integer retry");
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_Z | ARM_CPSR_Q;
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpscr = 0x08000002u;
+        c.vfp_s[16] = kind<4u ? 0x01000003u : 0xbfc00000u; c.a8_vfp_hi[0] = UINT64_C(0xbff8000000000000);
+        uint32_t singles[32]; uint64_t upper[16];
+        memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
+        c.r[15] = 0x100u; c.r[5] = 0x40000000u; c.r[2] = 0x12345678u;
+        m_w16(NULL,0x100u,0xbf04u); /* ITT EQ */
+        m_w16(NULL,0x102u,(uint16_t)(insns[kind]>>16)); m_w16(NULL,0x104u,(uint16_t)insns[kind]);
+        m_w16(NULL,0x106u,0x2201u);
+        put_vfp_system_transfer(0u,ARM_VEC_UNDEFINED,0u,8u,5u); m_w32(NULL,8u,0xe25ef002u);
+        CHECK(arm_step(&c) == ARM_OK,"integer retry IT setup");
+        uint32_t interrupted = c.cpsr;
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == 0x104u &&
+              c.spsr[ARM_BANK_UND] == interrupted && c.vfp_fpscr == 0x08000002u &&
+              memcmp(singles,c.vfp_s,sizeof singles) == 0 && memcmp(upper,c.a8_vfp_hi,sizeof upper) == 0,
+              "integer lazy exception changed FP state");
+        CHECK(arm_step(&c) == ARM_OK && c.vfp_fpexc == 0x40000000u,"integer guest enable");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x102u && c.cpsr == interrupted,"integer exception return");
+        /* RN rounds int-to-F32 upward here; signed VCVTR yields -2 while
+         * VCVT still yields -1. Unsigned negative results saturate to zero. */
+        uint64_t result = kind<4u ? (kind&1u ? UINT64_C(0x4170000030000000) : UINT64_C(0x4b800002)) :
+            kind&2u ? (kind<8u ? UINT64_C(0xfffffffe) : UINT32_MAX) : 0u;
+        uint32_t exceptions = kind<4u ? (kind&1u ? 0u : 0x10u) : kind&2u ? 0x10u : 0x1u;
+        if (kind<4u && (kind&1u)) upper[15] = result; else singles[31] = (uint32_t)result;
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x106u && c.vfp_fpscr == (0x08000002u | exceptions) &&
+              c.cpsr == ((interrupted & ~TEST_IT_MASK) | test_it_bits(0x08u)) &&
+              memcmp(singles,c.vfp_s,sizeof singles) == 0 && memcmp(upper,c.a8_vfp_hi,sizeof upper) == 0,
+              "integer exact retry/IT/register state");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x108u && c.r[2] == 1u &&
+              c.cpsr == (interrupted & ~TEST_IT_MASK) && c.cycles == 6u,"integer changed following IT condition");
+    }
+}
+
 static void test_cortex_a8_vfp_data_fetch_and_retry(void) {
     static const uint32_t insns[] = {
         0xeef7fb00u,0xeef0fb60u,0xeef0fbe0u,0xeef1fb60u,
@@ -12030,6 +12100,7 @@ static void test_a8_exclusive_invalid_and_conditions(void) {
 int main(void) {
     test_cortex_a8_vfp_binary_fetch_and_retry();
     test_cortex_a8_vfp_precision_fetch_and_retry();
+    test_cortex_a8_vfp_integer_fetch_and_retry();
     test_a8_exclusive_registers();
     test_a8_exclusive_monitor_and_faults();
     test_a8_exclusive_invalid_and_conditions();

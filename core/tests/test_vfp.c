@@ -391,7 +391,7 @@ static void test_a8_vfp_bitwise_invalid_and_conditional(void) {
     /* Neither instruction-set prefix nor the neighboring arithmetic/conversion
      * encodings may become a raw move. These upper-bank operations remain
      * unsupported with access enabled. CDP2 stays refused even with EN=0. */
-    static const uint32_t neighbors[] = {0xfef7fb00u,0xee40fba0u,0xeef8fb60u};
+    static const uint32_t neighbors[] = {0xfef7fb00u,0xee40fba0u,0xeefafb60u};
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned n = 0; n < sizeof neighbors / sizeof neighbors[0]; n++) {
         arm_cpu_t c;
@@ -499,6 +499,16 @@ static uint32_t a8_fp_precision(unsigned narrow, unsigned dst, unsigned source) 
     return 0xeeb70ac0u | (narrow << 8) |
         (narrow ? ((dst >> 1) << 12) | ((dst & 1u) << 22) | (source & 15u) | ((source >> 4) << 5) :
                   ((dst & 15u) << 12) | ((dst >> 4) << 22) | (source >> 1) | ((source & 1u) << 5));
+}
+
+/* kind 0..3=int-to-FP, 4..7=VCVTR, 8..11=VCVT-to-int;
+ * bit 0 selects F64 and bit 1 signed integer data. */
+static uint32_t a8_fp_integer(unsigned kind, unsigned dst, unsigned source) {
+    unsigned to_integer = kind >= 4u, dbl = kind&1u, is_signed = (kind>>1)&1u;
+    return 0xeeb80a40u | (dbl<<8) |
+        (to_integer ? 0x40000u | (is_signed<<16) | ((kind>=8u)<<7) : is_signed<<7) |
+        (!to_integer && dbl ? ((dst&15u)<<12) | ((dst>>4)<<22) : ((dst>>1)<<12) | ((dst&1u)<<22)) |
+        (to_integer && dbl ? (source&15u) | ((source>>4)<<5) : (source>>1) | ((source&1u)<<5));
 }
 
 static uint32_t a8_fp_binary(unsigned op, unsigned dbl, unsigned dst, unsigned left, unsigned right) {
@@ -1807,6 +1817,316 @@ static void test_a8_vfp_precision_access_and_invalid(void) {
         arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = 0u;
         CHECK(!vfp_is_precision_data(neighbors[n]) && a8_move_step(&c,thumb,neighbors[n]) == ARM_UNDEFINED,
               "precision consumed neighboring coprocessor encoding");
+     }
+}
+
+static uint64_t a8_integer_native(uint64_t input, unsigned kind, uint32_t fpscr, uint32_t *flags) {
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    unsigned to_integer = kind>=4u, dbl = kind&1u, is_signed = (kind>>1)&1u;
+    *flags = 0u;
+    if (to_integer) {
+        uint64_t sign = UINT64_C(1)<<(dbl ? 63u : 31u), normal = UINT64_C(1)<<(dbl ? 52u : 23u);
+        uint64_t infinity = dbl ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
+        uint64_t magnitude = input & ~sign;
+        if (magnitude > infinity) { *flags = ARM_FPSCR_IOC; return 0u; }
+        if (magnitude == infinity) {
+            *flags = ARM_FPSCR_IOC;
+            return input&sign ? (is_signed ? 0x80000000u : 0u) : (is_signed ? 0x7fffffffu : UINT32_MAX);
+        }
+        if (magnitude && magnitude < normal && (fpscr&ARM_FPSCR_FZ)) { *flags = ARM_FPSCR_IDC; return 0u; }
+    }
+    fenv_t saved;
+    CHECK(fegetenv(&saved) == 0 && fesetround(rounds[kind>=8u ? 3u : (fpscr>>22)&3u]) == 0 &&
+          feclearexcept(FE_ALL_EXCEPT) == 0,"prepare native integer-conversion oracle");
+    uint64_t result;
+    if (to_integer) {
+        volatile double value = dbl ? u2d(input) : (double)u2f((uint32_t)input);
+        volatile double rounded = nearbyint(value);
+        double minimum = is_signed ? -2147483648.0 : 0.0, maximum = is_signed ? 2147483647.0 : 4294967295.0;
+        if (rounded < minimum) { result = is_signed ? 0x80000000u : 0u; *flags = ARM_FPSCR_IOC; }
+        else if (rounded > maximum) { result = is_signed ? 0x7fffffffu : UINT32_MAX; *flags = ARM_FPSCR_IOC; }
+        else { result = (uint32_t)(int64_t)rounded; if (rounded != value) *flags = ARM_FPSCR_IXC; }
+    } else {
+        uint32_t raw = (uint32_t)input;
+        volatile int64_t value = is_signed && (raw>>31) ? (int64_t)raw-INT64_C(4294967296) : raw;
+        if (dbl) { volatile double converted = (double)value; result = d2u(converted); }
+        else { volatile float converted = (float)value; result = f2u(converted); }
+        int exceptions = fetestexcept(FE_ALL_EXCEPT);
+        CHECK(!(exceptions & (FE_INVALID|FE_DIVBYZERO|FE_OVERFLOW|FE_UNDERFLOW)) && (!dbl || !exceptions),
+              "unexpected integer-to-FP native exception");
+        if (exceptions & FE_INEXACT) *flags = ARM_FPSCR_IXC;
+    }
+    CHECK(fesetenv(&saved) == 0,"restore native integer-conversion oracle host state");
+    return result;
+}
+
+static void test_a8_vfp_integer_registers(void) {
+    CHECK(a8_fp_integer(11u,0u,16u) == 0xeebd0be0u && a8_fp_integer(3u,16u,0u) == 0xeef80bc0u,
+          "VFP integer firmware encoding anchors");
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned kind = 0; kind < 12u; kind++)
+      for (unsigned shape = 0; shape < 32u; shape++)
+       for (unsigned dst = 0; dst < 32u; dst++)
+        for (unsigned source = 0; source < 32u; source++) {
+            unsigned to_integer = kind>=4u, dbl = kind&1u, is_signed = (kind>>1)&1u;
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.vfp_fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC | ((shape&7u)<<16) | ((shape>>3)<<20);
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c,d,UINT64_C(0x7ff01234dead0000)+d);
+            for (unsigned r = 0; r < 32u; r++) {
+                int value = is_signed ? (int)r-16 : (int)r+1;
+                a8_fp_value_set(&c,to_integer && dbl,r,to_integer ? a8_add_integer(dbl,value) : (uint32_t)value);
+            }
+            uint64_t expected[32]; for (unsigned d = 0; d < 32u; d++) expected[d] = vfp_get_d(&c,d);
+            int value = is_signed ? (int)source-16 : (int)source+1;
+            a8_add_expected_set(expected,!to_integer && dbl,dst,to_integer ? (uint32_t)value : a8_add_integer(dbl,value));
+            c.excl_valid = true; c.excl_addr = 0x12340u; c.a8_excl_size = 8u;
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c,thumb,a8_fp_integer(kind,dst,source)) == ARM_OK &&
+                  c.r[15] == 0x104u && c.cycles == 1u && c.cpsr == flags && c.vfp_fpscr == fpscr &&
+                  c.excl_valid && c.excl_addr == 0x12340u && c.a8_excl_size == 8u,
+                  "integer register/ignored LEN-STRIDE T=%u kind=%u shape=%u d/m=%u/%u",thumb,kind,shape,dst,source);
+            bool match = true;
+            for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c,d) == expected[d];
+            for (unsigned r = 0; r < 15u; r++) match &= c.r[r] == 0u;
+            CHECK(match,"integer conversion alias/result preservation");
+        }
+}
+
+static void test_a8_vfp_integer_values_and_host_state(void) {
+    fenv_t saved; CHECK(fegetenv(&saved) == 0,"save integer-conversion host state");
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    /* Explicit rounded integers before signed/unsigned range checks. These
+     * anchors distinguish saturation after rounding from checking the input. */
+    static const struct { uint64_t input; unsigned dbl; int64_t rounded[4]; bool inexact; } anchors[] = {
+        {UINT64_C(0x3fe0000000000000),1u,{0,1,0,0},true},
+        {UINT64_C(0xbfe0000000000000),1u,{0,0,-1,0},true},
+        {UINT64_C(0x3ff8000000000000),1u,{2,2,1,1},true},
+        {UINT64_C(0xbff8000000000000),1u,{-2,-1,-2,-1},true},
+        {UINT64_C(0x4004000000000000),1u,{2,3,2,2},true},
+        {UINT64_C(0xc004000000000000),1u,{-2,-2,-3,-2},true},
+        {UINT64_C(0x3fdfffffffffffff),1u,{0,1,0,0},true},
+        {UINT64_C(0x3fe0000000000001),1u,{1,1,0,0},true},
+        {UINT64_C(0x41dfffffffe00000),1u,{2147483648,2147483648,2147483647,2147483647},true},
+        {UINT64_C(0xc1e0000000100000),1u,{-2147483648,-2147483648,-2147483649,-2147483648},true},
+        {UINT64_C(0x41effffffff00000),1u,{4294967296,4294967296,4294967295,4294967295},true},
+        {UINT64_C(0x41f0000000000000),1u,{4294967296,4294967296,4294967296,4294967296},false},
+        {1u,1u,{0,1,0,0},true}, {UINT64_C(0x8000000000000001),1u,{0,0,-1,0},true},
+        {0x3f000000u,0u,{0,1,0,0},true}, {0xbf000000u,0u,{0,0,-1,0},true},
+        {0x3fc00000u,0u,{2,2,1,1},true}, {0xbfc00000u,0u,{-2,-1,-2,-1},true},
+        {0x40200000u,0u,{2,3,2,2},true}, {0xc0200000u,0u,{-2,-2,-3,-2},true},
+        {0x4effffffu,0u,{2147483520,2147483520,2147483520,2147483520},false},
+        {0x4f000000u,0u,{2147483648,2147483648,2147483648,2147483648},false},
+        {0xcf000000u,0u,{-2147483648,-2147483648,-2147483648,-2147483648},false},
+        {0xcf000001u,0u,{-2147483904,-2147483904,-2147483904,-2147483904},false},
+        {0x4f7fffffu,0u,{4294967040,4294967040,4294967040,4294967040},false},
+        {0x4f800000u,0u,{4294967296,4294967296,4294967296,4294967296},false},
+        {1u,0u,{0,1,0,0},true}, {0x80000001u,0u,{0,0,-1,0},true}
+    };
+    for (unsigned row = 0; row < sizeof anchors/sizeof anchors[0]; row++)
+     for (unsigned is_signed = 0; is_signed < 2u; is_signed++)
+      for (unsigned to_zero = 0; to_zero < 2u; to_zero++)
+       for (unsigned controls = 0; controls < 16u; controls++) {
+        unsigned kind = 4u+4u*to_zero+2u*is_signed+anchors[row].dbl;
+        int64_t rounded = anchors[row].rounded[to_zero ? 3u : controls&3u];
+        int64_t minimum = is_signed ? -INT64_C(2147483648) : 0, maximum = is_signed ? INT64_C(2147483647) : INT64_C(4294967295);
+        uint32_t want = (uint32_t)rounded, want_flags = anchors[row].inexact ? ARM_FPSCR_IXC : 0u;
+        if (rounded < minimum || rounded > maximum) { want = (uint32_t)(rounded < minimum ? minimum : maximum); want_flags = ARM_FPSCR_IOC; }
+        uint64_t sign = UINT64_C(1)<<(anchors[row].dbl ? 63u : 31u), normal = UINT64_C(1)<<(anchors[row].dbl ? 52u : 23u);
+        uint64_t magnitude = anchors[row].input & ~sign;
+        if ((controls&4u) && magnitude && magnitude < normal) { want = 0u; want_flags = ARM_FPSCR_IDC; }
+        uint32_t fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC | ((controls&3u)<<22) |
+            (controls&4u ? ARM_FPSCR_FZ : 0u) | (controls&8u ? ARM_FPSCR_DN : 0u), exceptions;
+        CHECK(a8_integer_native(anchors[row].input,kind,fpscr,&exceptions) == want && exceptions == want_flags,
+              "native integer raw anchor row=%u kind=%u controls=%u",row,kind,controls);
+        for (unsigned thumb = 0; thumb < 2u; thumb++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = fpscr;
+            a8_fp_value_set(&c,anchors[row].dbl,16u,anchors[row].input);
+            CHECK(a8_move_step(&c,thumb,a8_fp_integer(kind,31u,16u)) == ARM_OK &&
+                  vfp_get_s(&c,31u) == want && c.vfp_fpscr == (fpscr | want_flags),
+                  "integer raw anchor T=%u row=%u kind=%u controls=%u",thumb,row,kind,controls);
+        }
+       }
+    static const struct { uint32_t input; unsigned is_signed; uint32_t result[4], flags; } from_anchors[] = {
+        {0u,0u,{0u,0u,0u,0u},0u}, {1u,0u,{0x3f800000u,0x3f800000u,0x3f800000u,0x3f800000u},0u},
+        {0x01000001u,0u,{0x4b800000u,0x4b800001u,0x4b800000u,0x4b800000u},ARM_FPSCR_IXC},
+        {0x01000003u,0u,{0x4b800002u,0x4b800002u,0x4b800001u,0x4b800001u},ARM_FPSCR_IXC},
+        {UINT32_MAX,0u,{0x4f800000u,0x4f800000u,0x4f7fffffu,0x4f7fffffu},ARM_FPSCR_IXC},
+        {0x7fffffffu,1u,{0x4f000000u,0x4f000000u,0x4effffffu,0x4effffffu},ARM_FPSCR_IXC},
+        {0x80000000u,1u,{0xcf000000u,0xcf000000u,0xcf000000u,0xcf000000u},0u},
+        {0xfeffffffu,1u,{0xcb800000u,0xcb800000u,0xcb800001u,0xcb800000u},ARM_FPSCR_IXC},
+        {0xfefffffdu,1u,{0xcb800002u,0xcb800001u,0xcb800002u,0xcb800001u},ARM_FPSCR_IXC},
+        {UINT32_MAX,1u,{0xbf800000u,0xbf800000u,0xbf800000u,0xbf800000u},0u},
+        {0x80000000u,0u,{0x4f000000u,0x4f000000u,0x4f000000u,0x4f000000u},0u}
+    };
+    for (unsigned row = 0; row < sizeof from_anchors/sizeof from_anchors[0]; row++)
+     for (unsigned controls = 0; controls < 16u; controls++) {
+        unsigned kind = from_anchors[row].is_signed*2u;
+        uint32_t fpscr = ARM_FPSCR_QC | ARM_FPSCR_DZC | ((controls&3u)<<22) |
+            (controls&4u ? ARM_FPSCR_FZ : 0u) | (controls&8u ? ARM_FPSCR_DN : 0u), exceptions;
+        uint32_t want = from_anchors[row].result[controls&3u];
+        CHECK(a8_integer_native(from_anchors[row].input,kind,fpscr,&exceptions) == want && exceptions == from_anchors[row].flags,
+              "native int-to-F32 raw anchor row=%u controls=%u",row,controls);
+        for (unsigned thumb = 0; thumb < 2u; thumb++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = fpscr; vfp_set_s(&c,16u,from_anchors[row].input);
+            CHECK(a8_move_step(&c,thumb,a8_fp_integer(kind,31u,16u)) == ARM_OK &&
+                  vfp_get_s(&c,31u) == want && c.vfp_fpscr == (fpscr | from_anchors[row].flags),
+                  "int-to-F32 raw anchor T=%u row=%u controls=%u",thumb,row,controls);
+        }
+     }
+    for (unsigned kind = 0; kind < 12u; kind++) {
+        unsigned to_integer = kind>=4u, dbl = kind&1u, fraction = dbl ? 52u : 23u, max_exp = dbl ? 2047u : 255u;
+        uint64_t sign = UINT64_C(1)<<(dbl ? 63u : 31u), normal = UINT64_C(1)<<fraction;
+        uint64_t random = UINT64_C(0x739a10dc256ebf48);
+        unsigned samples = 2048u+(to_integer ? 2u*fraction : 96u);
+        for (unsigned sample = 0; sample < samples; sample++) {
+            random ^= random << 13; random ^= random >> 7; random ^= random << 17;
+            uint64_t input;
+            if (to_integer) {
+                uint64_t mantissa = (sample&3u)==0u ? 0u : (sample&3u)==1u ? normal-1u : (sample&3u)==2u ? 1u : random&(normal-1u);
+                input = ((uint64_t)(sample%max_exp)<<fraction) | mantissa;
+                if (sample>=2048u) {
+                    unsigned bit = (sample-2048u)/2u;
+                    input = sample&1u ? (UINT64_C(1)<<(bit+1u))-1u : UINT64_C(1)<<bit;
+                }
+                if (sample&4u) input |= sign;
+            } else {
+                input = (uint32_t)random;
+                if (sample>=2048u) {
+                    unsigned bit = (sample-2048u)/3u, part = (sample-2048u)%3u;
+                    uint32_t power = UINT32_C(1)<<bit;
+                    input = part==0u ? power : part==1u ? power-1u : power+1u;
+                }
+            }
+            for (unsigned controls = 0; controls < 16u; controls++) {
+                uint32_t fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC | ((controls&3u)<<22) |
+                    (controls&4u ? ARM_FPSCR_FZ : 0u) | (controls&8u ? ARM_FPSCR_DN : 0u), exceptions;
+                uint64_t want = a8_integer_native(input,kind,fpscr,&exceptions);
+                for (unsigned thumb = 0; thumb < 2u; thumb++) {
+                    arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = fpscr; a8_fp_value_set(&c,to_integer && dbl,16u,input);
+                    unsigned host = sample%4u;
+                    CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
+                          (!(sample&1u) || feraiseexcept(FE_INVALID|FE_DIVBYZERO) == 0),"prepare integer host state");
+                    int pending = fetestexcept(FE_ALL_EXCEPT); uint32_t flags = c.cpsr;
+                    CHECK(a8_move_step(&c,thumb,a8_fp_integer(kind,31u,16u)) == ARM_OK &&
+                          a8_fp_value(&c,!to_integer && dbl,31u) == want && c.vfp_fpscr == (fpscr | exceptions) && c.cpsr == flags,
+                          "finite integer T=%u kind=%u sample=%u controls=%u",thumb,kind,sample,controls);
+                    CHECK(fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == pending,"integer conversion changed host FP state");
+                }
+            }
+        }
+        if (!to_integer) continue;
+        for (unsigned row = 0; row < sizeof a8_compare_values/sizeof a8_compare_values[0]; row++)
+         for (unsigned controls = 0; controls < 16u; controls++) {
+            uint64_t input = dbl ? a8_compare_values[row].dual : a8_compare_values[row].single;
+            uint32_t fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ((controls&3u)<<22) |
+                (controls&4u ? ARM_FPSCR_FZ : 0u) | (controls&8u ? ARM_FPSCR_DN : 0u), exceptions;
+            uint64_t want = a8_integer_native(input,kind,fpscr,&exceptions);
+            if (a8_compare_values[row].nan) CHECK(want == 0u && exceptions == ARM_FPSCR_IOC,"all integer NaNs must raise invalid and yield zero");
+            for (unsigned thumb = 0; thumb < 2u; thumb++) {
+                arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = fpscr; a8_fp_value_set(&c,dbl,16u,input);
+                unsigned host = row%4u;
+                CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
+                      (!(row&1u) || feraiseexcept(FE_INVALID|FE_DIVBYZERO) == 0),"prepare special integer host state");
+                int pending = fetestexcept(FE_ALL_EXCEPT);
+                CHECK(a8_move_step(&c,thumb,a8_fp_integer(kind,31u,16u)) == ARM_OK &&
+                      vfp_get_s(&c,31u) == want && c.vfp_fpscr == (fpscr | exceptions),
+                      "special integer T=%u kind=%u row=%u controls=%u",thumb,kind,row,controls);
+                CHECK(fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == pending,"special integer changed host FP state");
+            }
+         }
+    }
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb);
+        c.vfp_fpscr = ARM_FPSCR_QC | ARM_FPSCR_FZ | ARM_FPSCR_DZC | (2u<<22) | (7u<<16) | (3u<<20);
+        vfp_set_s(&c,16u,UINT32_MAX); vfp_set_s(&c,17u,0xbf000000u); vfp_set_s(&c,18u,1u);
+        vfp_set_d(&c,16u,UINT64_C(0x7ff0000000000001)); vfp_set_d(&c,17u,1u);
+        uint32_t flags = c.vfp_fpscr | ARM_FPSCR_IXC | ARM_FPSCR_IOC | ARM_FPSCR_IDC;
+        CHECK(a8_move_step(&c,thumb,a8_fp_integer(0u,0u,16u)) == ARM_OK &&
+              a8_move_step(&c,thumb,a8_fp_integer(11u,1u,16u)) == ARM_OK &&
+              a8_move_step(&c,thumb,a8_fp_integer(4u,2u,17u)) == ARM_OK &&
+              a8_move_step(&c,thumb,a8_fp_integer(5u,3u,17u)) == ARM_OK &&
+              a8_move_step(&c,thumb,a8_fp_integer(3u,20u,18u)) == ARM_OK &&
+              a8_move_step(&c,thumb,VMRS(2u,1u)) == ARM_OK && c.r[2] == flags &&
+              vfp_get_s(&c,0u) == 0x4f7fffffu && vfp_get_s(&c,1u) == 0u && vfp_get_s(&c,2u) == 0u && vfp_get_s(&c,3u) == 0u &&
+              vfp_get_d(&c,20u) == UINT64_C(0x3ff0000000000000),"integer cumulative flags/exact conversion/VMRS");
+    }
+    CHECK(fesetenv(&saved) == 0,"restore integer-conversion host state");
+}
+
+static void test_a8_vfp_integer_access_and_invalid(void) {
+    static const unsigned permissions[] = {0u,1u,3u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned kind = 0; kind < 12u; kind++)
+      for (unsigned user = 0; user < 2u; user++)
+       for (unsigned enabled = 0; enabled < 2u; enabled++)
+        for (unsigned access = 0; access < 3u; access++)
+         for (unsigned skip = 0; skip < 2u; skip++) {
+            unsigned to_integer = kind>=4u, dbl = kind&1u;
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permissions[access]*0x00500000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            c.vfp_fpscr = (c.vfp_fpscr & ~ARM_FPSCR_IDC) | (7u<<16) | (3u<<20);
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c,d,UINT64_C(0x7ff01234dead0000)+d);
+            if (to_integer) a8_compare_value_set(&c,dbl,16u,20u); else vfp_set_s(&c,16u,0x7fffffffu);
+            vfp_set_s(&c,1u,1u); a8_fp_value_set(&c,!to_integer && dbl,31u,0x12345678u);
+            uint64_t expected[32]; for (unsigned d = 0; d < 32u; d++) expected[d] = vfp_get_d(&c,d);
+            if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf0cu : 0xbf1cu); CHECK(arm_step(&c) == ARM_OK,"integer IT setup"); }
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr, pc = c.r[15]; uint64_t cycles = c.cycles;
+            bool allowed = enabled && (permissions[access]==3u || (permissions[access]==1u && !user));
+            uint32_t insn = a8_fp_integer(kind,31u,16u); if (!thumb && skip) insn &= 0x0fffffffu;
+            uint64_t result = to_integer ? 0u : dbl ? UINT64_C(0x41dfffffffc00000) : UINT64_C(0x4effffff);
+            uint32_t exceptions = to_integer ? ARM_FPSCR_IOC : dbl ? 0u : ARM_FPSCR_IXC;
+            if (!skip && allowed) a8_add_expected_set(expected,!to_integer && dbl,31u,result);
+            CHECK(a8_move_step(&c,thumb,insn) == ARM_OK && c.cycles == cycles+1u &&
+                  c.vfp_fpscr == (fpscr | (!skip && allowed ? exceptions : 0u)) &&
+                  c.vfp_fpexc == (enabled ? ARM_FPEXC_EN : 0u) && c.cp15.cpacr == permissions[access]*0x00500000u,
+                  "integer access effects/unused operand");
+            CHECK(skip || allowed ? c.r[15] == pc+4u &&
+                  c.cpsr == (thumb ? (flags & ~0x0600fc00u) | 0x1800u : flags) :
+                  c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == pc+(thumb ? 2u : 4u) &&
+                  c.spsr[ARM_BANK_UND] == flags && (c.cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_UND,
+                  "integer conditional/exception state");
+            bool match = true; for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c,d) == expected[d];
+            CHECK(match,"integer access changed unexpected FP registers");
+         }
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned kind = 0; kind < 12u; kind++)
+      for (unsigned bit = 0; bit < 32u; bit++) {
+        if ((1u<<bit) & ARM_FPSCR_A8_WMASK) continue;
+        for (unsigned enabled = 0; enabled < 2u; enabled++)
+         for (unsigned skip = 0; skip < 2u; skip++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr |= (1u<<bit) | (7u<<16) | (3u<<20);
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u; c.cp15.cpacr = enabled ? 0x00f00000u : 0u;
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c,d,UINT64_C(0x7ff01234dead0000)+d);
+            if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK,"invalid integer IT setup"); }
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr, pc = c.r[15]; uint64_t cycles = c.cycles;
+            uint32_t insn = a8_fp_integer(kind,31u,16u); if (!thumb && skip) insn &= 0x0fffffffu;
+            CHECK(a8_move_step(&c,thumb,insn) == (skip ? ARM_OK : ARM_UNDEFINED) && c.cycles == cycles+1u &&
+                  c.r[15] == pc+(skip ? 4u : 0u) && c.vfp_fpscr == fpscr && c.vfp_fpexc == (enabled ? ARM_FPEXC_EN : 0u) &&
+                  c.cpsr == (thumb && skip ? flags & ~0x0600fc00u : flags),"integer reserved FPSCR/access/skip priority");
+            bool match = true;
+            for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c,d) == UINT64_C(0x7ff01234dead0000)+d;
+            CHECK(match,"invalid/skipped integer conversion changed FP registers");
+         }
+      }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++)
+     for (unsigned kind = 1u; kind < 12u; kind+=2u) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,legacy[profile]),"reset legacy integer conversion");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        vfp_set_d(&c,0u,UINT64_C(0x123456789abcdef0));
+        uint32_t singles[32]; uint64_t upper[16];
+        memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
+        CHECK(a8_move_step(&c,0u,a8_fp_integer(kind,kind>=4u ? 0u : 16u,kind>=4u ? 16u : 0u)) == ARM_UNDEFINED &&
+              memcmp(singles,c.vfp_s,sizeof singles) == 0 && memcmp(upper,c.a8_vfp_hi,sizeof upper) == 0,
+              "A8 integer conversion upper bank leaked into legacy");
+     }
+    const uint32_t neighbors[] = {0xeeb809c0u,0xeeb80cc0u,0xeeb90ac0u,0xeeb20ac0u,0xeeba0ac0u,0xeebb0ac0u,0xeebe0ac0u,0xeebf0ac0u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned n = 0; n < sizeof neighbors/sizeof neighbors[0]; n++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = 0u;
+        CHECK(!vfp_is_integer_data(neighbors[n]) && a8_move_step(&c,thumb,neighbors[n]) == ARM_UNDEFINED,
+              "integer conversion consumed neighboring allocation");
      }
 }
 
@@ -6060,6 +6380,9 @@ int main(void) {
     test_a8_vfp_precision_registers();
     test_a8_vfp_precision_values_and_host_state();
     test_a8_vfp_precision_access_and_invalid();
+    test_a8_vfp_integer_registers();
+    test_a8_vfp_integer_values_and_host_state();
+    test_a8_vfp_integer_access_and_invalid();
     test_a8_vfp_add_registers();
     test_a8_vfp_add_values_and_host_state();
     test_a8_vfp_add_special_values();

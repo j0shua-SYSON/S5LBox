@@ -281,6 +281,45 @@ static void test_vfp_precision_fetch_and_retry(void) {
         }
 }
 
+static void test_vfp_integer_fetch_and_retry(void) {
+    /* kind order matches int-to-FP, VCVTR, VCVT; F32/F64 and unsigned/signed. */
+    static const uint32_t insns[] = {0xeef8fa48u,0xeef8fb48u,0xeef8fac8u,0xeef8fbc8u,
+        0xeefcfa48u,0xeefcfb60u,0xeefdfa48u,0xeefdfb60u,0xeefcfac8u,0xeefcfbe0u,0xeefdfac8u,0xeefdfbe0u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned kind = 0; kind < 12u; kind++)
+      for (unsigned host = 0; host < 2u; host++)
+       for (unsigned second = 0; second < (thumb ? 2u : 1u); second++)
+        for (unsigned enabled = 0; enabled < 2u; enabled++) {
+            fixture_t f; arm_bus_t bus; arm_cpu_t c;
+            setup(&f,&bus,&c,thumb != 0u,host != 0u); if (thumb) c.cpsr |= 0x1800u;
+            c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u; c.vfp_fpscr = 0x4bc00080u;
+            uint32_t insn = insns[kind];
+            if (thumb) { put16(&f,0u,(uint16_t)(insn>>16)); put16(&f,2u,(uint16_t)insn); }
+            else put32(&f,0u,insn);
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c,d,UINT64_C(0xdead1234beef0000)+d);
+            vfp_set_s(&c,16u,kind<4u ? 0x01000003u : 0xbfc00000u); vfp_set_d(&c,16u,UINT64_C(0xbff8000000000000));
+            uint64_t expected[32]; for (unsigned d = 0; d < 32u; d++) expected[d] = vfp_get_d(&c,d);
+            uint32_t flags = c.cpsr;
+            f.fail_address = second*2u; f.fail_size = thumb ? 2u : 4u;
+            CHECK(arm_step(&c) == ARM_HALT,"integer conversion executed an incomplete fetch");
+            check_stop(&f,&c,0u,flags);
+            bool match = true; for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c,d) == expected[d];
+            CHECK(match && c.vfp_fpscr == 0x4bc00080u && c.vfp_fpexc == (enabled ? ARM_FPEXC_EN : 0u),
+                  "integer availability/effects preceded full checked fetch");
+            f.failed = false; f.fail_size = 0u; c.vfp_fpexc = ARM_FPEXC_EN;
+            uint64_t result = kind<4u ? (kind&1u ? UINT64_C(0x4170000030000000) : UINT64_C(0x4b800001)) :
+                kind&2u ? UINT32_MAX : 0u;
+            uint32_t exceptions = kind<4u ? (kind&1u ? 0u : ARM_FPSCR_IXC) : kind&2u ? ARM_FPSCR_IXC : ARM_FPSCR_IOC;
+            if (kind<4u && (kind&1u)) expected[31] = result;
+            else expected[15] = (expected[15] & UINT64_C(0xffffffff)) | (result<<32);
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u &&
+                  c.cpsr == (flags & ~0x0600fc00u) && c.vfp_fpscr == (0x4bc00080u | exceptions),
+                  "integer checked fetch retry");
+            match = true; for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c,d) == expected[d];
+            CHECK(match,"integer retry register result/preservation");
+        }
+}
+
 static void test_neon_by_scalar_fetch_and_retry(void) {
     const uint64_t a=UINT64_C(0x3fc000003fc00000), accumulator=UINT64_C(0x3f8000003f800000);
     static const uint64_t results[]={UINT64_C(0x4080000040800000),UINT64_C(0xc0000000c0000000),UINT64_C(0x4040000040400000)};
@@ -909,6 +948,7 @@ static void test_signed_runner_entry_guards(void) {
 int main(void) {
     test_vfp_binary_fetch_and_retry();
     test_vfp_precision_fetch_and_retry();
+    test_vfp_integer_fetch_and_retry();
     test_neon_by_scalar_fetch_and_retry();
     test_thumb_byte_reverse_fetch_retry();
     test_neon_macc_fetch_and_retry();

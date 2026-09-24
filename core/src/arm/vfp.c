@@ -2,7 +2,8 @@
  * S5LBox — VFPv2 (the ARM1176JZF-S's VFP11 unit).
  *
  * Cortex-A8 transfers, raw-bit data operations, scalar comparisons and
- * VADD/VSUB, VMUL/VNMUL, VDIV, VSQRT and single/double precision conversions
+ * VADD/VSUB, VMUL/VNMUL, VDIV, VSQRT, single/double precision conversions
+ * and 32-bit integer conversions
  * use checked paths with D0-D31. Comparisons and
  * these arithmetic operations use integer bits and preserve the host FP environment. The
  * register-file and arithmetic descriptions below concern the legacy VFP11
@@ -1082,6 +1083,73 @@ static arm_status_t vfp_a8_precision_data(arm_cpu_t *c, uint32_t pc, uint32_t in
     return ARM_OK;
 }
 
+/* FixedToFP with zero fraction bits, A2.7.8. The source bits are integer
+ * data, so FZ/DN have no effect; all 32-bit inputs are exact in binary64. */
+static uint64_t vfp_a8_integer_to_fp(uint32_t raw, bool is_signed, bool dbl,
+                                     uint32_t fpscr, uint32_t *exceptions) {
+    bool negative = is_signed && (raw >> 31);
+    uint64_t magnitude = negative ? (uint32_t)(0u - raw) : raw;
+    if (!magnitude) return 0u;
+    unsigned exponent = 0u, fraction = dbl ? 52u : 23u;
+    for (uint64_t scan = magnitude; scan >>= 1;) exponent++;
+    uint64_t significand = exponent > fraction + 3u ?
+        vfp_a8_shift_jam(magnitude, exponent - fraction - 3u) : magnitude << (fraction + 3u - exponent);
+    uint64_t sign = negative ? UINT64_C(1) << (dbl ? 63u : 31u) : 0u;
+    return vfp_a8_round(significand, (int)exponent + (dbl ? 1023 : 127), sign, dbl, fpscr, exceptions);
+}
+
+/* FPToFixed with M=32 and zero fraction bits. Round before saturation;
+ * invalid conversion suppresses a new IXC without clearing prior flags. */
+static uint32_t vfp_a8_fp_to_integer(uint64_t value, bool dbl, bool is_signed,
+                                     bool round_zero, uint32_t fpscr, uint32_t *exceptions) {
+    unsigned fraction = dbl ? 52u : 23u;
+    uint64_t hidden = UINT64_C(1) << fraction, sign = UINT64_C(1) << (dbl ? 63u : 31u);
+    uint64_t magnitude = value & (sign - 1u), infinity = (uint64_t)(dbl ? 2047u : 255u) << fraction;
+    bool negative = (value & sign) != 0u;
+    uint32_t limit = is_signed ? (negative ? 0x80000000u : 0x7fffffffu) : (negative ? 0u : UINT32_MAX);
+    if (magnitude > infinity) { *exceptions |= ARM_FPSCR_IOC; return 0u; }
+    if (!magnitude) return 0u;
+    if (magnitude < hidden && (fpscr & ARM_FPSCR_FZ)) { *exceptions |= ARM_FPSCR_IDC; return 0u; }
+    unsigned field = (unsigned)(magnitude >> fraction);
+    int exponent = (int)(field ? field : 1u) - (dbl ? 1023 : 127);
+    if (exponent > 31) { *exceptions |= ARM_FPSCR_IOC; return limit; }
+    uint64_t significand = (magnitude & (hidden - 1u)) | (field ? hidden : 0u);
+    uint64_t rounded; unsigned remainder = 0u;
+    if (exponent >= (int)fraction) rounded = significand << ((unsigned)exponent - fraction);
+    else {
+        uint64_t scaled = vfp_a8_shift_jam(significand << 3, (unsigned)((int)fraction - exponent));
+        rounded = scaled >> 3; remainder = (unsigned)(scaled & 7u);
+    }
+    unsigned mode = round_zero ? 3u : (fpscr >> 22) & 3u;
+    bool increment = mode == 0u ? remainder > 4u || (remainder == 4u && (rounded & 1u)) :
+                     mode == 1u ? remainder && !negative : mode == 2u ? remainder && negative : false;
+    if (increment) rounded++;
+    if (rounded > limit) { *exceptions |= ARM_FPSCR_IOC; return limit; }
+    if (remainder) *exceptions |= ARM_FPSCR_IXC;
+    return negative ? 0u - (uint32_t)rounded : (uint32_t)rounded;
+}
+
+/* A8.8.306 and K.1.1: integer conversions ignore LEN and STRIDE. */
+static arm_status_t vfp_a8_integer_data(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
+    g_reason = NULL;
+    bool to_integer = BIT(18), dbl = BIT(8), is_signed = to_integer ? BIT(16) : BIT(7);
+    bool source_double = to_integer && dbl, result_double = !to_integer && dbl;
+    unsigned rd = result_double ? FIELD(12) | (BIT(22) << 4) : SREG(FIELD(12), BIT(22));
+    unsigned rm = source_double ? (insn & 15u) | (BIT(5) << 4) : SREG(insn & 15u, BIT(5));
+    if (c->vfp_fpscr & ~ARM_FPSCR_A8_WMASK)
+        return vfp_trap(pc, insn, "nonzero Cortex-A8 FPSCR DNM/SBZP fields");
+    if (!vfp_cpacr_permits(c) || !vfp_enabled(c))
+        return vfp_guest_undefined("Cortex-A8 VFP integer conversion requires CPACR access and FPEXC.EN");
+    uint64_t value = source_double ? vfp_get_d(c, rm) : vfp_get_s(c, rm);
+    uint32_t exceptions = 0u;
+    uint64_t result = to_integer ? vfp_a8_fp_to_integer(value, dbl, is_signed, BIT(7), c->vfp_fpscr, &exceptions) :
+        vfp_a8_integer_to_fp((uint32_t)value, is_signed, dbl, c->vfp_fpscr, &exceptions);
+    if (result_double) vfp_set_d(c, rd, result);
+    else vfp_set_s(c, rd, (uint32_t)result);
+    c->vfp_fpscr |= exceptions;
+    return ARM_OK;
+}
+
 /* ================================================= load / store group ==== *
  *
  * cond 110 P U D W L Rn Vd 101 sz imm8   (ARM ARM A7.6, "Extension register
@@ -1939,6 +2007,8 @@ arm_status_t vfp_execute(arm_cpu_t *c, uint32_t pc, uint32_t insn,
         return vfp_a8_compare_data(c, pc, insn);
     if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_precision_data(insn))
         return vfp_a8_precision_data(c, pc, insn);
+    if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_integer_data(insn))
+        return vfp_a8_integer_data(c, pc, insn);
     if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 &&
         (vfp_is_add_sub_data(insn) || vfp_is_multiply_data(insn) || vfp_is_divide_data(insn) || vfp_is_sqrt_data(insn)))
         return vfp_a8_arithmetic_data(c, pc, insn);

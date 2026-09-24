@@ -177,6 +177,12 @@ static inline bool vfp_is_precision_data(uint32_t insn) {
     return (insn & 0x0fbf0ed0u) == 0x0eb70ac0u;
 }
 
+/* VCVT/VCVTR between F32/F64 and a signed/unsigned 32-bit integer. */
+static inline bool vfp_is_integer_data(uint32_t insn) {
+    return (insn & 0x0fbf0e50u) == 0x0eb80a40u ||
+           (insn & 0x0fbe0e50u) == 0x0ebc0a40u;
+}
+
 /*
  * Execute one VFP encoding. `insn` must already have been identified as a
  * cp10/cp11 encoding by the caller and its condition code must already have
