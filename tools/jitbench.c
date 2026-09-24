@@ -8228,6 +8228,170 @@ static bool compact_raw_vfp_resident_memory_case(
     return true;
 }
 
+/* Dirty low CPU registers before each VFP transfer, then immediately consume
+ * the result in integer code. Single-instruction tests cannot detect a stale
+ * CPU-array read/write when the resident register ABI owns the live value. */
+static bool validate_compact_raw_vfp_resident_transfer_oracles(void) {
+    const uint32_t pc = UINT32_C(0x17800);
+    unsigned core_cases = 0u, memory_cases = 0u, guard_cases = 0u;
+    uint8_t *baseline = (uint8_t *)malloc(sizeof g_ram);
+    uint8_t *expected = (uint8_t *)malloc(sizeof g_ram);
+    arm_bus_t write_bus = g_bus;
+    bool ok = false;
+    if (!baseline || !expected) goto done;
+    write_bus.host_ram_write = mem_host_ram;
+
+    for (unsigned rt = 0u; rt < 15u; rt++)
+        for (unsigned sn = 0u; sn < 32u; sn++) {
+            const unsigned other = (rt + 1u) % 15u;
+            const uint32_t program[] = {
+                UINT32_C(0xe2800001) | (rt << 16) | (rt << 12),
+                VFP_VMOV_S_R(sn, rt),
+                UINT32_C(0xe2800001) | (rt << 16) | (rt << 12),
+                VFP_VMOV_R_S(rt, sn),
+                UINT32_C(0xe2a00000) | (rt << 16) | (other << 12),
+                VFP_VMOV_R_S(other, sn),
+                UINT32_C(0xe2800001),
+            };
+            for (unsigned budget = 1u; budget <= 7u; budget++) {
+                arm_cpu_t reference, compact;
+                seed_vfp_oracle(&reference, program, 7u, pc, true);
+                reference.r[rt] = UINT32_C(0xabcdef00) + sn;
+                reference.cpsr = (reference.cpsr & UINT32_C(0x0fffffff)) |
+                                 (((rt + sn + budget) & 15u) << 28);
+                reference.vfp_fpscr = UINT32_C(0xf3ff9f9f);
+                compact = reference;
+                if (!compact_raw_vfp_run_pair("resident-core-transfer",
+                        &reference, &compact, pc, 7u, budget, budget, budget))
+                    goto done;
+                core_cases++;
+            }
+        }
+
+    for (unsigned fp = 0u; fp < 48u; fp++)
+        for (unsigned rn = 0u; rn < 16u; rn++)
+            for (unsigned mode = 0u; mode < 4u; mode++) {
+                const bool wide = fp >= 32u, load = (mode & 1u) != 0u;
+                const bool up = (mode & 2u) != 0u;
+                const unsigned word = wide ? (fp - 32u) * 2u : fp;
+                const unsigned base = rn == 15u ? 0u : rn;
+                const unsigned result = (base + 1u) % 15u;
+                const uint32_t addr = rn == 15u ?
+                    pc + 12u + (up ? 128u : (uint32_t)-128) :
+                    DATA_BASE + UINT32_C(0x800);
+                const uint32_t program[] = {
+                    UINT32_C(0xe2800004) | (base << 16) | (base << 12),
+                    VFP_LDST(14, 1, up, wide ? 0u : (word & 1u), 0,
+                             load, rn, word >> 1, wide, rn == 15u ? 32u : 2u),
+                    VFP_VMOV_R_S(result, word),
+                    UINT32_C(0xe220001f) | (result << 16) | (result << 12),
+                };
+                for (unsigned cached = 0u; cached < 2u; cached++) {
+                    arm_cpu_t initial;
+                    seed_vfp_oracle(&initial, program, 4u, pc, true);
+                    initial.bus = &write_bus;
+                    if (rn != 15u)
+                        initial.r[rn] = addr - 4u + (up ? (uint32_t)-8 : 8u);
+                    initial.cpsr = (initial.cpsr & UINT32_C(0x0fffffff)) |
+                                   (((fp + rn + mode) & 15u) << 28);
+                    initial.vfp_fpscr = UINT32_C(0xf3ff9f9f);
+                    mem_w32(NULL, addr, UINT32_C(0x7f800001) ^ fp);
+                    mem_w32(NULL, addr + 4u, UINT32_C(0x87654321) ^ rn);
+                    if (cached) {
+                        if (load) oracle_warm_dread(&initial, addr);
+                        else oracle_warm_dwrite(&initial, addr, true);
+                    }
+                    if (!(cached ? compact_raw_vfp_resident_memory_case(
+                            "live-base-transfer", 4u, pc, &initial, baseline, expected) :
+                          compact_raw_vfp_flat_memory_case(
+                            "live-base-transfer", 4u, pc, &initial, baseline, expected)))
+                        goto done;
+                    memory_cases++;
+                }
+            }
+
+    /* A rejected instruction must spill the already retired prefix, but not
+     * alter the current instruction's CPU/VFP state. A failed condition must
+     * skip the guard altogether. */
+    for (unsigned kind = 0u; kind < 4u; kind++)
+        for (unsigned guard = 0u; guard < 2u; guard++)
+            for (unsigned skip = 0u; skip < 2u; skip++) {
+                uint32_t transfer = kind == 0u ? VFP_VMOV_S_R(31, 7) :
+                    kind == 1u ? VFP_VMOV_R_S(7, 31) :
+                    VFP_LDST(14, 1, 1, 0, 0, kind == 2u, 7, 15, 1, 0);
+                if (skip) transfer &= UINT32_C(0x0fffffff); /* EQ, Z clear */
+                const uint32_t program[] = {
+                    UINT32_C(0xe2877008), transfer, UINT32_C(0xe2877008)
+                };
+                arm_cpu_t reference, compact;
+                seed_vfp_oracle(&reference, program, 3u, pc, guard != 0u);
+                reference.r[7] = DATA_BASE;
+                reference.cpsr &= ~ARM_CPSR_Z;
+                if (guard) reference.cp15.cpacr = 0u;
+                compact = reference;
+                const unsigned steps = skip ? 3u : 1u;
+                if (!compact_raw_vfp_run_pair("resident-transfer-guard",
+                        &reference, &compact, pc, 3u, steps, 3u, steps))
+                    goto done;
+                guard_cases++;
+            }
+    for (unsigned load = 0u; load < 2u; load++)
+        for (unsigned failure = 0u; failure < 3u; failure++) {
+            const uint32_t program[] = {
+                UINT32_C(0xe2877008),
+                VFP_LDST(14, 1, 1, 0, 0, load, 7, 15, 1, 0),
+            };
+            arm_cpu_t reference, compact;
+            unsigned completed = UINT_MAX;
+            seed_vfp_oracle(&reference, program, 2u, pc, true);
+            reference.bus = &write_bus;
+            reference.r[7] = DATA_BASE;
+            if (failure != 0u) {
+                if (load) oracle_warm_dread(&reference, DATA_BASE + 8u);
+                else oracle_warm_dwrite(&reference, DATA_BASE + 8u, true);
+                if (failure == 1u) reference.tlb_gen++;
+                else reference.r[7]++; /* Misaligned even for the old path. */
+            }
+            compact = reference;
+            memcpy(baseline, g_ram, sizeof g_ram);
+            if (arm_step(&reference) != ARM_OK ||
+                !a64_compact_raw_run_code_window(&compact, &g_ram[pc], pc,
+                                                  8u, 2u, &completed) ||
+                completed != 1u || !static_vfp_states_equal(&reference, &compact) ||
+                memcmp(baseline, g_ram, sizeof g_ram) != 0) {
+                fprintf(stderr, "jitbench: resident VFP witness refusal %u/%u\n",
+                        load, failure);
+                goto done;
+            }
+            guard_cases++;
+        }
+    {
+        /* Store through VFP directly into the next live instruction word. */
+        const uint32_t program[] = {
+            UINT32_C(0xe2800001), VFP_VMOV_S_R(0, 0),
+            VFP_LDST(14, 1, 1, 0, 0, 0, 15, 0, 0, 0),
+            UINT32_C(0xe2811001), UINT32_C(0xe2822001),
+        };
+        arm_cpu_t initial;
+        seed_vfp_oracle(&initial, program, 5u, pc, true);
+        initial.bus = &write_bus;
+        initial.r[0] = UINT32_C(0xe2822037) - 1u;
+        oracle_warm_dwrite(&initial, pc + 16u, true);
+        if (!compact_raw_vfp_resident_memory_case("live-code-store", 5u, pc,
+                                                   &initial, baseline, expected))
+            goto done;
+    }
+    printf("COMPACT-RAW-VFP-RESIDENT-TRANSFER-ORACLE exact=yes core=%u memory=%u "
+           "guards=%u live-low-registers=yes budgets=7 flags=yes "
+           "flat-and-cached=yes live-code-store=yes runtime-codegen=no\n",
+           core_cases, memory_cases, guard_cases);
+    ok = true;
+done:
+    free(baseline);
+    free(expected);
+    return ok;
+}
+
 static bool validate_compact_raw_vfp_memory_oracles(void) {
     uint8_t *baseline = (uint8_t *)malloc(sizeof g_ram);
     uint8_t *expected = (uint8_t *)malloc(sizeof g_ram);
@@ -9675,6 +9839,8 @@ static bool validate_compact_raw_oracles(void) {
     if (!validate_compact_raw_vfp_integer_to_float_oracles())
         return false;
     if (!validate_compact_raw_vfp_memory_oracles())
+        return false;
+    if (!validate_compact_raw_vfp_resident_transfer_oracles())
         return false;
     if (!validate_compact_raw_a32_single_oracles())
         return false;

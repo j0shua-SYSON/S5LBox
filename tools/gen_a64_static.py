@@ -3676,7 +3676,7 @@ def compact_system_coprocessor_body() -> list[str]:
     ]
 
 
-def compact_register_memory(prefix: str) -> list[str]:
+def compact_register_memory(prefix: str, double: bool = False) -> list[str]:
     """Resident memory witness checks; misses leave before any guest mutation.
 
     w10 is the address, x11 the returned pointer. Only x11-x15 are clobbered;
@@ -3684,7 +3684,7 @@ def compact_register_memory(prefix: str) -> list[str]:
     """
     body: list[str] = []
     for direction, cache, count in (("read", 16, 32), ("write", 24, 40)):
-        for width in (4, 2, 1):
+        for width in ((8, 4, 2, 1) if double else (4, 2, 1)):
             body += [f"{prefix}{direction}{width}:"]
             if width > 1:
                 body += [f"    tst w10, #{width - 1}", f"    b.ne {prefix}decode"]
@@ -3835,7 +3835,7 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
             "    cmp w10, #5", f"    b.eq {prefix}branch",
             "    cmp w10, #2", f"    b.eq {prefix}memory",
             "    cmp w10, #1", f"    b.eq {prefix}immediate",
-            f"    cbnz w10, {prefix}decode",
+            f"    cbnz w10, {prefix}extension",
             # Only the ordinary unshifted, all-low-register form. The high
             # register and shift bits also reject BX/MSR/multiply/extra space.
             "    mov w11, #0x8ff8", "    movk w11, #8, lsl #16",
@@ -3856,6 +3856,86 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
             "    add w8, w26, #4", "    str w8, [x19, #56]", "1:",
             "    sbfx w8, w9, #0, #24", "    add w26, w26, #8",
             "    add w26, w26, w8, lsl #2", f"    b {prefix}retire"]
+    # Keep common VFP transfers inside the resident ABI. They need only
+    # w8-w15, so low CPU registers and CPSR need not make a memory round trip.
+    # Rejected encodings/accesses still enter the old decoder before mutation.
+    body += [f"{prefix}extension:", "    cmp w10, #7",
+             f"    b.eq {prefix}vfp_core_probe", "    cmp w10, #6",
+             f"    b.ne {prefix}decode",
+             # Scalar VLDR/VSTR only: P=1, W=0, cp10/cp11. Double addresses
+             # that are word- but not double-aligned use the existing path.
+             "    mov w11, #0x0e00", "    movk w11, #0x0f20, lsl #16",
+             "    and w10, w9, w11", "    mov w11, #0x0a00",
+             "    movk w11, #0x0d00, lsl #16", "    cmp w10, w11",
+             f"    b.ne {prefix}decode", f"    bl {prefix}vfp_enabled",
+             "    tbz w9, #8, 1f", f"    tbnz w9, #22, {prefix}decode", "1:",
+             "    ubfx w10, w9, #16, #4", f"    bl {prefix}vfp_read_core",
+             "    and w10, w9, #255", "    tbz w9, #23, 2f",
+             "    add w10, w8, w10, lsl #2", "    b 3f", "2:",
+             "    sub w10, w8, w10, lsl #2", "3:",
+             f"    tbz w9, #20, {prefix}vfp_store_address",
+             "    tbnz w9, #8, 4f", f"    bl {prefix}read4", "    b 5f", "4:",
+             f"    bl {prefix}read8", "5:", f"    b {prefix}vfp_memory_operand",
+             f"{prefix}vfp_store_address:", "    tbnz w9, #8, 6f",
+             f"    bl {prefix}write4", "    b 7f", "6:",
+             f"    bl {prefix}write8", "7:",
+             f"{prefix}vfp_memory_operand:",
+             "    ldr x12, [x27, #104]", "    ubfx w13, w9, #12, #4",
+             "    ubfx w14, w9, #22, #1", "    orr w13, w14, w13, lsl #1",
+             "    add x12, x12, w13, uxtw #2",
+             f"    tbnz w9, #8, {prefix}vfp_memory_double",
+             "    tbz w9, #20, 8f", "    ldr w8, [x11]", "    str w8, [x12]",
+             f"    b {prefix}sequential", "8:", "    ldr w8, [x12]",
+             "    str w8, [x11]", f"    b {prefix}sequential",
+             f"{prefix}vfp_memory_double:",
+             "    tbz w9, #20, 9f", "    ldr x8, [x11]", "    str x8, [x12]",
+             "    b 10f", "9:", "    ldr x8, [x12]", "    str x8, [x11]", "10:",
+             # A double transfer represents two architectural word accesses.
+             # The witness helper counted one; flat-RAM oracles have no cache.
+             "    ldr x12, [x27]", f"    cbnz x12, {prefix}sequential",
+             "    tbz w9, #20, 11f", "    ldr x12, [x27, #32]", "    b 12f",
+             "11:", "    ldr x12, [x27, #40]", "12:",
+             "    ldr x13, [x12]", "    add x13, x13, #1", "    str x13, [x12]",
+             f"    b {prefix}sequential",
+             f"{prefix}vfp_core_probe:",
+             # VMOV between one S word and one non-PC CPU register. Double
+             # lane transfers and system-register operations keep their path.
+             "    mov w11, #0x0f7f", "    movk w11, #0x0fe0, lsl #16",
+             "    and w10, w9, w11", "    mov w11, #0x0a10",
+             "    movk w11, #0x0e00, lsl #16", "    cmp w10, w11",
+             f"    b.ne {prefix}decode", "    ubfx w10, w9, #12, #4",
+             "    cmp w10, #15", f"    b.eq {prefix}decode",
+             f"    bl {prefix}vfp_enabled",
+             "    ldr x11, [x27, #104]", "    ubfx w12, w9, #16, #4",
+             "    ubfx w13, w9, #7, #1", "    orr w12, w13, w12, lsl #1",
+             "    add x11, x11, w12, uxtw #2", "    ubfx w10, w9, #12, #4",
+             f"    tbnz w9, #20, {prefix}vfp_to_core",
+             f"    bl {prefix}vfp_read_core", "    str w8, [x11]",
+             f"    b {prefix}sequential", f"{prefix}vfp_to_core:",
+             "    ldr w8, [x11]", f"    bl {prefix}vfp_write_core",
+             f"    b {prefix}sequential",
+             f"{prefix}vfp_enabled:",
+             "    ldr w10, [x27, #128]", f"    cbz w10, {prefix}decode",
+             "    ldr x10, [x27, #112]", f"    cbz x10, {prefix}decode",
+             "    ldr w10, [x10]", f"    tbz w10, #30, {prefix}decode", "    ret",
+             f"{prefix}vfp_read_core:", "    cmp w10, #8", "    b.lo 13f",
+             "    cmp w10, #15", "    b.eq 14f",
+             "    ldr w8, [x19, w10, uxtw #2]", "    ret", "14:",
+             "    add w8, w26, #8", "    ret", "13:",
+             *table_address(15, prefix + "vfp_read_core_table"),
+             "    ldrsw x10, [x15, w10, uxtw #2]", "    add x15, x15, x10", "    br x15",
+             f"{prefix}vfp_write_core:", "    cmp w10, #8", "    b.lo 15f",
+             "    str w8, [x19, w10, uxtw #2]", "    ret", "15:",
+             *table_address(15, prefix + "vfp_write_core_table"),
+             "    ldrsw x10, [x15, w10, uxtw #2]", "    add x15, x15, x10", "    br x15"]
+    for reg in range(8):
+        body += [f"{prefix}vfp_read_core_{reg}:", f"    mov w8, w{reg}", "    ret",
+                 f"{prefix}vfp_write_core_{reg}:", f"    mov w{reg}, w8", "    ret"]
+    for direction in ("read", "write"):
+        label = prefix + "vfp_" + direction + "_core_table"
+        body += [".p2align 2", f"{label}:"]
+        body += [f"    .long {prefix}vfp_{direction}_core_{reg} - {label}"
+                 for reg in range(8)]
     for index, condition in enumerate(CONDITIONS):
         body += [f"{prefix}condition_{index}:", f"    b.{condition} {prefix}classify",
                  f"    b {prefix}sequential"]
@@ -3942,7 +4022,7 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
             elif value != "w8":
                 body += [f"    mov w8, {value}"]
             body += [f"    b {prefix}operand_{role}_ready"]
-    body += compact_register_memory(prefix)
+    body += compact_register_memory(prefix, double=True)
     table = ["", ".p2align 2", f"{prefix}table:"]
     handlers: dict[tuple[str, ...], str] = {}
 

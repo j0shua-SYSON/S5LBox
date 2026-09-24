@@ -998,6 +998,23 @@ coverage compares 16,384 cases with the interpreter, plus rejection, condition,
 partial-prefix and host-state checks. Physical speed and latency remain to be
 measured; extending instruction coverage alone does not establish a speedup.
 
+### Resident floating-point transfers (2026-09-24)
+
+The A32 low-register tier now handles single-word CPU/VFP `VMOV` and scalar
+`VLDR`/`VSTR` without leaving its live-register ABI. Previously these ordinary
+transfers spilled eight CPU registers and the guest flags, then reloaded them
+after the old compact decoder finished. This extends generic instruction
+execution; it does not identify guest functions or change their results.
+
+The new path retains access checks, condition-before-guard ordering and the
+existing direct-memory witnesses. Double transfers use it only when aligned to
+eight bytes, so both words share one proved cache block; other legal forms keep
+the existing path. Cached doubles still count two architectural word accesses.
+Mixed-instruction regression coverage includes 3,360 CPU-register/budget cases,
+6,144 flat/cached memory cases, 22 partial-prefix refusals or condition skips,
+and a store into the next live instruction. Native and physical validation are
+required before treating this candidate as a correctness or performance result.
+
 ### Historical instruction-resume narrative
 
 Two interpreter changes make the current instruction counts different from the
