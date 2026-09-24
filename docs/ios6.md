@@ -667,6 +667,53 @@ unit F64 ramp, F32 ramp and F64 remainder fixtures retain all 4,096, 640,
 (77 strict and 72 shipping tests). The entire guarded kernel-entry trace
 remains identical through the same 61,650-step L2 parity/ECC stop.
 
+Advanced SIMD conversions between F32 and signed/unsigned 32-bit integers
+now cover every D/Q register and both instruction sets. They use the same
+integer arithmetic with standard NEON controls: nearest-even for integer
+inputs, truncation for FP inputs, FZ/DN enabled and traps disabled. Guest
+rounding, FZ/DN, LEN/STRIDE and trap enables do not select the arithmetic.
+Each active lane contributes its cumulative exceptions; inactive registers
+and lanes remain unchanged. Reserved sizes and odd Q register operands stop
+before access checks. This follows
+[DDI0406C.b, A2.7.8 and A8.8.305](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Tests cover all source/destination D/Q pairs and aliases, raw result/flag
+anchors under all 512 rounding/FZ/DN/LEN/STRIDE combinations, independent
+native conversion oracles, every finite F32 exponent and subnormal shift,
+special values and random/power-boundary integers. Four host rounding modes
+and pending exceptions remain intact. Tests also cover cumulative flags,
+VMRS, access denial, invalid encodings, IT conditions, legacy refusals and
+adjacent reciprocal allocations. Checked host fetch failures, split-page
+User translation/XN/AP faults, and guest enable/return retries exercise
+all four operations and both vector widths. The first build and all three
+focused tests passed without corrections.
+
+Three unchanged 44-byte Thumb routines now complete 6,144 prepared calls:
+`vDSP_vflt32` at `0x308616f4..0x30861720`, `vDSP_vfltu32` at
+`0x30861800..0x3086182c`, and `vDSP_vfixu32` at
+`0x308615e4..0x30861610`. Before this addition, all 256 initial empty calls
+returned and the first nonempty call stopped after nine instructions at
+`0x3086170a`, on `VCVT.F32.S32 d0, d0`, after four input bytes and before
+any output write. The fixture and runner were unchanged for the first
+successful run. Each routine converts both lanes of D0 even though it stores
+only S0; the fixture checks D0 and partial FPSCR/CPSR after every conversion.
+An independent exact-rational oracle supplies 60 main-input rows and 396
+upper-lane trajectory rows, checked against 24 raw anchors. Calls cover
+eight counts from zero through 33, four signed-stride pairs, four alignment
+tuples, twenty main inputs per routine, all sixteen guest rounding/FZ/DN
+controls and four prepared S1 seeds. Separate User input/output pages and a
+four-byte stack argument have exact access counts; no stack frame is used.
+Checks cover each fetched byte, all FP/general registers, flags, exclusive
+monitor, return state, instruction counts and whole RAM. These results do
+not establish a signed F32-to-integer routine, process launch, board boot,
+timing or physical behavior.
+
+After NEON conversion support, all 77 strict and 72 shipping tests pass.
+The earlier integer, precision, square-root, division, unit F64 ramp, F32
+ramp and F64 remainder fixtures retain their 4,096, 4,096, 640, 1,536, 336,
+1,824 and 112 passing calls. The whole guarded kernel-entry trace remains
+identical through the 61,650-step L2 parity/ECC stop.
+
 The unchanged ARM [`vDSP_vma`](https://developer.apple.com/documentation/accelerate/vdsp_vma)
 at `0x30825f94` now completes 144 calls through its scalar body. Before
 multiply-accumulate support, the first nonempty case stopped at `0x30826144`
@@ -1328,7 +1375,7 @@ establish that result.
   32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms,
   register Boolean operations, VEXT, 8/16/32-bit VTRN, F32 VABS/VNEG,
   immediate constants, core-register VDUP, register VMUL/VADD/VSUB/VMLA/VMLS.F32
-  and F32 VMUL/VMLA/VMLS by scalar
+  F32 VMUL/VMLA/VMLS by scalar, and F32/signed/unsigned 32-bit NEON conversion
   described above.
   Other upper-bank VFP arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Remaining shared lower-bank

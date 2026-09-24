@@ -3788,6 +3788,231 @@ static void test_a8_neon_multiply_access_and_invalid(void) {
     }
 }
 
+/* op: signed/unsigned int-to-F32, then F32-to-signed/unsigned int. */
+static uint32_t a8_neon_integer(unsigned thumb, unsigned op, unsigned quad,
+                                unsigned d, unsigned m, unsigned size) {
+    return (thumb ? 0xffb30600u : 0xf3b30600u) | (size<<18) | (op<<7) | (quad<<6) |
+        ((d&15u)<<12) | ((d>>4)<<22) | ((m>>4)<<5) | (m&15u);
+}
+
+static void test_a8_neon_integer_registers(void) {
+    CHECK(a8_neon_integer(1u,0u,0u,0u,0u,2u)==0xffbb0600u &&
+          a8_neon_integer(1u,1u,0u,0u,0u,2u)==0xffbb0680u &&
+          a8_neon_integer(1u,3u,0u,0u,0u,2u)==0xffbb0780u,"NEON integer firmware encoding anchors");
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned op=0;op<4u;op++)
+      for (unsigned quad=0;quad<2u;quad++)
+       for (unsigned d=0;d<32u;d+=quad+1u)
+        for (unsigned m=0;m<32u;m+=quad+1u) {
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.cpsr|=ARM_CPSR_E; c.vfp_fpscr=0xfff79f9fu;
+            c.excl_valid=true; c.excl_addr=0x2468u; c.a8_excl_size=8u;
+            uint64_t expected[32];
+            for (unsigned r=0;r<32u;r++) {
+                uint32_t lanes[2];
+                for (unsigned lane=0;lane<2u;lane++) {
+                    int value=(op&1u) ? (int)(2u*r+lane)+1 : (int)(2u*r+lane)-32;
+                    lanes[lane]=op>=2u ? a8_macc_int_bits(value) : (uint32_t)value;
+                }
+                expected[r]=(uint64_t)lanes[1]<<32|lanes[0]; vfp_set_d(&c,r,expected[r]);
+            }
+            for (unsigned r=0;r<=quad;r++) {
+                uint32_t lanes[2];
+                for (unsigned lane=0;lane<2u;lane++) {
+                    int value=(op&1u) ? (int)(2u*(m+r)+lane)+1 : (int)(2u*(m+r)+lane)-32;
+                    lanes[lane]=op>=2u ? (uint32_t)value : a8_macc_int_bits(value);
+                }
+                expected[d+r]=(uint64_t)lanes[1]<<32|lanes[0];
+            }
+            uint32_t flags=c.cpsr;
+            CHECK(a8_move_step(&c,thumb,a8_neon_integer(thumb,op,quad,d,m,2u))==ARM_OK &&
+                  c.r[15]==0x104u && c.cycles==1u && c.cpsr==flags && c.vfp_fpscr==0xfff79f9fu &&
+                  c.vfp_fpexc==ARM_FPEXC_EN && c.excl_valid && c.excl_addr==0x2468u && c.a8_excl_size==8u,
+                  "NEON integer register status T=%u op=%u Q=%u",thumb,op,quad);
+            bool match=true;
+            for (unsigned r=0;r<32u;r++) match&=vfp_get_d(&c,r)==expected[r];
+            for (unsigned r=0;r<15u;r++) match&=c.r[r]==0u;
+            CHECK(match,"NEON integer register/alias T=%u op=%u Q=%u D/M=%u/%u",thumb,op,quad,d,m);
+        }
+}
+
+static void test_a8_neon_integer_values_and_host_state(void) {
+    fenv_t saved; CHECK(fegetenv(&saved)==0,"save NEON integer host state");
+    static const int rounds[]={FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    static const unsigned native_kind[]={2u,0u,10u,8u};
+    static const uint64_t inputs[][2]={
+        {UINT64_C(0xfefffffd01000003),UINT64_C(0x0000000100000000)},
+        {UINT64_C(0x80000000ffffffff),UINT64_C(0x0000000100000000)},
+        {UINT64_C(0x800000013fc00000),UINT64_C(0xff8000007f800000)},
+        {UINT64_C(0x7fc12345bf000000),UINT64_C(0xff8000007f800000)}
+    };
+    static const uint64_t results[][2]={
+        {UINT64_C(0xcb8000024b800002),UINT64_C(0x3f80000000000000)},
+        {UINT64_C(0x4f0000004f800000),UINT64_C(0x3f80000000000000)},
+        {UINT64_C(0x0000000000000001),UINT64_C(0x800000007fffffff)},
+        {0u,UINT64_C(0x00000000ffffffff)}
+    };
+    static const uint32_t exceptions[][2]={{0x10u,0u},{0x10u,0u},{0x90u,1u},{0x11u,1u}};
+    /* All 512 guest rounding/FZ/DN/LEN/STRIDE combinations must leave the
+     * standard NEON controls unchanged, including trap enables and AHP. */
+    for (unsigned op=0;op<4u;op++)
+     for (unsigned quad=0;quad<2u;quad++)
+      for (unsigned controls=0;controls<512u;controls++) {
+        uint32_t fpscr=ARM_FPSCR_NZCV|ARM_FPSCR_QC|ARM_FPSCR_DZC|ARM_FPSCR_ENABLES|(1u<<26)|
+            ((controls&3u)<<22)|(controls&4u ? ARM_FPSCR_FZ : 0u)|(controls&8u ? ARM_FPSCR_DN : 0u)|
+            (((controls>>4)&7u)<<16)|((controls>>7)<<20);
+        uint32_t want_flags=exceptions[op][0]|(quad ? exceptions[op][1] : 0u);
+        for (unsigned thumb=0;thumb<2u;thumb++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr=fpscr;
+            vfp_set_d(&c,16u,inputs[op][0]); vfp_set_d(&c,17u,inputs[op][1]);
+            uint64_t expected[32]; for (unsigned r=0;r<32u;r++) expected[r]=vfp_get_d(&c,r);
+            for (unsigned r=0;r<=quad;r++) expected[30u+r]=results[op][r];
+            CHECK(a8_move_step(&c,thumb,a8_neon_integer(thumb,op,quad,30u,16u,2u))==ARM_OK &&
+                  c.vfp_fpscr==(fpscr|want_flags),"NEON integer standard controls T=%u op=%u Q=%u controls=%u",thumb,op,quad,controls);
+            bool match=true; for (unsigned r=0;r<32u;r++) match&=vfp_get_d(&c,r)==expected[r];
+            CHECK(match,"NEON integer raw anchors and inactive lanes");
+        }
+        for (unsigned r=0;r<=quad;r++) {
+            uint32_t native_flags=0u;
+            for (unsigned lane=0;lane<2u;lane++) {
+                uint32_t raised;
+                uint64_t result=a8_integer_native((uint32_t)(inputs[op][r]>>(32u*lane)),native_kind[op],ARM_FPSCR_FZ|ARM_FPSCR_DN,&raised);
+                native_flags|=raised;
+                CHECK(result==(uint32_t)(results[op][r]>>(32u*lane)),"NEON integer native raw anchor");
+            }
+            CHECK(native_flags==exceptions[op][r],"NEON integer native raw flags");
+        }
+      }
+    for (unsigned op=0;op<4u;op++) {
+        uint32_t random=0x97a139d5u;
+        unsigned special_count=sizeof a8_compare_values/sizeof a8_compare_values[0];
+        unsigned count=op>=2u ? 558u+special_count : 1120u;
+        for (unsigned sample=0;sample<count;sample++) {
+            uint32_t input[4], result[4], raised[4];
+            for (unsigned lane=0;lane<4u;lane++) {
+                random^=random<<13; random^=random>>17; random^=random<<5;
+                if (op>=2u) {
+                    uint32_t mantissa=(sample&3u)==0u ? 0u : (sample&3u)==1u ? 0x7fffffu : (sample&3u)==2u ? 1u : random&0x7fffffu;
+                    input[lane]=((sample+67u*lane)%255u)<<23|mantissa;
+                    if (sample>=512u && sample<558u) {
+                        unsigned bit=(sample-512u)/2u;
+                        input[lane]=sample&1u ? (1u<<(bit+1u))-1u : 1u<<bit;
+                    }
+                    if ((sample+lane)&4u) input[lane]|=0x80000000u;
+                    if (sample>=558u) input[lane]=a8_compare_values[(sample-558u+lane)%special_count].single;
+                } else {
+                    input[lane]=random;
+                    if (sample>=1024u) {
+                        unsigned bit=(sample-1024u)/3u, part=(sample-1024u+lane)%3u;
+                        uint32_t power=UINT32_C(1)<<bit;
+                        input[lane]=part==0u ? power : part==1u ? power-1u : power+1u;
+                    }
+                }
+                result[lane]=(uint32_t)a8_integer_native(input[lane],native_kind[op],ARM_FPSCR_FZ|ARM_FPSCR_DN,&raised[lane]);
+            }
+            for (unsigned guest=0;guest<16u;guest++)
+             for (unsigned quad=0;quad<2u;quad++)
+              for (unsigned thumb=0;thumb<2u;thumb++) {
+                arm_cpu_t c; a8_move_reset(&c,thumb);
+                c.vfp_fpscr=ARM_FPSCR_NZCV|ARM_FPSCR_QC|ARM_FPSCR_DZC|ARM_FPSCR_ENABLES|
+                    ((guest&3u)<<22)|(guest&4u ? ARM_FPSCR_FZ : 0u)|(guest&8u ? ARM_FPSCR_DN : 0u);
+                for (unsigned r=0;r<32u;r++) vfp_set_d(&c,r,UINT64_C(0x12345678dead0000)+r);
+                vfp_set_d(&c,16u,(uint64_t)input[1]<<32|input[0]); vfp_set_d(&c,17u,(uint64_t)input[3]<<32|input[2]);
+                uint64_t expected[32]; for (unsigned r=0;r<32u;r++) expected[r]=vfp_get_d(&c,r);
+                uint32_t flags=c.cpsr, fpscr=c.vfp_fpscr, cumulative=0u;
+                for (unsigned r=0;r<=quad;r++) {
+                    expected[30u+r]=(uint64_t)result[2u*r+1u]<<32|result[2u*r];
+                    cumulative|=raised[2u*r]|raised[2u*r+1u];
+                }
+                unsigned host=(sample+guest)%4u;
+                CHECK(fesetround(rounds[host])==0 && feclearexcept(FE_ALL_EXCEPT)==0 &&
+                      (!(sample&1u) || feraiseexcept(FE_INVALID|FE_DIVBYZERO)==0),"prepare NEON integer host state");
+                int pending=fetestexcept(FE_ALL_EXCEPT);
+                CHECK(a8_move_step(&c,thumb,a8_neon_integer(thumb,op,quad,30u,16u,2u))==ARM_OK &&
+                      c.r[15]==0x104u && c.cycles==1u && c.cpsr==flags && c.vfp_fpscr==(fpscr|cumulative),
+                      "NEON integer numeric T=%u op=%u Q=%u sample=%u guest=%u",thumb,op,quad,sample,guest);
+                CHECK(fegetround()==rounds[host] && fetestexcept(FE_ALL_EXCEPT)==pending,"NEON integer changed host FP state");
+                bool match=true; for (unsigned r=0;r<32u;r++) match&=vfp_get_d(&c,r)==expected[r];
+                CHECK(match,"NEON integer numerical result/inactive lanes");
+              }
+        }
+    }
+    for (unsigned thumb=0;thumb<2u;thumb++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr=ARM_FPSCR_QC|ARM_FPSCR_DZC;
+        for (unsigned op=0;op<4u;op++) {
+            vfp_set_d(&c,16u,inputs[op][0]);
+            CHECK(a8_move_step(&c,thumb,a8_neon_integer(thumb,op,0u,30u,16u,2u))==ARM_OK,"NEON integer cumulative sequence");
+        }
+        CHECK(a8_move_step(&c,thumb,VMRS(2u,1u))==ARM_OK &&
+              c.r[2]==(ARM_FPSCR_QC|ARM_FPSCR_DZC|ARM_FPSCR_IOC|ARM_FPSCR_IXC|ARM_FPSCR_IDC),"NEON integer cumulative flags/VMRS");
+    }
+    CHECK(fesetenv(&saved)==0,"restore NEON integer host state");
+}
+
+static void test_a8_neon_integer_access_invalid_and_it(void) {
+    static const unsigned permissions[]={0u,1u,3u};
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned op=0;op<4u;op++)
+      for (unsigned quad=0;quad<2u;quad++)
+       for (unsigned user=0;user<2u;user++)
+        for (unsigned enabled=0;enabled<2u;enabled++)
+         for (unsigned access=0;access<3u;access++)
+          for (unsigned variant=0;variant<(quad ? 6u : 4u);variant++)
+           for (unsigned skip=0;skip<(thumb ? 2u : 1u);skip++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.cpsr=(c.cpsr&~ARM_CPSR_MODE_MASK)|(user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr=permissions[access]*0x00500000u; c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u;
+            c.vfp_fpscr=ARM_FPSCR_QC|ARM_FPSCR_DZC|(3u<<22)|ARM_FPSCR_LEN|ARM_FPSCR_STRIDE;
+            for (unsigned r=0;r<32u;r++) vfp_set_d(&c,r,UINT64_C(0x7f800001dead0000)+r);
+            vfp_set_d(&c,16u,op>=2u ? UINT64_C(0x3fc000003fc00000) : UINT64_C(0x0100000301000003));
+            vfp_set_d(&c,17u,UINT64_C(0x0000000100000001));
+            uint64_t expected[32]; for (unsigned r=0;r<32u;r++) expected[r]=vfp_get_d(&c,r);
+            if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c)==ARM_OK,"NEON integer IT setup"); }
+            unsigned size=variant==1u ? 0u : variant==2u ? 1u : variant==3u ? 3u : 2u;
+            uint32_t insn=a8_neon_integer(thumb,op,quad,variant==4u ? 31u : 30u,variant==5u ? 17u : 16u,size);
+            uint32_t pc=c.r[15], flags=c.cpsr, fpscr=c.vfp_fpscr; uint64_t cycles=c.cycles;
+            bool valid=variant==0u, allowed=enabled && (permissions[access]==3u || (permissions[access]==1u && !user));
+            uint32_t raised=0u;
+            if (valid && allowed && !skip) {
+                expected[30]=op>=2u ? UINT64_C(0x0000000100000001) : UINT64_C(0x4b8000024b800002);
+                raised=ARM_FPSCR_IXC;
+                if (quad) { expected[31]=op>=2u ? 0u : UINT64_C(0x3f8000003f800000); if (op>=2u) raised|=ARM_FPSCR_IDC; }
+            }
+            CHECK(a8_move_step(&c,thumb,insn)==(skip || valid ? ARM_OK : ARM_UNDEFINED) &&
+                  c.cycles==cycles+1u && c.vfp_fpscr==(fpscr|raised) && c.vfp_fpexc==(enabled ? ARM_FPEXC_EN : 0u),
+                  "NEON integer access/encoding T=%u op=%u Q=%u variant=%u",thumb,op,quad,variant);
+            CHECK(skip ? c.r[15]==pc+4u && c.cpsr==(flags&~0x0600fc00u) :
+                  !valid ? c.r[15]==pc && c.cpsr==flags : allowed ? c.r[15]==pc+4u && c.cpsr==(flags&~0x0600fc00u) :
+                  c.r[15]==ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND]==flags && c.r[14]==pc+(thumb ? 2u : 4u),
+                  "NEON integer access precedence/IT retirement");
+            bool match=true; for (unsigned r=0;r<32u;r++) match&=vfp_get_d(&c,r)==expected[r];
+            CHECK(match,"NEON integer invalid/access/result preservation");
+           }
+    const arm_arch_t legacy[]={ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned p=0;p<2u;p++)
+     for (unsigned op=0;op<4u;op++)
+      for (unsigned quad=0;quad<2u;quad++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,legacy[p]),"legacy NEON integer reset");
+        c.cp15.cpacr=0x00f00000u; c.vfp_fpexc=ARM_FPEXC_EN;
+        for (unsigned r=0;r<32u;r++) c.vfp_s[r]=0xdead0000u+r;
+        for (unsigned r=0;r<16u;r++) c.a8_vfp_hi[r]=UINT64_C(0x7f800001beef0000)+r;
+        uint32_t singles[32], fpscr=c.vfp_fpscr; uint64_t upper[16];
+        memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
+        CHECK(a8_move_step(&c,0u,a8_neon_integer(0u,op,quad,30u,16u,2u))==ARM_UNDEFINED &&
+              c.r[15]==0u && c.vfp_fpscr==fpscr && memcmp(singles,c.vfp_s,sizeof singles)==0 &&
+              memcmp(upper,c.a8_vfp_hi,sizeof upper)==0,"NEON integer leaked into legacy");
+      }
+    /* Adjacent reciprocal estimate allocations remain unsupported. */
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned reciprocal=0;reciprocal<2u;reciprocal++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb);
+        uint32_t insn=(thumb ? 0xfffb0520u : 0xf3fb0520u)|(reciprocal<<7);
+        uint32_t fpscr=c.vfp_fpscr;
+        CHECK(a8_move_step(&c,thumb,insn)==ARM_UNDEFINED && c.r[15]==0x100u &&
+              c.vfp_fpscr==fpscr && vfp_get_d(&c,16u)==0u,"NEON integer consumed reciprocal neighbor");
+     }
+}
+
 /* kind: 0 MLA, 1 MLS, 2 MUL. Q is in a different field from three-vector
  * encodings; M selects a lane, never an upper-bank scalar register. */
 static uint32_t a8_neon_by_scalar(unsigned thumb, unsigned kind, unsigned quad,
@@ -6411,6 +6636,9 @@ int main(void) {
     test_a8_neon_immediate_invalid_and_it();
     test_a8_neon_multiply_results();
     test_a8_neon_multiply_access_and_invalid();
+    test_a8_neon_integer_registers();
+    test_a8_neon_integer_values_and_host_state();
+    test_a8_neon_integer_access_invalid_and_it();
     test_a8_neon_by_scalar_registers();
     test_a8_neon_by_scalar_values_and_host_state();
     test_a8_neon_by_scalar_access_invalid_and_it();

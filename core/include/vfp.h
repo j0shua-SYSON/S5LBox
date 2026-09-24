@@ -183,6 +183,11 @@ static inline bool vfp_is_integer_data(uint32_t insn) {
            (insn & 0x0fbe0e50u) == 0x0ebc0a40u;
 }
 
+/* Pure Cortex-A8 Advanced SIMD conversion lane with standard FP controls.
+ * The instruction caller checks profile, encoding and coprocessor access. */
+uint32_t vfp_a8_neon_integer(uint32_t value, bool to_integer, bool is_signed,
+                              uint32_t *exceptions);
+
 /*
  * Execute one VFP encoding. `insn` must already have been identified as a
  * cp10/cp11 encoding by the caller and its condition code must already have

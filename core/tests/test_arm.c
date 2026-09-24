@@ -8014,6 +8014,78 @@ static void test_cortex_a8_neon_transpose_fetch_and_retry(void) {
      }
 }
 
+static void test_cortex_a8_neon_integer_fetch_and_retry(void) {
+    static const uint64_t inputs[]={UINT64_C(0xfefffffd01000003),UINT64_C(0x80000000ffffffff),
+        UINT64_C(0x800000013fc00000),UINT64_C(0x7fc12345bf000000)};
+    static const uint64_t results[]={UINT64_C(0xcb8000024b800002),UINT64_C(0x4f0000004f800000),1u,0u};
+    static const uint32_t exceptions[]={0x10u,0x10u,0x90u,0x11u};
+    for (unsigned host=0;host<2u;host++)
+     for (unsigned op=0;op<4u;op++)
+      for (unsigned quad=0;quad<2u;quad++)
+       for (unsigned fault=0;fault<4u;fault++) {
+        memset(g_ram,0,sizeof g_ram); arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&bus,ARM_ARCH_V7_CORTEX_A8),"NEON integer split fetch reset");
+        c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u; c.cp15.cpacr=0x00f00000u;
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|test_it_bits(0x1cu);
+        c.r[15]=0xffeu; c.vfp_fpscr=0x08c00002u; c.vfp_fpexc=fault ? 0u : ARM_FPEXC_EN;
+        for (unsigned r=0;r<32u;r++) c.vfp_s[r]=0xdead0000u+r;
+        for (unsigned r=0;r<16u;r++) c.a8_vfp_hi[r]=UINT64_C(0x7f800001beef0000)+r;
+        c.a8_vfp_hi[0]=inputs[op]; c.a8_vfp_hi[1]=UINT64_C(0x0000000100000001);
+        uint32_t singles[32], flags=c.cpsr; uint64_t upper[16];
+        memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
+        uint32_t insn=0xfffbe620u|(op<<7)|(quad<<6), raised=exceptions[op]|(quad && op>=2u ? 0x80u : 0u);
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x8032u);
+        m_w32(NULL,0x6004u,fault==1u ? 0u : fault==2u ? 0xa033u : fault==3u ? 0xa012u : 0xa032u);
+        m_w16(NULL,0x8ffeu,(uint16_t)(insn>>16)); m_w16(NULL,0xa000u,(uint16_t)insn); m_w16(NULL,0x9000u,0u);
+        CHECK(arm_step(&c)==ARM_OK && c.cycles==1u && c.vfp_fpscr==(0x08c00002u|(fault ? 0u : raised)),
+              "NEON integer split fetch disposition");
+        if (fault) CHECK(c.r[15]==ARM_VEC_PREFETCH && c.r[14]==0x1002u && c.spsr[ARM_BANK_ABT]==flags &&
+            c.cp15.ifar==0x1000u && (c.cp15.ifsr&15u)==(fault==1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION) &&
+            !(c.cpsr&(ARM_CPSR_T|TEST_IT_MASK)) && c.vfp_fpexc==0u,"NEON integer effects preceded full User fetch");
+        else {
+            upper[14]=results[op]; if (quad) upper[15]=op>=2u ? 0u : UINT64_C(0x3f8000003f800000);
+            CHECK(c.r[15]==0x1002u && c.cpsr==((flags&~TEST_IT_MASK)|test_it_bits(0x18u)),"NEON integer split fetch IT");
+        }
+        CHECK(memcmp(singles,c.vfp_s,sizeof singles)==0 && memcmp(upper,c.a8_vfp_hi,sizeof upper)==0,
+              "NEON integer User fetch full register state");
+       }
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned op=0;op<4u;op++)
+      for (unsigned quad=0;quad<2u;quad++) {
+        memset(g_ram,0,sizeof g_ram); arm_cpu_t c;
+        CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"NEON integer lazy retry reset");
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_Z|ARM_CPSR_Q|(thumb ? ARM_CPSR_T : 0u); c.cp15.cpacr=0x00f00000u;
+        for (unsigned r=0;r<32u;r++) c.vfp_s[r]=0xdead0000u+r;
+        for (unsigned r=0;r<16u;r++) c.a8_vfp_hi[r]=UINT64_C(0x7f800001beef0000)+r;
+        c.a8_vfp_hi[0]=inputs[op]; c.a8_vfp_hi[1]=UINT64_C(0x0000000100000001);
+        uint32_t singles[32]; uint64_t upper[16];
+        memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
+        c.r[15]=0x100u; c.r[5]=ARM_FPEXC_EN; c.r[2]=0x12345678u; c.vfp_fpscr=0x08c00002u;
+        uint32_t insn=(thumb ? 0xfffbe620u : 0xf3fbe620u)|(op<<7)|(quad<<6);
+        if (thumb) {
+            m_w16(NULL,0x100u,0xbf04u); m_w16(NULL,0x102u,(uint16_t)(insn>>16));
+            m_w16(NULL,0x104u,(uint16_t)insn); m_w16(NULL,0x106u,0x2201u);
+        } else { m_w32(NULL,0x100u,insn); m_w32(NULL,0x104u,0xe3a02001u); }
+        put_vfp_system_transfer(0u,ARM_VEC_UNDEFINED,0u,8u,5u); m_w32(NULL,8u,thumb ? 0xe25ef002u : 0xe25ef004u);
+        if (thumb) CHECK(arm_step(&c)==ARM_OK,"NEON integer lazy IT setup");
+        uint32_t flags=c.cpsr, pc=c.r[15];
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==ARM_VEC_UNDEFINED && c.r[14]==pc+(thumb ? 2u : 4u) &&
+              c.spsr[ARM_BANK_UND]==flags && c.vfp_fpscr==0x08c00002u &&
+              memcmp(singles,c.vfp_s,sizeof singles)==0 && memcmp(upper,c.a8_vfp_hi,sizeof upper)==0,
+              "NEON integer changed FP state before guest enable");
+        CHECK(arm_step(&c)==ARM_OK && c.vfp_fpexc==ARM_FPEXC_EN,"NEON integer guest enable");
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==pc && c.cpsr==flags,"NEON integer exception return");
+        upper[14]=results[op]; if (quad) upper[15]=op>=2u ? 0u : UINT64_C(0x3f8000003f800000);
+        uint32_t raised=exceptions[op]|(quad && op>=2u ? 0x80u : 0u);
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==pc+4u &&
+              c.cpsr==(thumb ? (flags&~TEST_IT_MASK)|test_it_bits(0x08u) : flags) &&
+              c.vfp_fpscr==(0x08c00002u|raised) && memcmp(singles,c.vfp_s,sizeof singles)==0 &&
+              memcmp(upper,c.a8_vfp_hi,sizeof upper)==0,"NEON integer guest exact retry");
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==0x108u && c.r[2]==1u && c.cpsr==(flags&~TEST_IT_MASK) &&
+              c.cycles==(thumb ? 6u : 5u),"NEON integer retry changed following condition");
+      }
+}
+
 static void test_cortex_a8_neon_by_scalar_fetch_and_retry(void) {
     const uint64_t a=UINT64_C(0x3fc000003fc00000), accumulator=UINT64_C(0x3f8000003f800000);
     static const uint64_t results[]={UINT64_C(0x4080000040800000),UINT64_C(0xc0000000c0000000),UINT64_C(0x4040000040400000)};
@@ -12113,6 +12185,7 @@ int main(void) {
     test_cortex_a8_neon_pair_faults();
     test_cortex_a8_neon_transpose_fetch_and_retry();
     test_cortex_a8_neon_macc_fetch_and_retry();
+    test_cortex_a8_neon_integer_fetch_and_retry();
     test_cortex_a8_neon_by_scalar_fetch_and_retry();
     test_cortex_a8_vfp_single_memory_aborts();
     test_cortex_a8_vfp_multiple_memory_aborts();

@@ -1129,6 +1129,15 @@ static uint32_t vfp_a8_fp_to_integer(uint64_t value, bool dbl, bool is_signed,
     return negative ? 0u - (uint32_t)rounded : (uint32_t)rounded;
 }
 
+/* A8.8.305 uses StandardFPSCRValue: nearest-even, FZ/DN on and traps off.
+ * FP-to-integer still forces truncation. AHP cannot affect a 32-bit lane. */
+uint32_t vfp_a8_neon_integer(uint32_t value, bool to_integer, bool is_signed,
+                              uint32_t *exceptions) {
+    const uint32_t controls = ARM_FPSCR_FZ | ARM_FPSCR_DN;
+    return to_integer ? vfp_a8_fp_to_integer(value, false, is_signed, true, controls, exceptions) :
+        (uint32_t)vfp_a8_integer_to_fp(value, is_signed, false, controls, exceptions);
+}
+
 /* A8.8.306 and K.1.1: integer conversions ignore LEN and STRIDE. */
 static arm_status_t vfp_a8_integer_data(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
     g_reason = NULL;
