@@ -1722,6 +1722,8 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
     NSString *checkpointFailure = nil;
     BOOL checkpointInputPrepared = NO;
     BOOL profilePauseExported = NO;
+    BOOL hostPausePending = NO;
+    uint64_t hostPauseStartNS = 0u;
     uint64_t checkpointInputStartNS = 0u;
     uint64_t checkpointInputStartRetired = 0u;
 
@@ -1741,6 +1743,15 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
             if (stop) {
                 stoppedByRequest = YES;
                 break;
+            }
+            /* Only this thread knows when guest execution actually stops.
+             * Exclude the pause before checkpoint draining as well as normal
+             * resume; both can execute work and inject input below. The UI
+             * thread only requests the pause and never mutates core clocks. */
+            if (hostPausePending && (!paused || checkpoint)) {
+                (void)s5l8900_resume_active_host_clock(
+                    &_machine, hostPauseStartNS, vm_now_ns());
+                hostPausePending = NO;
             }
             if (checkpoint) {
                 if (!checkpointInputPrepared) {
@@ -1818,6 +1829,10 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
                  * to freeze halfway through. */
             }
             if (paused && !checkpoint) {
+                if (!hostPausePending) {
+                    hostPauseStartNS = vm_now_ns();
+                    hostPausePending = YES;
+                }
                 if (!profilePauseExported) {
                     [self exportGuestPCProfile_emulatorThread];
                     [self exportNativePCProfile_emulatorThread];

@@ -954,6 +954,26 @@ typing trial, all ten letters were visible by the 1.93-second capture after a
 lag and first-focus behavior remain open. The new default improves calibrated
 active-time pacing; it does not declare keyboard or animation work complete.
 
+### Explicit pause accounting (2026-09-24)
+
+An on-device control reproduced a separate timing defect: after a keypress,
+an explicit 18-second frontend pause advanced the input guard past its
+15-second deadline. On resume the shield counter rose from zero to one even
+though the guest had not executed during that interval. The next paced WFI
+cleared it, but an interrupted busy transition could inherit instruction-time
+pacing from time spent deliberately stopped.
+
+The emulator thread now excludes that interval before normal resume or
+checkpoint draining. It discards active-clock catch-up debt while retaining
+the guard's age before the pause and any already-engaged shield. Repeated
+pauses cannot renew the genuine running-work deadline. Invalid or backward
+clock samples discard stale anchors without clearing an existing shield.
+This adds no serialized state and does not change deterministic execution.
+Portable regression cases cover long/repeated pauses, exact deadline edges,
+unanchored input, existing shields, failed samples and overflow. The updated
+application still requires the paired physical-device validation; this is
+not a claim that uninterrupted keyboard latency is fixed.
+
 ### Historical instruction-resume narrative
 
 Two interpreter changes make the current instruction counts different from the

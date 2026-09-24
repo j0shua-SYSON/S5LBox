@@ -740,6 +740,7 @@ static void w16(void *c, uint32_t a, uint16_t v) { bus_write(c, a, v, 2); }
 static void w8 (void *c, uint32_t a, uint8_t  v) { bus_write(c, a, v, 1); }
 
 static void active_clock_reset_anchor(s5l8900_t *m);
+static void active_clock_counter_add(uint64_t *counter, uint64_t value);
 
 bool s5l8900_set_direct_ram_writes(s5l8900_t *m, bool enabled) {
     if (!m) return false;
@@ -853,6 +854,31 @@ bool s5l8900_set_active_clock_work_budget(s5l8900_t *m,
     m->active_clock_max_ticks_per_retirement = ticks_per_retirement;
     active_clock_reset_anchor(m);
     return true;
+}
+
+bool s5l8900_resume_active_host_clock(s5l8900_t *m,
+                                      uint64_t paused_at_ns,
+                                      uint64_t resumed_at_ns) {
+    if (!m) return false;
+    if (!m->active_host_now) return true;
+    bool valid = paused_at_ns != 0u && resumed_at_ns >= paused_at_ns &&
+        (!m->active_clock_anchor_valid ||
+         paused_at_ns >= m->active_clock_last_host_ns) &&
+        (!m->active_clock_input_guard_host_valid ||
+         paused_at_ns >= m->active_clock_input_guard_host_ns);
+    if (!valid) {
+        active_clock_counter_add(&m->active_clock_failures, 1u);
+        m->active_clock_input_guard_host_ns = 0u;
+        m->active_clock_input_guard_host_valid = false;
+    } else if (m->active_clock_input_guard_host_valid) {
+        /* Subtract the preserved age from the new instant instead of adding
+         * an unbounded pause duration to an old timestamp. The ordered checks
+         * above prove both subtractions fit, even close to UINT64_MAX. */
+        uint64_t age = paused_at_ns - m->active_clock_input_guard_host_ns;
+        m->active_clock_input_guard_host_ns = resumed_at_ns - age;
+    }
+    active_clock_reset_anchor(m);
+    return valid;
 }
 
 bool s5l8900_set_uart4_host(s5l8900_t *m, s5l_uart4_host_tx_fn tx,
@@ -1672,8 +1698,6 @@ static uint32_t ext_inputs(const s5l8900_t *m) {
          | ((uint32_t)m->buttons.pressed << 8)
          | ((uint32_t)(m->mtz2.atn ? 1u : 0u) << 16);
 }
-
-static void active_clock_counter_add(uint64_t *counter, uint64_t value);
 
 static void active_clock_reset_anchor(s5l8900_t *m) {
     m->active_clock_last_host_ns = 0u;

@@ -1373,6 +1373,130 @@ static void test_active_host_clock_shields_only_pathological_input_work(void) {
     s5l8900_free(&m);
 }
 
+static void test_active_host_clock_excludes_explicit_frontend_pauses(void) {
+    uint32_t program[32];
+    fill_arm_nops(program, sizeof program / sizeof program[0]);
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "pause clock init failed");
+    s5l8900_load(&m, 0, program, sizeof program);
+    m.cpu_hz = m.tb_hz = 1000u;
+    m.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I | ARM_CPSR_F;
+    active_clock_probe_t probe = {
+        .now_ns = UINT64_C(1000000000), .succeeds = true
+    };
+    CHECK(!s5l8900_resume_active_host_clock(NULL, 1u, 2u) &&
+          s5l8900_resume_active_host_clock(&m, 0u, 0u) &&
+          !m.active_clock_anchor_valid && m.timer.ticks == 0u &&
+          m.active_clock_failures == 0u,
+          "disabled clock pause was not inert");
+    CHECK(s5l8900_set_active_host_clock(&m, active_clock_probe_now, &probe),
+          "pause clock install failed");
+    m.mtz2.atn = true;
+    s5l8900_tick(&m, 0u);
+    arm_status_t st = ARM_OK;
+    CHECK(s5l8900_run(&m, 1u, &st) == 1u && st == ARM_OK &&
+          m.active_clock_input_guard_host_ns == probe.now_ns,
+          "pause guard did not anchor");
+    probe.now_ns += UINT64_C(7000000000);
+    CHECK(s5l8900_run(&m, 1u, &st) == 1u && st == ARM_OK,
+          "pre-pause work failed");
+    uint64_t paused_at = probe.now_ns;
+    uint64_t ticks = m.timer.ticks;
+    uint64_t updates = m.active_clock_updates;
+    uint64_t added = m.active_clock_added_ticks;
+    probe.now_ns += UINT64_C(60000000000);
+    CHECK(s5l8900_resume_active_host_clock(&m, paused_at, probe.now_ns) &&
+          m.active_clock_input_guard_host_valid &&
+          probe.now_ns - m.active_clock_input_guard_host_ns ==
+              UINT64_C(7000000000) &&
+          !m.active_clock_anchor_valid &&
+          m.active_clock_guest_ticks_since_sync == 0u &&
+          m.active_clock_fraction == 0u &&
+          m.active_clock_updates == updates &&
+          m.active_clock_added_ticks == added && m.timer.ticks == ticks &&
+          m.active_clock_input_guards == 1u &&
+          m.active_clock_input_guard_quiesces == 0u,
+          "pause lost guard age, evidence, or manufactured guest time");
+    CHECK(s5l8900_run(&m, 1u, &st) == 1u && st == ARM_OK &&
+          !m.active_clock_deadline_shield && m.timer.ticks == ticks,
+          "one-minute frontend pause triggered shield or catch-up time");
+
+    /* Two pauses must not restart the fifteen-second running-work deadline.
+     * Seven active seconds on each side still leave only one second. */
+    probe.now_ns += UINT64_C(7000000000);
+    CHECK(s5l8900_run(&m, 1u, &st) == 1u && st == ARM_OK &&
+          !m.active_clock_deadline_shield, "second active interval failed");
+    paused_at = probe.now_ns;
+    probe.now_ns += UINT64_C(86400000000000);
+    CHECK(s5l8900_resume_active_host_clock(&m, paused_at, probe.now_ns) &&
+          s5l8900_run(&m, 1u, &st) == 1u && st == ARM_OK &&
+          probe.now_ns - m.active_clock_input_guard_host_ns ==
+              UINT64_C(14000000000) && !m.active_clock_deadline_shield,
+          "repeated pause renewed or prematurely expired guard");
+    probe.now_ns += UINT64_C(999999999);
+    CHECK(s5l8900_run(&m, 1u, &st) == 1u && st == ARM_OK &&
+          !m.active_clock_deadline_shield, "resumed guard expired early");
+    probe.now_ns++;
+    CHECK(s5l8900_run(&m, 1u, &st) == 1u && st == ARM_OK &&
+          m.active_clock_deadline_shield &&
+          m.active_clock_deadline_shields == 1u,
+          "pauses erased genuine active input-stall time");
+    paused_at = probe.now_ns;
+    probe.now_ns += UINT64_C(20000000000);
+    CHECK(s5l8900_resume_active_host_clock(&m, paused_at, probe.now_ns) &&
+          m.active_clock_deadline_shield &&
+          m.active_clock_deadline_shields == 1u,
+          "resume cleared a pre-existing shield or counted it twice");
+
+    CHECK(!s5l8900_resume_active_host_clock(&m, 0u, probe.now_ns) &&
+          m.active_clock_failures == 1u &&
+          !m.active_clock_input_guard_host_valid &&
+          !m.active_clock_anchor_valid && m.active_clock_input_guard &&
+          m.active_clock_deadline_shield,
+          "unavailable pause sample retained a stale anchor or lost shield");
+    CHECK(!s5l8900_resume_active_host_clock(&m, 10u, 9u) &&
+          m.active_clock_failures == 2u,
+          "backward pause interval accepted");
+    m.active_clock_anchor_valid = true;
+    m.active_clock_last_host_ns = 12u;
+    CHECK(!s5l8900_resume_active_host_clock(&m, 11u, 13u) &&
+          m.active_clock_failures == 3u && !m.active_clock_anchor_valid,
+          "pause before last active sample accepted");
+    m.active_clock_input_guard_host_valid = true;
+    m.active_clock_input_guard_host_ns = 12u;
+    CHECK(!s5l8900_resume_active_host_clock(&m, 11u, 13u) &&
+          m.active_clock_failures == 4u &&
+          !m.active_clock_input_guard_host_valid,
+          "pause before input guard accepted");
+    m.active_clock_failures = UINT64_MAX;
+    CHECK(!s5l8900_resume_active_host_clock(&m, 0u, 0u) &&
+          m.active_clock_failures == UINT64_MAX,
+          "pause failure counter wrapped");
+    m.active_clock_input_guard_host_valid = true;
+    m.active_clock_input_guard_host_ns = 1u;
+    CHECK(s5l8900_resume_active_host_clock(&m, 2u, UINT64_MAX) &&
+          m.active_clock_input_guard_host_ns == UINT64_MAX - 1u,
+          "large pause overflowed preserved guard age");
+
+    /* A new report can be queued before the first run. A pause must not start
+     * its host deadline or fabricate an input event while no work executes. */
+    CHECK(s5l8900_set_active_host_clock(&m, active_clock_probe_now, &probe),
+          "unanchored pause clock reset failed");
+    m.mtz2.atn = false;
+    s5l8900_tick(&m, 0u);
+    m.mtz2.atn = true;
+    s5l8900_tick(&m, 0u);
+    probe.now_ns = UINT64_C(100000000000);
+    CHECK(s5l8900_resume_active_host_clock(&m, 1u, probe.now_ns) &&
+          !m.active_clock_input_guard_host_valid &&
+          m.active_clock_input_guards == 1u &&
+          s5l8900_run(&m, 1u, &st) == 1u && st == ARM_OK &&
+          m.active_clock_input_guard_host_ns == probe.now_ns &&
+          !m.active_clock_deadline_shield,
+          "unanchored input aged while explicitly paused");
+    s5l8900_free(&m);
+}
+
 static void test_active_host_clock_preserves_only_bounded_wfi_oversleep(void) {
     const uint32_t wfi = 0xee070f90u;
     arm_status_t st = ARM_OK;
@@ -7194,6 +7318,7 @@ int main(void) {
     test_active_host_clock_is_optional_bounded_and_fail_closed();
     test_active_host_clock_does_not_double_count_paced_wfi();
     test_active_host_clock_shields_only_pathological_input_work();
+    test_active_host_clock_excludes_explicit_frontend_pauses();
     test_active_host_clock_preserves_only_bounded_wfi_oversleep();
     test_active_host_clock_refreshes_devices_without_oversampling();
     test_wfi_unmasked_fiq_uses_the_post_mcr_return_link();

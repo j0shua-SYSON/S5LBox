@@ -4606,6 +4606,16 @@ bool s5l8900_set_active_host_clock(s5l8900_t *m,
 bool s5l8900_set_active_clock_work_budget(s5l8900_t *m,
                                           uint32_t ticks_per_retirement);
 
+/* Exclude an explicit frontend pause, between run calls and before injecting
+ * new input. Both nonzero timestamps use the installed host clock's monotonic
+ * domain. Discard active-time debt, but preserve the input guard's pre-pause
+ * age and any existing deadline shield. Invalid/backward samples return false,
+ * discard untrustworthy anchors and increment clock failures; no guest time or
+ * lifetime evidence is reset. A machine without an active clock is unchanged. */
+bool s5l8900_resume_active_host_clock(s5l8900_t *m,
+                                      uint64_t paused_at_ns,
+                                      uint64_t resumed_at_ns);
+
 /*
  * Attach or detach uart4's host peer. Attaching requires all three callbacks;
  * the context may be NULL. Passing all four arguments as NULL detaches. A
