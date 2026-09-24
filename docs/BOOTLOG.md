@@ -1056,6 +1056,27 @@ save/relaunch with the typed field intact, and an 18-second background/foregroun
 round trip passed. The initial typing delay and transition responsiveness
 remain open; this correction is retained for the demonstrated clock defect.
 
+### Reuse bounded elapsed time at a proven idle wait (2026-09-24)
+
+The oversleep correction left a separate timing loss: host time withheld by
+the active CPU-work limit was discarded even after the guest voluntarily
+entered WFI. A real-frequency regression spent 1 ms doing bounded CPU work,
+then slept another full 8 ms for an 8 ms idle slice. That made ordinary idle
+housekeeping consume its host time twice. The candidate retains at most 8 ms
+of that withheld time, usable only to shorten a paced WFI host sleep. It does
+not increase the CPU-work limit, skip the first known interrupt edge, or extend
+the existing maximum guest-time slice. Fully prepaid waits still return to the
+frontend. Suspend-like host intervals discard credit rather than accumulate it.
+
+Tests reproduce both the ordinary and oversleep cases, cover bounded accrual,
+exact wake edges, absent wake edges, failed/retrograde samples, failed sleeps,
+policy changes and deterministic execution. Another 100 alternating work/idle
+cycles stay within one CPU tick of elapsed host time without running ahead.
+Pause, input, power reset and snapshot restore clear both credit and its
+per-sample accounting; the serialized checkpoint format is unchanged. The local
+SoC test passes 86,371 checks. Physical responsiveness remains unverified for
+this candidate; it is not a claim of increased CPU throughput.
+
 ### Historical instruction-resume narrative
 
 Two interpreter changes make the current instruction counts different from the

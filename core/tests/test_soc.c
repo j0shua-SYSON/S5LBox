@@ -1408,6 +1408,8 @@ static void test_active_host_clock_excludes_explicit_frontend_pauses(void) {
     uint64_t updates = m.active_clock_updates;
     uint64_t added = m.active_clock_added_ticks;
     m.active_clock_idle_oversleep_ns = UINT64_C(2000000);
+    m.active_clock_idle_credit_ticks = 123u;
+    m.active_clock_idle_repaid_ticks = 456u;
     probe.now_ns += UINT64_C(60000000000);
     CHECK(s5l8900_resume_active_host_clock(&m, paused_at, probe.now_ns) &&
           m.active_clock_input_guard_host_valid &&
@@ -1418,6 +1420,8 @@ static void test_active_host_clock_excludes_explicit_frontend_pauses(void) {
           m.active_clock_fraction == 0u &&
           m.active_clock_idle_oversleep_ns == 0u &&
           m.active_clock_updates == updates &&
+          m.active_clock_idle_credit_ticks == 0u &&
+          m.active_clock_idle_repaid_ticks == 0u &&
           m.active_clock_added_ticks == added && m.timer.ticks == ticks &&
           m.active_clock_input_guards == 1u &&
           m.active_clock_input_guard_quiesces == 0u,
@@ -1680,6 +1684,192 @@ static void test_active_host_clock_idle_credit_is_fail_closed(void) {
                   "idle credit changed the selected timer edge");
         s5l8900_free(&m);
     }
+}
+
+static void test_active_host_clock_reuses_elapsed_time_only_at_idle(void) {
+    const uint32_t program[] = {0xe1a00000u, 0xe1a00000u, 0xee070f90u};
+    static s5l8900_t m;
+    for (unsigned oversleep = 0u; oversleep < 2u; oversleep++) {
+        CHECK(s5l8900_init(&m, 0, 1u << 20), "idle catch-up init failed");
+        s5l8900_load(&m, 0, program, sizeof program);
+        m.cpu_hz = 412000000u;
+        m.tb_hz = 6000000u;
+        m.timer.t4_count = m.timer.t4_value = 120000u;
+        m.timer.t4_state = TIMER4_STATE_START;
+        m.vic[0].enable = 1u << S5L8900_IRQ_TIMER;
+        m.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I | ARM_CPSR_F;
+        active_clock_probe_t probe = {
+            .now_ns = UINT64_C(1000000000), .succeeds = true,
+            .sleep_overshoot_ns = oversleep ? UINT64_C(2000000) : 0u
+        };
+        CHECK(s5l8900_set_active_host_clock(&m, active_clock_probe_now, &probe) &&
+              s5l8900_set_wfi_host_pacing(&m, active_clock_probe_sleep, &probe),
+              "idle catch-up setup failed");
+        arm_status_t st = ARM_OK;
+        CHECK(s5l8900_run(&m, 1u, &st) == 1u && st == ARM_OK,
+              "idle catch-up anchor failed");
+        probe.now_ns += UINT64_C(1000000);
+        CHECK(s5l8900_run(&m, 1u, &st) == 1u && st == ARM_OK &&
+              m.active_clock_added_ticks == 16u && probe.sleep_calls == 0u,
+              "busy work used idle catch-up time");
+        CHECK(s5l8900_run(&m, 1u, &st) == 1u && st == ARM_OK &&
+              probe.last_sleep_ns == UINT64_C(7000039) &&
+              m.timer.ticks == (oversleep ? 60000u : 48000u) &&
+              m.active_clock_added_ticks == (oversleep ? 824016u : 16u),
+              "idle paid for the same elapsed time twice: oversleep=%u "
+              "sleep=%llu ticks=%llu added=%llu", oversleep,
+              (unsigned long long)probe.last_sleep_ns,
+              (unsigned long long)m.timer.ticks,
+              (unsigned long long)m.active_clock_added_ticks);
+        s5l8900_free(&m);
+    }
+}
+
+static void test_active_host_clock_prepaid_wait_guards(void) {
+    static s5l8900_t m;
+    enum { SATURATE, EXACT_EDGE, NO_EDGE, SAMPLE_FAIL, SLEEP_FAIL,
+           CLOCK_REWIND, BUDGET_CHANGE, PACING_CHANGE, CLOCK_CHANGE,
+           PAUSE, INPUT, NO_PACING, HOST_STALL, GUARD_COUNT };
+    for (unsigned kind = 0u; kind < GUARD_COUNT; kind++) {
+        uint32_t program[8];
+        fill_arm_nops(program, 8u);
+        unsigned busy_runs = kind == SATURATE ? 5u : 1u;
+        program[busy_runs + 1u] = 0xee070f90u;
+        CHECK(s5l8900_init(&m, 0, 1u << 20), "prepaid wait init failed");
+        s5l8900_load(&m, 0, program, sizeof program);
+        m.cpu_hz = 412000000u;
+        m.tb_hz = 6000000u;
+        m.timer.t4_count = m.timer.t4_value = 120000u;
+        m.timer.t4_state = TIMER4_STATE_START;
+        m.vic[0].enable = 1u << S5L8900_IRQ_TIMER;
+        m.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I | ARM_CPSR_F;
+        active_clock_probe_t probe = {
+            .now_ns = UINT64_C(1000000000), .succeeds = true
+        };
+        CHECK(s5l8900_set_active_host_clock(&m, active_clock_probe_now, &probe) &&
+              (kind == NO_PACING || s5l8900_set_wfi_host_pacing(
+                  &m, active_clock_probe_sleep, &probe)),
+              "prepaid wait setup failed");
+        arm_status_t st = ARM_OK;
+        CHECK(s5l8900_run(&m, 1u, &st) == 1u && st == ARM_OK,
+              "prepaid wait anchor failed");
+        for (unsigned i = 0u; i < busy_runs; i++) {
+            probe.now_ns += kind == HOST_STALL
+                ? UINT64_C(100000000) : UINT64_C(2000000);
+            CHECK(s5l8900_run(&m, 1u, &st) == 1u && st == ARM_OK &&
+                  m.active_clock_added_ticks == (i + 1u) * 16u &&
+                  m.active_clock_idle_repaid_ticks == 0u &&
+                  m.active_clock_idle_credit_ticks <= 3296000u,
+                  "busy code spent idle credit or exceeded its bound: %u", kind);
+        }
+        CHECK(m.active_clock_idle_credit_ticks ==
+                  (kind == SATURATE ? 3296000u :
+                   kind == NO_PACING || kind == HOST_STALL ? 0u : 823984u),
+              "prepaid wait accumulated the wrong credit: %u", kind);
+
+        if (kind == EXACT_EDGE)
+            m.timer.t4_count = m.timer.t4_value = 6000u;
+        if (kind == NO_EDGE) m.vic[0].enable = 0u;
+        if (kind == SAMPLE_FAIL) probe.fail_on_call = probe.now_calls + 1u;
+        if (kind == SLEEP_FAIL) probe.sleep_fails = true;
+        if (kind == CLOCK_REWIND) probe.now_ns--;
+        if (kind == BUDGET_CHANGE)
+            CHECK(s5l8900_set_active_clock_work_budget(&m, 16u), "budget reset failed");
+        if (kind == PACING_CHANGE)
+            CHECK(s5l8900_set_wfi_host_pacing(&m, active_clock_probe_sleep, &probe),
+                  "pacing reset failed");
+        if (kind == CLOCK_CHANGE)
+            CHECK(s5l8900_set_active_host_clock(&m, active_clock_probe_now, &probe),
+                  "clock reset failed");
+        if (kind == PAUSE) {
+            uint64_t paused_at = probe.now_ns;
+            probe.now_ns += UINT64_C(18000000000);
+            CHECK(s5l8900_resume_active_host_clock(&m, paused_at, probe.now_ns),
+                  "pause reset failed");
+        }
+        if (kind == INPUT) {
+            unsigned line = s5l_button_line(S5L_BUTTON_MENU);
+            m.gpioic.en[line >> 5] |= UINT32_C(1) << (line & 31u);
+            CHECK(s5l8900_set_button(&m, S5L_BUTTON_MENU, true) &&
+                  m.active_clock_idle_credit_ticks == 0u &&
+                  m.active_clock_idle_repaid_ticks == 0u,
+                  "new input retained stale idle credit");
+        } else {
+            unsigned limit = kind == SATURATE || kind == EXACT_EDGE ? 8u : 1u;
+            CHECK(s5l8900_run(&m, limit, &st) == 1u && st == ARM_OK &&
+                  m.active_clock_idle_repaid_ticks == 0u,
+                  "prepaid WFI did not retire cleanly: %u", kind);
+            if (kind == SATURATE || kind == EXACT_EDGE)
+                CHECK(probe.sleep_calls == 0u && m.wfi_paced_waits == 0u &&
+                      m.timer.ticks == (kind == EXACT_EDGE ? 6000u : 48001u) &&
+                      m.cpu.irq_line == (kind == EXACT_EDGE) &&
+                      m.active_clock_idle_credit_ticks ==
+                          (kind == EXACT_EDGE ? 412000u : 0u),
+                      "prepaid WFI skipped its first edge or slept twice: %u "
+                      "ticks=%llu credit=%llu", kind,
+                      (unsigned long long)m.timer.ticks,
+                      (unsigned long long)m.active_clock_idle_credit_ticks);
+            else if (kind == NO_EDGE)
+                CHECK(probe.sleep_calls == 0u && m.timer.ticks == 0u &&
+                      m.active_clock_idle_credit_ticks == 823984u,
+                      "WFI without a known edge spent idle credit");
+            else if (kind == SLEEP_FAIL)
+                CHECK(m.wfi_paced_failures == 1u && m.timer.ticks == 0u &&
+                      m.active_clock_added_ticks == 32u,
+                      "failed sleep advanced prepaid guest time");
+            else if (kind == NO_PACING)
+                CHECK(probe.sleep_calls == 0u && m.timer.ticks == 120000u &&
+                      m.active_clock_idle_credit_ticks == 0u && m.cpu.irq_line,
+                      "host policy changed deterministic WFI");
+            else
+                CHECK(probe.sleep_calls == 1u &&
+                      probe.last_sleep_ns == UINT64_C(8000000) &&
+                      m.timer.ticks == 48000u &&
+                      m.active_clock_idle_credit_ticks == 0u,
+                      "stale or invalid credit shortened a wait: %u", kind);
+        }
+        s5l8900_free(&m);
+    }
+}
+
+static void test_active_host_clock_repeated_idle_matches_elapsed_time(void) {
+    const uint32_t program[] = {0xe1a00000u, 0xee070f90u};
+    static s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "repeated idle init failed");
+    s5l8900_load(&m, 0, program, sizeof program);
+    m.cpu_hz = 412000000u;
+    m.tb_hz = 6000000u;
+    m.timer.t4_count = m.timer.t4_value = UINT32_MAX;
+    m.timer.t4_state = TIMER4_STATE_START;
+    m.vic[0].enable = 1u << S5L8900_IRQ_TIMER;
+    m.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I | ARM_CPSR_F;
+    active_clock_probe_t probe = {
+        .now_ns = UINT64_C(1000000000), .succeeds = true
+    };
+    CHECK(s5l8900_set_active_host_clock(&m, active_clock_probe_now, &probe) &&
+          s5l8900_set_wfi_host_pacing(&m, active_clock_probe_sleep, &probe),
+          "repeated idle setup failed");
+    arm_status_t st = ARM_OK;
+    CHECK(s5l8900_run(&m, 1u, &st) == 1u && st == ARM_OK,
+          "repeated idle anchor failed");
+    for (unsigned i = 0; i < 100u; i++) {
+        m.cpu.r[15] = 0u;
+        probe.now_ns += UINT64_C(1000000);
+        probe.sleep_overshoot_ns = (i % 3u) * UINT64_C(500000);
+        CHECK(s5l8900_run(&m, 1u, &st) == 1u && st == ARM_OK &&
+              s5l8900_run(&m, 1u, &st) == 1u && st == ARM_OK,
+              "repeated idle did not retire its work and wait");
+        uint64_t host_ticks = (probe.now_ns - UINT64_C(1000000000)) *
+            m.cpu_hz / UINT64_C(1000000000);
+        uint64_t guest_ticks =
+            (m.timer.ticks * m.cpu_hz + m.tb_accum) / m.tb_hz;
+        CHECK(guest_ticks <= host_ticks && host_ticks - guest_ticks < 2u &&
+              m.active_clock_idle_repaid_ticks == 0u &&
+              m.active_clock_idle_credit_ticks == 0u,
+              "repeated idle drifted or ran ahead at %u: guest=%llu host=%llu",
+              i, (unsigned long long)guest_ticks, (unsigned long long)host_ticks);
+    }
+    s5l8900_free(&m);
 }
 
 static void test_active_host_clock_refreshes_devices_without_oversampling(void) {
@@ -7424,6 +7614,9 @@ int main(void) {
     test_active_host_clock_preserves_only_bounded_wfi_oversleep();
     test_active_host_clock_wfi_oversleep_at_board_frequency();
     test_active_host_clock_idle_credit_is_fail_closed();
+    test_active_host_clock_reuses_elapsed_time_only_at_idle();
+    test_active_host_clock_prepaid_wait_guards();
+    test_active_host_clock_repeated_idle_matches_elapsed_time();
     test_active_host_clock_refreshes_devices_without_oversampling();
     test_wfi_unmasked_fiq_uses_the_post_mcr_return_link();
     test_wfi_pending_line_completes_without_advancing_time();

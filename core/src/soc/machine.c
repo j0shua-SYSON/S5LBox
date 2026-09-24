@@ -815,6 +815,8 @@ bool s5l8900_set_wfi_host_pacing(s5l8900_t *m,
     m->wfi_paced_failures = 0u;
     m->wfi_pace_yield = false;
     m->active_clock_idle_oversleep_ns = 0u;
+    m->active_clock_idle_credit_ticks = 0u;
+    m->active_clock_idle_repaid_ticks = 0u;
     if (sleep) m->wfi_host_sleep = sleep;
     return true;
 }
@@ -832,6 +834,8 @@ bool s5l8900_set_active_host_clock(s5l8900_t *m,
     m->active_clock_guest_ticks_since_sync = 0u;
     m->active_clock_fraction = 0u;
     m->active_clock_idle_oversleep_ns = 0u;
+    m->active_clock_idle_credit_ticks = 0u;
+    m->active_clock_idle_repaid_ticks = 0u;
     m->active_clock_updates = 0u;
     m->active_clock_added_ticks = 0u;
     m->active_clock_clamps = 0u;
@@ -1322,6 +1326,19 @@ static bool machine_wait_for_interrupt(void *ctx) {
             (S5L8900_WFI_PACE_SLICE_NS * m->cpu_hz) / UINT64_C(1000000000);
         bool partial = cpu_ticks > slice_ticks;
         uint64_t paced_ticks = partial ? slice_ticks : cpu_ticks;
+        uint64_t idle_start_ns = 0u;
+        bool idle_measured = m->active_host_now &&
+            m->active_clock_anchor_valid && !m->active_clock_deadline_shield &&
+            m->active_host_now(m->active_host_now_ctx, &idle_start_ns) &&
+            idle_start_ns >= m->active_clock_last_host_ns;
+        if (!idle_measured) m->active_clock_idle_credit_ticks = 0u;
+        /* The CPU has voluntarily yielded. Reuse bounded time withheld while
+         * it was busy instead of making it wait for that time a second time.
+         * This never advances past next_wake's edge or lengthens an 8 ms slice;
+         * even a wholly prepaid slice yields to the frontend for fresh input. */
+        uint64_t idle_credit = m->active_clock_idle_credit_ticks < paced_ticks
+            ? m->active_clock_idle_credit_ticks : paced_ticks;
+        uint64_t wait_ticks = paced_ticks - idle_credit;
         uint64_t wait_ns;
 
         if (!paced_ticks) {
@@ -1334,12 +1351,12 @@ static bool machine_wait_for_interrupt(void *ctx) {
              * overflow for any uint32_t CPU rate. Round up: waiting a fraction
              * too long is harmless; advancing before the requested interval
              * completed would recreate the bug this policy exists to stop. */
-            uint64_t scaled = paced_ticks * UINT64_C(1000000000);
+            uint64_t scaled = wait_ticks * UINT64_C(1000000000);
             wait_ns = scaled / m->cpu_hz + (scaled % m->cpu_hz != 0u);
         }
 
         m->wfi_pace_yield = true;
-        m->wfi_paced_waits++;
+        if (wait_ns) m->wfi_paced_waits++;
         if (UINT64_MAX - m->wfi_paced_wait_ns < wait_ns)
             m->wfi_paced_wait_ns = UINT64_MAX;
         else
@@ -1351,18 +1368,14 @@ static bool machine_wait_for_interrupt(void *ctx) {
          * millisecond oversleep to that credit stretched idle guest time. The
          * paired samples do not move devices or cross the selected wake edge.
          * The usual post-retirement synchronization consumes this allowance. */
-        uint64_t idle_start_ns = 0u;
-        bool idle_measured = m->active_host_now &&
-            m->active_clock_anchor_valid && !m->active_clock_deadline_shield &&
-            m->active_host_now(m->active_host_now_ctx, &idle_start_ns) &&
-            idle_start_ns >= m->active_clock_last_host_ns;
-        if (!m->wfi_host_sleep(m->wfi_host_sleep_ctx, wait_ns)) {
+        if (wait_ns && !m->wfi_host_sleep(m->wfi_host_sleep_ctx, wait_ns)) {
             m->wfi_paced_failures++;
+            m->active_clock_idle_credit_ticks = 0u;
             s5l8900_tick(m, 0u);
             return m->cpu.irq_line || m->cpu.fiq_line;
         }
         uint64_t idle_end_ns = 0u;
-        if (idle_measured &&
+        if (wait_ns && idle_measured &&
             m->active_host_now(m->active_host_now_ctx, &idle_end_ns) &&
             idle_end_ns >= idle_start_ns &&
             idle_end_ns - idle_start_ns > wait_ns) {
@@ -1372,6 +1385,8 @@ static bool machine_wait_for_interrupt(void *ctx) {
             m->active_clock_idle_oversleep_ns +=
                 oversleep < room ? oversleep : room;
         }
+        m->active_clock_idle_credit_ticks -= idle_credit;
+        m->active_clock_idle_repaid_ticks += idle_credit;
 
         if (partial) {
             m->wfi_paced_partial_advances++;
@@ -1728,6 +1743,8 @@ static void active_clock_reset_anchor(s5l8900_t *m) {
     m->active_clock_guest_ticks_since_sync = 0u;
     m->active_clock_fraction = 0u;
     m->active_clock_idle_oversleep_ns = 0u;
+    m->active_clock_idle_credit_ticks = 0u;
+    m->active_clock_idle_repaid_ticks = 0u;
     m->active_clock_anchor_valid = false;
 }
 
@@ -1976,6 +1993,8 @@ static bool wake_from_pmu_power_state(s5l8900_t *m) {
     m->active_clock_guest_ticks_since_sync = 0u;
     m->active_clock_fraction = 0u;
     m->active_clock_idle_oversleep_ns = 0u;
+    m->active_clock_idle_credit_ticks = 0u;
+    m->active_clock_idle_repaid_ticks = 0u;
     m->active_clock_anchor_valid = false;
     m->active_clock_input_guard_host_ns = 0u;
     m->active_clock_input_guard = false;
@@ -2480,6 +2499,8 @@ static bool active_host_clock_sync(s5l8900_t *m,
         m->active_clock_guest_ticks_since_sync = 0u;
         m->active_clock_fraction = 0u;
         m->active_clock_idle_oversleep_ns = 0u;
+        m->active_clock_idle_credit_ticks = 0u;
+        m->active_clock_idle_repaid_ticks = 0u;
         m->active_clock_anchor_valid = true;
         /* Establish the same level/input boundary the first ordinary device
          * tick in this run would have supplied, without manufacturing time. */
@@ -2491,6 +2512,12 @@ static bool active_host_clock_sync(s5l8900_t *m,
     m->active_clock_last_host_ns = now_ns;
     uint64_t prior_fraction = m->active_clock_fraction;
     uint64_t observed_ticks = m->active_clock_guest_ticks_since_sync;
+    /* Prepaid WFI time came from an earlier sample, not this host interval.
+     * Subtracting it here also preserves this wait's independently measured
+     * oversleep instead of accidentally charging the same credit twice. */
+    if (observed_ticks >= m->active_clock_idle_repaid_ticks)
+        observed_ticks -= m->active_clock_idle_repaid_ticks;
+    m->active_clock_idle_repaid_ticks = 0u;
     uint64_t due_ticks = 0u, due_fraction = 0u;
     uint64_t max_added_ticks = 0u, max_fraction = 0u;
     bool converted = active_clock_elapsed_ticks(
@@ -2517,16 +2544,16 @@ static bool active_host_clock_sync(s5l8900_t *m,
     if (clamp) {
         added_ticks = max_added_ticks;
         due_fraction = max_fraction;
+        m->active_clock_idle_credit_ticks = 0u;
     }
 
     /* Wall time is an upper bound, not permission to run the guest clock ahead
      * of the work this host completed.  Without this second bound a 20 Minsn/s
      * phone was credited 412 million CPU ticks each host second; timer
      * deadlines then arrived faster than XNU could service them and foreground
-     * navigation never reached its next wait.  Discard excess elapsed time
-     * instead of queuing debt: a later WFI supplies genuine idle time at wall
-     * cadence, while sustained CPU work advances only as quickly as it is
-     * actually emulated. */
+     * navigation never reached its next wait. Sustained CPU work still obeys
+     * that bound. Retain at most one slice for a later, proven idle interval;
+     * it may shorten a host sleep but can never accelerate busy execution. */
     uint64_t retirement_cap =
         (uint64_t)fallback_ticks *
         m->active_clock_max_ticks_per_retirement;
@@ -2540,6 +2567,12 @@ static bool active_host_clock_sync(s5l8900_t *m,
         retirement_cap += idle_ticks;
     m->active_clock_idle_oversleep_ns = 0u;
     if (added_ticks > retirement_cap) {
+        if (!clamp && m->wfi_host_sleep) {
+            uint64_t room = max_added_ticks > m->active_clock_idle_credit_ticks
+                ? max_added_ticks - m->active_clock_idle_credit_ticks : 0u;
+            uint64_t withheld = added_ticks - retirement_cap;
+            m->active_clock_idle_credit_ticks += withheld < room ? withheld : room;
+        }
         added_ticks = retirement_cap;
         clamp = true;
     }

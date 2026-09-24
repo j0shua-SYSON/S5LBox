@@ -4326,6 +4326,12 @@ typedef struct {
      * Consumed by the next synchronization; never serialized or carried across
      * a pause, reset, restore or clock-policy change. */
     uint64_t               active_clock_idle_oversleep_ns;
+    /* At most one 8 ms slice of elapsed time withheld by the CPU-work cap.
+     * Only a paced WFI may spend it, by shortening its host sleep before the
+     * next proven device edge. Repaid ticks distinguish that older time from
+     * ticks backed by the current host sample. Both are transient host policy. */
+    uint64_t               active_clock_idle_credit_ticks;
+    uint64_t               active_clock_idle_repaid_ticks;
     uint64_t               active_clock_updates;
     uint64_t               active_clock_added_ticks;
     uint64_t               active_clock_clamps;
