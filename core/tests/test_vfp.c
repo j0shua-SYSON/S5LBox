@@ -1896,7 +1896,8 @@ static void test_a8_vfp_integer_values_and_host_state(void) {
     fenv_t saved; CHECK(fegetenv(&saved) == 0,"save integer-conversion host state");
     static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
     /* Explicit rounded integers before signed/unsigned range checks. These
-     * anchors distinguish saturation after rounding from checking the input. */
+     * anchors distinguish saturation after rounding from checking the input.
+     * Explicit signed 64-bit literals also avoid MSVC unsigned negation. */
     static const struct { uint64_t input; unsigned dbl; int64_t rounded[4]; bool inexact; } anchors[] = {
         {UINT64_C(0x3fe0000000000000),1u,{0,1,0,0},true},
         {UINT64_C(0xbfe0000000000000),1u,{0,0,-1,0},true},
@@ -1907,7 +1908,7 @@ static void test_a8_vfp_integer_values_and_host_state(void) {
         {UINT64_C(0x3fdfffffffffffff),1u,{0,1,0,0},true},
         {UINT64_C(0x3fe0000000000001),1u,{1,1,0,0},true},
         {UINT64_C(0x41dfffffffe00000),1u,{2147483648,2147483648,2147483647,2147483647},true},
-        {UINT64_C(0xc1e0000000100000),1u,{-2147483648,-2147483648,-2147483649,-2147483648},true},
+        {UINT64_C(0xc1e0000000100000),1u,{-INT64_C(2147483648),-INT64_C(2147483648),-INT64_C(2147483649),-INT64_C(2147483648)},true},
         {UINT64_C(0x41effffffff00000),1u,{4294967296,4294967296,4294967295,4294967295},true},
         {UINT64_C(0x41f0000000000000),1u,{4294967296,4294967296,4294967296,4294967296},false},
         {1u,1u,{0,1,0,0},true}, {UINT64_C(0x8000000000000001),1u,{0,0,-1,0},true},
@@ -1916,8 +1917,8 @@ static void test_a8_vfp_integer_values_and_host_state(void) {
         {0x40200000u,0u,{2,3,2,2},true}, {0xc0200000u,0u,{-2,-2,-3,-2},true},
         {0x4effffffu,0u,{2147483520,2147483520,2147483520,2147483520},false},
         {0x4f000000u,0u,{2147483648,2147483648,2147483648,2147483648},false},
-        {0xcf000000u,0u,{-2147483648,-2147483648,-2147483648,-2147483648},false},
-        {0xcf000001u,0u,{-2147483904,-2147483904,-2147483904,-2147483904},false},
+        {0xcf000000u,0u,{-INT64_C(2147483648),-INT64_C(2147483648),-INT64_C(2147483648),-INT64_C(2147483648)},false},
+        {0xcf000001u,0u,{-INT64_C(2147483904),-INT64_C(2147483904),-INT64_C(2147483904),-INT64_C(2147483904)},false},
         {0x4f7fffffu,0u,{4294967040,4294967040,4294967040,4294967040},false},
         {0x4f800000u,0u,{4294967296,4294967296,4294967296,4294967296},false},
         {1u,0u,{0,1,0,0},true}, {0x80000001u,0u,{0,0,-1,0},true}

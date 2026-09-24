@@ -637,6 +637,12 @@ profiles are checked. Fetch and guest enable/return tests cover every form,
 including the difference between VCVT and VCVTR on retry. The first focused
 build and all three focused tests passed without corrections.
 
+The first Windows MSVC CI run exposed 576 failed assertions in three raw
+anchor rows: unsuffixed negative literals at or below -2^31 were interpreted
+using unsigned negation. The expected values now use explicit `INT64_C`
+operands. The native oracle and emulator arithmetic are unchanged; the
+other seven core CI jobs passed on that original commit.
+
 The unchanged 40-byte Thumb routines `vDSP_vfix32D` at
 `0x308612bc..0x308612e4` and `vDSP_vflt32D` at
 `0x30861720..0x30861748` complete all 4,096 prepared calls. Before this
