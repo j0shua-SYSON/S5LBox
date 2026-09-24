@@ -1074,8 +1074,18 @@ policy changes and deterministic execution. Another 100 alternating work/idle
 cycles stay within one CPU tick of elapsed host time without running ahead.
 Pause, input, power reset and snapshot restore clear both credit and its
 per-sample accounting; the serialized checkpoint format is unchanged. The local
-SoC test passes 86,371 checks. Physical responsiveness remains unverified for
-this candidate; it is not a claim of increased CPU throughput.
+SoC test passes 86,371 checks; all 77 local test executables and all nine native
+CI jobs pass. The exact-source iOS artifact was installed with the four guest
+files unchanged. From the same empty Safari keyboard checkpoint, a settled
+control interval advanced 7.030608 guest seconds in 9.021478 host seconds
+(77.9%); the candidate advanced 8.348785 in 8.485341 (98.4%). Neither interval
+changed the sampled framebuffer signature. This corrects idle clock drift, not
+CPU throughput. Explicit pause/resume, power sleep/wake/unlock, an 18-second
+background interval, and saved asleep/awake checkpoint restoration passed.
+Rapid typing and the roughly one-second Settings back transition remain open:
+both control and candidate omitted the first Q in a roughly half-second
+ten-key burst despite accepting and reading all 20 touch reports. An isolated
+follow-up Q worked. Controller receipt alone does not prove usable input.
 
 ### Historical instruction-resume narrative
 
