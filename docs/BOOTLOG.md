@@ -1039,7 +1039,22 @@ Pause, restore, power reset and policy changes clear the transient allowance.
 The snapshot stream does not change. Real-frequency tests cover all budgets,
 ordinary and suspend-like oversleep, failed measurements, failed sleep,
 backward time, exact wake edges, and leakage into the next active instruction.
-Physical timing and interactive validation are still required for this fix.
+The final local Release rebuild passed 77/77 tests. The exact iPhone artifact
+was installed with unchanged guest-image/checkpoint hashes. In a settled,
+unchanged General screen restored from the same checkpoint, the old binary
+advanced 6.629920 guest seconds over 8.954861 host seconds; the candidate
+advanced 7.505551 over 8.490903. Thus this observed idle clock improved from
+about 74% to 88% of wall time, with zero clock failures. It is not full
+real-time execution, a CPU-throughput measurement or an original-device match.
+
+Back navigation still completed at roughly the one-second screenshot bound.
+The ten-key burst preserved all reports and displayed every letter by the
+roughly two-second capture. A same-binary budget-64 keyboard trial did not
+establish an advantage once its shorter input burst was accounted for; the
+default remains 16. Pause/resume typing, guest sleep/Power wake/unlock, normal
+save/relaunch with the typed field intact, and an 18-second background/foreground
+round trip passed. The initial typing delay and transition responsiveness
+remain open; this correction is retained for the demonstrated clock defect.
 
 ### Historical instruction-resume narrative
 
