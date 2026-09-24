@@ -2622,7 +2622,7 @@ static void test_a8_neon_pair_invalid_and_it(void) {
             unsigned size = bad < 3u ? (bad == 2u ? 3u : bad) : 2u;
             unsigned first = bad == 3u ? 31u : 28u, rn = bad == 4u ? 15u : 5u;
             uint32_t insn = a8_neon_memory(thumb, load_, a8_pair_types[kind], size, 0u, first, rn, 13u);
-            if (bad == 5u) insn |= 1u << 23; /* single-structure lane/replicate allocation */
+            if (bad == 5u) insn |= (1u << 23) | (1u << 8); /* Unsupported multiple-structure lane allocation. */
             if (thumb) { m_w16(NULL, 0x100u, skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK, "pair IT setup"); }
             uint32_t pc = c.r[15], flags = c.cpsr, fpscr = c.vfp_fpscr;
             uint8_t memory[32]; memset(memory, 0xa5, 32u); memcpy(g_ram + 0x2040u, memory, 32u);
@@ -2645,6 +2645,114 @@ static void test_a8_neon_pair_invalid_and_it(void) {
         c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
         CHECK(a8_move_step(&c, 0u, a8_neon_memory(0u, load_, 8u, 2u, 0u, 16u, 5u, 13u)) == ARM_UNDEFINED && c.r[15] == 0u,
               "NEON pair memory leaked to legacy profile");
+     }
+}
+
+static uint32_t a8_neon_lane_load(unsigned thumb,unsigned size,unsigned index_align,unsigned d,unsigned rn,unsigned rm) {
+    return (thumb ? 0xf9a00000u : 0xf4a00000u)|((d&15u)<<12)|((d>>4)<<22)|
+        (rn<<16)|(size<<10)|(index_align<<4)|rm;
+}
+
+static void test_a8_neon_lane_registers(void) {
+    CHECK(a8_neon_lane_load(0u,2u,0u,6u,0u,13u)==0xf4a0680du &&
+          a8_neon_lane_load(0u,2u,0u,7u,2u,13u)==0xf4a2780du &&
+          a8_neon_lane_load(1u,2u,11u,31u,13u,14u)==0xf9edf8beu,"lane load encoding anchors");
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned d=0;d<32u;d++)
+     for (unsigned lane=0;lane<2u;lane++) for (unsigned align=0;align<2u;align++)
+      for (unsigned rn=0;rn<15u;rn++) for (unsigned rm=0;rm<16u;rm++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr=0xfff79f9fu;
+        c.excl_valid=true; c.excl_addr=0x2468u; c.a8_excl_size=8u;
+        for (unsigned r=0;r<15u;r++) c.r[r]=0xffffffe0u+r;
+        c.r[rn]=0x2040u;
+        uint32_t expected_gpr[15]; memcpy(expected_gpr,c.r,sizeof expected_gpr);
+        uint32_t raw=a8_compare_values[(d+lane+rn+rm)%22u].single;
+        memset(g_ram+0x2030u,0xa5,32u); m_w32(NULL,0x2040u,raw);
+        uint8_t expected_ram[32]; memcpy(expected_ram,g_ram+0x2030u,sizeof expected_ram);
+        uint64_t expected_fp[32];
+        for (unsigned r=0;r<32u;r++) { expected_fp[r]=UINT64_C(0x7f800001dead0000)+r; vfp_set_d(&c,r,expected_fp[r]); }
+        uint8_t bytes[8]; memcpy(bytes,&expected_fp[d],8u); memcpy(bytes+lane*4u,&raw,4u); memcpy(&expected_fp[d],bytes,8u);
+        if (rm!=15u) expected_gpr[rn]+=rm==13u ? 4u : c.r[rm];
+        uint32_t flags=c.cpsr;
+        CHECK(a8_move_step(&c,thumb,a8_neon_lane_load(thumb,2u,lane*8u+align*3u,d,rn,rm))==ARM_OK &&
+              c.r[15]==0x104u && c.cycles==1u && c.cpsr==flags && c.vfp_fpscr==0xfff79f9fu &&
+              c.vfp_fpexc==ARM_FPEXC_EN && c.excl_valid && c.excl_addr==0x2468u && c.a8_excl_size==8u,"lane load status");
+        bool match=!memcmp(expected_gpr,c.r,sizeof expected_gpr) && !memcmp(expected_ram,g_ram+0x2030u,sizeof expected_ram);
+        for (unsigned r=0;r<32u;r++) match&=vfp_get_d(&c,r)==expected_fp[r];
+        CHECK(match,"lane load registers/bytes/writeback T=%u D=%u lane=%u align=%u Rn/m=%u/%u",thumb,d,lane,align,rn,rm);
+      }
+}
+
+static void test_a8_neon_lane_alignment_and_access(void) {
+    static const unsigned permissions[]={0u,1u,3u};
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned lane=0;lane<2u;lane++)
+     for (unsigned align=0;align<2u;align++) for (unsigned alignment_check=0;alignment_check<2u;alignment_check++)
+      for (unsigned offset=0;offset<4u;offset++) for (unsigned enabled=0;enabled<2u;enabled++)
+       for (unsigned access=0;access<3u;access++) for (unsigned user=0;user<2u;user++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb);
+        c.cpsr=(c.cpsr&~ARM_CPSR_MODE_MASK)|(user ? ARM_MODE_USR : ARM_MODE_SVC);
+        c.cp15.cpacr=permissions[access]*0x00500000u; c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u;
+        c.cp15.sctlr=(c.cp15.sctlr&~ARM_SCTLR_A)|(alignment_check ? ARM_SCTLR_A : 0u);
+        c.r[5]=0x2040u+offset; m_w32(NULL,0x2040u,0x7f800001u);
+        vfp_set_d(&c,31u,UINT64_C(0x123456789abcdef0));
+        uint32_t flags=c.cpsr,fpscr=c.vfp_fpscr;
+        bool allowed=enabled && (permissions[access]==3u || (permissions[access]==1u && !user));
+        bool abort=allowed && offset && (align || alignment_check),unsupported=allowed && offset && !abort;
+        bool executed=allowed && !offset;
+        CHECK(a8_move_step(&c,thumb,a8_neon_lane_load(thumb,2u,lane*8u+align*3u,31u,5u,13u))==
+              (unsupported ? ARM_UNDEFINED : ARM_OK) && c.vfp_fpscr==fpscr && c.r[5]==0x2040u+offset+(executed ? 4u : 0u),
+              "lane alignment/access disposition");
+        if (!allowed) CHECK(c.r[15]==ARM_VEC_UNDEFINED && c.r[14]==(thumb ? 0x102u : 0x104u) &&
+            c.spsr[ARM_BANK_UND]==flags && c.cp15.dfsr==0u,"lane access denial preceded alignment/data");
+        else if (abort) CHECK(c.r[15]==ARM_VEC_DATA_ABORT && c.r[14]==0x108u && c.spsr[ARM_BANK_ABT]==flags &&
+            c.cp15.dfar==0x2040u+offset && c.cp15.dfsr==1u,"lane precise alignment abort");
+        else CHECK(c.r[15]==(unsupported ? 0x100u : 0x104u) && c.cpsr==flags,"lane completion/refusal flags");
+        uint64_t expected=UINT64_C(0x123456789abcdef0);
+        if (executed) expected=lane ? UINT64_C(0x7f8000019abcdef0) : UINT64_C(0x123456787f800001);
+        CHECK(vfp_get_d(&c,31u)==expected && m_r32(NULL,0x2040u)==0x7f800001u,"lane alignment/access changed uncompleted data");
+       }
+}
+
+static void test_a8_neon_lane_invalid_and_it(void) {
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned size=0;size<4u;size++)
+     for (unsigned index_align=0;index_align<16u;index_align++) for (unsigned bad_base=0;bad_base<2u;bad_base++)
+      for (unsigned big=0;big<2u;big++) for (unsigned enabled=0;enabled<2u;enabled++)
+       for (unsigned skip=0;skip<(thumb ? 2u : 1u);skip++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.r[5]=0x2040u;
+        c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u; if (skip) c.cp15.cpacr=0u;
+        if (big) c.cpsr|=ARM_CPSR_E;
+        m_w32(NULL,0x2040u,0x7f800001u); vfp_set_d(&c,31u,UINT64_C(0x123456789abcdef0));
+        if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c)==ARM_OK,"lane IT setup"); }
+        uint32_t flags=c.cpsr,pc=c.r[15],fpscr=c.vfp_fpscr;
+        bool shape=size==2u && !bad_base && ((index_align&7u)==0u || (index_align&7u)==3u);
+        bool denied=shape && !enabled && !skip,executed=shape && enabled && !big && !skip;
+        uint32_t insn=a8_neon_lane_load(thumb,size,index_align,31u,bad_base ? 15u : 5u,13u);
+        CHECK(a8_move_step(&c,thumb,insn)==(skip || denied || executed ? ARM_OK : ARM_UNDEFINED) &&
+              c.vfp_fpscr==fpscr && c.r[5]==0x2040u+(executed ? 4u : 0u),"lane invalid/IT disposition");
+        if (denied) CHECK(c.r[15]==ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND]==flags &&
+            c.r[14]==pc+(thumb ? 2u : 4u),"lane valid guest access exception");
+        else CHECK(c.r[15]==pc+(skip || executed ? 4u : 0u) &&
+            c.cpsr==(skip || executed ? flags&~0x0600fc00u : flags),"lane invalid/IT preservation");
+        uint64_t expected=!executed ? UINT64_C(0x123456789abcdef0) : index_align&8u ?
+            UINT64_C(0x7f8000019abcdef0) : UINT64_C(0x123456787f800001);
+        CHECK(vfp_get_d(&c,31u)==expected && m_r32(NULL,0x2040u)==0x7f800001u,"lane refused or skipped result");
+       }
+    const arm_arch_t legacy[]={ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile=0;profile<2u;profile++) for (unsigned hint=0;hint<2u;hint++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,legacy[profile]),"legacy lane reset");
+        c.cp15.cpacr=0x00f00000u; c.vfp_fpexc=ARM_FPEXC_EN; c.r[5]=0x2040u;
+        /* Preserve the existing legacy Rd=PC preload-hint alias for D31.
+         * Only the Cortex-A8 decoder disambiguates these NEON encodings. */
+        CHECK(a8_move_step(&c,0u,a8_neon_lane_load(0u,2u,0u,hint ? 31u : 16u,5u,13u))==
+              (hint ? ARM_OK : ARM_UNDEFINED) && c.r[15]==(hint ? 4u : 0u) &&
+              c.r[5]==0x2040u,"lane load changed legacy disposition");
+    }
+    static const uint32_t toggles[]={1u<<21,1u<<8,1u<<9,3u<<8};
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned enabled=0;enabled<2u;enabled++)
+     for (unsigned neighbor=0;neighbor<4u;neighbor++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.r[5]=0x2040u; c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u;
+        uint32_t flags=c.cpsr,fpscr=c.vfp_fpscr;
+        CHECK(a8_move_step(&c,thumb,a8_neon_lane_load(thumb,2u,0u,31u,5u,13u)^toggles[neighbor])==ARM_UNDEFINED &&
+              c.r[15]==0x100u && c.r[5]==0x2040u && c.cpsr==flags && c.vfp_fpscr==fpscr,"lane load claimed neighboring store/structure");
      }
 }
 
@@ -7074,6 +7182,9 @@ int main(void) {
     test_a8_neon_add_results();
     test_a8_neon_add_access_and_invalid();
     test_a8_neon_memory_registers();
+    test_a8_neon_lane_registers();
+    test_a8_neon_lane_alignment_and_access();
+    test_a8_neon_lane_invalid_and_it();
     test_a8_neon_memory_alignment_and_access();
     test_a8_neon_memory_invalid_and_it();
     test_a8_vfp_compare_registers_and_values();

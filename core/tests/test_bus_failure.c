@@ -82,6 +82,42 @@ static void check_stop(fixture_t *f, arm_cpu_t *c, uint32_t pc, uint32_t flags) 
     c->irq_line = false;
 }
 
+static void test_neon_lane_fetch_data_and_retry(void) {
+    static const unsigned offsets[]={15u,13u,1u,2u};
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned host=0;host<2u;host++)
+     for (unsigned lane=0;lane<2u;lane++) for (unsigned align=0;align<2u;align++)
+      for (unsigned post=0;post<4u;post++) for (unsigned stop=0;stop<2u+thumb;stop++)
+       for (unsigned enabled=0;enabled<2u;enabled++) {
+        bool data=stop==1u+thumb; if (data && !enabled) continue;
+        fixture_t f; arm_bus_t bus; arm_cpu_t c;
+        setup(&f,&bus,&c,thumb!=0u,host!=0u); if (thumb) c.cpsr|=0x1800u;
+        c.cp15.cpacr=0x00f00000u; c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u; c.vfp_fpscr=0x0bc00080u;
+        c.excl_valid=true; c.excl_addr=0x2468u; c.a8_excl_size=8u;
+        unsigned rm=offsets[post]; uint32_t insn=(thumb ? 0xf9e1f800u : 0xf4e1f800u)|(lane<<7)|(align ? 0x30u : 0u)|rm;
+        if (thumb) { put16(&f,0u,(uint16_t)(insn>>16)); put16(&f,2u,(uint16_t)insn); } else put32(&f,0u,insn);
+        put32(&f,0x1000u,0x7f800001u);
+        uint64_t expected[32];
+        for (unsigned d=0;d<32u;d++) { expected[d]=UINT64_C(0x123456789abcdef0)+d; vfp_set_d(&c,d,expected[d]); }
+        uint32_t expected_gpr[15]; memcpy(expected_gpr,c.r,sizeof expected_gpr);
+        uint32_t updated=c.r[1]+(rm==15u ? 0u : rm==13u ? 4u : c.r[rm]),flags=c.cpsr;
+        uint8_t memory[sizeof f.ram]; memcpy(memory,f.ram,sizeof memory);
+        f.fail_address=data ? 0x1000u : 2u*stop; f.fail_size=data || !thumb ? 4u : 2u;
+        CHECK(arm_step(&c)==ARM_HALT,"lane failed fetch/data callback did not halt"); check_stop(&f,&c,0u,flags);
+        bool match=!memcmp(expected_gpr,c.r,sizeof expected_gpr) && !memcmp(memory,f.ram,sizeof memory);
+        for (unsigned d=0;d<32u;d++) match&=vfp_get_d(&c,d)==expected[d];
+        CHECK(match && c.vfp_fpscr==0x0bc00080u && c.vfp_fpexc==(enabled ? ARM_FPEXC_EN : 0u) &&
+              c.excl_valid && c.excl_addr==0x2468u && c.a8_excl_size==8u,"lane published failed load/writeback");
+        f.failed=false; f.fail_size=0u; c.vfp_fpexc=ARM_FPEXC_EN;
+        uint8_t bytes[8]; memcpy(bytes,&expected[31],8u); uint32_t raw=0x7f800001u;
+        memcpy(bytes+lane*4u,&raw,4u); memcpy(&expected[31],bytes,8u); expected_gpr[1]=updated;
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==4u && c.cycles==1u && c.cpsr==(flags&~0x0600fc00u) &&
+              c.vfp_fpscr==0x0bc00080u && c.excl_valid && c.excl_addr==0x2468u && c.a8_excl_size==8u,"lane retry retirement");
+        match=!memcmp(expected_gpr,c.r,sizeof expected_gpr) && !memcmp(memory,f.ram,sizeof memory);
+        for (unsigned d=0;d<32u;d++) match&=vfp_get_d(&c,d)==expected[d];
+        CHECK(match,"lane retry exact registers/bytes/writeback");
+       }
+}
+
 static void test_neon_memory_and_retry(void) {
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned host = 0; host < 2u; host++)
@@ -1066,6 +1102,7 @@ int main(void) {
     test_neon_pairs_and_retry();
     test_neon_sign_fetch_and_retry();
     test_neon_memory_and_retry();
+    test_neon_lane_fetch_data_and_retry();
     test_data_and_retry();
     test_table_branch_and_retry();
     test_unaligned_table_branch_and_retry();

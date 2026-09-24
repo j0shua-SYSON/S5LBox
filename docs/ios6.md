@@ -250,7 +250,7 @@ VLD2/VST2 multiple-structure forms additionally interleave or deinterleave
 consecutive D registers. They use the same alignment and writeback rules;
 two-register forms reject a 32-byte alignment assertion. Each completed
 word publishes to its own interleaved register lane. Other element widths,
-single-lane/replicate forms and the remaining structure families are not
+VLD2/VST2 single-lane/replicate forms and the remaining structure families are not
 implemented. See
 [DDI0406C.b, A8.8.323/406](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 
@@ -267,6 +267,63 @@ swallowed as hints.
 For VLD2/VST2, independent register-word permutations verify the untouched
 spaced register and every partial-transfer boundary, including User page
 translation/permission faults and checked-bus failure followed by retry.
+
+VLD1 single-element loads additionally copy one naturally aligned 32-bit
+word into either lane of any D register, preserving the other lane and all
+FPSCR fields. Both ARM and Thumb encodings support no writeback, a four-byte
+increment, or addition of the original offset register, including base/offset
+aliases. The lane and base publish only after the word has completed.
+Explicit four-byte alignment failures, or standard failures with SCTLR.A
+set, enter Data Abort before translation. Standard unaligned accesses with
+A=0 remain unsupported. Invalid sizes, index/alignment fields and R15 bases
+stop before coprocessor access checks; valid unavailable instructions enter
+guest Undefined. Big-endian execution, lane stores, 8/16-bit lane loads and
+replicate forms remain unsupported. See
+[DDI0406C.b, A8.8.321 and B1.9.8](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Tests exercise all D registers, both lanes, base/offset combinations and
+alignment forms, raw FP classes, whole register/RAM preservation, access
+denial, IT conditions and adjacent unsupported structures. They also check
+single-word User loads at a page end through Normal, Device and Strongly-ordered
+mappings, translation/permission/alignment faults, split Thumb fetch faults,
+checked host failures followed by retry, and guest enable/return retry with
+exactly one data read. The first run found a wrong physical input address in
+the new MMU test, an older refusal test whose encoding now selects a valid
+lane load, and two new assertions that overlooked the existing legacy D31
+preload-hint alias. Those test assumptions were corrected; the implementation
+was unchanged. ARM1176 and Swift retain their existing behavior.
+
+The unchanged 1,168-byte ARM `vDSP_dotpr` routine at
+`0x30857a5c..0x30857eec` completes 3,680 prepared calls. Before lane-load
+support, 3,456 calls already passed; the first additional unit-stride call
+with sixteen elements and both inputs four bytes past a 16-byte boundary
+stopped after fifteen instructions at `0x30857a94`, on
+`VLD1.32 {d6[0]}, [r0]!`, before any input read. The fixture, helper and
+runner hashes were unchanged for the first successful run. The initial
+3,456 calls cover unit counts below sixteen and three signed nonunit stride
+pairs through 65, with four pointer-alignment tuples, four small-integer
+patterns and all four FZ/DN combinations. Another 224 calls cover selected
+unit counts 16, 17 and 18 whose alignment prefix branches to the remaining
+scalar/block path before reading the CPU-family commpage. No identity
+value or override is supplied.
+
+All operands, products and partial sums in these calls are exact F32
+integers under nearest-even rounding and LEN/STRIDE zero. Independent
+closed-form sums, checked against twenty integer anchors, verify the output.
+The fixture checks the entire FP bank, including the unstored upper lane
+that the final odd-element VMLA updates from the preceding pair's retained
+inputs. It also checks all general registers, flags, exclusive and return
+state, whole RAM, instruction counts and exact per-byte fetch/input/output,
+eight-byte frame and eight-byte argument accesses. These prepared calls do
+not establish other large unit-stride paths, fractional or special inputs,
+process launch, board boot, timing or physical behavior.
+
+After lane-load support, all 77 strict and 72 shipping tests pass. The
+max/min, F64 dot-product, NEON integer, VFP integer, precision, square-root,
+division, unit F64 ramp, F32 ramp and F64 remainder fixtures retain their
+6,912, 3,456, 6,144, 4,096, 4,096, 640, 1,536, 336, 1,824 and 112 passing
+calls. The complete guarded kernel-entry trace remains identical through
+the 61,650-step L2 ECC stop.
 
 ARM and Thumb NEON register VAND, VBIC, VORR, VORN, VEOR, VBSL, VBIT and
 VBIF now operate on all 32 D registers or 16 Q registers, including VORR's
@@ -1478,7 +1535,7 @@ establish that result.
   VFP copies, immediate constants and sign operations with short vectors,
   scalar comparisons, F32/F64 precision conversion, 32-bit integer conversion and
   VADD/VSUB/VMUL/VNMUL/VDIV/VSQRT/VMLA/VMLS across the full register bank, and the bounded
-  32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms,
+  32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms, 32-bit VLD1 lane loads,
   register Boolean operations, VEXT, 8/16/32-bit VTRN, F32 VABS/VNEG,
   immediate constants, core-register VDUP, register VMUL/VADD/VSUB/VMLA/VMLS.F32,
   F32 VMUL/VMLA/VMLS by scalar, VMAX/VMIN.F32, and F32/signed/unsigned 32-bit NEON conversion
