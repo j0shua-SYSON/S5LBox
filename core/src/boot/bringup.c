@@ -72,9 +72,9 @@
 #define S5L_BRINGUP_LCD_NODE      "arm-io/spi0/lcd0"
 #define S5L_BRINGUP_LCD_COMPAT    "lcd,merlot"
 
-/* The Darwin dev_t the raw bridge answers for, and the user/kernel VA split
- * it refuses to translate above. Both from bootkernel.c:59 and :25246. */
-#define S5L_BRINGUP_MD_RAW_DEVICE       UINT32_C(0x09000000)
+/* Exact 7E18 _mdevCMajor, assigned by cdevsw_add rather than fixed at 9.
+ * The firmware gate pins the kernel containing this global. */
+#define S5L_BRINGUP_MD_RAW_MAJOR_VA     UINT32_C(0xc0216108)
 #define S5L_BRINGUP_USER_ADDRESS_LIMIT  UINT32_C(0xc0000000)
 
 /*
@@ -1114,7 +1114,8 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
         raw.bounce_base_pa          = bounce.begin;
         raw.bounce_stride           = MD_RAW_BRIDGE_MAX_TRANSFER;
         raw.bounce_slot_count       = S5L_BRINGUP_MD_RAW_SLOT_COUNT;
-        raw.expected_device         = S5L_BRINGUP_MD_RAW_DEVICE;
+        raw.expected_device         = 0u; /* md0 minor; major is guest-owned */
+        raw.expected_device_major_va = S5L_BRINGUP_MD_RAW_MAJOR_VA;
         raw.user_address_limit      = S5L_BRINGUP_USER_ADDRESS_LIMIT;
         raw.media_size              = media_size;
         raw.ram_base                = machine->ram_base;

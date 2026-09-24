@@ -52,8 +52,13 @@ typedef struct {
     md_raw_bridge_site_t completion_site;
     /* Even fetch PC of the exact firmware's Thumb uiomove entry. */
     uint32_t uiomove_thumb_pc;
-    /* Complete Darwin dev_t accepted by this backend (for 7E18 md0: 09000000). */
+    /* Complete Darwin dev_t for a fixed registration. If major_va is set,
+     * only this value's low 24-bit minor is used. */
     uint32_t expected_device;
+    /* Optional aligned guest VA of XNU's signed character-device major.
+     * Read through the privileged MMU on each entry, never cached across a
+     * boot or restore. Zero retains the fixed-device contract above. */
+    uint32_t expected_device_major_va;
     /* Exclusive user VA ceiling enforced before unprivileged translation. */
     uint32_t user_address_limit;
     uint64_t media_size;
@@ -128,7 +133,8 @@ typedef enum {
     MD_RAW_BRIDGE_ERROR_STALE_COMPLETION,
     MD_RAW_BRIDGE_ERROR_MALFORMED_COMPLETION,
     MD_RAW_BRIDGE_ERROR_UIOMOVE,
-    MD_RAW_BRIDGE_ERROR_BLOCK_IO
+    MD_RAW_BRIDGE_ERROR_BLOCK_IO,
+    MD_RAW_BRIDGE_ERROR_DEVICE_MAJOR
 } md_raw_bridge_error_code_t;
 
 typedef struct {
@@ -176,6 +182,7 @@ typedef struct {
     uint32_t key_sp;
     uint32_t key_mode;
     uint32_t return_lr;
+    uint32_t device;
     uint32_t uio_va;
     uint32_t uio_iovs_pa;
     uint32_t uio_iovcnt_pa;

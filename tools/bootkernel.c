@@ -81,7 +81,7 @@ static rootfs_work_entry_t *g_jb_entries = NULL;
 
 #define EXTERNAL_MD_TOKEN_BASE UINT64_C(0xe0000000)
 #define EXTERNAL_MD_MAX_SIZE   UINT64_C(0x80000000)
-#define EXTERNAL_MD_RAW_DEVICE UINT32_C(0x09000000)
+#define EXTERNAL_MD_RAW_MAJOR_VA UINT32_C(0xc0216108) /* 7E18 _mdevCMajor */
 #define EXTERNAL_MD_RAW_SLOT_COUNT UINT32_C(4)
 #define EXTERNAL_MD_RAW_RESERVE_SIZE \
     (EXTERNAL_MD_RAW_SLOT_COUNT * MD_RAW_BRIDGE_MAX_TRANSFER)
@@ -37138,7 +37138,8 @@ external_md_work_ready:
         raw_config.bounce_base_pa = raw_bounce_pa;
         raw_config.bounce_stride = MD_RAW_BRIDGE_MAX_TRANSFER;
         raw_config.bounce_slot_count = EXTERNAL_MD_RAW_SLOT_COUNT;
-        raw_config.expected_device = EXTERNAL_MD_RAW_DEVICE;
+        raw_config.expected_device = 0u;
+        raw_config.expected_device_major_va = EXTERNAL_MD_RAW_MAJOR_VA;
         raw_config.user_address_limit = UINT32_C(0xc0000000);
         raw_config.media_size = external_media_size;
         raw_config.ram_base = UINT64_C(0x08000000);

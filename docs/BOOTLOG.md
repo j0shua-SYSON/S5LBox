@@ -900,6 +900,28 @@ available current configuration.
 
 ## Stage 9 — current snapshot-resume frontier
 
+### 2026-09-24: raw disk character major is assigned at runtime
+
+A physical cold boot reached launchd but both filesystem-check attempts exited
+with signal 8, followed by `fsck failed!` and guest shutdown. The same failure
+occurred at active-clock work budgets 16 and 4; it is not evidence that the
+larger budget alone broke boot. The saved kernel's `_mdevCMajor` at `0xc0216108`
+contained **10**, while both frontends configured the raw bridge for major 9.
+The sidecar recorded four raw guest errors and no successful raw transfers.
+The checker binary matched the original firmware, and fstab still enabled
+checking; neither was replaced to get past the failure.
+
+The bridge now reads the exact firmware's registered major through privileged
+guest translation on each entry and combines it with the configured minor.
+Invalid registration, wrong minor, missing mappings, and native user-buffer
+fault handling retain their strict checks. Native-copy continuations retain the
+accepted device identity, even if the registration changes before completion.
+Host regression tests cover changing registrations, reads and writes, invalid
+devices, nonidentity kernel mappings, and fault continuations. Physical cold-boot
+validation of this fix is pending; this is not a keyboard or animation verdict.
+
+### Historical instruction-resume narrative
+
 Two interpreter changes make the current instruction counts different from the
 older narrative without making them less meaningful.
 

@@ -420,6 +420,99 @@ static void expect_halt_error(md_raw_bridge_error_code_t code,
           (int)fixture.bridge.last_error.code, (int)code);
 }
 
+static void test_runtime_device_major(void) {
+    const uint32_t major_va = UINT32_C(0x00001200);
+    const uint32_t majors[] = {9u, 10u, 0u, 255u};
+    fixture_init();
+    fixture.bridge.config.expected_device_major_va = major_va;
+    for (unsigned i = 0u; i < sizeof majors / sizeof majors[0]; i++) {
+        /* One bridge sees several registrations: no retained major may win
+         * over the kernel RAM restored or updated between requests. */
+        put_u32(major_va, majors[i]);
+        put_uio(TEST_IOV, 1, 13, 5u, 0u, 32, 1);
+        put_iov(0u, TEST_USER, 32u);
+        fixture.cpu.r[0] = majors[i] << 24;
+        fixture.cpu.r[1] = TEST_UIO;
+        CHECK(invoke() == ARM_SVC_HANDLED && fixture.cpu.r[0] == 0u &&
+              get_u32(TEST_UIO + UIO_RESID) == 0u &&
+              memcmp(fixture.ram.bytes + TEST_USER,
+                     fixture.fake_block.bytes + 13u, 32u) == 0,
+              "registered major %u could not read md0", majors[i]);
+    }
+
+    put_u32(major_va, 10u);
+    put_uio(TEST_IOV, 1, 57, 5u, 1u, 32, 1);
+    put_iov(0u, TEST_USER, 32u);
+    memset(fixture.ram.bytes + TEST_USER, 0xa6, 32u);
+    fixture.cpu.r[0] = UINT32_C(0x0a000000);
+    fixture.cpu.r[1] = TEST_UIO;
+    CHECK(invoke() == ARM_SVC_HANDLED && fixture.cpu.r[0] == 0u &&
+          fixture.bridge.stats.successful_writes == 1u &&
+          get_u32(TEST_UIO + UIO_RESID) == 0u &&
+          memcmp(fixture.ram.bytes + TEST_USER,
+                 fixture.fake_block.bytes + 57u, 32u) == 0,
+          "runtime-major raw write did not commit the exact payload");
+
+    const uint32_t registered[] = {10u, 10u, UINT32_MAX, 256u};
+    const uint32_t requested[] = {TEST_DEVICE, 0x0a000001u,
+                                  0xff000000u, 0u};
+    for (unsigned i = 0u; i < 4u; i++) {
+        fixture_init();
+        fixture.bridge.config.expected_device_major_va = major_va;
+        put_u32(major_va, registered[i]);
+        fixture.cpu.r[0] = requested[i];
+        CHECK(invoke() == ARM_SVC_HANDLED && fixture.cpu.r[0] == 6u &&
+              fixture.bridge.stats.guest_errors == 1u &&
+              fixture.bridge.last_guest_error.device == requested[i] &&
+              fixture.bridge.stats.successful_reads == 0u &&
+              get_u32(TEST_UIO + UIO_RESID) == 32u &&
+              get_u32(TEST_IOV) == TEST_USER,
+              "invalid major/minor request %u was accepted or changed uio", i);
+    }
+
+    /* Counterfactual: the old fixed major rejects this observed cold-boot
+     * registration even though md0's minor and every transfer field match. */
+    fixture_init();
+    fixture.cpu.r[0] = UINT32_C(0x0a000000);
+    CHECK(invoke() == ARM_SVC_HANDLED && fixture.cpu.r[0] == 6u &&
+          fixture.bridge.last_guest_error.code == MD_RAW_BRIDGE_ERROR_DEVICE,
+          "fixed-device compatibility gate changed");
+
+    fixture_init();
+    fixture.bridge.config.expected_device_major_va = major_va + 1u;
+    CHECK(!md_raw_bridge_config_valid(&fixture.bridge.config),
+          "unaligned major VA accepted");
+    fixture.bridge.config.expected_device_major_va = UINT32_C(0x00101200);
+    CHECK(invoke() == ARM_SVC_ERROR &&
+          fixture.bridge.last_error.code == MD_RAW_BRIDGE_ERROR_DEVICE_MAJOR &&
+          fixture.bridge.stats.successful_reads == 0u &&
+          get_u32(TEST_UIO + UIO_RESID) == 32u,
+          "unmapped major VA did not fail closed");
+
+    /* Read the global with kernel permissions, not the user buffer's. Its
+     * virtual alias is not a host-RAM offset. The same request then faults
+     * on the user buffer and takes native uiomove. */
+    fixture_init();
+    const uint32_t kernel_major_va = UINT32_C(0xc0012200);
+    put_u32(TEST_L1 + 0xc00u * 4u, UINT32_C(0x00000802));
+    put_u32(UINT32_C(0x00012200), 10u);
+    put_u32(TEST_L1, UINT32_C(0x00000802));
+    fixture.cpu.cp15.dacr = 1u;
+    fixture.bridge.config.expected_device_major_va = kernel_major_va;
+    fixture.cpu.r[0] = UINT32_C(0x0a000000);
+    fixture.cpu.r[13] = UINT32_C(0x00009000);
+    CHECK(invoke_entry_raw() == ARM_SVC_REDIRECTED &&
+          fixture.cpu.r[15] == TEST_UIOMOVE_PC &&
+          fixture.bridge.pending[0].device == UINT32_C(0x0a000000),
+          "runtime-major demand-page read did not redirect");
+    simulate_simple_uiomove(0u, 14u);
+    put_u32(UINT32_C(0x00012200), 9u);
+    CHECK(invoke_completion() == ARM_SVC_REDIRECTED &&
+          fixture.bridge.last_guest_error.device == UINT32_C(0x0a000000) &&
+          fixture.bridge.last_guest_error.code == MD_RAW_BRIDGE_ERROR_UIOMOVE,
+          "completion diagnostic lost the accepted device identity");
+}
+
 static void test_read_write_and_exact_uio_commit(void) {
     arm_cpu_t before;
     uint8_t expected[32];
@@ -1875,6 +1968,7 @@ static void test_saturating_diagnostics_and_strings(void) {
 
 int main(void) {
     printf("S5LBox raw md bridge tests\n");
+    test_runtime_device_major();
     test_read_write_and_exact_uio_commit();
     test_zero_and_multi_iovec_semantics();
     test_media_eof_semantics();

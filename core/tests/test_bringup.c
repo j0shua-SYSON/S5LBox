@@ -261,6 +261,9 @@ static void test_run89_layout(const uint8_t *kernel, size_t kernel_len,
           "cmdline: got \"%s\" want \"%s\"", result.cmdline, WANT_CMDLINE);
 
     CHECK(result.md_bridge_installed, "the md bridge was not installed");
+    CHECK_U32(md->raw.config.expected_device, 0u, "raw md0 minor");
+    CHECK_U32(md->raw.config.expected_device_major_va, 0xc0216108u,
+              "raw bridge must use the kernel's runtime character major");
     CHECK(gate.ran && gate.status == IOS3_KERNEL_PATCH_STATUS_OK,
           "the kernel gate did not accept the real kernel: %s",
           ios3_kernel_patch_status_string(gate.status));

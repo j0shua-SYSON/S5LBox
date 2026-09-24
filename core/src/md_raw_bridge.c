@@ -125,7 +125,8 @@ bool md_raw_bridge_config_valid(const md_raw_bridge_config_t *config) {
         config->completion_site.pc != config->site.pc + 2u ||
         config->completion_site.encoding != UINT32_C(0xdfe4) ||
         config->uiomove_thumb_pc == 0u ||
-        (config->uiomove_thumb_pc & 1u) != 0u)
+        (config->uiomove_thumb_pc & 1u) != 0u ||
+        (config->expected_device_major_va & 3u) != 0u)
         return false;
     if (config->media_size == 0u || config->media_size > INT64_MAX ||
         config->block->size != config->media_size)
@@ -606,13 +607,13 @@ static arm_svc_result_t handle_completion(md_raw_bridge_t *bridge,
 
     error.pc = pc;
     error.encoding = encoding;
-    error.device = config->expected_device;
     pending = find_pending(bridge, cpu->r[13],
                            cpu->cpsr & ARM_CPSR_MODE_MASK);
     if (pending == NULL)
         return bridge_fail(bridge, &error,
                            MD_RAW_BRIDGE_ERROR_STALE_COMPLETION);
 
+    error.device = pending->device;
     error.uio_va = pending->uio_va;
     error.segment = pending->original_segment;
     error.rw = pending->rw;
@@ -813,6 +814,7 @@ static arm_svc_result_t start_uiomove(md_raw_bridge_t *bridge,
     pending->key_sp = cpu->r[13];
     pending->key_mode = cpu->cpsr & ARM_CPSR_MODE_MASK;
     pending->return_lr = return_lr;
+    pending->device = error->device;
     pending->uio_va = uio_va;
     pending->uio_span_count = uio_span_count;
     pending->metadata_span_count = metadata_count;
@@ -968,7 +970,31 @@ arm_svc_result_t md_raw_bridge_handle_svc(void *context, arm_cpu_t *cpu,
                            MD_RAW_BRIDGE_ERROR_PENDING_COLLISION,
                            XNU_ERR_EBUSY, return_lr);
     error.device = cpu->r[0];
-    if (error.device != config->expected_device)
+    uint32_t expected_device = config->expected_device;
+    if (config->expected_device_major_va != 0u) {
+        mapped_span_t major_span[1];
+        uint32_t major_span_count = 0u;
+        map_status = collect_mapping(
+            config, cpu, config->expected_device_major_va, 4u,
+            ARM_ACCESS_READ, true, major_span, 1u, &major_span_count,
+            &error);
+        if (map_status != MAP_OK)
+            return bridge_fail(bridge, &error,
+                               MD_RAW_BRIDGE_ERROR_DEVICE_MAJOR);
+        uint32_t major = mapped_load_u32(
+            config, major_span, major_span_count,
+            config->expected_device_major_va);
+        /* cdevsw_add(-1, ...) chooses a free major at runtime. In particular,
+         * -1 before registration is not major 255. Keep the exact md minor
+         * gate: this must not become an arbitrary-character-device bridge. */
+        if (major > UINT8_MAX)
+            return guest_error(bridge, cpu, &error,
+                               MD_RAW_BRIDGE_ERROR_DEVICE, XNU_ERR_ENXIO,
+                               return_lr);
+        expected_device = (major << 24) |
+                          (expected_device & UINT32_C(0x00ffffff));
+    }
+    if (error.device != expected_device)
         return guest_error(bridge, cpu, &error,
                            MD_RAW_BRIDGE_ERROR_DEVICE, XNU_ERR_ENXIO,
                            return_lr);
@@ -1279,6 +1305,8 @@ const char *md_raw_bridge_error_string(md_raw_bridge_error_code_t code) {
     case MD_RAW_BRIDGE_ERROR_MISSING_BUS_ACCESS:
         return "missing MMU page-table access";
     case MD_RAW_BRIDGE_ERROR_DEVICE: return "unsupported raw device";
+    case MD_RAW_BRIDGE_ERROR_DEVICE_MAJOR:
+        return "raw device major lookup failed";
     case MD_RAW_BRIDGE_ERROR_UIO_ALIGNMENT: return "unaligned uio";
     case MD_RAW_BRIDGE_ERROR_UIO_TRANSLATION: return "uio translation fault";
     case MD_RAW_BRIDGE_ERROR_UIO_RANGE: return "uio outside guest RAM";
