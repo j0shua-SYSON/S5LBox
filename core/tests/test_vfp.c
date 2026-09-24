@@ -391,7 +391,7 @@ static void test_a8_vfp_bitwise_invalid_and_conditional(void) {
     /* Neither instruction-set prefix nor the neighboring arithmetic/conversion
      * encodings may become a raw move. These upper-bank operations remain
      * unsupported with access enabled. CDP2 stays refused even with EN=0. */
-    static const uint32_t neighbors[] = {0xfef7fb00u,0xee40fba0u,0xeef7fbe0u,0xeef8fb60u};
+    static const uint32_t neighbors[] = {0xfef7fb00u,0xee40fba0u,0xeef8fb60u};
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned n = 0; n < sizeof neighbors / sizeof neighbors[0]; n++) {
         arm_cpu_t c;
@@ -493,6 +493,12 @@ static uint32_t a8_fp_sqrt(unsigned dbl, unsigned dst, unsigned source) {
     return 0xeeb10ac0u | (dbl << 8) |
         (dbl ? ((dst & 15u) << 12) | ((dst >> 4) << 22) | (source & 15u) | ((source >> 4) << 5) :
                ((dst >> 1) << 12) | ((dst & 1u) << 22) | (source >> 1) | ((source & 1u) << 5));
+}
+
+static uint32_t a8_fp_precision(unsigned narrow, unsigned dst, unsigned source) {
+    return 0xeeb70ac0u | (narrow << 8) |
+        (narrow ? ((dst >> 1) << 12) | ((dst & 1u) << 22) | (source & 15u) | ((source >> 4) << 5) :
+                  ((dst & 15u) << 12) | ((dst >> 4) << 22) | (source >> 1) | ((source & 1u) << 5));
 }
 
 static uint32_t a8_fp_binary(unsigned op, unsigned dbl, unsigned dst, unsigned left, unsigned right) {
@@ -1532,6 +1538,276 @@ static void test_a8_vfp_sqrt_values_and_host_state(void) {
               "VFP exact sqrt/VMRS lost accumulated flags");
     }
     CHECK(fesetenv(&saved) == 0,"restore VFP sqrt host state");
+}
+
+static uint64_t a8_precision_native(uint64_t a, unsigned narrow, uint32_t fpscr, uint32_t *flags) {
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    uint64_t source_sign = narrow ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+    uint64_t source_normal = narrow ? UINT64_C(0x0010000000000000) : UINT64_C(0x00800000);
+    uint64_t source_infinity = narrow ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
+    uint64_t magnitude = a & ~source_sign;
+    uint64_t result_sign = a & source_sign ? (narrow ? UINT64_C(0x80000000) : UINT64_C(0x8000000000000000)) : 0u;
+    CHECK(magnitude < source_infinity,"nonfinite input reached precision native oracle");
+    *flags = 0u;
+    if (magnitude && magnitude < source_normal && (fpscr & ARM_FPSCR_FZ)) {
+        *flags = ARM_FPSCR_IDC; return result_sign;
+    }
+    /* F32's smallest normal value, expressed exactly as F64. Native underflow
+     * may be detected after rounding, so compare the original input instead. */
+    bool tiny = narrow && magnitude && magnitude < UINT64_C(0x3810000000000000);
+    fenv_t saved;
+    CHECK(fegetenv(&saved) == 0 && fesetround(rounds[(fpscr>>22)&3u]) == 0 &&
+          feclearexcept(FE_ALL_EXCEPT) == 0,"prepare native precision oracle");
+    uint64_t bits;
+    if (narrow) {
+        volatile double x = u2d(a); volatile float y = (float)x; bits = f2u(y);
+    } else {
+        volatile float x = u2f((uint32_t)a); volatile double y = (double)x; bits = d2u(y);
+    }
+    int exceptions = fetestexcept(FE_ALL_EXCEPT);
+    CHECK(!(exceptions & (FE_INVALID | FE_DIVBYZERO)) && (narrow || !exceptions),"unexpected precision native exception");
+    if (tiny && (fpscr & ARM_FPSCR_FZ)) { bits = result_sign; *flags |= ARM_FPSCR_UFC; }
+    else {
+        if (exceptions & FE_OVERFLOW) *flags |= ARM_FPSCR_OFC;
+        if (exceptions & FE_INEXACT) { *flags |= ARM_FPSCR_IXC; if (tiny) *flags |= ARM_FPSCR_UFC; }
+    }
+    CHECK(fesetenv(&saved) == 0,"restore precision native oracle host state");
+    return bits;
+}
+
+static void test_a8_vfp_precision_registers(void) {
+    CHECK(a8_fp_precision(1u,0u,16u) == 0xeeb70be0u && a8_fp_precision(0u,16u,0u) == 0xeef70ac0u,
+          "VFP precision firmware encoding anchors");
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned narrow = 0; narrow < 2u; narrow++)
+      for (unsigned shape = 0; shape < 32u; shape++)
+       for (unsigned dst = 0; dst < 32u; dst++)
+        for (unsigned source = 0; source < 32u; source++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.vfp_fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC | ((shape&7u)<<16) | ((shape>>3)<<20);
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c,d,UINT64_C(0x7ff01234dead0000)+d);
+            for (unsigned r = 0; r < 32u; r++) a8_fp_value_set(&c,narrow,r,a8_add_integer(narrow,(int)r-16));
+            uint64_t expected[32]; for (unsigned d = 0; d < 32u; d++) expected[d] = vfp_get_d(&c,d);
+            a8_add_expected_set(expected,!narrow,dst,a8_add_integer(!narrow,(int)source-16));
+            c.excl_valid = true; c.excl_addr = 0x12340u; c.a8_excl_size = 8u;
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c,thumb,a8_fp_precision(narrow,dst,source)) == ARM_OK &&
+                  c.r[15] == 0x104u && c.cycles == 1u && c.cpsr == flags && c.vfp_fpscr == fpscr &&
+                  c.excl_valid && c.excl_addr == 0x12340u && c.a8_excl_size == 8u,
+                  "VFP precision register/ignored LEN-STRIDE T=%u narrow=%u shape=%u d/m=%u/%u",thumb,narrow,shape,dst,source);
+            bool match = true;
+            for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c,d) == expected[d];
+            for (unsigned r = 0; r < 15u; r++) match &= c.r[r] == 0u;
+            CHECK(match,"VFP precision mixed-format alias/result preservation");
+        }
+}
+
+static void test_a8_vfp_precision_values_and_host_state(void) {
+    fenv_t saved; CHECK(fegetenv(&saved) == 0,"save VFP precision host state");
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    static const struct { uint64_t input, result[4]; uint32_t flags; } narrow_anchors[] = {
+        {0u,{0u,0u,0u,0u},0u},
+        {UINT64_C(0x3ff0000000000000),{0x3f800000u,0x3f800000u,0x3f800000u,0x3f800000u},0u},
+        {UINT64_C(0x3ff0000010000000),{0x3f800000u,0x3f800001u,0x3f800000u,0x3f800000u},ARM_FPSCR_IXC},
+        {UINT64_C(0x3ff0000030000000),{0x3f800002u,0x3f800002u,0x3f800001u,0x3f800001u},ARM_FPSCR_IXC},
+        {UINT64_C(0x3810000000000000),{0x00800000u,0x00800000u,0x00800000u,0x00800000u},0u},
+        {UINT64_C(0x380fffffe0000000),{0x00800000u,0x00800000u,0x007fffffu,0x007fffffu},ARM_FPSCR_UFC|ARM_FPSCR_IXC},
+        {UINT64_C(0x36a0000000000000),{1u,1u,1u,1u},0u},
+        {UINT64_C(0x3690000000000000),{0u,1u,0u,0u},ARM_FPSCR_UFC|ARM_FPSCR_IXC},
+        {1u,{0u,1u,0u,0u},ARM_FPSCR_UFC|ARM_FPSCR_IXC},
+        {UINT64_C(0x47efffffe0000000),{0x7f7fffffu,0x7f7fffffu,0x7f7fffffu,0x7f7fffffu},0u},
+        {UINT64_C(0x7fefffffffffffff),{0x7f800000u,0x7f800000u,0x7f7fffffu,0x7f7fffffu},ARM_FPSCR_OFC|ARM_FPSCR_IXC}
+    };
+    static const struct { uint32_t input; uint64_t result; } wide_anchors[] = {
+        {0u,0u}, {0x3f800000u,UINT64_C(0x3ff0000000000000)},
+        {0x3f800001u,UINT64_C(0x3ff0000020000000)}, {1u,UINT64_C(0x36a0000000000000)},
+        {0x007fffffu,UINT64_C(0x380fffffc0000000)}, {0x00800000u,UINT64_C(0x3810000000000000)},
+        {0x7f7fffffu,UINT64_C(0x47efffffe0000000)}
+    };
+    for (unsigned narrow = 0; narrow < 2u; narrow++) {
+        uint64_t source_sign = narrow ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+        uint64_t result_sign = narrow ? UINT64_C(0x80000000) : UINT64_C(0x8000000000000000);
+        uint64_t source_normal = narrow ? UINT64_C(0x0010000000000000) : UINT64_C(0x00800000);
+        uint64_t source_infinity = narrow ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
+        unsigned row_count = narrow ? sizeof narrow_anchors/sizeof narrow_anchors[0] : sizeof wide_anchors/sizeof wide_anchors[0];
+        for (unsigned row = 0; row < row_count; row++)
+         for (unsigned neg = 0; neg < 2u; neg++)
+          for (unsigned controls = 0; controls < 16u; controls++) {
+            unsigned mode = controls&3u, effective_mode = neg && (mode==1u || mode==2u) ? 3u-mode : mode;
+            uint64_t magnitude = narrow ? narrow_anchors[row].input : wide_anchors[row].input;
+            uint64_t input = magnitude | (neg ? source_sign : 0u);
+            uint64_t want = (narrow ? narrow_anchors[row].result[effective_mode] : wide_anchors[row].result) | (neg ? result_sign : 0u);
+            uint32_t want_flags = narrow ? narrow_anchors[row].flags : 0u;
+            if ((controls&4u) && magnitude && magnitude < source_normal) { want = neg ? result_sign : 0u; want_flags = ARM_FPSCR_IDC; }
+            else if ((controls&4u) && narrow && magnitude && magnitude < UINT64_C(0x3810000000000000)) {
+                want = neg ? result_sign : 0u; want_flags = ARM_FPSCR_UFC;
+            }
+            uint32_t fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC | (mode<<22) |
+                (controls&4u ? ARM_FPSCR_FZ : 0u) | (controls&8u ? ARM_FPSCR_DN : 0u), exceptions;
+            CHECK(a8_precision_native(input,narrow,fpscr,&exceptions) == want && exceptions == want_flags,
+                  "native precision anchor narrow=%u row=%u neg=%u controls=%u",narrow,row,neg,controls);
+            for (unsigned thumb = 0; thumb < 2u; thumb++) {
+                arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = fpscr; a8_fp_value_set(&c,narrow,16u,input);
+                CHECK(a8_move_step(&c,thumb,a8_fp_precision(narrow,31u,16u)) == ARM_OK &&
+                      a8_fp_value(&c,!narrow,31u) == want && c.vfp_fpscr == (fpscr | want_flags),
+                      "VFP precision analytical anchor T=%u narrow=%u row=%u neg=%u controls=%u",thumb,narrow,row,neg,controls);
+            }
+          }
+        unsigned fraction = narrow ? 52u : 23u, max_exp = narrow ? 2047u : 255u;
+        uint64_t random = UINT64_C(0x1a2b3c4d5e6f9870);
+        for (unsigned sample = 0; sample < 2048u+2u*fraction; sample++) {
+            random ^= random << 13; random ^= random >> 7; random ^= random << 17;
+            uint64_t mantissa = (sample&3u)==0u ? 0u : (sample&3u)==1u ? source_normal-1u :
+                                (sample&3u)==2u ? 1u : random & (source_normal-1u);
+            uint64_t input = ((uint64_t)(sample%max_exp)<<fraction) | mantissa;
+            if (sample >= 2048u) {
+                unsigned bit = (sample-2048u)/2u;
+                input = sample&1u ? (UINT64_C(1)<<(bit+1u))-1u : UINT64_C(1)<<bit;
+            }
+            if (sample&4u) input |= source_sign;
+            for (unsigned controls = 0; controls < 16u; controls++) {
+                uint32_t fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ARM_FPSCR_DZC | ((controls&3u)<<22) |
+                    (controls&4u ? ARM_FPSCR_FZ : 0u) | (controls&8u ? ARM_FPSCR_DN : 0u), exceptions;
+                uint64_t want = a8_precision_native(input,narrow,fpscr,&exceptions);
+                for (unsigned thumb = 0; thumb < 2u; thumb++) {
+                    arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = fpscr; a8_fp_value_set(&c,narrow,16u,input);
+                    unsigned host = sample%4u;
+                    CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
+                          (!(sample&1u) || feraiseexcept(FE_INVALID | FE_DIVBYZERO) == 0),"prepare precision host state");
+                    int pending = fetestexcept(FE_ALL_EXCEPT); uint32_t flags = c.cpsr;
+                    CHECK(a8_move_step(&c,thumb,a8_fp_precision(narrow,31u,16u)) == ARM_OK &&
+                          a8_fp_value(&c,!narrow,31u) == want && c.vfp_fpscr == (fpscr | exceptions) && c.cpsr == flags,
+                          "VFP finite precision T=%u narrow=%u sample=%u controls=%u",thumb,narrow,sample,controls);
+                    CHECK(fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == pending,"precision changed host FP state");
+                }
+            }
+        }
+        for (unsigned row = 0; row < sizeof a8_compare_values/sizeof a8_compare_values[0]; row++)
+         for (unsigned controls = 0; controls < 16u; controls++) {
+            uint64_t input = narrow ? a8_compare_values[row].dual : a8_compare_values[row].single;
+            uint64_t magnitude = input & ~source_sign, sign = input & source_sign ? result_sign : 0u;
+            uint64_t infinity = narrow ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+            uint64_t quiet = narrow ? UINT64_C(0x00400000) : UINT64_C(0x0008000000000000);
+            uint32_t fpscr = ARM_FPSCR_NZCV | ARM_FPSCR_QC | ((controls&3u)<<22) |
+                (controls&4u ? ARM_FPSCR_FZ : 0u) | (controls&8u ? ARM_FPSCR_DN : 0u), exceptions = 0u;
+            uint64_t want;
+            if (a8_compare_values[row].nan) {
+                uint64_t payload = magnitude & ((source_normal>>1)-1u);
+                payload = narrow ? payload>>29 : payload<<29;
+                want = controls&8u ? infinity | quiet : sign | infinity | quiet | payload;
+                if (a8_compare_values[row].signaling) exceptions = ARM_FPSCR_IOC;
+            } else if (magnitude == source_infinity) want = sign | infinity;
+            else want = a8_precision_native(input,narrow,fpscr,&exceptions);
+            for (unsigned thumb = 0; thumb < 2u; thumb++) {
+                arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = fpscr; a8_fp_value_set(&c,narrow,16u,input);
+                unsigned host = row%4u;
+                CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
+                      (!(row&1u) || feraiseexcept(FE_INVALID | FE_DIVBYZERO) == 0),"prepare special precision host state");
+                int pending = fetestexcept(FE_ALL_EXCEPT);
+                CHECK(a8_move_step(&c,thumb,a8_fp_precision(narrow,31u,16u)) == ARM_OK &&
+                      a8_fp_value(&c,!narrow,31u) == want && c.vfp_fpscr == (fpscr | exceptions),
+                      "VFP special precision T=%u narrow=%u row=%u controls=%u",thumb,narrow,row,controls);
+                CHECK(fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == pending,"special precision changed host FP state");
+            }
+         }
+    }
+    /* Sequential scalar operations retain all earlier cumulative flags. */
+    for (unsigned thumb = 0; thumb < 2u; thumb++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = ARM_FPSCR_QC | ARM_FPSCR_FZ;
+        vfp_set_d(&c,16u,UINT64_C(0x7fefffffffffffff)); vfp_set_d(&c,17u,UINT64_C(0x3690000000000000));
+        vfp_set_d(&c,18u,UINT64_C(0x7ff0000000000001)); vfp_set_s(&c,16u,1u);
+        CHECK(a8_move_step(&c,thumb,a8_fp_precision(1u,0u,16u)) == ARM_OK &&
+              a8_move_step(&c,thumb,a8_fp_precision(1u,1u,17u)) == ARM_OK &&
+              a8_move_step(&c,thumb,a8_fp_precision(1u,2u,18u)) == ARM_OK &&
+              a8_move_step(&c,thumb,a8_fp_precision(0u,20u,16u)) == ARM_OK &&
+              vfp_get_s(&c,0u) == 0x7f800000u && vfp_get_s(&c,1u) == 0u && vfp_get_s(&c,2u) == 0x7fc00000u &&
+              vfp_get_d(&c,20u) == 0u,"precision accumulated-result sequence");
+        uint32_t flags = ARM_FPSCR_QC | ARM_FPSCR_FZ | ARM_FPSCR_OFC | ARM_FPSCR_IXC | ARM_FPSCR_UFC | ARM_FPSCR_IOC | ARM_FPSCR_IDC;
+        vfp_set_s(&c,3u,0x3f800000u);
+        CHECK(a8_move_step(&c,thumb,a8_fp_precision(0u,21u,3u)) == ARM_OK &&
+              a8_move_step(&c,thumb,VMRS(2u,1u)) == ARM_OK && c.r[2] == flags &&
+              vfp_get_d(&c,21u) == UINT64_C(0x3ff0000000000000),"exact precision/VMRS lost cumulative flags");
+    }
+    CHECK(fesetenv(&saved) == 0,"restore VFP precision host state");
+}
+
+static void test_a8_vfp_precision_access_and_invalid(void) {
+    static const unsigned permissions[] = {0u,1u,3u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned narrow = 0; narrow < 2u; narrow++)
+      for (unsigned user = 0; user < 2u; user++)
+       for (unsigned enabled = 0; enabled < 2u; enabled++)
+        for (unsigned access = 0; access < 3u; access++)
+         for (unsigned skip = 0; skip < 2u; skip++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permissions[access] * 0x00500000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            /* Even shapes forbidden for arithmetic are ignored here. The
+             * unused subnormal must not contribute an input-denormal flag. */
+            c.vfp_fpscr = (c.vfp_fpscr & ~ARM_FPSCR_IDC) | (7u<<16) | (3u<<20);
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c,d,UINT64_C(0x7ff01234dead0000)+d);
+            a8_compare_value_set(&c,narrow,16u,20u); vfp_set_s(&c,1u,1u);
+            a8_fp_value_set(&c,!narrow,31u,0x12345678u);
+            uint64_t expected[32]; for (unsigned d = 0; d < 32u; d++) expected[d] = vfp_get_d(&c,d);
+            if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf0cu : 0xbf1cu); CHECK(arm_step(&c) == ARM_OK,"precision IT setup"); }
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr, pc = c.r[15]; uint64_t cycles = c.cycles;
+            bool allowed = enabled && (permissions[access] == 3u || (permissions[access] == 1u && !user));
+            uint32_t insn = a8_fp_precision(narrow,31u,16u);
+            if (!thumb && skip) insn &= 0x0fffffffu;
+            if (!skip && allowed) a8_add_expected_set(expected,!narrow,31u,
+                narrow ? UINT64_C(0x7fc00000) : UINT64_C(0x7ff8000000000000));
+            CHECK(a8_move_step(&c,thumb,insn) == ARM_OK && c.cycles == cycles+1u &&
+                  c.vfp_fpscr == (fpscr | (!skip && allowed ? ARM_FPSCR_IOC : 0u)) &&
+                  c.vfp_fpexc == (enabled ? ARM_FPEXC_EN : 0u) && c.cp15.cpacr == permissions[access]*0x00500000u,
+                  "precision access effects/unused operand");
+            CHECK(skip || allowed ? c.r[15] == pc+4u &&
+                  c.cpsr == (thumb ? (flags & ~0x0600fc00u) | 0x1800u : flags) :
+                  c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == pc+(thumb ? 2u : 4u) &&
+                  c.spsr[ARM_BANK_UND] == flags && (c.cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_UND,
+                  "precision conditional/exception state");
+            bool match = true; for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c,d) == expected[d];
+            CHECK(match,"precision access changed unexpected FP registers");
+         }
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned narrow = 0; narrow < 2u; narrow++)
+      for (unsigned bit = 0; bit < 32u; bit++) {
+        if ((1u<<bit) & ARM_FPSCR_A8_WMASK) continue;
+        for (unsigned enabled = 0; enabled < 2u; enabled++)
+         for (unsigned skip = 0; skip < 2u; skip++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr |= (1u<<bit) | (7u<<16) | (3u<<20);
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u; c.cp15.cpacr = enabled ? 0x00f00000u : 0u;
+            for (unsigned d = 0; d < 32u; d++) vfp_set_d(&c,d,UINT64_C(0x7ff01234dead0000)+d);
+            if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK,"invalid precision IT setup"); }
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr, pc = c.r[15]; uint64_t cycles = c.cycles;
+            uint32_t insn = a8_fp_precision(narrow,31u,16u); if (!thumb && skip) insn &= 0x0fffffffu;
+            CHECK(a8_move_step(&c,thumb,insn) == (skip ? ARM_OK : ARM_UNDEFINED) && c.cycles == cycles+1u &&
+                  c.r[15] == pc+(skip ? 4u : 0u) && c.vfp_fpscr == fpscr &&
+                  c.vfp_fpexc == (enabled ? ARM_FPEXC_EN : 0u) &&
+                  c.cpsr == (thumb && skip ? flags & ~0x0600fc00u : flags),"precision reserved FPSCR/access/skip priority");
+            bool match = true;
+            for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c,d) == UINT64_C(0x7ff01234dead0000)+d;
+            CHECK(match,"invalid/skipped precision changed FP registers");
+         }
+      }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++)
+     for (unsigned narrow = 0; narrow < 2u; narrow++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,legacy[profile]),"reset legacy precision");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        vfp_set_d(&c,0u,UINT64_C(0x123456789abcdef0));
+        uint32_t singles[32]; uint64_t upper[16];
+        memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
+        CHECK(a8_move_step(&c,0u,a8_fp_precision(narrow,narrow ? 0u : 16u,narrow ? 16u : 0u)) == ARM_UNDEFINED &&
+              memcmp(singles,c.vfp_s,sizeof singles) == 0 && memcmp(upper,c.a8_vfp_hi,sizeof upper) == 0,
+              "A8 precision upper bank leaked into legacy");
+     }
+    const uint32_t neighbors[] = {0xeeb70cc0u,0xeeb709c0u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned n = 0; n < sizeof neighbors/sizeof neighbors[0]; n++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = 0u;
+        CHECK(!vfp_is_precision_data(neighbors[n]) && a8_move_step(&c,thumb,neighbors[n]) == ARM_UNDEFINED,
+              "precision consumed neighboring coprocessor encoding");
+     }
 }
 
 static void test_a8_vfp_compare_registers_and_values(void) {
@@ -5781,6 +6057,9 @@ int main(void) {
     test_a8_vfp_divide_special_values();
     test_a8_vfp_sqrt_registers();
     test_a8_vfp_sqrt_values_and_host_state();
+    test_a8_vfp_precision_registers();
+    test_a8_vfp_precision_values_and_host_state();
+    test_a8_vfp_precision_access_and_invalid();
     test_a8_vfp_add_registers();
     test_a8_vfp_add_values_and_host_state();
     test_a8_vfp_add_special_values();

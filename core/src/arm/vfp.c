@@ -2,7 +2,8 @@
  * S5LBox — VFPv2 (the ARM1176JZF-S's VFP11 unit).
  *
  * Cortex-A8 transfers, raw-bit data operations, scalar comparisons and
- * VADD/VSUB, VMUL/VNMUL, VDIV and VSQRT use checked paths with D0-D31. Comparisons and
+ * VADD/VSUB, VMUL/VNMUL, VDIV, VSQRT and single/double precision conversions
+ * use checked paths with D0-D31. Comparisons and
  * these arithmetic operations use integer bits and preserve the host FP environment. The
  * register-file and arithmetic descriptions below concern the legacy VFP11
  * implementation; they do not establish complete Cortex-A8 VFPv3/NEON support.
@@ -1029,6 +1030,58 @@ static arm_status_t vfp_a8_arithmetic_data(arm_cpu_t *c, uint32_t pc, uint32_t i
     return ARM_OK;
 }
 
+/* FPSingleToDouble/FPDoubleToSingle, A2.7.8. Both directions preserve the
+ * sign and high payload bits of a NaN unless DN selects the default NaN.
+ * Finite values use integer normalization and the shared guest rounding. */
+static uint64_t vfp_a8_convert_precision(uint64_t a, bool narrow, uint32_t fpscr, uint32_t *exceptions) {
+    const unsigned source_fraction = narrow ? 52u : 23u, fraction = narrow ? 23u : 52u;
+    const int source_bias = narrow ? 1023 : 127, bias = narrow ? 127 : 1023;
+    const uint64_t source_hidden = UINT64_C(1) << source_fraction, hidden = UINT64_C(1) << fraction;
+    const uint64_t source_sign = source_hidden << (narrow ? 11u : 8u), sign = hidden << (narrow ? 8u : 11u);
+    const uint64_t source_infinity = (uint64_t)(narrow ? 2047u : 255u) << source_fraction;
+    const uint64_t infinity = (uint64_t)(narrow ? 255u : 2047u) << fraction;
+    uint64_t magnitude = a & (source_sign - 1u), result_sign = a & source_sign ? sign : 0u;
+    if (magnitude > source_infinity) {
+        if (!(a & (source_hidden >> 1))) *exceptions |= ARM_FPSCR_IOC;
+        if (fpscr & ARM_FPSCR_DN) return infinity | (hidden >> 1);
+        uint64_t payload = magnitude & (source_hidden - 1u);
+        payload = narrow ? payload >> 29 : payload << 29;
+        return result_sign | infinity | (hidden >> 1) | payload;
+    }
+    if (magnitude == source_infinity) return result_sign | infinity;
+    if (!magnitude) return result_sign;
+    if (magnitude < source_hidden && (fpscr & ARM_FPSCR_FZ)) {
+        *exceptions |= ARM_FPSCR_IDC;
+        return result_sign;
+    }
+    int exponent = (int)(magnitude >> source_fraction);
+    uint64_t significand = (magnitude & (source_hidden - 1u)) | (exponent ? source_hidden : 0u);
+    exponent = (exponent ? exponent : 1) - source_bias + bias;
+    while (significand < source_hidden) { significand <<= 1; exponent--; }
+    significand = narrow ? vfp_a8_shift_jam(significand, 26u) : significand << 32;
+    return vfp_a8_round(significand, exponent, result_sign, !narrow, fpscr, exceptions);
+}
+
+/* A8.8.309 and K.1.1: precision conversions are scalar regardless of LEN
+ * and STRIDE, including combinations that vector arithmetic cannot use. */
+static arm_status_t vfp_a8_precision_data(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
+    g_reason = NULL;
+    bool narrow = BIT(8);
+    unsigned rd = narrow ? SREG(FIELD(12), BIT(22)) : FIELD(12) | (BIT(22) << 4);
+    unsigned rm = narrow ? (insn & 15u) | (BIT(5) << 4) : SREG(insn & 15u, BIT(5));
+    if (c->vfp_fpscr & ~ARM_FPSCR_A8_WMASK)
+        return vfp_trap(pc, insn, "nonzero Cortex-A8 FPSCR DNM/SBZP fields");
+    if (!vfp_cpacr_permits(c) || !vfp_enabled(c))
+        return vfp_guest_undefined("Cortex-A8 VFP precision conversion requires CPACR access and FPEXC.EN");
+    uint64_t value = narrow ? vfp_get_d(c, rm) : vfp_get_s(c, rm);
+    uint32_t exceptions = 0u;
+    uint64_t result = vfp_a8_convert_precision(value, narrow, c->vfp_fpscr, &exceptions);
+    if (narrow) vfp_set_s(c, rd, (uint32_t)result);
+    else vfp_set_d(c, rd, result);
+    c->vfp_fpscr |= exceptions;
+    return ARM_OK;
+}
+
 /* ================================================= load / store group ==== *
  *
  * cond 110 P U D W L Rn Vd 101 sz imm8   (ARM ARM A7.6, "Extension register
@@ -1884,6 +1937,8 @@ arm_status_t vfp_execute(arm_cpu_t *c, uint32_t pc, uint32_t insn,
         return vfp_a8_bitwise_data(c, pc, insn);
     if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_compare_data(insn))
         return vfp_a8_compare_data(c, pc, insn);
+    if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 && vfp_is_precision_data(insn))
+        return vfp_a8_precision_data(c, pc, insn);
     if (c && c->arch == ARM_ARCH_V7_CORTEX_A8 &&
         (vfp_is_add_sub_data(insn) || vfp_is_multiply_data(insn) || vfp_is_divide_data(insn) || vfp_is_sqrt_data(insn)))
         return vfp_a8_arithmetic_data(c, pc, insn);

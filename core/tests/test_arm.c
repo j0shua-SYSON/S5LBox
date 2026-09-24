@@ -8191,6 +8191,71 @@ static void test_cortex_a8_vfp_binary_fetch_and_retry(void) {
      }
 }
 
+static void test_cortex_a8_vfp_precision_fetch_and_retry(void) {
+    static const uint32_t insns[] = {0xeef7fac8u,0xeef7fbe0u};
+    for (unsigned host = 0; host < 2u; host++)
+     for (unsigned narrow = 0; narrow < 2u; narrow++)
+      for (unsigned fault = 0; fault < 4u; fault++) {
+        memset(g_ram,0,sizeof g_ram);
+        arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&bus,ARM_ARCH_V7_CORTEX_A8),"reset precision fetch");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP; c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = fault ? 0u : 0x40000000u; c.vfp_fpscr = 0x4bc00080u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N | test_it_bits(0x1cu); c.r[15] = 0xffeu;
+        for (unsigned s = 0; s < 32u; s++) c.vfp_s[s] = 0xdead0000u+s;
+        for (unsigned d = 0; d < 16u; d++) c.a8_vfp_hi[d] = UINT64_C(0x7ff01234beef0000)+d;
+        c.vfp_s[16] = 0x7f800001u; c.a8_vfp_hi[0] = UINT64_C(0x3ff0000030000000);
+        uint32_t singles[32], flags = c.cpsr; uint64_t upper[16];
+        memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x8032u);
+        m_w32(NULL,0x6004u,fault == 1u ? 0u : fault == 2u ? 0xa033u : fault == 3u ? 0xa012u : 0xa032u);
+        m_w16(NULL,0x8ffeu,(uint16_t)(insns[narrow]>>16)); m_w16(NULL,0xa000u,(uint16_t)insns[narrow]);
+        m_w16(NULL,0x9000u,0u);
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u &&
+              c.vfp_fpscr == (0x4bc00080u | (fault ? 0u : narrow ? 0x10u : 0x1u)),"precision split fetch disposition");
+        if (!fault) {
+            if (narrow) singles[31] = 0x3f800001u; else upper[15] = UINT64_C(0x7ff8000000000000);
+            CHECK(c.r[15] == 0x1002u && c.cpsr == ((flags & ~TEST_IT_MASK) | test_it_bits(0x18u)),"precision split fetch/IT");
+        } else CHECK(c.r[15] == ARM_VEC_PREFETCH && c.r[14] == 0x1002u && c.cp15.ifar == 0x1000u &&
+            c.spsr[ARM_BANK_ABT] == flags && !(c.cpsr & (ARM_CPSR_T | TEST_IT_MASK)) && c.vfp_fpexc == 0u &&
+            (c.cp15.ifsr & 15u) == (fault == 1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION),
+            "precision availability/effects preceded second-half User fetch");
+        CHECK(memcmp(singles,c.vfp_s,sizeof singles) == 0 && memcmp(upper,c.a8_vfp_hi,sizeof upper) == 0,
+              "precision split fetch register result/preservation");
+      }
+    for (unsigned narrow = 0; narrow < 2u; narrow++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset precision retry");
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_Z | ARM_CPSR_Q;
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpscr = 0x08000002u;
+        c.vfp_s[16] = 0x7f800001u; c.a8_vfp_hi[0] = UINT64_C(0x3ff0000030000000);
+        uint32_t singles[32]; uint64_t upper[16];
+        memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
+        c.r[15] = 0x100u; c.r[5] = 0x40000000u; c.r[2] = 0x12345678u;
+        m_w16(NULL,0x100u,0xbf04u); /* ITT EQ */
+        m_w16(NULL,0x102u,(uint16_t)(insns[narrow]>>16)); m_w16(NULL,0x104u,(uint16_t)insns[narrow]);
+        m_w16(NULL,0x106u,0x2201u);
+        put_vfp_system_transfer(0u,ARM_VEC_UNDEFINED,0u,8u,5u); m_w32(NULL,8u,0xe25ef002u);
+        CHECK(arm_step(&c) == ARM_OK,"precision retry IT setup");
+        uint32_t interrupted = c.cpsr;
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == 0x104u &&
+              c.spsr[ARM_BANK_UND] == interrupted && c.vfp_fpscr == 0x08000002u &&
+              memcmp(singles,c.vfp_s,sizeof singles) == 0 && memcmp(upper,c.a8_vfp_hi,sizeof upper) == 0,
+              "precision lazy exception changed FP state");
+        CHECK(arm_step(&c) == ARM_OK && c.vfp_fpexc == 0x40000000u,"precision guest enable");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x102u && c.cpsr == interrupted,"precision exception return");
+        /* The guest retry enables VFP with RN and DN clear: preserve the NaN
+         * payload, or round the halfway finite input to the even result. */
+        if (narrow) singles[31] = 0x3f800002u; else upper[15] = UINT64_C(0x7ff8000020000000);
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x106u &&
+              c.vfp_fpscr == (0x08000002u | (narrow ? 0x10u : 0x1u)) &&
+              c.cpsr == ((interrupted & ~TEST_IT_MASK) | test_it_bits(0x08u)) &&
+              memcmp(singles,c.vfp_s,sizeof singles) == 0 && memcmp(upper,c.a8_vfp_hi,sizeof upper) == 0,
+              "precision exact retry/IT/register state");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x108u && c.r[2] == 1u &&
+              c.cpsr == (interrupted & ~TEST_IT_MASK) && c.cycles == 6u,"precision changed following IT condition");
+    }
+}
+
 static void test_cortex_a8_vfp_data_fetch_and_retry(void) {
     static const uint32_t insns[] = {
         0xeef7fb00u,0xeef0fb60u,0xeef0fbe0u,0xeef1fb60u,
@@ -11964,6 +12029,7 @@ static void test_a8_exclusive_invalid_and_conditions(void) {
 
 int main(void) {
     test_cortex_a8_vfp_binary_fetch_and_retry();
+    test_cortex_a8_vfp_precision_fetch_and_retry();
     test_a8_exclusive_registers();
     test_a8_exclusive_monitor_and_faults();
     test_a8_exclusive_invalid_and_conditions();
