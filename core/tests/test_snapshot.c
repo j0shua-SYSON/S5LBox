@@ -520,6 +520,7 @@ static void test_device_state_round_trips(void) {
     b->active_clock_last_host_ns = 405u;
     b->active_clock_guest_ticks_since_sync = 406u;
     b->active_clock_fraction = 407u;
+    b->active_clock_idle_oversleep_ns = 412u;
     b->active_clock_anchor_valid = true;
     b->active_clock_input_guard_host_ns = 408u;
     b->active_clock_input_guards = 409u;
@@ -586,6 +587,7 @@ static void test_device_state_round_trips(void) {
           b->active_clock_last_host_ns == 0u &&
           b->active_clock_guest_ticks_since_sync == 0u &&
           b->active_clock_fraction == 0u &&
+          b->active_clock_idle_oversleep_ns == 0u &&
           !b->active_clock_anchor_valid &&
           b->active_clock_input_guard_host_ns == 0u &&
           !b->active_clock_input_guard &&

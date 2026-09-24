@@ -221,7 +221,9 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * owner, also deliberately absent from snap_mach(); load revokes its proofs
  * before replacing RAM. The size below must be read from the
  * compiler's emitted `.space`, not inferred from source padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         256968, "snap_mach");
+/* 256976 adds one transient host-only idle-oversleep allowance. Restore clears
+ * it; snap_mach() and SNAPSHOT_VERSION are intentionally unchanged. */
+SNAP_SIZE_GUARD(s5l8900_t,         256976, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -1607,6 +1609,7 @@ static snapshot_status_t snap_apply(s5l8900_t *m, FILE *f,
     m->active_clock_last_host_ns = 0u;
     m->active_clock_guest_ticks_since_sync = 0u;
     m->active_clock_fraction = 0u;
+    m->active_clock_idle_oversleep_ns = 0u;
     m->active_clock_anchor_valid = false;
     m->active_clock_input_guard_host_ns = 0u;
     m->active_clock_input_guard = false;

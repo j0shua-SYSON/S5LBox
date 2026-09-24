@@ -933,6 +933,7 @@ static void test_power_wakes_hibernation_through_retained_reset(void) {
     m.active_clock_last_host_ns = 99u;
     m.active_clock_guest_ticks_since_sync = 88u;
     m.active_clock_fraction = 77u;
+    m.active_clock_idle_oversleep_ns = 66u;
     m.active_clock_anchor_valid = true;
 
     CHECK(s5l_pcf50635_in_hibernation(&m.pmu) &&
@@ -1039,6 +1040,7 @@ static void test_power_wakes_standby_through_retained_reset(void) {
     m.active_clock_last_host_ns = 99u;
     m.active_clock_guest_ticks_since_sync = 88u;
     m.active_clock_fraction = 77u;
+    m.active_clock_idle_oversleep_ns = 66u;
     m.active_clock_anchor_valid = true;
     m.active_clock_input_guard_host_ns = 99u;
     m.active_clock_input_guard = true;
@@ -1084,7 +1086,8 @@ static void test_power_wakes_standby_through_retained_reset(void) {
     CHECK(!m.wfi_pace_yield && !m.active_clock_anchor_valid &&
           m.active_clock_last_host_ns == 0u &&
           m.active_clock_guest_ticks_since_sync == 0u &&
-          m.active_clock_fraction == 0u,
+          m.active_clock_fraction == 0u &&
+          m.active_clock_idle_oversleep_ns == 0u,
           "warm reset retained stale host-clock state");
     CHECK(m.active_clock_input_guard_host_ns == 0u &&
           m.active_clock_input_guards == 1u &&
@@ -1175,6 +1178,7 @@ static void test_restore_wakes_standby_without_a_button(void) {
     m.active_clock_last_host_ns = 199u;
     m.active_clock_guest_ticks_since_sync = 188u;
     m.active_clock_fraction = 177u;
+    m.active_clock_idle_oversleep_ns = 166u;
     m.active_clock_anchor_valid = true;
     m.active_clock_input_guard_host_ns = 199u;
     m.active_clock_input_guard = true;
@@ -1208,7 +1212,8 @@ static void test_restore_wakes_standby_without_a_button(void) {
     CHECK(!m.wfi_pace_yield && !m.active_clock_anchor_valid &&
           m.active_clock_last_host_ns == 0u &&
           m.active_clock_guest_ticks_since_sync == 0u &&
-          m.active_clock_fraction == 0u,
+          m.active_clock_fraction == 0u &&
+          m.active_clock_idle_oversleep_ns == 0u,
           "restore wake retained stale host-clock state");
     CHECK(m.active_clock_input_guard_host_ns == 0u &&
           m.active_clock_input_guards == 0u &&

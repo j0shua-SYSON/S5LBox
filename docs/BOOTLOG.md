@@ -995,8 +995,10 @@ literal exception-enable fallback; exact F64 conversion does not raise an
 exception. Disabled VFP/access and unavailable double registers still reject
 before mutation. No host floating-point state is touched. Native regression
 coverage compares 16,384 cases with the interpreter, plus rejection, condition,
-partial-prefix and host-state checks. Physical speed and latency remain to be
-measured; extending instruction coverage alone does not establish a speedup.
+partial-prefix and host-state checks. Exact native and iOS builds passed, and
+the matched physical keyboard trials showed a modest reduction in the time
+until all letters appeared. The initial stall remained; this is not a complete
+keyboard-latency fix.
 
 ### Resident floating-point transfers (2026-09-24)
 
@@ -1012,8 +1014,32 @@ eight bytes, so both words share one proved cache block; other legal forms keep
 the existing path. Cached doubles still count two architectural word accesses.
 Mixed-instruction regression coverage includes 3,360 CPU-register/budget cases,
 6,144 flat/cached memory cases, 22 partial-prefix refusals or condition skips,
-and a store into the next live instruction. Native and physical validation are
-required before treating this candidate as a correctness or performance result.
+and a store into the next live instruction. Local 77/77 tests and both native
+execution gates passed. Exact installed-binary trials retained every touch
+report and showed all ten letters by the roughly 2.0-second capture, versus
+roughly 2.45 seconds in the prior control. Those coarse screenshot bounds do
+not establish an exact percentage. Back navigation still took about a second.
+
+### Idle oversleep is not CPU work (2026-09-24)
+
+A real-frequency clock regression exposed a hole in the older WFI oversleep
+test: at 412 MHz, a single WFI instruction supplies only 4--64 CPU ticks of
+work allowance. A requested 8 ms wait that actually slept 10 ms therefore
+advanced guest time by essentially 8 ms, discarding the scheduler's extra 2 ms.
+The prior 1 kHz fixture hid this because its same numeric allowance was ample.
+All three calibrated work budgets reproduced the failure before the fix.
+
+Paired monotonic samples now identify time spent beyond the requested interval
+inside a successful idle wait. Only that measured oversleep supplements the
+CPU-work allowance, once, at the ordinary post-retirement synchronization.
+Both the 8 ms residual cap and the CPU-only retirement bound remain unchanged.
+No additional samples occur in CPU-only execution. Failed/retrograde samples
+and failed sleeps grant no idle credit; deterministic execution is unchanged.
+Pause, restore, power reset and policy changes clear the transient allowance.
+The snapshot stream does not change. Real-frequency tests cover all budgets,
+ordinary and suspend-like oversleep, failed measurements, failed sleep,
+backward time, exact wake edges, and leakage into the next active instruction.
+Physical timing and interactive validation are still required for this fix.
 
 ### Historical instruction-resume narrative
 

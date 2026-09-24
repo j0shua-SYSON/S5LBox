@@ -4321,6 +4321,11 @@ typedef struct {
     uint64_t               active_clock_last_host_ns;
     uint64_t               active_clock_guest_ticks_since_sync;
     uint64_t               active_clock_fraction;
+    /* Measured successful WFI oversleep, bounded to one catch-up slice. Idle
+     * host time is not CPU work and must not consume the retirement allowance.
+     * Consumed by the next synchronization; never serialized or carried across
+     * a pause, reset, restore or clock-policy change. */
+    uint64_t               active_clock_idle_oversleep_ns;
     uint64_t               active_clock_updates;
     uint64_t               active_clock_added_ticks;
     uint64_t               active_clock_clamps;

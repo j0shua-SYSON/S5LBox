@@ -814,6 +814,7 @@ bool s5l8900_set_wfi_host_pacing(s5l8900_t *m,
     m->wfi_paced_partial_advances = 0u;
     m->wfi_paced_failures = 0u;
     m->wfi_pace_yield = false;
+    m->active_clock_idle_oversleep_ns = 0u;
     if (sleep) m->wfi_host_sleep = sleep;
     return true;
 }
@@ -830,6 +831,7 @@ bool s5l8900_set_active_host_clock(s5l8900_t *m,
     m->active_clock_last_host_ns = 0u;
     m->active_clock_guest_ticks_since_sync = 0u;
     m->active_clock_fraction = 0u;
+    m->active_clock_idle_oversleep_ns = 0u;
     m->active_clock_updates = 0u;
     m->active_clock_added_ticks = 0u;
     m->active_clock_clamps = 0u;
@@ -1343,10 +1345,32 @@ static bool machine_wait_for_interrupt(void *ctx) {
         else
             m->wfi_paced_wait_ns += wait_ns;
 
+        /* Attribute scheduler oversleep to the successful idle wait itself,
+         * not to any CPU work before it. At the real 412 MHz clock a lone WFI
+         * has only tens of nanoseconds of retirement credit; charging ordinary
+         * millisecond oversleep to that credit stretched idle guest time. The
+         * paired samples do not move devices or cross the selected wake edge.
+         * The usual post-retirement synchronization consumes this allowance. */
+        uint64_t idle_start_ns = 0u;
+        bool idle_measured = m->active_host_now &&
+            m->active_clock_anchor_valid && !m->active_clock_deadline_shield &&
+            m->active_host_now(m->active_host_now_ctx, &idle_start_ns) &&
+            idle_start_ns >= m->active_clock_last_host_ns;
         if (!m->wfi_host_sleep(m->wfi_host_sleep_ctx, wait_ns)) {
             m->wfi_paced_failures++;
             s5l8900_tick(m, 0u);
             return m->cpu.irq_line || m->cpu.fiq_line;
+        }
+        uint64_t idle_end_ns = 0u;
+        if (idle_measured &&
+            m->active_host_now(m->active_host_now_ctx, &idle_end_ns) &&
+            idle_end_ns >= idle_start_ns &&
+            idle_end_ns - idle_start_ns > wait_ns) {
+            uint64_t oversleep = idle_end_ns - idle_start_ns - wait_ns;
+            uint64_t room = S5L8900_ACTIVE_CLOCK_MAX_STEP_NS -
+                m->active_clock_idle_oversleep_ns;
+            m->active_clock_idle_oversleep_ns +=
+                oversleep < room ? oversleep : room;
         }
 
         if (partial) {
@@ -1703,6 +1727,7 @@ static void active_clock_reset_anchor(s5l8900_t *m) {
     m->active_clock_last_host_ns = 0u;
     m->active_clock_guest_ticks_since_sync = 0u;
     m->active_clock_fraction = 0u;
+    m->active_clock_idle_oversleep_ns = 0u;
     m->active_clock_anchor_valid = false;
 }
 
@@ -1950,6 +1975,7 @@ static bool wake_from_pmu_power_state(s5l8900_t *m) {
     m->active_clock_last_host_ns = 0u;
     m->active_clock_guest_ticks_since_sync = 0u;
     m->active_clock_fraction = 0u;
+    m->active_clock_idle_oversleep_ns = 0u;
     m->active_clock_anchor_valid = false;
     m->active_clock_input_guard_host_ns = 0u;
     m->active_clock_input_guard = false;
@@ -2453,6 +2479,7 @@ static bool active_host_clock_sync(s5l8900_t *m,
         m->active_clock_last_host_ns = now_ns;
         m->active_clock_guest_ticks_since_sync = 0u;
         m->active_clock_fraction = 0u;
+        m->active_clock_idle_oversleep_ns = 0u;
         m->active_clock_anchor_valid = true;
         /* Establish the same level/input boundary the first ordinary device
          * tick in this run would have supplied, without manufacturing time. */
@@ -2503,6 +2530,15 @@ static bool active_host_clock_sync(s5l8900_t *m,
     uint64_t retirement_cap =
         (uint64_t)fallback_ticks *
         m->active_clock_max_ticks_per_retirement;
+    /* Only time measured inside a successful host idle wait can supplement
+     * the CPU-work cap. No wait credit survives this synchronization. The
+     * residual 8 ms cap above still applies, including suspend-like sleeps. */
+    uint64_t idle_ticks = 0u, idle_fraction = 0u;
+    if (m->active_clock_idle_oversleep_ns &&
+        active_clock_elapsed_ticks(m->active_clock_idle_oversleep_ns,
+                                  m->cpu_hz, 0u, &idle_ticks, &idle_fraction))
+        retirement_cap += idle_ticks;
+    m->active_clock_idle_oversleep_ns = 0u;
     if (added_ticks > retirement_cap) {
         added_ticks = retirement_cap;
         clamp = true;
