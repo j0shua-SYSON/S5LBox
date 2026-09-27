@@ -1145,30 +1145,31 @@ stall therefore remains; these passing bursts do not prove the intermittent
 lost-key issue fixed. The temporary replay return clones were removed only
 after restoring and hash-verifying the saved machine state.
 
-### Bounded weighted-byte execution candidate (2026-09-27)
+### Bounded weighted-byte execution experiment removed (2026-09-27)
 
-The existing keyboard samples include the byte/weight accumulation loop in
-`UIKBApplyKeyBackgroundShadowToPixels`. The bulk runner now recognizes its
-complete 17-instruction A32 shape at any address, including signed clipping
-and the back edge. It represents exact original instruction counts and stops
-at the existing event budget; there is no generated executable code, retained
-guest-code cache, skipped drawing, clock change or assumed function ABI.
+`fdd9561` tried the existing bounded bulk mechanism on the complete
+17-instruction byte/weight accumulation loop in
+`UIKBApplyKeyBackgroundShadowToPixels`. Integer binary32 rounding, exact
+scratch state, flags, event budgets and plain-RAM witnesses passed 77/77 local
+tests (including 50,176,424 bulk checks), all nine core CI jobs in
+`36288439530`, and the iOS build `36288439548`. Both native ARM64 bridge
+verification jobs passed too. These results establish correctness coverage,
+not a physical speedup.
 
-Only proved plain-RAM reads and bounded positive normal/zero values qualify.
-Both binary32 rounding stages use integer arithmetic, so VMLA is not fused and
-the host FP environment is untouched. The scalar round-to-nearest gate requires
-IXC already sticky, disallows exception enables and preserves every scratch
-register, FPSCR and final NZCV. An unsafe iteration is left for the interpreter
-without consuming either read or changing state. Clipped samples do not touch
-their pointers. Portable differential tests cover randomized weights and bytes,
-budgets, clipping, exceptional values, code changes and lost mapping witnesses.
-Native bridge coverage also checks live resident registers and refusal paths.
-The local release suite passes 77/77 (68.85 seconds), including 50,176,424 bulk
-checks; full generated ARM64 text also cross-assembles successfully. Native
-execution of the new bridge remains a separate CI gate.
-This is a candidate for reducing keyboard drawing cost, not evidence that the
-overall first-key delay or navigation duration is fixed; physical benefit is
-still unmeasured.
+The exact cold keyboard quartet was replayed on both installed executables.
+For a 120 ms Q contact, the first visible completed character was sampled at
+712 and 1293 ms on the candidate, versus 993 and 871 ms on the control. These
+are coarse screenshot-arrival bounds, not exact render times. The repeated
+comparison does not establish a reliable latency improvement, despite about
+five million guest instructions using the new path in each single-key trial.
+The candidate runtime, bridge and candidate-only tests were therefore removed.
+Do not revive this experiment as an established keyboard fix.
+
+A quick ten-key control burst also lost the first Q with all twenty reports
+accepted and no queue drops or 3D rejects. A passing candidate burst does not
+prove that intermittent bug fixed. The saved user quartet was restored and
+hash-verified across reinstallation of `8221add`; only the four temporary
+return clones and the two retained-locally installation uploads were deleted.
 
 ### Historical instruction-resume narrative
 

@@ -1,6 +1,5 @@
 /* See arm_bulk.h. Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "arm_bulk.h"
-#include "vfp.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -96,17 +95,6 @@ static const uint32_t compare_words[] = {
     0xe2800001u, 0xe28cc001u, 0xe1510000u, 0x115e000cu,
     0x0a000003u, 0xe1d020d0u, 0xe1dc30d0u, 0xe1520003u,
     0x0afffff6u,
-};
-
-/* Complete byte/weight dot-product loop, including signed clipping and its
- * back edge. No function address, caller ABI or surrounding routine is assumed.
- * VMOV r9,s19; clipped LDRB/VLDR; VCVT.F32.S32; VMLA.F32; CMP/BLE. */
-static const uint32_t weighted_byte_words[] = {
-    0xee199a90u, 0xe1e03002u, 0xe1a03fa3u, 0xe28ee001u,
-    0xe1520009u, 0xa3a03000u, 0xe3530000u, 0xe2822001u,
-    0x15d03000u, 0x1d917a00u, 0xe2800001u, 0xe2811004u,
-    0x1e063a10u, 0x1ef87ac6u, 0x1e476a87u, 0xe152000cu,
-    0xdaffffeeu,
 };
 
 static uint32_t read32(const uint8_t *p) {
@@ -819,111 +807,6 @@ static unsigned length_loop(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
     return count * 5u;
 }
 
-/* Positive, normal binary32 rounding, entirely in integer arithmetic. The
- * input is significand * 2^(exponent-150), with at least 24 significant bits.
- * Callers prove no overflow/underflow; ties round to even. This does not depend
- * on (or modify) the host floating-point environment, and cannot fuse VMLA's
- * separately rounded multiplication and addition. */
-static uint32_t positive_round(uint64_t significand, unsigned exponent) {
-    uint64_t top = significand;
-    unsigned bit = 0u;
-    if (top >> 32) { top >>= 32; bit += 32u; }
-    if (top >> 16) { top >>= 16; bit += 16u; }
-    if (top >> 8) { top >>= 8; bit += 8u; }
-    if (top >> 4) { top >>= 4; bit += 4u; }
-    if (top >> 2) { top >>= 2; bit += 2u; }
-    if (top >> 1) bit++;
-    unsigned shift = bit - 23u;
-    uint32_t rounded = (uint32_t)(significand >> shift);
-    if (shift) {
-        uint64_t half = UINT64_C(1) << (shift - 1u);
-        uint64_t remainder = significand & ((half << 1) - 1u);
-        if (remainder > half || (remainder == half && (rounded & 1u)))
-            rounded++;
-    }
-    if (rounded == UINT32_C(0x1000000)) { rounded >>= 1; shift++; }
-    return ((exponent + shift) << 23) | (rounded & UINT32_C(0x7fffff));
-}
-
-static uint32_t positive_add(uint32_t a, uint32_t b) {
-    if (a < b) { uint32_t swap = a; a = b; b = swap; }
-    if (!b) return a;
-    unsigned ea = a >> 23, eb = b >> 23;
-    unsigned gap = ea - eb;
-    /* At this distance b is strictly below half an ulp, including powers of
-     * two in a. For the closer cases the exact sum fits in 49 bits. */
-    if (gap >= 25u) return a;
-    uint64_t ma = (a & UINT32_C(0x7fffff)) | UINT32_C(0x800000);
-    uint64_t mb = (b & UINT32_C(0x7fffff)) | UINT32_C(0x800000);
-    return positive_round((ma << gap) + mb, eb);
-}
-
-static bool bounded_positive(uint32_t bits, uint32_t upper) {
-    return bits == 0u || (bits >= UINT32_C(0x00800000) && bits <= upper);
-}
-
-static unsigned weighted_byte_loop(arm_cpu_t *cpu,
-                                    const arm_bulk_memory_t *memory,
-                                    unsigned budget) {
-    const uint32_t controls = ARM_FPSCR_RMODE | ARM_FPSCR_STRIDE |
-                              ARM_FPSCR_LEN | ARM_FPSCR_ENABLES;
-    if (!vfp_cpacr_permits(cpu) || !vfp_enabled(cpu) ||
-        (cpu->vfp_fpscr & controls) || !(cpu->vfp_fpscr & ARM_FPSCR_IXC) ||
-        !bounded_positive(cpu->vfp_s[13], UINT32_C(0x4f000000)))
-        return 0u;
-    const uint32_t start = cpu->r[15], width = cpu->vfp_s[19];
-    unsigned retired = 0u;
-    while (budget - retired >= 17u) {
-        uint32_t byte = 0u, weight = 0u, converted = 0u, sum = cpu->vfp_s[13];
-        bool inside = (int32_t)cpu->r[2] >= 0 &&
-                      (int32_t)cpu->r[2] < (int32_t)width;
-        if (inside) {
-            /* A byte needs only its containing RAM word, never the next page.
-             * VLDR's aligned word is proved separately before any mutation. */
-            const uint8_t *p = word_at(cpu, memory, cpu->r[0] & ~UINT32_C(3));
-            if (!p || (cpu->r[1] & 3u)) break;
-            byte = p[cpu->r[0] & 3u];
-            p = word_at(cpu, memory, cpu->r[1]);
-            if (!p) break;
-            weight = read32(p);
-            if (!bounded_positive(weight, UINT32_C(0x3f800000))) break;
-            uint32_t product = 0u;
-            if (byte) {
-                converted = positive_round((uint64_t)byte << 23, 127u);
-                if (weight)
-                    product = positive_round((uint64_t)byte *
-                        ((weight & UINT32_C(0x7fffff)) | UINT32_C(0x800000)),
-                        weight >> 23);
-            }
-            sum = positive_add(sum, product);
-        }
-        /* Commit only a complete iteration. Unmapped or exceptional operands
-         * leave the exact next header for literal execution and its fault.
-         * IXC is already sticky; the admitted values cannot add any other
-         * exception, in either FZ/DN setting. Skipped accesses stay skipped. */
-        cpu->r[9] = width;
-        cpu->r[3] = byte;
-        cpu->r[14]++;
-        cpu->r[0]++;
-        cpu->r[1] += 4u;
-        cpu->r[2]++;
-        if (inside) {
-            cpu->vfp_s[12] = byte;
-            cpu->vfp_s[14] = weight;
-            cpu->vfp_s[15] = converted;
-            cpu->vfp_s[13] = sum;
-            if (!memory->flat_ram) cpu->dread_hits += 2u;
-        }
-        cpu->cpsr = compare_flags(cpu->cpsr, cpu->r[2], cpu->r[12]);
-        retired += 17u;
-        if ((int32_t)cpu->r[2] > (int32_t)cpu->r[12]) {
-            cpu->r[15] = start + sizeof weighted_byte_words;
-            break;
-        }
-    }
-    return retired;
-}
-
 unsigned arm_bulk_string_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
                              unsigned budget) {
     uint32_t offset;
@@ -953,10 +836,6 @@ unsigned arm_bulk_string_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
         return count ? count : thumb_filtered_chain(cpu, memory, offset, budget);
     }
     uint32_t first = read32(memory->code + offset);
-    if (first == weighted_byte_words[0]) {
-        if (!matches(memory, offset, weighted_byte_words, 17u)) return 0u;
-        return weighted_byte_loop(cpu, memory, budget);
-    }
     if (first == compare_words[5]) {
         if (offset < 20u || !matches(memory, offset - 20u, compare_words, 9u))
             return 0u;
