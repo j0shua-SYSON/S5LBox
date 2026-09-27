@@ -1238,9 +1238,21 @@ Regression cases cover shutdown preparation, both PMU states, exact fractional
 RTC time, failed waits/clock samples, bounded oversleep, zero-budget slices,
 host services, restart, wake, restored sleep, stale translations and changed
 instruction bytes. The local suite passes 77/77 (51.00 s), including 86,741
-machine checks. Native CI and physical-device validation are still pending.
-This targets demonstrated sleep-time CPU waste; it is not yet evidence of
-improved animation or keyboard latency.
+machine checks. All nine exact-revision core CI jobs and the iOS build passed.
+A fixture-only follow-up avoids a Linux `BIG_ENDIAN` macro collision.
+
+The installed executable and preserved guest quartet were hash-verified.
+Restoring an asleep checkpoint rebuilt its fetch witness in one bounded slice,
+then retired no further instructions across a measured 28.006-second interval;
+PWM time also stayed fixed. Power wake, Settings General/Back navigation and
+all ten Safari keys (`qwertyuiop`) passed. Fresh sleep parked again. A black-
+screen tap was rejected without a pending contact, and normal Back saved the
+asleep machine. Relaunch restored it asleep; a timely wake/unlock preserved
+the text and accepted four more keys. One delayed unlock attempt let the guest
+return to sleep before the swipe; repeating promptly succeeded.
+
+This fixes demonstrated sleep-time CPU waste, not the remaining animation or
+cold-keyboard latency. No active clock budget or execution engine was changed.
 
 ### Historical instruction-resume narrative
 
