@@ -1254,6 +1254,29 @@ return to sleep before the swipe; repeating promptly succeeded.
 This fixes demonstrated sleep-time CPU waste, not the remaining animation or
 cold-keyboard latency. No active clock budget or execution engine was changed.
 
+### Home resumes Auto-Lock without a Power event (2026-09-27)
+
+The installed control consumed Home presses while the PMU was hibernating:
+the black screen and parked instruction count stayed unchanged. Power woke it.
+That was a missing wake source, not slow animation. Home now resumes only
+hibernation, preserving its real GPIO press across the retained-RAM reset.
+It cannot power on a fully shut-down/standby machine.
+
+The shipped device tree has a Power wake-status selector but no Home selector.
+AppleM68Buttons resumes the Home GPIO interrupt at `0xc065a110`. Consequently
+Home clears only `GO_HIBERNATE`; it does not manufacture a Power status or
+ONKEY event. Existing pending PMU events, masks, RTC and guest write counters
+remain untouched. The normal GPIO acknowledgement and debounce path owns the
+release. Power keeps its existing separate wake-status behavior.
+
+The first regression reproduced 18 failures before the implementation. The
+expanded cases now pass 548 button checks and 1,364 I2C/PMU checks, including
+saved asleep states, initially disabled Home interrupts, repeat presses,
+release backpressure and all 256 command bytes with and without a guest write.
+The full local suite passes 77/77 (41.45 s). Snapshot format and active execution
+pacing are unchanged. Native CI and physical Home-wake validation are pending;
+this is not yet a claim that the remaining input/animation latency is fixed.
+
 ### Historical instruction-resume narrative
 
 Two interpreter changes make the current instruction counts different from the

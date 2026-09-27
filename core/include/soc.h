@@ -1604,7 +1604,7 @@ bool     s5l_gpio_watch(s5l_gpio_t *g, uint16_t pin, void *ctx,
  * right by two, and returns bit zero. Thus this device-tree selector tests
  * INT2.EXTON1R (0x04), not the adjacent ONKEYR event (0x01). It is NOT the
  * ordinary press/release path. The machine-level s5l8900_set_button() wrapper
- * models it only while the PMU has put the application processor into standby.
+ * models it when the PMU has put the processor into hibernation or standby.
  *
  * WHICH LEVEL IS "PRESSED". This is the number that had to be right, because a
  * wrong one reads as a button held down forever. Two independently decoded
@@ -2280,6 +2280,9 @@ bool s5l_pcf50635_irq(const s5l_pcf50635_t *pmu);
 bool s5l_pcf50635_in_standby(const s5l_pcf50635_t *pmu);
 bool s5l_pcf50635_in_hibernation(const s5l_pcf50635_t *pmu);
 void s5l_pcf50635_wake_onkey(s5l_pcf50635_t *pmu);
+/* Resume hibernation through a board GPIO, preserving all PMU event latches.
+ * Refuses standby/shutdown (including conflicting shutdown command bits). */
+bool s5l_pcf50635_wake_gpio(s5l_pcf50635_t *pmu);
 void s5l_pcf50635_civil(uint64_t unix_seconds, int *year, int *month, int *day,
                         int *hour, int *minute, int *second, int *weekday);
 
@@ -4512,17 +4515,17 @@ bool s5l8900_wake_from_hibernation(s5l8900_t *m);
  * the PCF50635's separate Power wake path. Ordinary running transitions use
  * the GPIO button model above and refresh interrupt levels before returning.
  *
- * When the guest has commanded PMU hibernation or standby, only a Power press
- * is a wake source. The host transition itself represents ONKEY powering the
- * application processor; the guest event bank latches EXTON1R, which the
- * shipped AppleM68Buttons STAT function actually tests, then the ARM core
+ * Power wakes PMU hibernation or standby. Home also wakes hibernation, but
+ * cannot power on standby/shutdown. The Power transition represents ONKEY
+ * powering the application processor; the guest event bank latches EXTON1R,
+ * which the shipped AppleM68Buttons STAT function tests, then the ARM core
  * resets into XNU's retained-RAM vector. Publishing ONKEYR as an additional
  * guest event made the physical guest wake and immediately hibernate again.
  * The same switch remains an ordinary GPIO level transition: the GPIO
  * controller must service and auto-flip that line so the later release is
- * observable. Other button transitions are consumed without reaching the
- * powered-down application processor, so one stale Home event cannot
- * permanently block a later Power event in a FIFO.
+ * observable. Home instead retains its own GPIO press across the same reset
+ * without manufacturing a Power/ONKEY event. Other sleeping transitions are
+ * consumed so an unserviceable edge cannot block a later wake in a FIFO.
  */
 bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed);
 

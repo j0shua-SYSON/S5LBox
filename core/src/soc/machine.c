@@ -1968,7 +1968,7 @@ static void power_trace_observe(s5l8900_t *m, uint32_t elapsed_tb) {
         m->power_trace_ticks_left -= elapsed_tb;
 }
 
-static bool wake_from_pmu_power_state(s5l8900_t *m) {
+static bool wake_from_pmu_power_state(s5l8900_t *m, bool onkey) {
     /* XNU copied its reset trampoline to the first retained DRAM page before
      * writing OOCSHDWN, then entered an intentional infinite branch. ONKEY
      * powers the ARM core back up from reset; it is not an IRQ capable of
@@ -1977,7 +1977,10 @@ static bool wake_from_pmu_power_state(s5l8900_t *m) {
     power_trace_arm(m);
     power_trace_record(m, S5L_POWER_TRACE_EVENT_WAKE_BEGIN,
                        POWER_TRACE_RECORD_FORCE);
-    s5l_pcf50635_wake_onkey(&m->pmu);
+    if (onkey)
+        s5l_pcf50635_wake_onkey(&m->pmu);
+    else if (!s5l_pcf50635_wake_gpio(&m->pmu))
+        return false;
 
     uint64_t cycles = m->cpu.cycles;
     arm_reset(&m->cpu, &m->bus);
@@ -2011,12 +2014,12 @@ static bool wake_from_pmu_power_state(s5l8900_t *m) {
 
 bool s5l8900_wake_from_standby(s5l8900_t *m) {
     if (!m || !s5l_pcf50635_in_standby(&m->pmu)) return false;
-    return wake_from_pmu_power_state(m);
+    return wake_from_pmu_power_state(m, true);
 }
 
 bool s5l8900_wake_from_hibernation(s5l8900_t *m) {
     if (!m || !s5l_pcf50635_in_hibernation(&m->pmu)) return false;
-    return wake_from_pmu_power_state(m);
+    return wake_from_pmu_power_state(m, true);
 }
 
 bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
@@ -2068,11 +2071,15 @@ bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
         return false;
     }
 
-    /* The application processor is powered down. A GPIO transition cannot be
-     * serviced in this state, and retaining it at the head of a host FIFO
-     * would prevent the real wake source behind it from ever arriving. Count
-     * and consume it, but do not pretend it reached a GPIO pin or interrupt. */
-    if (which != S5L_BUTTON_HOLD || !pressed) {
+    /* Home resumes Auto-Lock, but does not power on a shut-down board. Its
+     * device-tree entry has no function-wake_button_menu PMU STAT selector;
+     * after retained reset AppleM68Buttons re-enables its ordinary GPIO source
+     * (0xc065a110), which must still see the held electrical press. */
+    bool home_wake = which == S5L_BUTTON_MENU && pressed &&
+                     in_hibernation && !in_standby;
+    /* Other powered-down transitions cannot be serviced. Consume them without
+     * inventing GPIO activity or blocking the real wake source in the FIFO. */
+    if (!home_wake && (which != S5L_BUTTON_HOLD || !pressed)) {
         m->buttons.sets++;
         if (which == S5L_BUTTON_HOLD) {
             power_trace_arm(m);
@@ -2093,17 +2100,21 @@ bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
      * checks EXTON1R. AppleM68Buttons' own state bitfield suppresses a GPIO
      * dispatch that repeats its PMU-derived pressed state, but GPIOIC still
      * needs to service and auto-flip the real line before it can catch release.
-     * Preserve that physical transition across the retained reset. */
+     * Preserve that physical transition across the retained reset. Home has
+     * only the GPIO side; neither its press nor release changes Power state. */
     m->buttons.sets++;
-    if (!s5l_buttons_held(&m->buttons, S5L_BUTTON_HOLD)) {
-        m->buttons.pressed |= (uint8_t)(1u << S5L_BUTTON_HOLD);
+    if (!s5l_buttons_held(&m->buttons, which)) {
+        m->buttons.pressed |= (uint8_t)(1u << which);
         m->buttons.edges++;
         s5l_buttons_apply(&m->buttons, &m->gpio, &m->gpioic);
     }
 
-    bool woke = in_hibernation
-        ? s5l8900_wake_from_hibernation(m)
-        : s5l8900_wake_from_standby(m);
+    bool woke;
+    if (home_wake)
+        woke = wake_from_pmu_power_state(m, false);
+    else
+        woke = in_hibernation ? s5l8900_wake_from_hibernation(m)
+                              : s5l8900_wake_from_standby(m);
     if (woke) {
         active_clock_begin_input_guard(m);
     } else {

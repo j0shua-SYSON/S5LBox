@@ -409,6 +409,31 @@ static void test_pmu_power_state_wake_event_is_one_shot(void) {
     s5l_pcf50635_wake_onkey(NULL);
 }
 
+static void test_gpio_wake_only_clears_hibernation(void) {
+    CHECK(!s5l_pcf50635_wake_gpio(NULL), "NULL PMU accepted GPIO wake");
+    for (unsigned written = 0u; written < 2u; written++) {
+        for (unsigned command = 0u; command < 256u; command++) {
+            s5l_pcf50635_t pmu;
+            s5l_pcf50635_reset(&pmu, 6000000u);
+            memset(pmu.regs, 0xa5, sizeof pmu.regs);
+            pmu.regs[PCF50635_OOCSHDWN] = (uint8_t)command;
+            pmu.written[PCF50635_OOCSHDWN] = (uint8_t)written;
+            s5l_pcf50635_t expected = pmu;
+            bool allowed = written &&
+                (command & PCF50635_OOCSHDWN_GO_HIBERNATE) != 0u &&
+                (command & PCF50635_OOCSHDWN_GO_STANDBY) == 0u;
+            if (allowed)
+                expected.regs[PCF50635_OOCSHDWN] &=
+                    (uint8_t)~PCF50635_OOCSHDWN_GO_HIBERNATE;
+            CHECK(s5l_pcf50635_wake_gpio(&pmu) == allowed,
+                  "GPIO wake admitted written=%u command=%02x", written, command);
+            CHECK(memcmp(&pmu, &expected, sizeof pmu) == 0,
+                  "GPIO wake changed state beyond hibernation: %u/%02x",
+                  written, command);
+        }
+    }
+}
+
 static void test_unknown_pmu_registers_are_visible_and_bounded(void) {
     s5l_i2c_t bus;
     s5l_pcf50635_t pmu;
@@ -625,6 +650,7 @@ int main(void) {
     test_pmu_multibyte_pointer_and_wrap();
     test_pmu_rtc_and_tick_overflow();
     test_pmu_power_state_wake_event_is_one_shot();
+    test_gpio_wake_only_clears_hibernation();
     test_unknown_pmu_registers_are_visible_and_bounded();
     test_machine_routes_widths_windows_and_irqs();
     test_malformed_runtime_state_cannot_index_callbacks();

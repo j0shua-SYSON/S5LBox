@@ -214,6 +214,17 @@ bool s5l_pcf50635_in_hibernation(const s5l_pcf50635_t *pmu) {
             PCF50635_OOCSHDWN_GO_HIBERNATE) != 0u;
 }
 
+bool s5l_pcf50635_wake_gpio(s5l_pcf50635_t *pmu) {
+    /* A retained GPIO can resume Auto-Lock, not power on a shut-down board.
+     * It has no Power STAT event: that reason belongs only to ONKEY. */
+    if (!s5l_pcf50635_in_hibernation(pmu) ||
+        s5l_pcf50635_in_standby(pmu))
+        return false;
+    pmu->regs[PCF50635_OOCSHDWN] &=
+        (uint8_t)~PCF50635_OOCSHDWN_GO_HIBERNATE;
+    return true;
+}
+
 void s5l_pcf50635_wake_onkey(s5l_pcf50635_t *pmu) {
     if (!pmu) return;
 

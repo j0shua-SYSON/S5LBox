@@ -942,13 +942,13 @@ static void test_power_wakes_hibernation_through_retained_reset(void) {
           !s5l_pcf50635_in_standby(&m.pmu),
           "Auto-Lock command was not classified only as hibernation");
 
-    CHECK(s5l8900_set_button(&m, S5L_BUTTON_MENU, true) &&
-          s5l8900_set_button(&m, S5L_BUTTON_MENU, false),
-          "sleeping Home transitions were allowed to block the Power FIFO");
-    CHECK(!s5l_buttons_held(&m.buttons, S5L_BUTTON_MENU) &&
-          !s5l_gpioic_pending(&m.gpioic, s5l_button_line(S5L_BUTTON_MENU)) &&
+    CHECK(s5l8900_set_button(&m, S5L_BUTTON_VOLUP, true) &&
+          s5l8900_set_button(&m, S5L_BUTTON_VOLUP, false),
+          "sleeping volume transitions were allowed to block the Power FIFO");
+    CHECK(!s5l_buttons_held(&m.buttons, S5L_BUTTON_VOLUP) &&
+          !s5l_gpioic_pending(&m.gpioic, s5l_button_line(S5L_BUTTON_VOLUP)) &&
           m.cpu.r[15] == 0xc0061eb0u,
-          "sleeping Home reached hardware or changed the sleeping CPU");
+          "sleeping volume reached hardware or changed the sleeping CPU");
 
     CHECK(s5l8900_set_button(&m, S5L_BUTTON_HOLD, true),
           "Power did not wake the hibernating machine");
@@ -1016,6 +1016,103 @@ static void test_power_wakes_hibernation_through_retained_reset(void) {
           "CPU-line-only transitions evicted Power lifecycle trace entries");
 
     s5l8900_free(&m);
+}
+
+static void test_home_wakes_hibernation_without_power_event(void) {
+    for (unsigned variant = 0u; variant < 4u; variant++) {
+        bool restored = (variant & 1u) != 0u;
+        bool disarmed = (variant & 2u) != 0u;
+        s5l8900_t m;
+        CHECK(s5l8900_init(&m, S5L8900_SDRAM_BASE, 1u << 16),
+              "Home wake machine init failed");
+        arm_all(&m);
+        arm_pmu_irq(&m);
+        unsigned line = s5l_button_line(S5L_BUTTON_MENU);
+        unsigned group = line >> 5;
+        uint32_t bit = 1u << (line & 31u);
+        if (disarmed)
+            s5l_gpioic_write(&m.gpioic, GPIOIC_INTEN + 4u * group,
+                             m.gpioic.en[group] & ~bit);
+        m.pmu.regs[PCF50635_OOCSHDWN] =
+            0x80u | PCF50635_OOCSHDWN_GO_HIBERNATE;
+        m.pmu.written[PCF50635_OOCSHDWN] = 1u;
+        /* An unrelated pending event must survive, but Home must not invent
+         * the Power STAT bit or ONKEYR in any of the five event latches. */
+        m.pmu.regs[PCF50635_INT2] = 0x20u;
+        uint8_t events[5];
+        memcpy(events, m.pmu.regs + PCF50635_INT1, sizeof events);
+        m.cpu.r[0] = 0xabcdef01u;
+        m.cpu.r[15] = 0xc0061eb0u;
+        m.cpu.cp15.sctlr = 0x00c5187du;
+        m.cpu.cycles = UINT64_C(18667762932);
+        m.ram[0x321] = 0x5au;
+        uint64_t rtc = m.pmu.seconds;
+        uint64_t writes = m.pmu.reg_writes;
+        if (restored) {
+            uint8_t *blob = NULL;
+            size_t len = 0u;
+            CHECK(snapshot_save_mem(&m, &blob, &len) == SNAP_OK,
+                  "could not save sleeping Home fixture");
+            CHECK(blob && snapshot_load_mem(&m, blob, len) == SNAP_OK,
+                  "could not restore sleeping Home fixture");
+            free(blob);
+        }
+        uint64_t now_ns = UINT64_C(1000000000);
+        CHECK(s5l8900_set_active_host_clock(&m, active_clock_now_probe, &now_ns),
+              "could not install Home wake clock");
+        m.active_clock_anchor_valid = true;
+        m.active_clock_last_host_ns = 99u;
+        m.active_clock_deadline_shield = true;
+        m.power_wait_fraction = 123u;
+
+        CHECK(s5l8900_set_button(&m, S5L_BUTTON_MENU, false) &&
+              m.cpu.r[15] == 0xc0061eb0u &&
+              s5l_pcf50635_in_hibernation(&m.pmu),
+              "a release without a press woke hibernation");
+        CHECK(s5l8900_set_button(&m, S5L_BUTTON_MENU, true),
+              "Home did not wake hibernation (variant=%u)", variant);
+        CHECK(!s5l_pcf50635_in_hibernation(&m.pmu) &&
+              m.pmu.regs[PCF50635_OOCSHDWN] == 0x80u,
+              "Home did not clear only the hibernation command");
+        CHECK(memcmp(events, m.pmu.regs + PCF50635_INT1, sizeof events) == 0 &&
+              m.pmu.reg_writes == writes && m.pmu.seconds == rtc,
+              "Home manufactured a PMU event, guest write or elapsed time");
+        CHECK(m.cpu.r[15] == S5L8900_SDRAM_BASE && m.cpu.r[0] == 0u &&
+              m.cpu.cp15.sctlr == 0u &&
+              m.cpu.cycles == UINT64_C(18667762932) && m.ram[0x321] == 0x5au,
+              "Home did not enter retained reset without losing RAM/cycles");
+        CHECK(!m.active_clock_anchor_valid && !m.active_clock_deadline_shield &&
+              m.active_clock_input_guard && m.power_wait_fraction == 0u,
+              "Home retained pre-sleep host clock policy");
+        CHECK(s5l_buttons_held(&m.buttons, S5L_BUTTON_MENU) &&
+              !s5l_buttons_held(&m.buttons, S5L_BUTTON_HOLD) &&
+              s5l_gpio_pin(&m.gpio, s5l_button_pin(S5L_BUTTON_MENU)),
+              "Home wake did not retain exactly its own electrical press");
+        m.cpu.r[0] = 0x12345678u;
+        CHECK(s5l8900_set_button(&m, S5L_BUTTON_MENU, true) &&
+              m.cpu.r[0] == 0x12345678u && m.buttons.edges == 1u,
+              "repeating a held Home reset the running CPU or made an edge");
+        CHECK(!s5l8900_set_button(&m, S5L_BUTTON_MENU, false),
+              "Home release overtook the pending wake press");
+        if (disarmed) {
+            s5l_gpioic_write(&m.gpioic, GPIOIC_INTEN + 4u * group,
+                             m.gpioic.en[group] | bit);
+            s5l8900_tick(&m, 0u);
+        }
+        CHECK(s5l_gpioic_pending(&m.gpioic, line),
+              "rearming Home lost the retained press");
+        CHECK(guest_services(&m, line), "guest could not service Home wake");
+        s5l8900_tick(&m, 0u);
+        CHECK(s5l8900_set_button(&m, S5L_BUTTON_MENU, false) &&
+              s5l_gpioic_pending(&m.gpioic, line),
+              "Home release did not reach the rearmed GPIO line");
+        CHECK(guest_services(&m, line), "guest could not service Home release");
+        s5l8900_tick(&m, 0u);
+        CHECK(!s5l_buttons_held(&m.buttons, S5L_BUTTON_MENU) &&
+              !s5l_gpioic_pending(&m.gpioic, line) && m.buttons.edges == 2u,
+              "Home wake/release did not return to rest exactly once");
+        s5l8900_free(&m);
+    }
 }
 
 static void test_power_wakes_standby_through_retained_reset(void) {
@@ -1370,6 +1467,7 @@ int main(void) {
     test_an_undriven_level_line_never_asserts();
     test_the_board_drives_inputs_and_the_guest_cannot();
     test_power_wakes_hibernation_through_retained_reset();
+    test_home_wakes_hibernation_without_power_event();
     test_power_wakes_standby_through_retained_reset();
     test_restore_wakes_standby_without_a_button();
     test_snapshot_carries_the_switches();
