@@ -14,6 +14,9 @@ static bool ram_span(const s5l8920_t *m, uint32_t address, size_t size) {
  * DDI0273A 2.3.2 blocking wiring: no acknowledgement is forwarded downstream.
  * Logical levels are propagated without asserting physical timing accuracy. */
 static void refresh_interrupts(s5l8920_t *m) {
+    (void)pl192_set_line(&m->vic[0],S5L8920_UART0_IRQ,
+                        (m->input_levels[0]&(1u<<S5L8920_UART0_IRQ))!=0u ||
+                        s5l8920_uart_irq(&m->uart0));
     pl192_set_daisy(&m->vic[S5L8920_VIC_COUNT - 1u],false,false,0u);
     for (unsigned bank = S5L8920_VIC_COUNT - 1u; bank > 0u; bank--)
         pl192_set_daisy(&m->vic[bank - 1u],pl192_irq(&m->vic[bank]),
@@ -63,7 +66,7 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
         else if (!s5l8920_uart_read(&m->uart0,offset,&value))
             fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
-        else return value;
+        else { refresh_interrupts(m); return value; }
         return 0u;
     }
     if (!decode_vic(address,&bank,&offset)) {
@@ -94,6 +97,7 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
         else if (!s5l8920_uart_write(&m->uart0,offset,value))
             fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+        else refresh_interrupts(m);
         return;
     }
     if (!decode_vic(address,&bank,&offset)) {
@@ -130,6 +134,19 @@ bool s5l8920_load(s5l8920_t *m, uint32_t address, const void *data, size_t size)
 
 void s5l8920_clear_bus_failure(s5l8920_t *m) {
     if (m) memset(&m->bus_failure,0,sizeof m->bus_failure);
+}
+
+bool s5l8920_uart0_clock(s5l8920_t *m,bool nclk,uint64_t ticks,
+                        uint8_t *output,size_t capacity,size_t *count) {
+    if (!m || !m->ram || !s5l8920_uart_clock(&m->uart0,nclk,ticks,output,capacity,count)) return false;
+    refresh_interrupts(m);
+    return true;
+}
+
+bool s5l8920_uart0_receive(s5l8920_t *m,uint8_t byte) {
+    if (!m || !m->ram || !s5l8920_uart_receive(&m->uart0,byte)) return false;
+    refresh_interrupts(m);
+    return true;
 }
 
 bool s5l8920_set_irq(s5l8920_t *m, unsigned source, bool asserted) {

@@ -52,13 +52,13 @@ reducing the boot-argument memory size accordingly. This establishes a
 firmware configuration, not a working display model. The device-tree pointer
 at argument offset `0x30` is virtual; its byte length is at `0x34`.
 
-## Early polled UART
+## Early UART and transmit interrupts
 
 UART0 has a separate checked word-access model at `0x82500000`, within the
 matching device tree's 4 KiB aperture. It supports 8N1, disabled or polled
 channels, PCLK/NCLK selection, manual RTS, the divider and sample fields,
 and FIFO enable/reset commands with zero trigger fields. Unsupported
-registers, widths, modes, interrupts, DMA and fractional offsets stop without
+registers, widths, modes, receive/timeout/error interrupts, DMA and fractional offsets stop without
 committing the access. The iPhone OS 3 UART remains separate.
 
 The matching kernel's original ARM initializer at `0x8027c3c0` writes ULCON
@@ -91,7 +91,7 @@ all five configuration registers. FIFO reset commands self-clear and affect
 queued bytes, while a transmitting frame continues. Live status follows FIFO
 and shift state; receive and zero-threshold transmit events stay latched until
 W1C. Those transition/timing rules are the explicit component abstraction,
-not a physical N88 timing measurement. Interrupt delivery, clock gating,
+not a physical N88 timing measurement. Receive/timeout/error interrupts, clock gating,
 the scheduler's source-clock conversion, other formats and complete driver
 configuration remain unfinished.
 
@@ -119,13 +119,51 @@ byte completes only after another 2,080 input cycles for the prepared divisor.
 This demonstrates directly entered original routines using the component,
 not a running kernel console or an integrated scheduler.
 
-All 78 strict and 73 shipping tests pass, including clock-source selection,
+The polled UART checkpoint passed all 78 strict and 73 shipping tests, including clock-source selection,
 frame boundaries, FIFO limits/order, atomic output-capacity retry, receive
 gates, reset commands and checked CPU access retry. The final rebuilt library
 also passes the 54 initialization calls, six polled I/O calls, and all 192
 earlier board-VIC cases. The entire canonical 61,650-step kernel-entry trace
 is unchanged and still stops at the unestablished L2 parity/ECC configuration.
 No CPU implementation, boot guard or legacy machine behavior was changed.
+
+Transmit interrupt delivery uses UCON bit 13 to gate the existing latched
+UTRSTAT bit 5 cause. The enable can change during a frame without changing
+its remaining time or clearing pending status. The matching device tree
+routes UART0 to source 24; the board ORs this cause with any externally held
+input on that source before updating the PL192 and CPU IRQ/FIQ lines.
+Board-owned UART clock and receive entry points refresh that wiring before
+returning, so an elapsed frame does not require a later MMIO read to expose
+its interrupt. Reset clears UART causes while preserving external input levels.
+
+The unchanged Thumb method at `0x8083c26c` independently identifies the
+transmit enable and software status-mask bits. Its 120-byte body clears the
+old enables, constructs the requested mask, writes UCON, and optionally calls
+an external interrupt-source method. A private fixture prepares software
+masks that take its original return path before that external call; this is
+not proof of real driver registration. Before transmit support, two disable
+calls returned after 34 instructions and four enable calls stopped at
+`0x8083c2b8` after 24 retirements. Every predicted register, FP, flag, monitor,
+UART-state, RAM-hash and access-count check passed on the first baseline.
+The full and partial oracles were frozen before implementation. The matching
+handler at `0x8083c10c` also confirms masked status acknowledgment by writing
+its selected UTRSTAT causes back to that register; its external callbacks
+remain separate work.
+
+The first run after implementation completed all six original setter calls,
+each in 34 instructions, with every full-state check passing and the frozen
+fixture unchanged. The focused component and board tests also passed on their
+first run. They cover masking during transmission, atomic clock-output retry,
+immediate time-driven IRQ/FIQ delivery, shared externally held source 24,
+reset, and guest acknowledgment/EOI/exception return through explicitly
+synthetic vectors. Those vectors do not establish the N88 kernel's interrupt
+entry or registered serial callback.
+
+The final transmit-interrupt checkpoint passes all 78 strict and 73 shipping
+tests, the six original setter calls, 54 unchanged initialization calls, six
+unchanged polled I/O calls, and 192 unchanged board-VIC cases. The entire
+canonical 61,650-step kernel-entry trace remains identical at its guarded
+L2 parity/ECC boundary. CPU implementation and firmware guards are unchanged.
 
 ## CPU boundary
 
@@ -2005,8 +2043,8 @@ establish that result.
   Other upper-bank VFP arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Remaining shared lower-bank
   arithmetic derives from VFP11 and requires a Cortex-A8 semantic audit.
-- The partial S5L8920 fabric supplies a bounded polled UART but still lacks
-  full UART interrupt/DMA/error behavior, clocks, storage, graphics, input
+- The partial S5L8920 fabric supplies a bounded UART with transmit interrupts but still lacks
+  remaining UART interrupt/DMA/error behavior, clocks, storage, graphics, input
   and power devices. Build those components from the N88 firmware requirements.
 - Boot arguments, device-tree relocation, importer/storage selection, and
   any compatibility patches need explicit target/version guards. Existing

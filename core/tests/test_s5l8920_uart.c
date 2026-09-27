@@ -51,7 +51,7 @@ static void test_configuration(void) {
         if (!config && off!=16u && off!=32u) rejected_write(&u,off,0u);
     }
     const uint32_t bad[][2]={{0u,2u},{0u,7u},{0u,0x23u},{4u,2u},{4u,3u},{4u,8u},{4u,12u},
-        {4u,0x1005u},{4u,0x2405u},{4u,0x485u},{8u,0x1c1u},{8u,8u},{12u,0x10u},
+        {4u,0x1005u},{4u,0x4405u},{4u,0x485u},{8u,0x1c1u},{8u,8u},{12u,0x10u},
         {40u,0x90000u},{40u,0x100000u},{16u,1u},{16u,4u},{16u,0x40u},{32u,0x100u}};
     for (unsigned n=0;n<sizeof bad/sizeof bad[0];n++) rejected_write(&u,bad[n][0],bad[n][1]);
     for (unsigned field=0;field<=8u;field++) {
@@ -147,8 +147,44 @@ static void test_channel_gates_and_partition(void) {
     CHECK(!s5l8920_uart_clock(&whole,true,0u,NULL,1u,&count) && count==77u && !memcmp(&whole,&parts,sizeof whole),"null output failure");
     CHECK(!s5l8920_uart_clock(&whole,true,0u,a,sizeof a,NULL) && !s5l8920_uart_clock(NULL,true,0u,a,sizeof a,&count),"null clock access");
 }
+static void test_transmit_interrupt(void) {
+    s5l8920_uart_t u; configure(&u,0x2405u,0x80019u);
+    CHECK(!s5l8920_uart_irq(&u) && !s5l8920_uart_irq(NULL),"enable invented a pending TX event");
+    CHECK(s5l8920_uart_receive(&u,0x18u) && !s5l8920_uart_irq(&u),"RX event drove TX-only IRQ");
+    CHECK(s5l8920_uart_write(&u,16u,0x10u),"clear RX event");
+    CHECK(s5l8920_uart_write(&u,32u,0x41u) && s5l8920_uart_irq(&u) && u.tx_busy,
+          "initial buffer-empty cause did not assert during active frame");
+    uint32_t remaining=u.tx_remaining;
+    CHECK(s5l8920_uart_write(&u,4u,0x405u) && !s5l8920_uart_irq(&u) &&
+          (u.pending&0x20u) && u.tx_remaining==remaining,"active masking cleared cause or changed frame");
+    CHECK(s5l8920_uart_write(&u,4u,0x2405u) && s5l8920_uart_irq(&u) && u.tx_remaining==remaining,
+          "pending cause did not reassert on active enable");
+    rejected_write(&u,4u,0x2401u); rejected_write(&u,4u,0x2005u); rejected_write(&u,4u,0x3405u);
+    CHECK(s5l8920_uart_write(&u,16u,0x20u) && !s5l8920_uart_irq(&u) && (read_reg(&u,16u)&6u)==2u,
+          "TX acknowledge changed live shifter/buffer state");
+    CHECK(s5l8920_uart_write(&u,32u,0x42u) && !s5l8920_uart_irq(&u),"nonempty FIFO invented empty transition");
+    uint8_t output[2]={0xeeu,0xeeu}; size_t count=999u;
+    s5l8920_uart_t before=u;
+    CHECK(s5l8920_uart_clock(&u,false,UINT64_MAX,output,sizeof output,&count) && count==0u &&
+          !memcmp(&u,&before,sizeof u) && !s5l8920_uart_irq(&u),"unselected clock raised interrupt");
+    count=999u;
+    CHECK(!s5l8920_uart_clock(&u,true,2080u,output,0u,&count) && count==999u && output[0]==0xeeu &&
+          !memcmp(&u,&before,sizeof u) && !s5l8920_uart_irq(&u),"failed clock delivery asserted interrupt");
+    CHECK(s5l8920_uart_clock(&u,true,2079u,output,sizeof output,&count) && count==0u && !s5l8920_uart_irq(&u),
+          "transmit interrupt arrived before empty transition");
+    CHECK(s5l8920_uart_clock(&u,true,1u,output,sizeof output,&count) && count==1u && output[0]==0x41u &&
+          s5l8920_uart_irq(&u) && u.tx_busy && u.tx_shift==0x42u && u.tx_remaining==2080u,
+          "selected-clock empty transition failed to assert before final frame completes");
+    CHECK(s5l8920_uart_write(&u,16u,0x20u) && !s5l8920_uart_irq(&u),"acknowledge time-driven cause");
+    CHECK(s5l8920_uart_clock(&u,true,2080u,output,sizeof output,&count) && count==1u && output[0]==0x42u &&
+          !s5l8920_uart_irq(&u) && (read_reg(&u,16u)&6u)==6u,"shift completion re-latched already acknowledged FIFO-empty cause");
+    CHECK(s5l8920_uart_write(&u,32u,0x43u) && s5l8920_uart_irq(&u),"next transfer did not create new cause");
+    s5l8920_uart_reset(&u);
+    CHECK(!s5l8920_uart_irq(&u) && !u.pending && !u.ucon && !u.tx_busy,"reset retained interrupt source");
+}
 int main(void) {
     test_configuration(); test_clock_and_frame_boundaries(); test_fifo_and_reset_commands(); test_channel_gates_and_partition();
+    test_transmit_interrupt();
     printf("%u passed, %u failed\n",passed,failed);
     return failed?1:0;
 }

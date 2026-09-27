@@ -175,13 +175,92 @@ static void test_uart_checked_bus(s5l8920_t *m) {
           m->uart0.tx_shift==0xb5u && m->uart0.tx_busy, "full FIFO repair did not retry once");
     CHECK(!m->cpu.irq_line && !m->cpu.fiq_line && m->input_levels[0]==0u,
           "polled UART asserted an unimplemented interrupt");
-    s5l8920_clear_bus_failure(m); m->bus.write32(m,uart+4u,0x2405u);
+    s5l8920_clear_bus_failure(m); m->bus.write32(m,uart+4u,0x1405u);
     CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && m->uart0.ucon==0x405u,
-          "unsupported interrupt mode silently enabled");
+          "unsupported receive interrupt mode silently enabled");
     s5l8920_clear_bus_failure(m); (void)m->bus.read32(m,uart+0xfffu);
     CHECK(m->bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED, "aperture end alignment");
     CHECK(s5l8920_reset(m) && !m->uart0.tx_busy && !m->uart0.programmed &&
           m->bus_failure.reason==S5L8920_BUS_OK, "functional board reset retained UART state");
+}
+
+static void test_uart_interrupt_wiring(s5l8920_t *m) {
+    const uint32_t uart=S5L8920_UART0_BASE, line=1u<<S5L8920_UART0_IRQ;
+    for (unsigned fiq=0u;fiq<2u;fiq++) {
+        CHECK(s5l8920_reset(m), "reset UART interrupt fixture");
+        const uint32_t offsets[]={0u,4u,12u,40u,8u},values[]={3u,0x405u,1u,0x80019u,3u};
+        for (unsigned n=0;n<5u;n++) m->bus.write32(m,uart+offsets[n],values[n]);
+        vic_write(m,0u,PL192_VECTADDR0+4u*S5L8920_UART0_IRQ,0x80000018u);
+        vic_write(m,0u,PL192_INTSELECT,fiq?line:0u);
+        vic_write(m,0u,PL192_INTENABLE,line);
+        m->bus.write32(m,uart+32u,0x41u); m->bus.write32(m,uart+32u,0x42u);
+        m->bus.write32(m,uart+16u,0x20u); m->bus.write32(m,uart+4u,0x2405u);
+        CHECK(!m->cpu.irq_line && !m->cpu.fiq_line && !(m->vic[0].input&line),
+              "IRQ asserted before a new FIFO-empty event");
+        uint8_t output[2]={0xeeu,0xeeu}; size_t count=777u;
+        s5l8920_uart_t before=m->uart0;
+        CHECK(!s5l8920_uart0_clock(m,true,2080u,output,0u,&count) && count==777u && output[0]==0xeeu &&
+              !memcmp(&before,&m->uart0,sizeof before) && !(m->vic[0].input&line),
+              "failed host output changed UART or board IRQ state");
+        CHECK(s5l8920_uart0_clock(m,false,UINT64_MAX,output,sizeof output,&count) && count==0u &&
+              !m->cpu.irq_line && !m->cpu.fiq_line, "unselected source reached interrupt fabric");
+        CHECK(s5l8920_uart0_clock(m,true,2079u,output,sizeof output,&count) && count==0u &&
+              !m->cpu.irq_line && !m->cpu.fiq_line, "board interrupt arrived a cycle early");
+        CHECK(s5l8920_uart0_clock(m,true,1u,output,sizeof output,&count) && count==1u && output[0]==0x41u &&
+              m->cpu.irq_line==(fiq==0u) && m->cpu.fiq_line==(fiq!=0u) && (m->vic[0].input&line) &&
+              m->uart0.tx_busy && m->uart0.tx_shift==0x42u,
+              "time-driven UART cause was not routed immediately to the selected CPU line");
+        CHECK(s5l8920_set_irq(m,S5L8920_UART0_IRQ,true), "external shared input assert");
+        m->bus.write32(m,uart+16u,0x20u);
+        CHECK(!s5l8920_uart_irq(&m->uart0) && (m->vic[0].input&line) && (m->cpu.irq_line || m->cpu.fiq_line),
+              "UART W1C erased externally held source24");
+        CHECK(s5l8920_set_irq(m,S5L8920_UART0_IRQ,false) && !(m->vic[0].input&line) &&
+              !m->cpu.irq_line && !m->cpu.fiq_line, "external withdrawal did not release acknowledged UART line");
+        CHECK(s5l8920_uart0_receive(m,0x99u) && !m->cpu.irq_line && !m->cpu.fiq_line,
+              "receive-only pending state incorrectly drove TX interrupt");
+        m->bus.write32(m,uart+32u,0x43u);
+        CHECK(s5l8920_uart0_clock(m,true,2080u,output,sizeof output,&count) && count==1u && output[0]==0x42u,
+              "second time-driven event");
+        CHECK(s5l8920_set_irq(m,S5L8920_UART0_IRQ,false) && (m->vic[0].input&line) &&
+              (m->cpu.irq_line || m->cpu.fiq_line), "host input update erased internal UART cause");
+        m->bus.write32(m,uart+4u,0x405u);
+        CHECK(!m->cpu.irq_line && !m->cpu.fiq_line && m->uart0.tx_remaining==2080u && (m->uart0.pending&0x20u),
+              "active interrupt disable altered pending frame/cause");
+        m->bus.write32(m,uart+4u,0x2405u);
+        CHECK(m->cpu.irq_line==(fiq==0u) && m->cpu.fiq_line==(fiq!=0u), "pending enable did not refresh board line");
+
+        /* Explicit synthetic vectors validate CPU/device wiring, not N88's
+         * unestablished real exception-vector setup or registered callbacks. */
+        map_test_vectors(m);
+        put(m,0x4000u+(uart>>20)*4u,uart|0xc02u);
+        uint32_t vector_offset=fiq?0x1cu:0x18u;
+        put(m,vector_offset,0xea000000u|((0x1000u-vector_offset-8u)>>2));
+        uint32_t address=0x1000u;
+        if (!fiq) { put(m,address,0xe5932000u); address+=4u; } /* LDR r2,[r3], VIC ACK */
+        put(m,address,0xe5810000u); address+=4u;              /* STR r0,[r1], UART W1C */
+        if (!fiq) { put(m,address,0xe5834000u); address+=4u; } /* STR r4,[r3], VIC EOI */
+        put(m,address,0xe25ef004u);                          /* SUBS pc,lr,#4 */
+        m->cpu.r[0]=0x20u; m->cpu.r[1]=uart+16u; m->cpu.r[2]=0x12345678u;
+        m->cpu.r[3]=vic_address(0u,PL192_ADDRESS); m->cpu.r[4]=0u;
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[15]==vector_offset && m->cpu.r[14]==0x204u &&
+              (m->cpu.cpsr&ARM_CPSR_MODE_MASK)==(fiq?ARM_MODE_FIQ:ARM_MODE_IRQ), "UART-driven CPU exception entry");
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[15]==0x1000u, "synthetic UART vector branch");
+        unsigned steps=0u;
+        while (m->cpu.r[15]!=0x200u && steps++<5u) if (arm_step(&m->cpu)!=ARM_OK) break;
+        CHECK(m->cpu.r[15]==0x200u && m->cpu.cpsr==(ARM_MODE_SYS|ARM_CPSR_C) &&
+              m->bus_failure.reason==S5L8920_BUS_OK && !m->cpu.irq_line && !m->cpu.fiq_line &&
+              !(m->uart0.pending&0x20u) && m->vic[0].in_service==0u && m->uart0.tx_remaining==2080u,
+              "UART W1C/VIC EOI/exception return failed or CPU steps drained transmitter");
+        if (!fiq) CHECK(m->cpu.r[2]==0x80000018u, "UART source24 vector acknowledgement");
+        CHECK(s5l8920_set_irq(m,S5L8920_UART0_IRQ,true) && s5l8920_reset(m) &&
+              m->input_levels[0]==line && m->vic[0].input==line && !m->uart0.pending &&
+              !m->uart0.programmed && !m->cpu.irq_line && !m->cpu.fiq_line,
+              "reset lost external source24 or retained UART enable/cause");
+        CHECK(s5l8920_set_irq(m,S5L8920_UART0_IRQ,false), "release reset-held source24");
+    }
+    size_t count=999u;
+    CHECK(!s5l8920_uart0_clock(NULL,true,1u,NULL,0u,&count) && count==999u && !s5l8920_uart0_receive(NULL,0u),
+          "invalid board event changed output or succeeded");
 }
 
 static void test_guest_irq_handler(s5l8920_t *m) {
@@ -251,10 +330,14 @@ int main(void) {
     test_geometry_and_refusals(&m);
     test_cpu_access_stops(&m);
     test_uart_checked_bus(&m);
+    test_uart_interrupt_wiring(&m);
     test_guest_irq_handler(&m);
     test_fiq_and_reset(&m);
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
+    size_t count=999u;
+    CHECK(!s5l8920_uart0_clock(&m,true,1u,NULL,0u,&count) && count==999u && !s5l8920_uart0_receive(&m,0u),
+          "freed board accepted a UART event");
     s5l8920_free(&m);
     printf("%u passed, %u failed\n",passed,failed);
     return failed ? 1 : 0;

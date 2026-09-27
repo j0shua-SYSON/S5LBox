@@ -1,4 +1,4 @@
-/* Partial Apple UART used by N88's early polled console.
+/* Partial Apple UART used by N88's early console, with transmit IRQ delivery.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #ifndef S5LBOX_S5L8920_UART_H
 #define S5LBOX_S5L8920_UART_H
@@ -26,7 +26,8 @@ typedef struct {
 /* Functional empty component reset, not an assertion of hardware reset values
  * or bootloader handoff. Configuration reads fail until the guest writes them;
  * status/data require all five configuration registers to be programmed.
- * No interrupts, DMA, errors, modem input, fractional offsets or auto baud.
+ * Only zero-threshold transmit interrupts; no receive/timeout/error IRQs,
+ * DMA, errors, modem input, fractional offsets or auto baud.
  * No host pointers or output callbacks are retained. */
 void s5l8920_uart_reset(s5l8920_uart_t *u);
 
@@ -34,11 +35,14 @@ void s5l8920_uart_reset(s5l8920_uart_t *u);
  * Supports 8N1, disabled/polled channels, PCLK/NCLK selection, FIFO commands
  * with zero trigger fields, manual RTS, divider/sample fields (rates8..16).
  * Traffic requires enabled FIFO. Configuration changes during transmission
- * are refused; FIFO resets affect queued bytes, not the active shift register.
+ * are refused except the transmit interrupt enable; FIFO resets affect queued
+ * bytes, not the active shift register.
  * UTRSTAT RX/TX events are latched until word W1C, independently of IRQ enables;
- * enabling interrupt delivery itself remains unsupported. */
+ * only the transmit cause can currently drive interrupt delivery. */
 bool s5l8920_uart_read(s5l8920_uart_t *u, uint32_t offset, uint32_t *value);
 bool s5l8920_uart_write(s5l8920_uart_t *u, uint32_t offset, uint32_t value);
+/* Pending TX event gated by UCON bit13; RX events cannot drive this output. */
+bool s5l8920_uart_irq(const s5l8920_uart_t *u);
 
 /* Supply cycles of the named source (false=PCLK,true=NCLK), after any external
  * gating. Unselected source has no effect. An 8N1 frame takes

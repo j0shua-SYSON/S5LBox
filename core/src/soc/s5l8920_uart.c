@@ -1,4 +1,4 @@
-/* N88 polled Apple UART, independent of the legacy instantly drained UART.
+/* N88 polled/TX-interrupt Apple UART, independent of the legacy UART.
  * Register fields: Apple's apple_uart_regs.h; actual N88 early console uses
  * UTRSTAT bit2/bit0, word UTXH/URXH, and the encoded 16-sample divisor field.
  * Functional timing and host-frame boundaries are explicit in the header.
@@ -24,6 +24,9 @@ static void start_next(s5l8920_uart_t *u) {
 }
 void s5l8920_uart_reset(s5l8920_uart_t *u) {
     if (u) memset(u,0,sizeof *u);
+}
+bool s5l8920_uart_irq(const s5l8920_uart_t *u) {
+    return u && (u->ucon&0x2000u)!=0u && (u->pending&TX_EVENT)!=0u;
 }
 bool s5l8920_uart_read(s5l8920_uart_t *u,uint32_t offset,uint32_t *value) {
     if (!u || !value) return false;
@@ -63,7 +66,7 @@ bool s5l8920_uart_write(s5l8920_uart_t *u,uint32_t offset,uint32_t value) {
         if (value!=3u) return false;
         target=&u->ulcon; bit=1u; break;
     case S5L8920_UART_UCON:
-        if ((value&~0x405u)!=0u) return false;
+        if ((value&~0x2405u)!=0u) return false;
         target=&u->ucon; bit=2u; break;
     case S5L8920_UART_UMCON:
         if (value>1u) return false;
@@ -91,7 +94,8 @@ bool s5l8920_uart_write(s5l8920_uart_t *u,uint32_t offset,uint32_t value) {
         return true;
     default: return false;
     }
-    if (u->tx_busy && value!=*target) return false;
+    uint32_t active_mutable=offset==S5L8920_UART_UCON?0x2000u:0u;
+    if (u->tx_busy && ((value^*target)&~active_mutable)!=0u) return false;
     *target=value; u->programmed|=bit;
     return true;
 }

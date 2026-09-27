@@ -16,6 +16,7 @@
 #define S5L8920_VIC_COUNT 3u
 #define S5L8920_IRQ_COUNT (32u * S5L8920_VIC_COUNT)
 #define S5L8920_UART0_BASE UINT32_C(0x82500000)
+#define S5L8920_UART0_IRQ 24u
 
 typedef enum {
     S5L8920_BUS_OK = 0,
@@ -54,6 +55,16 @@ void s5l8920_free(s5l8920_t *m);
  * model of power sequencing. The caller owns execution and device timing. */
 bool s5l8920_reset(s5l8920_t *m);
 bool s5l8920_set_irq(s5l8920_t *m, unsigned source, bool asserted);
+
+/* Board-owned UART input advances refresh the real interrupt fabric before
+ * returning. Use these instead of advancing the embedded component directly
+ * when interrupt delivery matters. No source frequency, gating or conversion
+ * from CPU instructions to UART cycles is invented here. Failed operations
+ * preserve UART/output/interrupt state; external input24 is ORed with UART0.
+ * Like set_irq, these host events may repair a latched CPU bus stop. */
+bool s5l8920_uart0_clock(s5l8920_t *m, bool nclk, uint64_t ticks,
+                        uint8_t *output, size_t capacity, size_t *count);
+bool s5l8920_uart0_receive(s5l8920_t *m, uint8_t byte);
 
 /* Host preparation is bounded to RAM and never performs MMIO. Rejected loads
  * leave RAM and existing bus diagnostics untouched. No firmware is patched. */
