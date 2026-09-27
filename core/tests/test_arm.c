@@ -12463,6 +12463,131 @@ static void test_cortex_a8_generic_configuration(void) {
     }
 }
 
+/* Plain imm12, distinct from ThumbExpandImm. DDI0406C.b A8.8.4/9/12/
+ * 221/225: Rn=PC is ADR, Rn=SP permits SP destination, and no form sets flags. */
+static uint32_t thumb_plain_immediate(bool subtract, unsigned rn, unsigned rd, unsigned imm) {
+    return (subtract ? 0xf2a00000u : 0xf2000000u) | ((imm & 0x800u) << 15) |
+           (rn << 16) | ((imm & 0x700u) << 4) | (rd << 8) | (imm & 255u);
+}
+
+static void test_thumb_plain_immediates(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
+    const uint32_t values[] = {0u,1u,0x7fffffffu,0x80000000u,0xfffff800u,UINT32_MAX};
+    unsigned exhaustive_failures = 0u;
+    for (unsigned p = 0; p < 2u; p++) for (unsigned host = 0; host < 2u; host++) {
+        arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c;
+        CHECK(arm_reset_profile(&c, &bus, profiles[p]), "reset");
+        c.excl_valid = true; c.excl_addr = 0x1234u; c.vfp_fpscr = 0x0bc00080u;
+        c.a8_vfp_hi[0] = UINT64_C(0x8123456789abcdef);
+        const arm_cp15_t controls = c.cp15;
+        for (unsigned sub = 0; sub < 2u; sub++) for (unsigned v = 0; v < 6u; v++)
+         for (unsigned imm = 0; imm < 4096u; imm++) {
+            c.r[15] = 0x100u; c.r[0] = 0x12345678u; c.r[4] = values[v];
+            uint32_t flags = ARM_MODE_SYS | ARM_CPSR_T | ARM_CPSR_I | ARM_CPSR_F | ARM_CPSR_Q |
+                             ((imm & 15u) << 28) | ((imm & 15u) << 16) | (v & 1u ? ARM_CPSR_E : 0u);
+            c.cpsr = flags;
+            uint64_t cycles = c.cycles;
+            exclusive_put(true, 0x100u, thumb_plain_immediate(sub != 0u, 4u, 0u, imm));
+            uint64_t arithmetic = sub ? (UINT64_C(0x100000000) + values[v] - imm) : (uint64_t)values[v] + imm;
+            arm_status_t status = arm_step(&c);
+            bool correct = status == ARM_OK && c.r[0] == (uint32_t)arithmetic && c.r[4] == values[v] &&
+                           c.r[15] == 0x104u && c.cpsr == flags && c.cycles == cycles + 1u &&
+                           c.excl_valid && c.excl_addr == 0x1234u && c.vfp_fpscr == 0x0bc00080u &&
+                           c.a8_vfp_hi[0] == UINT64_C(0x8123456789abcdef) &&
+                           memcmp(&c.cp15, &controls, sizeof controls) == 0;
+            if (!correct && ++exhaustive_failures <= 3u)
+                printf("  plain imm mismatch profile=%u host=%u sub=%u input=%08x imm=%u status=%u result=%08x\n",
+                       p,host,sub,values[v],imm,(unsigned)status,c.r[0]);
+         }
+    }
+    CHECK(exhaustive_failures == 0u, "plain immediate arithmetic/state failures=%u of196608", exhaustive_failures);
+
+    const uint32_t pcs[] = {0x100u,0x102u,0xfffffffcu,0xfffffffeu};
+    const unsigned immediates[] = {0u,1u,0x4d4u,4095u};
+    unsigned operand_failures = 0u;
+    for (unsigned p = 0; p < 2u; p++) for (unsigned host = 0; host < 2u; host++)
+     for (unsigned sub = 0; sub < 2u; sub++) for (unsigned rn = 0; rn < 16u; rn++)
+      for (unsigned rd = 0; rd < 16u; rd++) for (unsigned edge = 0; edge < 4u; edge++) {
+        arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c; CHECK(arm_reset_profile(&c, &bus, profiles[p]), "reset");
+        uint32_t pc = pcs[edge], imm = immediates[edge], expected[16];
+        for (unsigned r = 0; r < 16u; r++) c.r[r] = 0xffffff00u + 17u * r;
+        c.r[15] = pc; c.cpsr = ARM_MODE_SYS | ARM_CPSR_T | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_Q | 0xa0000u;
+        uint32_t flags = c.cpsr;
+        memcpy(expected, c.r, sizeof expected);
+        bool allowed = rd != 15u && (rd != 13u || rn == 13u);
+        uint32_t operand = rn == 15u ? ((pc + 4u) & ~3u) : c.r[rn];
+        if (allowed) { expected[rd] = sub ? operand - imm : operand + imm; expected[15] = pc + 4u; }
+        exclusive_put(true, pc, thumb_plain_immediate(sub != 0u,rn,rd,imm));
+        arm_status_t status = arm_step(&c);
+        if (status != (allowed ? ARM_OK : ARM_UNDEFINED) || memcmp(c.r,expected,sizeof expected) || c.cpsr != flags) {
+            if (++operand_failures <= 3u)
+                printf("  plain operand mismatch profile=%u host=%u sub=%u rn=%u rd=%u pc=%08x\n",p,host,sub,rn,rd,pc);
+        }
+      }
+    CHECK(operand_failures == 0u, "plain immediate SP/PC/alias/wrap failures=%u",operand_failures);
+
+    /* ConditionPassed precedes encoding-specific rejection. Invalid Rd=PC
+     * is skipped by a false IT condition, but refused by a true condition. */
+    for (unsigned p = 0; p < 2u; p++) for (unsigned sub = 0; sub < 2u; sub++)
+     for (unsigned cond = 0; cond < 2u; cond++) for (unsigned z = 0; z < 2u; z++)
+      for (unsigned invalid = 0; invalid < 2u; invalid++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,profiles[p]),"reset");
+        c.cpsr = ARM_MODE_SYS | ARM_CPSR_T | ARM_CPSR_C | ARM_CPSR_V | ARM_CPSR_Q | (z ? ARM_CPSR_Z : 0u);
+        uint32_t flags=c.cpsr; c.r[4]=UINT32_MAX; c.r[0]=0x12345678u;
+        m_w16(NULL,0,(uint16_t)(0xbf08u | (cond << 4)));
+        exclusive_put(true,2u,thumb_plain_immediate(sub != 0u,4u,invalid ? 15u : 0u,1u));
+        CHECK(arm_step(&c)==ARM_OK,"IT");
+        uint32_t it_flags=c.cpsr;
+        bool pass=cond ? !z : z, refused=pass && invalid;
+        CHECK(arm_step(&c)==(refused ? ARM_UNDEFINED : ARM_OK) && c.r[15]==(refused ? 2u : 6u) &&
+              c.r[0]==(pass && !invalid ? (sub ? 0xfffffffeu : 0u) : 0x12345678u) &&
+              c.cpsr==(refused ? it_flags : flags), "plain immediate IT condition/flags/refusal failed");
+      }
+
+    const uint32_t neighbors[] = {0xf2100000u,0xf2200000u,0xf2800000u,0xf2b00000u,
+                                  0xf2400001u,0xf2c00001u,0xf20480d4u};
+    for (unsigned p=0;p<2u;p++) for (unsigned n=0;n<sizeof neighbors/sizeof neighbors[0];n++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,profiles[p]),"reset");
+        c.cpsr=ARM_MODE_SYS | ARM_CPSR_T; c.r[0]=0xdeadbeefu;
+        exclusive_put(true,0,neighbors[n]);
+        bool valid=n>=4u;
+        uint32_t expected=n==4u ? 1u : n==5u ? 0x0001beefu : 0xdeadbeefu;
+        CHECK(arm_step(&c)==(valid ? ARM_OK : ARM_UNDEFINED) && c.r[15]==(valid ? 4u : 0u) && c.r[0]==expected,
+              "plain immediate stole neighbor encoding=%08x",neighbors[n]);
+    }
+    for (unsigned sub=0;sub<2u;sub++) {
+        arm_cpu_t c; arm_reset(&c,&g_bus); c.cpsr|=ARM_CPSR_T; c.r[0]=0x12345678u;
+        exclusive_put(true,0,thumb_plain_immediate(sub != 0u,4u,0u,0x4d4u));
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==2u && c.r[14]==(sub ? 0x002a4004u : 0x00204004u) && c.r[0]==0x12345678u,
+              "wide immediate changed ARM1176 first BL halfword behavior");
+    }
+    for (unsigned p=0;p<2u;p++) for (unsigned host=0;host<2u;host++) for (unsigned sub=0;sub<2u;sub++)
+     for (unsigned source=0;source<3u;source++) for (unsigned fault=0;fault<5u;fault++) {
+        memset(g_ram,0,sizeof g_ram);
+        arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&bus,profiles[p]),"reset");
+        c.cp15.sctlr=ARM_SCTLR_M | ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+        c.cpsr=ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N; c.r[15]=0xffeu;
+        c.r[0]=0x12345678u; c.r[4]=0xfffffff0u; c.r[13]=0x100u;
+        unsigned rn=source==0u ? 4u : source==1u ? 13u : 15u;
+        uint32_t insn=thumb_plain_immediate(sub != 0u,rn,0u,0x4d4u);
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,fault==4u ? 0u : 0x8032u);
+        m_w32(NULL,0x6004u,fault==1u ? 0u : fault==2u ? 0xa033u : fault==3u ? 0xa012u : 0xa032u);
+        m_w16(NULL,0x8ffeu,(uint16_t)(insn>>16)); m_w16(NULL,0xa000u,(uint16_t)insn); m_w16(NULL,0x9000u,0x0fffu);
+        g_watch_addr=0xa000u; g_watch_reads16=0u;
+        arm_status_t status=arm_step(&c);
+        uint32_t operand=source==0u ? 0xfffffff0u : source==1u ? 0x100u : 0x1000u;
+        uint32_t expected=sub ? operand-0x4d4u : operand+0x4d4u;
+        CHECK(status==ARM_OK && (fault ? (c.r[15]==ARM_VEC_PREFETCH && c.r[0]==0x12345678u &&
+              c.cp15.ifar==(fault==4u ? 0xffeu : 0x1000u) && g_watch_reads16==0u) :
+              (c.r[15]==0x1002u && c.r[0]==expected && c.cpsr==(ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N) && g_watch_reads16==1u)),
+              "plain immediate split fetch profile=%u host=%u sub=%u rn=%u fault=%u",p,host,sub,rn,fault);
+        g_watch_addr=UINT32_MAX;
+     }
+}
+
 static void exclusive_setup(arm_cpu_t *c, bool thumb, uint32_t insn) {
     memset(g_ram, 0, sizeof g_ram);
     CHECK(arm_reset_profile(c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
@@ -12821,6 +12946,7 @@ int main(void) {
     test_cp15_wfi_uses_only_the_exact_privileged_hook();
     test_cortex_a8_cp15_selector_boundary();
     test_cortex_a8_generic_configuration();
+    test_thumb_plain_immediates();
     test_cortex_a8_cp15_maintenance_boundary();
     test_cortex_a8_l2_auxiliary_control();
     test_cortex_a8_system_control_register();

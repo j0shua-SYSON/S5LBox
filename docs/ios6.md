@@ -31,10 +31,30 @@ snapshots exclude and clear this inactive state without changing format v32.
 Host validation passed all 78 strict and 73 shipping tests, plus the existing
 24 timebase and 192 interrupt-controller firmware cases. Old and new snapshot
 executables cross-load the same byte-identical v32 save. A separately labelled
-kernel diagnostic selects r3p2, 32 KiB L1I/L1D, 256 KiB L2 and no ECC: it
-reaches a 76,172-step stop on an unsupported Thumb `ADDW` at `0x80021b34`.
+kernel diagnostic selects r3p2, 32 KiB L1I/L1D, 256 KiB L2 and no ECC: its
+initial run reached Thumb `ADDW` at `0x80021b34` after 76,172 steps.
 This is a generic configuration hypothesis. The original N88
 diagnostic retains its entire 61,650-step trace and ECC configuration guard.
+
+Thumb `ADDW`/`SUBW` now implement the plain 12-bit immediate, including the
+SP forms and `ADR` aliases, for Cortex-A8 and Swift. `ADR` uses the aligned
+architectural Thumb PC; arithmetic wraps at 32 bits and preserves flags.
+Invalid destinations are refused before changing registers. See
+[DDI0406C.b, A8.8.4/9/12/221/225](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Tests cover all 4,096 immediates over six arithmetic boundaries, every register
+pair, PC alignment and wrap, IT conditions, neighboring encodings, and split
+instruction-fetch faults. ARM1176 retains its legacy Thumb halfword behavior.
+All 78 strict and 73 shipping tests pass with this decoder.
+
+The labelled generic diagnostic now reaches the original console initializer's
+first UART write after 293,151 steps: ARM `STR r5,[r0]` at `0x8027c3dc`, writing
+`3` through virtual `0xc0000000` to physical `0x82500000`. Its RAM-only bus
+refuses this access. A separate guard confirms that this trace does not use
+the inherited, unaudited CP14 debug-register responses. Full 256 MiB heap and
+file-backed RAM produce identical traces; the file-backed variant also exactly
+reproduces the preceding configuration checkpoint's trace with its archived
+library. These host diagnostics establish neither the N88 CPU configuration
+nor a complete kernel boot. The canonical ECC guard remains unchanged.
 
 ## Target evidence
 

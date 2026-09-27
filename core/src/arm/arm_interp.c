@@ -4418,9 +4418,22 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
             return ARM_UNDEFINED;
         return exec_bitfield(c, rd, rn, lsb, limit, insert, field_operation == 0xf340u);
     }
+    uint16_t operation = first & 0xfbf0u;
+    /* ADDW/SUBW T4, SP aliases and ADR T2/T3 (DDI0406C.b A8.8.4/9/12/
+     * 221/225). The plain imm12 is not a modified/rotated immediate. Only
+     * SP arithmetic permits Rd=SP; no form permits Rd=PC or changes flags.
+     * ADR uses the aligned architectural Thumb PC, even across address wrap. */
+    if ((operation == 0xf200u || operation == 0xf2a0u) && !(second & 0x8000u)) {
+        unsigned rn = first & 15u, rd = (second >> 8) & 15u;
+        if (rd == 15u || (rd == 13u && rn != 13u)) return ARM_UNDEFINED;
+        uint32_t immediate = ((uint32_t)(first & 0x400u) << 1) |
+                             ((second & 0x7000u) >> 4) | (second & 0xffu);
+        uint32_t source = rn == 15u ? ((pc + 4u) & ~3u) : c->r[rn];
+        c->r[rd] = operation == 0xf2a0u ? source - immediate : source + immediate;
+        return ARM_OK;
+    }
     /* MOVW T3 / MOVT T1: imm4:i:imm3:imm8, no flag changes. ARMv7 forbids
      * SP and PC here (DDI0406C.b A8.8.102/106). Check before any register write. */
-    uint16_t operation = first & 0xfbf0u;
     if ((operation == 0xf240u || operation == 0xf2c0u) && !(second & 0x8000u)) {
         unsigned rd = (second >> 8) & 15u;
         if (rd == 13u || rd == 15u) return ARM_UNDEFINED;
