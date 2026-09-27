@@ -277,8 +277,8 @@ Explicit four-byte alignment failures, or standard failures with SCTLR.A
 set, enter Data Abort before translation. Standard unaligned accesses with
 A=0 remain unsupported. Invalid sizes, index/alignment fields and R15 bases
 stop before coprocessor access checks; valid unavailable instructions enter
-guest Undefined. Big-endian execution, 8/16-bit lane transfers and
-replicate forms remain unsupported. See
+guest Undefined. Big-endian execution and 8/16-bit lane transfers remain
+unsupported. The separate broadcast form is described below. See
 [DDI0406C.b, A8.8.321 and B1.9.8](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 
 Tests exercise all D registers, both lanes, base/offset combinations and
@@ -324,6 +324,57 @@ division, unit F64 ramp, F32 ramp and F64 remainder fixtures retain their
 6,912, 3,456, 6,144, 4,096, 4,096, 640, 1,536, 336, 1,824 and 112 passing
 calls. The complete guarded kernel-entry trace remains identical through
 the 61,650-step L2 ECC stop.
+
+VLD1 single-element broadcasts load one naturally aligned 32-bit word into
+all lanes of one or two adjacent D registers. Odd starting registers are
+valid for the two-register form; a pair starting at D31 is refused. Both
+ARM and Thumb forms retain the same access, alignment and writeback rules
+as lane loads. Immediate writeback is four bytes even with two destination
+registers. The original offset register is used when it aliases the base.
+Both destinations and the base publish only after the single read completes;
+the raw value, including NaNs and subnormals, is copied without changing
+FPSCR. Unsupported sizes and invalid register shapes stop before access
+checks. The decoder separates this allocation from lane transfers and
+legacy preload hints. See
+[DDI0406C.b, A8.8.322 and B1.9.8](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Broadcast tests cover every destination and base/offset combination,
+one/two registers, both alignment encodings, all raw FP classes, access
+denials, invalid sizes and overflow, endianness refusal, IT conditions and
+legacy behavior. The existing lane fault tests also exercise broadcasts:
+User page-end Normal, Device and Strongly-ordered reads, read-only mappings,
+translation/permission/alignment faults, split Thumb instruction fetches,
+checked host failures and guest enable/return retry. They verify that both
+registers consume exactly one word and preserve uncompleted state.
+
+The broadcast fixture uses the original 134-byte Thumb `_vvrecf` short-count
+body at `0x308668a0..0x30866926`. Its frozen baseline on the preceding core
+passes all 256 empty calls, then stops in the first one-element call at
+`0x308668e6`, `VLD1.32 {d16[]}, [r1:32]`, after twelve steps and 34 fetched
+bytes. The count has been read once; no input or output has been accessed.
+The fixture verifies the entire partial FP/general-register, flag, monitor
+and RAM state at that stop. With broadcast support, the first run completes
+all 4,096 calls using the unchanged fixture, runner and oracle-helper hashes.
+The matrix covers all counts zero through fifteen, all sixteen word-aligned
+input/output pairs and all sixteen
+RMode/FZ/DN combinations, with 32 raw inputs and four initial D19 pairs.
+A frozen Python helper supplies only six pure Fraction functions, selected
+from its syntax tree without executing its build or file-handling code.
+The independent five-stage oracle has 45 rows and twelve raw result/flag
+anchors, including thirteen refined intermediate values reused as unstored
+upper-lane inputs. The two-element tail deliberately reads its first input
+and writes its first output twice; the one-element tail still computes
+both unstored upper lanes. These behaviors are included in the full FP and
+per-byte access oracle. All general registers, flags, FPSCR, monitor,
+return state, whole RAM and exact instruction counts also match. No
+CPU-family input or override is supplied. These are approximate instruction
+pipeline results, not correctly rounded reciprocal guarantees. They do not
+establish aliases, larger counts, process launch, board boot or physical
+behavior. The focused tests passed on their first run without production,
+test or oracle corrections. All 77 strict and 72 shipping tests pass.
+All fourteen prior firmware fixtures also pass, bringing the prepared-call
+total across fifteen routines/fixture groups to 66,880. The entire canonical
+kernel-entry trace remains identical through its 61,650-step ECC guard.
 
 VST1 single-element stores now use the same checked address, alignment and
 writeback rules for either 32-bit lane of any D register. They preserve the
@@ -1725,6 +1776,7 @@ establish that result.
   scalar comparisons, F32/F64 precision conversion, 32-bit integer conversion and
   VADD/VSUB/VMUL/VNMUL/VDIV/VSQRT/VMLA/VMLS across the full register bank, and the bounded
   32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms, 32-bit VLD1/VST1 lane transfers,
+  32-bit VLD1 broadcasts to one or two D registers,
   register Boolean operations, VEXT, 8/16/32-bit VTRN, F32 VABS/VNEG,
   immediate constants, core-register VDUP, register VMUL/VADD/VSUB/VMLA/VMLS.F32,
   F32 VMUL/VMLA/VMLS by scalar, VMAX/VMIN.F32, VCGE.F32 register comparisons,

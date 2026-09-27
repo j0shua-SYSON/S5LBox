@@ -2653,6 +2653,115 @@ static uint32_t a8_neon_lane(unsigned thumb,unsigned load_,unsigned size,unsigne
         (rn<<16)|(size<<10)|(index_align<<4)|rm;
 }
 
+static uint32_t a8_neon_replicate(unsigned thumb,unsigned size,unsigned two,unsigned align,unsigned d,unsigned rn,unsigned rm) {
+    return (thumb ? 0xf9a00c00u : 0xf4a00c00u)|((d&15u)<<12)|((d>>4)<<22)|
+        (rn<<16)|(size<<6)|(two<<5)|(align<<4)|rm;
+}
+
+static void test_a8_neon_replicate_registers(void) {
+    CHECK(a8_neon_replicate(1u,2u,0u,1u,16u,1u,15u)==0xf9e10c9fu &&
+          a8_neon_replicate(0u,2u,1u,0u,17u,5u,13u)==0xf4e51cadu,"broadcast encoding anchors");
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned two=0;two<2u;two++) for (unsigned d=0;d+two<32u;d++)
+     for (unsigned align=0;align<2u;align++) for (unsigned rn=0;rn<15u;rn++) for (unsigned rm=0;rm<16u;rm++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr=0xfff79f9fu;
+        c.excl_valid=true; c.excl_addr=0x2468u; c.a8_excl_size=8u;
+        for (unsigned r=0;r<15u;r++) c.r[r]=0xffffffe0u+r;
+        uint32_t base=0x2040u+4u*(d%4u); c.r[rn]=base;
+        uint32_t expected_gpr[15]; memcpy(expected_gpr,c.r,sizeof expected_gpr);
+        uint32_t raw=a8_compare_values[(d+rn+rm)%22u].single;
+        memset(g_ram+0x2030u,0xa5,48u); m_w32(NULL,base,raw);
+        uint8_t expected_ram[48]; memcpy(expected_ram,g_ram+0x2030u,sizeof expected_ram);
+        uint64_t expected_fp[32];
+        for (unsigned r=0;r<32u;r++) { expected_fp[r]=UINT64_C(0x7f800001dead0000)+r; vfp_set_d(&c,r,expected_fp[r]); }
+        expected_fp[d]=((uint64_t)raw<<32)|raw;
+        if (two) expected_fp[d+1u]=expected_fp[d];
+        if (rm!=15u) expected_gpr[rn]+=rm==13u ? 4u : c.r[rm];
+        uint32_t flags=c.cpsr;
+        CHECK(a8_move_step(&c,thumb,a8_neon_replicate(thumb,2u,two,align,d,rn,rm))==ARM_OK &&
+              c.r[15]==0x104u && c.cycles==1u && c.cpsr==flags && c.vfp_fpscr==0xfff79f9fu &&
+              c.vfp_fpexc==ARM_FPEXC_EN && c.excl_valid && c.excl_addr==0x2468u && c.a8_excl_size==8u,"broadcast status");
+        bool match=!memcmp(expected_gpr,c.r,sizeof expected_gpr) && !memcmp(expected_ram,g_ram+0x2030u,sizeof expected_ram);
+        for (unsigned r=0;r<32u;r++) match&=vfp_get_d(&c,r)==expected_fp[r];
+        CHECK(match,"broadcast registers/raw bytes/writeback T=%u two=%u D=%u align=%u Rn/m=%u/%u",thumb,two,d,align,rn,rm);
+     }
+}
+
+static void test_a8_neon_replicate_alignment_and_access(void) {
+    static const unsigned permissions[]={0u,1u,3u};
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned two=0;two<2u;two++) for (unsigned align=0;align<2u;align++)
+     for (unsigned alignment_check=0;alignment_check<2u;alignment_check++) for (unsigned offset=0;offset<4u;offset++)
+      for (unsigned enabled=0;enabled<2u;enabled++) for (unsigned access=0;access<3u;access++) for (unsigned user=0;user<2u;user++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb);
+        c.cpsr=(c.cpsr&~ARM_CPSR_MODE_MASK)|(user ? ARM_MODE_USR : ARM_MODE_SVC);
+        c.cp15.cpacr=permissions[access]*0x00500000u; c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u;
+        c.cp15.sctlr=(c.cp15.sctlr&~ARM_SCTLR_A)|(alignment_check ? ARM_SCTLR_A : 0u);
+        c.r[5]=0x2040u+offset; m_w32(NULL,0x2040u,0x7f800001u);
+        uint64_t expected[32];
+        for (unsigned d=0;d<32u;d++) { expected[d]=UINT64_C(0x123456789abcdef0)+d; vfp_set_d(&c,d,expected[d]); }
+        uint32_t flags=c.cpsr,fpscr=c.vfp_fpscr;
+        bool allowed=enabled && (permissions[access]==3u || (permissions[access]==1u && !user));
+        bool abort=allowed && offset && (align || alignment_check),unsupported=allowed && offset && !abort;
+        bool executed=allowed && !offset;
+        CHECK(a8_move_step(&c,thumb,a8_neon_replicate(thumb,2u,two,align,29u,5u,13u))==
+              (unsupported ? ARM_UNDEFINED : ARM_OK) && c.vfp_fpscr==fpscr && c.r[5]==0x2040u+offset+(executed ? 4u : 0u),
+              "broadcast alignment/access disposition");
+        if (!allowed) CHECK(c.r[15]==ARM_VEC_UNDEFINED && c.r[14]==(thumb ? 0x102u : 0x104u) &&
+            c.spsr[ARM_BANK_UND]==flags && c.cp15.dfsr==0u,"broadcast access denial preceded alignment/data");
+        else if (abort) CHECK(c.r[15]==ARM_VEC_DATA_ABORT && c.r[14]==0x108u && c.spsr[ARM_BANK_ABT]==flags &&
+            c.cp15.dfar==0x2040u+offset && c.cp15.dfsr==1u,"broadcast precise read alignment abort");
+        else CHECK(c.r[15]==(unsupported ? 0x100u : 0x104u) && c.cpsr==flags,"broadcast completion/refusal flags");
+        if (executed) { expected[29]=UINT64_C(0x7f8000017f800001); if (two) expected[30]=expected[29]; }
+        bool match=m_r32(NULL,0x2040u)==0x7f800001u;
+        for (unsigned d=0;d<32u;d++) match&=vfp_get_d(&c,d)==expected[d];
+        CHECK(match,"broadcast alignment/access whole FP bank and unchanged memory");
+      }
+}
+
+static void test_a8_neon_replicate_invalid_and_it(void) {
+    static const unsigned registers[]={0u,15u,16u,30u,31u};
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned size=0;size<4u;size++) for (unsigned two=0;two<2u;two++)
+     for (unsigned align=0;align<2u;align++) for (unsigned reg=0;reg<5u;reg++) for (unsigned bad_base=0;bad_base<2u;bad_base++)
+      for (unsigned big=0;big<2u;big++) for (unsigned enabled=0;enabled<2u;enabled++)
+       for (unsigned skip=0;skip<(thumb ? 2u : 1u);skip++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.r[5]=0x2040u;
+        c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u; if (skip) c.cp15.cpacr=0u;
+        if (big) c.cpsr|=ARM_CPSR_E;
+        m_w32(NULL,0x2040u,0x7f800001u);
+        uint64_t expected[32];
+        for (unsigned r=0;r<32u;r++) { expected[r]=UINT64_C(0x123456789abcdef0)+r; vfp_set_d(&c,r,expected[r]); }
+        if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c)==ARM_OK,"broadcast IT setup"); }
+        unsigned d=registers[reg]; uint32_t flags=c.cpsr,pc=c.r[15],fpscr=c.vfp_fpscr;
+        bool shape=size==2u && !bad_base && d+two<32u;
+        bool denied=shape && !enabled && !skip,executed=shape && enabled && !big && !skip;
+        CHECK(a8_move_step(&c,thumb,a8_neon_replicate(thumb,size,two,align,d,bad_base ? 15u : 5u,13u))==
+              (skip || denied || executed ? ARM_OK : ARM_UNDEFINED) && c.vfp_fpscr==fpscr &&
+              c.r[5]==0x2040u+(executed ? 4u : 0u),"broadcast invalid/IT disposition");
+        if (denied) CHECK(c.r[15]==ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND]==flags && c.r[14]==pc+(thumb ? 2u : 4u),
+            "broadcast valid guest access exception");
+        else CHECK(c.r[15]==pc+(skip || executed ? 4u : 0u) &&
+            c.cpsr==(skip || executed ? flags&~0x0600fc00u : flags),"broadcast invalid/IT preservation");
+        if (executed) { expected[d]=UINT64_C(0x7f8000017f800001); if (two) expected[d+1u]=expected[d]; }
+        bool match=m_r32(NULL,0x2040u)==0x7f800001u;
+        for (unsigned r=0;r<32u;r++) match&=vfp_get_d(&c,r)==expected[r];
+        CHECK(match,"broadcast refused/skipped/overflow whole FP bank");
+       }
+    const arm_arch_t legacy[]={ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile=0;profile<2u;profile++) for (unsigned hint=0;hint<2u;hint++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,legacy[profile]),"legacy broadcast reset");
+        c.cp15.cpacr=0x00f00000u; c.vfp_fpexc=ARM_FPEXC_EN; c.r[5]=0x2040u;
+        CHECK(a8_move_step(&c,0u,a8_neon_replicate(0u,2u,0u,1u,hint ? 31u : 16u,5u,13u))==
+              (hint ? ARM_OK : ARM_UNDEFINED) && c.r[15]==(hint ? 4u : 0u) && c.r[5]==0x2040u,
+              "broadcast changed legacy refusal/preload alias");
+    }
+    static const uint32_t toggles[]={1u<<8,1u<<9,1u<<21,1u<<23};
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned enabled=0;enabled<2u;enabled++) for (unsigned n=0;n<4u;n++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.r[5]=0x2040u; c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u;
+        uint32_t flags=c.cpsr,fpscr=c.vfp_fpscr;
+        CHECK(a8_move_step(&c,thumb,a8_neon_replicate(thumb,2u,0u,1u,16u,5u,13u)^toggles[n])==ARM_UNDEFINED &&
+              c.r[15]==0x100u && c.r[5]==0x2040u && c.cpsr==flags && c.vfp_fpscr==fpscr,"broadcast claimed neighboring structure");
+    }
+}
+
 static void test_a8_neon_lane_registers(void) {
     CHECK(a8_neon_lane(0u,1u,2u,0u,6u,0u,13u)==0xf4a0680du &&
           a8_neon_lane(0u,1u,2u,0u,7u,2u,13u)==0xf4a2780du &&
@@ -2721,6 +2830,9 @@ static void test_a8_neon_lane_invalid_and_it(void) {
      for (unsigned index_align=0;index_align<16u;index_align++) for (unsigned bad_base=0;bad_base<2u;bad_base++)
       for (unsigned big=0;big<2u;big++) for (unsigned enabled=0;enabled<2u;enabled++)
        for (unsigned skip=0;skip<(thumb ? 2u : 1u);skip++) {
+        /* These load encodings are now valid one-register .32 broadcasts,
+         * covered by the complete broadcast shape/access/IT matrix above. */
+        if (load_ && size==3u && (index_align==8u || index_align==9u)) continue;
         arm_cpu_t c; a8_move_reset(&c,thumb); c.r[5]=0x2040u;
         c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u; if (skip) c.cp15.cpacr=0u;
         if (big) c.cpsr|=ARM_CPSR_E;
@@ -7621,6 +7733,9 @@ int main(void) {
     test_a8_neon_add_results();
     test_a8_neon_add_access_and_invalid();
     test_a8_neon_memory_registers();
+    test_a8_neon_replicate_registers();
+    test_a8_neon_replicate_alignment_and_access();
+    test_a8_neon_replicate_invalid_and_it();
     test_a8_neon_lane_registers();
     test_a8_neon_lane_alignment_and_access();
     test_a8_neon_lane_invalid_and_it();

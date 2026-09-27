@@ -7801,13 +7801,15 @@ static void test_cortex_a8_vfp_multiple_memory_aborts(void) {
     }
 }
 
-static void test_cortex_a8_neon_lane_faults(void) {
+static void test_cortex_a8_neon_lane_replicate_faults(void) {
     static const unsigned offsets[]={15u,13u,4u};
     static const uint32_t types[]={0x0cu,4u,0u}; /* Normal, Device, Strongly-ordered. */
-    for (unsigned host=0;host<2u;host++) for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned load=0;load<2u;load++)
+    for (unsigned broadcast=0;broadcast<2u;broadcast++)
+     for (unsigned host=0;host<2u;host++) for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned load=0;load<2u;load++)
      for (unsigned lane=0;lane<2u;lane++) for (unsigned align=0;align<2u;align++)
       for (unsigned post=0;post<3u;post++) for (unsigned type=0;type<3u;type++)
        for (unsigned fault=0;fault<5u;fault++) {
+        if (broadcast && !load) continue;
         memset(g_ram,0xee,sizeof g_ram); arm_bus_t bus=g_bus;
         if (host) { bus.host_ram=m_host_ram; bus.host_ram_write=m_host_ram_write; }
         arm_cpu_t c; CHECK(arm_reset_profile(&c,&bus,ARM_ARCH_V7_CORTEX_A8),"lane MMU reset");
@@ -7823,6 +7825,7 @@ static void test_cortex_a8_neon_lane_faults(void) {
         m_w32(NULL,0x6008u,0u); /* A load must not touch the unmapped next page. */
         unsigned rm=offsets[post];
         uint32_t insn=(thumb ? 0xf9c4f800u : 0xf4c4f800u)|(load<<21)|(lane<<7)|(align || fault==3u ? 0x30u : 0u)|rm;
+        if (broadcast) insn=(thumb ? 0xf9e4dc80u : 0xf4e4dc80u)|(lane<<5)|(align || fault==3u ? 0x10u : 0u)|rm;
         if (thumb) { m_w16(NULL,0x8000u,(uint16_t)(insn>>16)); m_w16(NULL,0x8002u,(uint16_t)insn); }
         else m_w32(NULL,0x8000u,insn);
         m_w32(NULL,0xaffcu,0x7f800001u); m_w32(NULL,0xb000u,0x13579bdfu);
@@ -7838,15 +7841,18 @@ static void test_cortex_a8_neon_lane_faults(void) {
             CHECK(c.r[15]==4u && c.r[4]==updated && c.cpsr==(flags&~TEST_IT_MASK) &&
                   g_watch_reads32==load && g_watch_writes32==!load,"lane one-word page-end access/writeback");
             uint8_t bytes[8]; memcpy(bytes,&upper[15],8u); uint32_t raw=0x7f800001u;
-            if (load) { memcpy(bytes+4u*lane,&raw,4u); memcpy(&upper[15],bytes,8u); }
+            if (broadcast) { upper[13]=UINT64_C(0x7f8000017f800001); if (lane) upper[14]=upper[13]; }
+            else if (load) { memcpy(bytes+4u*lane,&raw,4u); memcpy(&upper[15],bytes,8u); }
         }
         CHECK(!memcmp(singles,c.vfp_s,sizeof singles) && !memcmp(upper,c.a8_vfp_hi,sizeof upper),"lane MMU whole FP bank");
         g_watch_addr=UINT32_MAX;
         CHECK(m_r32(NULL,0xaffcu)==(aborted || load ? 0x7f800001u : stored) && m_r32(NULL,0xb000u)==0x13579bdfu,
               "lane transfer changed unselected RAM");
        }
-    for (unsigned host=0;host<2u;host++) for (unsigned load=0;load<2u;load++) for (unsigned lane=0;lane<2u;lane++)
+    for (unsigned broadcast=0;broadcast<2u;broadcast++)
+     for (unsigned host=0;host<2u;host++) for (unsigned load=0;load<2u;load++) for (unsigned lane=0;lane<2u;lane++)
      for (unsigned align=0;align<2u;align++) for (unsigned fault=0;fault<4u;fault++) {
+        if (broadcast && !load) continue;
         memset(g_ram,0,sizeof g_ram); arm_bus_t bus=g_bus;
         if (host) { bus.host_ram=m_host_ram; bus.host_ram_write=m_host_ram_write; }
         arm_cpu_t c; CHECK(arm_reset_profile(&c,&bus,ARM_ARCH_V7_CORTEX_A8),"lane split fetch reset");
@@ -7858,6 +7864,7 @@ static void test_cortex_a8_neon_lane_faults(void) {
         uint32_t singles[32],flags=c.cpsr; uint64_t upper[16];
         memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
         uint32_t insn=0xf9c4f80du|(load<<21)|(lane<<7)|(align ? 0x30u : 0u),stored=(uint32_t)(upper[15]>>(32u*lane));
+        if (broadcast) insn=0xf9e4dc8du|(lane<<5)|(align<<4);
         m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x8032u);
         m_w32(NULL,0x6004u,fault==1u ? 0u : fault==2u ? 0xa033u : fault==3u ? 0xa012u : 0xa032u);
         m_w32(NULL,0x600cu,0xc03eu); m_w32(NULL,0xc000u,0x7f800001u);
@@ -7872,7 +7879,8 @@ static void test_cortex_a8_neon_lane_faults(void) {
             CHECK(c.r[15]==0x1002u && c.r[4]==0x3004u && c.cpsr==((flags&~TEST_IT_MASK)|test_it_bits(0x18u)) &&
                   g_watch_reads32==load,"lane split fetch result/IT");
             uint8_t bytes[8]; memcpy(bytes,&upper[15],8u); uint32_t raw=0x7f800001u;
-            if (load) { memcpy(bytes+4u*lane,&raw,4u); memcpy(&upper[15],bytes,8u); }
+            if (broadcast) { upper[13]=UINT64_C(0x7f8000017f800001); if (lane) upper[14]=upper[13]; }
+            else if (load) { memcpy(bytes+4u*lane,&raw,4u); memcpy(&upper[15],bytes,8u); }
         }
         CHECK(!memcmp(singles,c.vfp_s,sizeof singles) && !memcmp(upper,c.a8_vfp_hi,sizeof upper) && g_watch_writes32==(fault ? 0u : !load),
               "lane split fetch whole register bank");
@@ -7881,9 +7889,11 @@ static void test_cortex_a8_neon_lane_faults(void) {
      }
 }
 
-static void test_cortex_a8_neon_lane_guest_retry(void) {
-    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned load=0;load<2u;load++)
+static void test_cortex_a8_neon_lane_replicate_guest_retry(void) {
+    for (unsigned broadcast=0;broadcast<2u;broadcast++)
+     for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned load=0;load<2u;load++)
      for (unsigned lane=0;lane<2u;lane++) for (unsigned align=0;align<2u;align++) {
+        if (broadcast && !load) continue;
         memset(g_ram,0,sizeof g_ram); arm_cpu_t c;
         CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"lane guest retry reset");
         c.cpsr=ARM_MODE_USR|ARM_CPSR_Z|ARM_CPSR_Q|(thumb ? ARM_CPSR_T : 0u); c.cp15.cpacr=0x00f00000u;
@@ -7893,6 +7903,7 @@ static void test_cortex_a8_neon_lane_guest_retry(void) {
         c.r[15]=0x100u; c.r[5]=ARM_FPEXC_EN; c.r[4]=0x2000u; c.r[2]=0x12345678u; c.vfp_fpscr=0x0bc00080u;
         m_w32(NULL,0x2000u,0x7f800001u);
         uint32_t insn=(thumb ? 0xf9c4f80du : 0xf4c4f80du)|(load<<21)|(lane<<7)|(align ? 0x30u : 0u);
+        if (broadcast) insn=(thumb ? 0xf9e4dc8du : 0xf4e4dc8du)|(lane<<5)|(align<<4);
         uint32_t stored=(uint32_t)(upper[15]>>(32u*lane));
         if (thumb) {
             m_w16(NULL,0x100u,0xbf04u); m_w16(NULL,0x102u,(uint16_t)(insn>>16));
@@ -7907,7 +7918,8 @@ static void test_cortex_a8_neon_lane_guest_retry(void) {
         CHECK(arm_step(&c)==ARM_OK && c.vfp_fpexc==ARM_FPEXC_EN,"lane guest enable");
         CHECK(arm_step(&c)==ARM_OK && c.r[15]==pc && c.cpsr==flags,"lane guest exception return");
         uint8_t bytes[8]; memcpy(bytes,&upper[15],8u); uint32_t raw=0x7f800001u;
-        if (load) { memcpy(bytes+4u*lane,&raw,4u); memcpy(&upper[15],bytes,8u); }
+        if (broadcast) { upper[13]=UINT64_C(0x7f8000017f800001); if (lane) upper[14]=upper[13]; }
+        else if (load) { memcpy(bytes+4u*lane,&raw,4u); memcpy(&upper[15],bytes,8u); }
         CHECK(arm_step(&c)==ARM_OK && c.r[15]==pc+4u && c.r[4]==0x2004u &&
               c.cpsr==(thumb ? (flags&~TEST_IT_MASK)|test_it_bits(0x08u) : flags) && c.vfp_fpscr==0x0bc00080u &&
               !memcmp(singles,c.vfp_s,sizeof singles) && !memcmp(upper,c.a8_vfp_hi,sizeof upper) && g_watch_reads32==load && g_watch_writes32==!load,
@@ -12448,8 +12460,8 @@ int main(void) {
     test_cortex_a8_vfp_undefined_retry();
     test_cortex_a8_vfp_data_fetch_and_retry();
     test_cortex_a8_neon_memory_faults();
-    test_cortex_a8_neon_lane_faults();
-    test_cortex_a8_neon_lane_guest_retry();
+    test_cortex_a8_neon_lane_replicate_faults();
+    test_cortex_a8_neon_lane_replicate_guest_retry();
     test_cortex_a8_neon_pair_faults();
     test_cortex_a8_neon_transpose_fetch_and_retry();
     test_cortex_a8_neon_macc_fetch_and_retry();
