@@ -2178,7 +2178,40 @@ A32 arithmetic after validating Thumb register constraints. UMAAL adds the
 two destination words separately. Tests use an independent shift/add product
 reference and cover signed extremes, accumulation carry/wrap, nonadjacent
 destination pairs, IT execution/skips and reserved or forbidden operands.
-Separate DSP multiply and Thumb divide encodings remain unsupported.
+Thumb SMMUL, SMMLA and SMMLS now implement signed high-word multiplication,
+including all three rounded variants, for Cortex-A8 and Swift. They share
+portable arithmetic with the existing A32 forms: the signed product is exact,
+while accumulation and rounding wrap modulo 64 bits before extracting the high
+word. This removes negative signed shifts and signed-overflow hazards from
+the A32 calculation. Thumb forbids SP operands; A32 permits them. Both reject
+PC operands except the add form's no-accumulator alias. These instructions
+preserve NZCV, Q and GE. See
+[DDI0406C.b, A8.8.184 through A8.8.186](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Regressions use an independent shift/add product and separate high-word
+carry/borrow oracle. They cover sign extremes, halfway rounding, accumulation
+wrap, register overlaps, every register role, conditions and IT state, reserved
+encodings, and noncontiguous instruction fetches with translation/permission
+faults. ARM1176 keeps its existing A32 operations and legacy Thumb decoding.
+Other Thumb DSP multiply and divide encodings remain unsupported.
+All 79 strict and 74 shipping tests pass with this change.
+The 276 prepared timebase, UART and interrupt-controller firmware calls pass,
+and the original guarded 61,650-step diagnostic retains its complete trace.
+
+A private generic-CPU diagnostic prepares the matching device tree's two-byte
+`chosen/random-seed` property with the explicit test value `0xa53c`. Static
+inspection shows that matching iBoot fills its existing property length using
+timebase sampling and SHA-1; the diagnostic does not execute that entropy
+producer or claim a random seed. It observes the original kernel reading both
+bytes and wiping them. The same generic CPU/no-ECC, zero-PRAM and inherited-RAM
+assumptions remain explicit, and all other unprepared property guards remain.
+With a 20-million-instruction budget, the baseline stops at `0x800311fc`,
+Thumb `SMMUL r0,r0,r1` (`fb50 f001`), after 17,884,017 steps. The first new
+implementation reaches that budget without an instruction failure. Extending
+only the budget to 50 million reaches a guarded read of CPU0's zero-valued
+`reg` property at physical `0x41103164`, PC `0x802411be`, after 20,170,011
+steps. No timer ticks are supplied. This is further host diagnostic progress,
+not a validated N88 CPU configuration, complete boot or physical-device result.
 
 The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates

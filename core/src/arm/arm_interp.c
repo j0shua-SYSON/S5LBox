@@ -2748,6 +2748,23 @@ static arm_status_t exec_bitfield(arm_cpu_t *c, unsigned rd, unsigned rn,
  *           Rn == 15 is the plain form; otherwise the result is added to Rn.
  *           rr rotates the source right by rr*8 before extracting.
  */
+static int64_t dsp_signed_word(uint32_t value) {
+    return (value & 0x80000000u) ? (int64_t)value - INT64_C(4294967296)
+                                 : (int64_t)value;
+}
+
+/* DDI 0406C.b A8.8.184..186: signed 32x32 products fit int64, but the
+ * accumulation need not. Unsigned arithmetic gives the required low 64 bits
+ * without shifting a negative value or overflowing a signed intermediate. */
+static uint32_t signed_highword(uint32_t n, uint32_t m, uint32_t a,
+                                bool subtract, bool round) {
+    uint64_t product = (uint64_t)(dsp_signed_word(n) * dsp_signed_word(m));
+    uint64_t accumulator = (uint64_t)a << 32;
+    uint64_t result = subtract ? accumulator - product : accumulator + product;
+    if (round) result += UINT64_C(0x80000000);
+    return (uint32_t)(result >> 32);
+}
+
 static arm_status_t exec_media(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
     /* BFC/BFI/SBFX/UBFX A1 (DDI0406C.b A8.8.19/20/164/246).
      * Unlike T32, A32 permits SP operands. Rn=PC selects BFC for insertion
@@ -3152,13 +3169,8 @@ static arm_status_t exec_media(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
         /* SMMUL has no accumulator and is the Ra == 15 encoding; SMMLS with
          * Ra == 15 is not an encoding at all. */
         if (sub && ra == 15u) return ARM_UNDEFINED;
-        int64_t prod = (int64_t)(int32_t)reg_read(c, pc, rn) *
-                       (int32_t)reg_read(c, pc, rm);
-        int64_t acc = (ra == 15u)
-            ? 0 : ((int64_t)(int32_t)reg_read(c, pc, ra) << 32);
-        int64_t res = sub ? (acc - prod) : (acc + prod);
-        if (round) res += INT64_C(0x80000000);
-        c->r[rd] = (uint32_t)((uint64_t)res >> 32);
+        c->r[rd] = signed_highword(c->r[rn], c->r[rm],
+                                  ra == 15u ? 0u : c->r[ra], sub, round);
         return ARM_OK;
     }
     if ((insn & 0x0ff000f0u) == 0x07800010u) {        /* USAD8 USADA8 */
@@ -3325,11 +3337,6 @@ static int64_t dsp_signed_half(uint32_t value, bool top) {
     uint32_t half = (value >> (top ? 16u : 0u)) & 0xffffu;
     return (half & 0x8000u) ? (int64_t)half - INT64_C(65536)
                             : (int64_t)half;
-}
-
-static int64_t dsp_signed_word(uint32_t value) {
-    return (value & 0x80000000u) ? (int64_t)value - INT64_C(4294967296)
-                                 : (int64_t)value;
 }
 
 static uint32_t dsp_accumulate_word(arm_cpu_t *c, int64_t product,
@@ -4414,6 +4421,21 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         uint32_t product = c->r[rn] * c->r[rm];
         uint32_t addend = ra == 15u ? 0u : c->r[ra]; /* Ra=PC is MUL. */
         c->r[rd] = subtract ? addend - product : addend + product;
+        return ARM_OK;
+    }
+    /* SMMUL/SMMLA/SMMLS and their rounded forms (A8.8.184..186).
+     * Ra=PC denotes no accumulator only in the add encoding. Thumb's SP/PC
+     * restrictions precede every operand read; no flags, including Q, change. */
+    if (((first & 0xfff0u) == 0xfb50u || (first & 0xfff0u) == 0xfb60u) &&
+        !(second & 0xe0u)) {
+        unsigned rn = first & 15u, rm = second & 15u;
+        unsigned rd = (second >> 8) & 15u, ra = second >> 12;
+        bool subtract = (first & 0xfff0u) == 0xfb60u;
+        if (rn == 13u || rn == 15u || rm == 13u || rm == 15u ||
+            rd == 13u || rd == 15u || ra == 13u || (subtract && ra == 15u))
+            return ARM_UNDEFINED;
+        c->r[rd] = signed_highword(c->r[rn], c->r[rm], ra == 15u ? 0u : c->r[ra],
+                                  subtract, (second & 0x10u) != 0u);
         return ARM_OK;
     }
     /* SMULL/UMULL/SMLAL/UMLAL and UMAAL (A8.8.178/189/255..257).

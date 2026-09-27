@@ -11960,6 +11960,157 @@ static uint64_t test_wide_product(uint32_t a, uint32_t b, bool is_signed) {
     return result;
 }
 
+static void exclusive_put(bool thumb, uint32_t pc, uint32_t insn);
+
+/* Compute high-word carry/borrow separately from the low product. The product
+ * oracle above uses shift/add, independently of the interpreter's multiply. */
+static uint32_t test_highword_result(uint32_t n, uint32_t m, uint32_t a,
+                                     bool subtract, bool round) {
+    uint64_t product = test_wide_product(n, m, true);
+    uint32_t low = (uint32_t)product, high = (uint32_t)(product >> 32);
+    if (subtract) {
+        high = a - high - (low != 0u);
+        low = 0u - low;
+    } else high += a;
+    return high + (round && low >= 0x80000000u);
+}
+
+static uint32_t highword_encoding(bool thumb, unsigned op, bool round,
+                                  unsigned rd, unsigned rn, unsigned rm, unsigned ra) {
+    if (op == 0u) ra = 15u;
+    if (thumb) return (op == 2u ? 0xfb600000u : 0xfb500000u) |
+        (rn << 16) | (ra << 12) | (rd << 8) | (round ? 0x10u : 0u) | rm;
+    return 0xe7500010u | (rd << 16) | (ra << 12) | (rm << 8) |
+        (op == 2u ? 0xc0u : 0u) | (round ? 0x20u : 0u) | rn;
+}
+
+static void test_signed_highword_values(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT, ARM_ARCH_V6_ARM1176};
+    const uint32_t values[][3] = {
+        {0u,UINT32_MAX,UINT32_MAX}, {1u,UINT32_MAX,0u},
+        {UINT32_MAX,UINT32_MAX,0x80000000u}, {0x80000000u,0x80000000u,0x7fffffffu},
+        {0x80000000u,0x7fffffffu,0x80000000u}, {0x7fffffffu,0x7fffffffu,0x7fffffffu},
+        {0x80000000u,1u,0u}, {0x7fffffffu,1u,UINT32_MAX},
+        {0x80000001u,1u,0x80000000u}, {0x40000000u,2u,0x7fffffffu},
+        {0xc0000000u,2u,0x80000000u}, {0x40000000u,0x40000000u,1u},
+        {0x12345678u,0x9abcdef0u,0x87654321u}, {0x400u,0x2e8ba2e9u,0u}
+    };
+    const unsigned regs[][4] = {{9,6,14,1},{6,6,14,1},{14,6,14,1},
+                               {1,6,14,1},{9,6,6,6},{6,6,6,6}};
+    CHECK(test_highword_result(0x400u,0x2e8ba2e9u,0u,false,false)==0xbau &&
+          test_highword_result(0x80000000u,1u,0u,false,false)==UINT32_MAX &&
+          test_highword_result(0x80000000u,1u,0u,false,true)==0u &&
+          test_highword_result(1u,1u,0u,true,false)==UINT32_MAX &&
+          test_highword_result(1u,1u,0u,true,true)==0u &&
+          test_highword_result(0x80000000u,0x80000000u,0x7fffffffu,false,false)==0xbfffffffu,
+          "signed high-word reference anchors");
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned p=0;p<(thumb ? 2u : 3u);p++)
+      for (unsigned host=0;host<2u;host++)
+       for (unsigned op=0;op<3u;op++) for (unsigned round=0;round<2u;round++)
+        for (unsigned v=0;v<sizeof values/sizeof values[0];v++)
+         for (unsigned layout=0;layout<sizeof regs/sizeof regs[0];layout++)
+          for (unsigned condition=0;condition<3u;condition++) {
+            arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
+            arm_cpu_t c; CHECK(arm_reset_profile(&c,&bus,profiles[p]),"reset");
+            c.cpsr=ARM_MODE_USR|ARM_CPSR_N|ARM_CPSR_C|ARM_CPSR_V|0xa0000u|
+                ((v&1u) ? ARM_CPSR_Q : 0u)|(thumb ? ARM_CPSR_T : 0u);
+            if (thumb && condition) c.cpsr |= test_it_bits(condition==1u ? 0x1cu : 0x0cu);
+            c.r[6]=values[v][0]; c.r[14]=values[v][1]; c.r[1]=values[v][2]; c.r[9]=0xabcdef12u;
+            c.excl_valid=true; c.excl_addr=0x1234u; c.vfp_fpscr=0x0bc00080u;
+            unsigned rd=regs[layout][0],rn=regs[layout][1],rm=regs[layout][2],ra=op ? regs[layout][3] : 15u;
+            uint32_t before[16],flags=c.cpsr; memcpy(before,c.r,sizeof before);
+            if (condition!=2u) before[rd]=test_highword_result(c.r[rn],c.r[rm],ra==15u ? 0u : c.r[ra],op==2u,round!=0u);
+            before[15]=4u;
+            uint32_t insn=highword_encoding(thumb!=0u,op,round!=0u,rd,rn,rm,ra);
+            if (!thumb && condition) insn=(insn&0x0fffffffu)|(condition==1u ? 0x10000000u : 0u);
+            exclusive_put(thumb!=0u,0u,insn);
+            uint32_t expected_flags=thumb && condition ? (flags&~TEST_IT_MASK)|test_it_bits(0x18u) : flags;
+            CHECK(arm_step(&c)==ARM_OK && memcmp(before,c.r,sizeof before)==0 &&
+                  c.cpsr==expected_flags && c.cycles==1u && c.excl_valid && c.excl_addr==0x1234u && c.vfp_fpscr==0x0bc00080u,
+                  "high-word t=%u p=%u host=%u op=%u round=%u v=%u alias=%u condition=%u",thumb,p,host,op,round,v,layout,condition);
+          }
+    /* The original kernel instruction uses an overlapping destination. */
+    arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+    c.cpsr=0x400000f3u; c.r[15]=0x800311fcu; c.r[0]=0x400u; c.r[1]=0x2e8ba2e9u;
+    exclusive_put(true,c.r[15],0xfb50f001u);
+    CHECK(arm_step(&c)==ARM_OK && c.r[0]==0xbau && c.r[1]==0x2e8ba2e9u &&
+          c.r[15]==0x80031200u && c.cpsr==0x400000f3u,"original kernel SMMUL");
+}
+
+static void test_signed_highword_constraints(void) {
+    const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8,ARM_ARCH_V7_SWIFT,ARM_ARCH_V6_ARM1176};
+    for (unsigned thumb=0;thumb<2u;thumb++)
+     for (unsigned p=0;p<(thumb ? 2u : 3u);p++)
+      for (unsigned op=0;op<3u;op++) for (unsigned round=0;round<2u;round++)
+       for (unsigned role=0;role<(op ? 4u : 3u);role++) for (unsigned reg=0;reg<16u;reg++)
+        for (unsigned execute=0;execute<2u;execute++) {
+            arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,profiles[p]),"reset");
+            c.cpsr=ARM_MODE_USR|ARM_CPSR_N|ARM_CPSR_C|ARM_CPSR_Q|0x50000u|
+                (thumb ? ARM_CPSR_T|test_it_bits(execute ? 0x18u : 0x08u) : 0u);
+            for (unsigned r=0;r<15u;r++) c.r[r]=0x81f023a5u+r;
+            unsigned rd=role==0u ? reg : 9u, rn=role==1u ? reg : 6u;
+            unsigned rm=role==2u ? reg : 14u, ra=op ? (role==3u ? reg : 1u) : 15u;
+            bool valid=rd!=15u && rn!=15u && rm!=15u && (op!=2u || ra!=15u) &&
+                (!thumb || (rd!=13u && rn!=13u && rm!=13u && ra!=13u));
+            uint32_t before[16],flags=c.cpsr; memcpy(before,c.r,sizeof before);
+            if (!execute || valid) {
+                if (execute) before[rd]=test_highword_result(c.r[rn],c.r[rm],ra==15u ? 0u : c.r[ra],op==2u,round!=0u);
+                before[15]=4u;
+            }
+            uint32_t insn=highword_encoding(thumb!=0u,op,round!=0u,rd,rn,rm,ra);
+            if (!thumb && !execute) insn &= 0x0fffffffu;
+            exclusive_put(thumb!=0u,0u,insn);
+            CHECK(arm_step(&c)==(!execute || valid ? ARM_OK : ARM_UNDEFINED) &&
+                  memcmp(before,c.r,sizeof before)==0 && c.cpsr==(thumb && (!execute || valid) ? flags&~TEST_IT_MASK : flags),
+                  "high-word operand t=%u p=%u op=%u round=%u role=%u reg=%u execute=%u",thumb,p,op,round,role,reg,execute);
+        }
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned op=0;op<3u;op++)
+     for (unsigned bits=1u;bits<(thumb ? 8u : 3u);bits++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cpsr=ARM_MODE_SYS|ARM_CPSR_C|(thumb ? ARM_CPSR_T : 0u); c.r[9]=0x12345678u;
+        uint32_t insn=highword_encoding(thumb!=0u,op,false,9u,6u,14u,1u);
+        insn=thumb ? insn|(bits<<5) : (insn&~0xc0u)|(bits<<6);
+        exclusive_put(thumb!=0u,0u,insn);
+        CHECK(arm_step(&c)==ARM_UNDEFINED && c.r[9]==0x12345678u && c.r[15]==0u &&
+              c.cpsr==(ARM_MODE_SYS|ARM_CPSR_C|(thumb ? ARM_CPSR_T : 0u)),"high-word reserved encoding %08x",insn);
+     }
+    arm_cpu_t c; arm_reset(&c,&g_bus); c.cpsr|=ARM_CPSR_T; c.r[0]=0x400u; c.r[14]=0x1001u;
+    exclusive_put(true,0u,0xfb50f001u);
+    CHECK(arm_step(&c)==ARM_OK && c.r[0]==0x400u && c.r[15]==0x16a0u && c.r[14]==3u,
+          "ARM1176 lost its existing BL-suffix decoding");
+}
+
+static void test_thumb_highword_fetch(void) {
+    for (unsigned host=0;host<2u;host++) for (unsigned op=0;op<3u;op++)
+     for (unsigned round=0;round<2u;round++) for (unsigned fault=0;fault<5u;fault++)
+      for (unsigned execute=0;execute<2u;execute++) {
+        memset(g_ram,0,sizeof g_ram);
+        arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&bus,ARM_ARCH_V7_CORTEX_A8),"reset");
+        c.cp15.sctlr=ARM_SCTLR_M|ARM_SCTLR_XP; c.cp15.ttbr0=0x4000u; c.cp15.dacr=1u;
+        c.cpsr=ARM_MODE_USR|ARM_CPSR_T|ARM_CPSR_N|ARM_CPSR_V|ARM_CPSR_Q|test_it_bits(execute ? 0x1cu : 0x0cu);
+        c.r[15]=0xffeu; c.r[0]=0x80000000u; c.r[1]=1u; c.r[2]=0x7fffffffu;
+        uint32_t flags=c.cpsr, insn=highword_encoding(true,op,round!=0u,0u,0u,1u,2u);
+        m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,fault==4u ? 0u : 0x8032u);
+        m_w32(NULL,0x6004u,fault==1u ? 0u : fault==2u ? 0xa033u : fault==3u ? 0xa012u : 0xa032u);
+        m_w16(NULL,0x8ffeu,(uint16_t)(insn>>16)); m_w16(NULL,0xa000u,(uint16_t)insn);
+        m_w16(NULL,0x9000u,0xf90eu); /* Wrong physical continuation must not be fetched. */
+        g_watch_addr=0xa000u; g_watch_reads16=0u;
+        arm_status_t status=arm_step(&c);
+        uint32_t expected=execute ? test_highword_result(0x80000000u,1u,op ? 0x7fffffffu : 0u,op==2u,round!=0u) : 0x80000000u;
+        CHECK(status==ARM_OK && c.cycles==1u && c.r[1]==1u && c.r[2]==0x7fffffffu &&
+              (fault ? c.r[15]==ARM_VEC_PREFETCH && c.r[0]==0x80000000u &&
+               c.r[14]==0x1002u && c.cp15.ifar==(fault==4u ? 0xffeu : 0x1000u) &&
+               c.spsr[ARM_BANK_ABT]==flags && g_watch_reads16==0u &&
+               (c.cp15.ifsr&15u)==(fault==1u || fault==4u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION) :
+               c.r[15]==0x1002u && c.r[0]==expected && g_watch_reads16==1u &&
+               c.cpsr==((flags&~TEST_IT_MASK)|test_it_bits(0x18u))),
+              "high-word split fetch host=%u op=%u round=%u fault=%u execute=%u",host,op,round,fault,execute);
+        g_watch_addr=UINT32_MAX;
+      }
+}
+
 static void test_thumb2_multiply(void) {
     const arm_arch_t profiles[] = {ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V7_SWIFT};
     const uint32_t values[][2] = {
@@ -12881,6 +13032,9 @@ int main(void) {
     test_thumb2_multiply();
     test_thumb2_multiply_long();
     test_thumb2_multiply_constraints();
+    test_signed_highword_values();
+    test_signed_highword_constraints();
+    test_thumb_highword_fetch();
     test_thumb_compare_and_branch();
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();
