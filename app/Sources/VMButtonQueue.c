@@ -174,6 +174,29 @@ void vm_button_momentary_note_accepted(
     }
 }
 
+static uint64_t resume_hold_anchor(uint64_t anchor, uint64_t paused_ns,
+                                   uint64_t resumed_ns) {
+    if (!anchor || !paused_ns || !resumed_ns ||
+        anchor > paused_ns || resumed_ns < paused_ns)
+        return 0u;
+    /* Subtractions cannot overflow: age <= paused_ns <= resumed_ns. */
+    return resumed_ns - (paused_ns - anchor);
+}
+
+void vm_button_holds_resume(
+    vm_button_power_hold_t *power, vm_button_momentary_holds_t *momentary,
+    uint64_t paused_ns, uint64_t resumed_ns) {
+    if (power && power->active)
+        power->delivered_ns = resume_hold_anchor(
+            power->delivered_ns, paused_ns, resumed_ns);
+    if (!momentary) return;
+    for (unsigned i = 0; i < S5L_BUTTON_COUNT; i++) {
+        if (uses_momentary_floor(i) && momentary->active[i])
+            momentary->delivered_ns[i] = resume_hold_anchor(
+                momentary->delivered_ns[i], paused_ns, resumed_ns);
+    }
+}
+
 void vm_button_queue_pop(vm_button_queue_t *q) {
     if (!q || q->count == 0u) return;
     q->head = (q->head + 1u) % VM_BUTTON_QUEUE_CAP;

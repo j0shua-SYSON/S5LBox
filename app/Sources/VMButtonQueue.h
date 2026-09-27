@@ -211,6 +211,14 @@ void vm_button_momentary_note_accepted(
     vm_button_momentary_holds_t *holds,
     uint64_t delivered_ns, bool waking_home);
 
+/* Exclude actual host pause time from accepted button pulses, before either
+ * normal resume or checkpoint release draining. Preserve pre-pause pulse age,
+ * held state and guest-cycle witnesses. Invalid clocks clear only the host
+ * anchor, retaining each release policy's existing clockless behavior. */
+void vm_button_holds_resume(
+    vm_button_power_hold_t *power, vm_button_momentary_holds_t *momentary,
+    uint64_t paused_ns, uint64_t resumed_ns);
+
 /* Remove the oldest transition. Harmless on an empty queue. */
 void vm_button_queue_pop(vm_button_queue_t *q);
 

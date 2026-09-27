@@ -1287,9 +1287,31 @@ or a 500 ms absolute host cap. Ordinary Home/volume presses and Power retain
 their existing policies. This host-only anchor is not serialized. Repeated
 held presses preserve it; release clears it; missing/backwards clocks fail open.
 Queue regressions cover these boundaries, unrelated keys and cancellation.
-They pass 154/0; the full local suite passes 77/77 (59.40 s). The release-guard
-follow-up still needs native CI and phone validation. No animation speedup is
-claimed from either Home change.
+They pass 154/0; the full local suite passes 77/77 (59.40 s). All nine core CI
+jobs and the iOS build passed. On the phone, ordinary short Home woke a restored
+asleep guest and a separately proven fresh park. Navigation, ten rapid QWERTY
+characters, another sleep/wake and saved-asleep relaunch retained usable input.
+No animation speedup is claimed from either Home change.
+
+### Button debounce must exclude host pause time (2026-09-27)
+
+The next physical edge case failed: short Home followed immediately by Pause
+accepted only the press before execution stopped. After roughly 3.6 seconds,
+Resume accepted the queued release, but the guest display remained black.
+Core clocks already excluded that pause; the app's accepted-button anchors did
+not. The host cap had expired while the guest could not sample the held pin.
+
+Before normal resume or checkpoint input draining, the emulator thread now
+shifts active Home, volume and Power anchors by the actual stopped interval.
+Pre-pause pulse age, held flags, Home wake policy and Power's guest-cycle witness
+are retained. Queued but unaccepted presses gain no age. Missing or backwards
+clocks invalidate only the host anchor, preserving each existing clockless
+release policy. No guest state or checkpoint format changes.
+
+Queue tests pass 180/0, covering all hold policies, repeated pauses, checkpoint
+cancellation, inactive/queued presses, invalid clocks and arithmetic near the
+clock limit. The full local suite passes 77/77 (50.70 s). Physical
+interrupted-wake validation of this change is pending.
 
 ### Historical instruction-resume narrative
 

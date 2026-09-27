@@ -494,6 +494,115 @@ static void test_home_wake_waits_for_display_with_a_host_cap(void) {
           "checkpoint release lost the bounded Home wake policy");
 }
 
+static void test_button_pulses_exclude_host_pause(void) {
+    const uint64_t ms = UINT64_C(1000000);
+    const uint64_t down_ns = 7000u * ms;
+    const uint64_t pause_ns = down_ns + 20u * ms;
+    const uint64_t resume_ns = pause_ns + 3000u * ms;
+    vm_button_event_t home_down = { S5L_BUTTON_MENU, true };
+    vm_button_event_t home_up = { S5L_BUTTON_MENU, false };
+    vm_button_event_t power_up = { S5L_BUTTON_HOLD, false };
+    vm_button_power_hold_t power = {
+        .active = true, .display_running_at_press = true,
+        .delivered_ns = down_ns, .delivered_cycles = 123u,
+    };
+    vm_button_momentary_holds_t holds = {0};
+    vm_button_momentary_note_accepted(&home_down, &holds, down_ns, true);
+    const unsigned volume[] = { S5L_BUTTON_VOLUP, S5L_BUTTON_VOLDOWN };
+    for (unsigned i = 0; i < 2u; i++) {
+        vm_button_event_t down = { (uint8_t)volume[i], true };
+        vm_button_momentary_note_accepted(&down, &holds, down_ns, false);
+    }
+    vm_button_holds_resume(&power, &holds, pause_ns, resume_ns);
+    CHECK(power.delivered_ns == down_ns + 3000u * ms &&
+          holds.delivered_ns[S5L_BUTTON_MENU] == power.delivered_ns,
+          "pause did not preserve the accepted pulse's 20 ms age");
+    CHECK(power.active && power.display_running_at_press &&
+          power.delivered_cycles == 123u && holds.home_wake &&
+          holds.active[S5L_BUTTON_MENU],
+          "pause changed held state, wake policy or guest-cycle witness");
+    CHECK(!vm_button_momentary_release_ready(&home_up, &holds, resume_ns, true),
+          "a stopped guest spent Home's debounce floor");
+    CHECK(vm_button_momentary_release_ready(
+              &home_up, &holds, resume_ns + 30u * ms, true),
+          "Home restarted its floor instead of retaining pre-pause age");
+    CHECK(!vm_button_momentary_release_ready(
+              &home_up, &holds, resume_ns + 480u * ms - 1u, false) &&
+          vm_button_momentary_release_ready(
+              &home_up, &holds, resume_ns + 480u * ms, false),
+          "Home's wake cap included stopped host time");
+    CHECK(!vm_button_power_release_ready(
+              &power_up, &power, resume_ns + 480u * ms - 1u, 124u, true) &&
+          vm_button_power_release_ready(
+              &power_up, &power, resume_ns + 480u * ms, 124u, true),
+          "awake Power's floor included stopped host time");
+    power.display_running_at_press = false;
+    CHECK(!vm_button_power_release_ready(
+              &power_up, &power, resume_ns + 230u * ms - 1u, 124u, false) &&
+          vm_button_power_release_ready(
+              &power_up, &power, resume_ns + 230u * ms, 124u, false),
+          "dark Power's cap included stopped host time");
+    for (unsigned i = 0; i < 2u; i++) {
+        vm_button_event_t up = { (uint8_t)volume[i], false };
+        CHECK(!vm_button_momentary_release_ready(
+                  &up, &holds, resume_ns + 30u * ms - 1u, false) &&
+              vm_button_momentary_release_ready(
+                  &up, &holds, resume_ns + 30u * ms, false),
+              "volume %u lost its active-time floor", volume[i]);
+    }
+
+    /* Repeated pauses and checkpoint cancellation retain the same accepted
+     * press. Only the pending queue is cancelled, not the held-pin witness. */
+    vm_button_queue_t q = {0};
+    CHECK(vm_button_queue_push(&q, S5L_BUTTON_MENU, false) &&
+          vm_button_queue_cancel_pending(&q) == 1u, "cancel release setup");
+    vm_button_holds_resume(&power, &holds, resume_ns + 10u * ms,
+                           resume_ns + 1010u * ms);
+    CHECK(holds.delivered_ns[S5L_BUTTON_MENU] == down_ns + 4000u * ms &&
+          !vm_button_momentary_release_ready(
+              &home_up, &holds, resume_ns + 1010u * ms, true),
+          "a second pause or checkpoint cancellation expired the pulse");
+    vm_button_momentary_note_accepted(&home_up, &holds, resume_ns, false);
+    power.active = false;
+    const uint64_t stale_power = power.delivered_ns;
+    vm_button_holds_resume(&power, &holds, pause_ns, resume_ns);
+    CHECK(!holds.active[S5L_BUTTON_MENU] && !holds.home_wake &&
+          holds.delivered_ns[S5L_BUTTON_MENU] == 0u &&
+          power.delivered_ns == stale_power,
+          "inactive button acquired a pause-adjusted anchor");
+    CHECK(vm_button_queue_push(&q, S5L_BUTTON_MENU, true), "queue press setup");
+    vm_button_holds_resume(NULL, &holds, pause_ns, resume_ns);
+    vm_button_momentary_note_accepted(&home_down, &holds, resume_ns, true);
+    CHECK(holds.delivered_ns[S5L_BUTTON_MENU] == resume_ns,
+          "a press queued during pause inherited time before acceptance");
+
+    const uint64_t invalid[][3] = {
+        {0u, pause_ns, resume_ns}, {down_ns, 0u, resume_ns},
+        {down_ns, pause_ns, 0u}, {down_ns, pause_ns, pause_ns - 1u},
+        {pause_ns + 1u, pause_ns, resume_ns},
+    };
+    for (unsigned i = 0; i < sizeof invalid / sizeof invalid[0]; i++) {
+        power.active = true;
+        power.delivered_ns = invalid[i][0];
+        holds.delivered_ns[S5L_BUTTON_MENU] = invalid[i][0];
+        vm_button_holds_resume(&power, &holds, invalid[i][1], invalid[i][2]);
+        CHECK(power.delivered_ns == 0u && power.delivered_cycles == 123u &&
+              power.active && holds.delivered_ns[S5L_BUTTON_MENU] == 0u &&
+              holds.active[S5L_BUTTON_MENU] && holds.home_wake,
+              "invalid pause clock %u changed more than host anchors", i);
+        CHECK(vm_button_momentary_release_ready(&home_up, &holds, resume_ns, false),
+              "invalid pause clock %u wedged Home", i);
+    }
+    power.delivered_ns = UINT64_MAX - 100u;
+    vm_button_holds_resume(&power, NULL, UINT64_MAX - 80u, UINT64_MAX);
+    CHECK(power.delivered_ns == UINT64_MAX - 20u,
+          "pause anchor overflowed near the host clock limit");
+    vm_button_holds_resume(&power, NULL, UINT64_MAX, UINT64_MAX);
+    CHECK(power.delivered_ns == UINT64_MAX - 20u,
+          "zero-duration pause changed the pulse age");
+    vm_button_holds_resume(NULL, NULL, 0u, 0u);
+}
+
 int main(void) {
     printf("S5LBox app button queue tests\n");
     test_the_two_orders_are_not_the_same_and_map_correctly();
@@ -504,6 +613,7 @@ int main(void) {
     test_power_release_uses_display_edge_or_bounded_fallback();
     test_home_and_volume_survive_the_guest_debounce();
     test_home_wake_waits_for_display_with_a_host_cap();
+    test_button_pulses_exclude_host_pause();
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

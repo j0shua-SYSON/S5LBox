@@ -1754,8 +1754,15 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
              * resume; both can execute work and inject input below. The UI
              * thread only requests the pause and never mutates core clocks. */
             if (hostPausePending && (!paused || checkpoint)) {
+                uint64_t resumedNS = vm_now_ns();
                 (void)s5l8900_resume_active_host_clock(
-                    &_machine, hostPauseStartNS, vm_now_ns());
+                    &_machine, hostPauseStartNS, resumedNS);
+                /* A stopped guest cannot sample a held pin. Its release floor
+                 * and wake cap must age only while execution is possible. */
+                pthread_mutex_lock(&_lock);
+                vm_button_holds_resume(&_powerHold, &_momentaryHolds,
+                                       hostPauseStartNS, resumedNS);
+                pthread_mutex_unlock(&_lock);
                 hostPausePending = NO;
             }
             if (checkpoint) {
