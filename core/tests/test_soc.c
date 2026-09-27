@@ -973,7 +973,7 @@ static void test_power_wait_freezes_cpu_and_preserves_rtc_wake_restore(void) {
 
 static void test_power_wait_requires_a_live_quiescent_witness(void) {
     enum { AWAKE, UNWRITTEN, NO_CALLBACK, USER_MODE, IRQ_ENABLED, FIQ_ENABLED,
-           THUMB, BIG_ENDIAN, ABORT_PENDING, MISALIGNED, ACTIVE_I2C,
+           THUMB, DATA_BIG_ENDIAN, ABORT_PENDING, MISALIGNED, ACTIVE_I2C,
            NO_FETCH, FETCH_BLOCK, FETCH_GEN, FETCH_PRIV, SCTLR, TTBR0, TTBR1,
            TTBCR, DACR, CONTEXT, CHANGED_CODE, HOST_HOOK, BUS_INTERPOSE, CASE_COUNT };
     for (unsigned which = 0u; which < CASE_COUNT; ++which) {
@@ -990,7 +990,7 @@ static void test_power_wait_requires_a_live_quiescent_witness(void) {
         case IRQ_ENABLED: m.cpu.cpsr &= ~ARM_CPSR_I; break;
         case FIQ_ENABLED: m.cpu.cpsr &= ~ARM_CPSR_F; break;
         case THUMB: m.cpu.cpsr |= ARM_CPSR_T; break;
-        case BIG_ENDIAN: m.cpu.cpsr |= ARM_CPSR_E; break;
+        case DATA_BIG_ENDIAN: m.cpu.cpsr |= ARM_CPSR_E; break;
         case ABORT_PENDING: m.cpu.abort_pending = true; break;
         case MISALIGNED: m.cpu.r[15] |= 2u; break;
         case ACTIVE_I2C: m.i2c[0].active = true; break;
