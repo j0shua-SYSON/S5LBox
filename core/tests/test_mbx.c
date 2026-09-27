@@ -3965,7 +3965,7 @@ static void test_compact_column_resample(void) {
     uint32_t first_u1 = object + record_offset + 25u * 4u;
     uint32_t second_u1 = object + record_offset + 31u * 4u;
     uint32_t captured_u1 = test_float_word(0.5f / (float)TEXTURE_WIDTH);
-    uint32_t wider_u1 = test_float_word(1.5f / (float)TEXTURE_WIDTH);
+    uint32_t wider_u1 = test_float_word(1.0f + 1.0f / (float)TEXTURE_WIDTH);
     CHECK(test_gpu_read32(&m, first_u1) == captured_u1 &&
           test_gpu_read32(&m, second_u1) == captured_u1,
           "compact column fixture lost its half-texel width");
@@ -3977,7 +3977,7 @@ static void test_compact_column_resample(void) {
     CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
           test_gpu_read32(&m, last) == 0x76543210u &&
           m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-          "wider mixed-axis compact scale was not rejected atomically");
+          "out-of-allocation compact UVs were not rejected atomically");
     test_gpu_write32(&m, first_u1, captured_u1);
     test_gpu_write32(&m, second_u1, captured_u1);
 
@@ -4012,14 +4012,13 @@ static void test_compact_column_resample(void) {
     s5l8900_free(&m);
 }
 
-/* Unlocking into Safari's retained error alert produced these two exact
- * compact-copy records.  Unlike the older compact fixtures, their texture
+/* The Safari alert records below retain a distinct full-extent case. Their texture
  * control uses the 0x0e layout while their UV endpoints remain half a texel
  * inside a 320x356 source.  Both destination rectangles are uniform
  * minifications to subpixel edges.  They are two phases of one producer
  * family, not permission to treat every full-extent compact packet as a
  * filtered transform. */
-struct compact_uniform_minification_capture {
+struct compact_filtered_capture {
     const char *name;
     uint32_t target;
     uint32_t boundary_left, boundary_top, boundary_right, boundary_bottom;
@@ -4028,8 +4027,30 @@ struct compact_uniform_minification_capture {
     uint32_t record[33];
 };
 
-static const struct compact_uniform_minification_capture
-compact_uniform_minification_captures[] = {
+static const struct compact_filtered_capture compact_filtered_captures[] = {
+    {
+        /* Exact navigation draw and scissor; boundary and region are derived.
+         * X shrinks while Y expands, independent of the direct sampler. */
+        .name = "navigation compact mixed-axis filtered rectangle",
+        .target = 0x00897000u,
+        .boundary_left = 1u, .boundary_top = 96u,
+        .boundary_right = 319u, .boundary_bottom = 105u,
+        .raster_left = 1u, .raster_top = 96u,
+        .raster_right = 319u, .raster_bottom = 104u,
+        .xclip = 0x01400000u, .yclip = 0x00700060u,
+        .record = {
+            0xe0000000u, 0xa6318000u, 0x8e517ee1u, 0xa6887610u,
+            0x22220e80u,
+            0x3fa8ed00u, 0x41ae845eu, 0x439f5713u, 0x41ae845eu,
+            0x3fa8ed00u, 0x42d04292u, 0x439f5713u, 0x42d04292u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xff000000u, 0u, 0u,
+            0xff000000u, 0x3f1fc000u, 0u,
+            0xff000000u, 0u, 0x3f6e0000u,
+            0xff000000u, 0x3f1fc000u, 0x3f6e0000u,
+        },
+    },
     {
         .name = "Safari alert compact minification on CLCD surface",
         .target = 0x00897000u,
@@ -4080,10 +4101,9 @@ static uint32_t test_compact_capture_gart(uint32_t gpu_page,
     return gpu_page < 0x00c00000u ? table2 : table3;
 }
 
-static void test_compact_full_extent_uniform_minification(void) {
+static void test_compact_filtered_captures(void) {
     enum {
-        SOURCE_WIDTH = 320u, SOURCE_HEIGHT = 356u,
-        SOURCE_STRIDE = 0x500u, TEXTURE_HEIGHT = 512u,
+        SOURCE_WIDTH = 320u, SOURCE_STRIDE = 0x500u,
         TARGET_STRIDE = 0x500u,
     };
     const uint32_t table0 = 0x08003000u;
@@ -4091,7 +4111,6 @@ static void test_compact_full_extent_uniform_minification(void) {
     const uint32_t table3 = 0x08005000u;
     const uint32_t region = 0x00001000u;
     const uint32_t object = 0x00014000u;
-    const uint32_t source = 0x00a51080u;
     const uint32_t region_pa = 0x08010000u;
     const uint32_t object_pa = 0x08014000u;
     const uint32_t source_pa = 0x08020000u;
@@ -4099,11 +4118,17 @@ static void test_compact_full_extent_uniform_minification(void) {
     const uint32_t record_offset = 0x0e8u;
 
     for (unsigned capture_index = 0;
-         capture_index < sizeof compact_uniform_minification_captures /
-                             sizeof compact_uniform_minification_captures[0];
+         capture_index < sizeof compact_filtered_captures /
+                             sizeof compact_filtered_captures[0];
          capture_index++) {
-        const struct compact_uniform_minification_capture *capture =
-            &compact_uniform_minification_captures[capture_index];
+        const struct compact_filtered_capture *capture =
+            &compact_filtered_captures[capture_index];
+        const uint32_t source = (capture->record[2] & 0x3ffffu) << 7;
+        const uint32_t TEXTURE_HEIGHT =
+            8u << ((capture->record[1] >> 20) & 7u);
+        const uint32_t SOURCE_HEIGHT = (uint32_t)(
+            test_float_value(capture->record[29]) * TEXTURE_HEIGHT + 0.5f);
+        const bool half_texel_layout = (capture->record[2] >> 31) != 0u;
         s5l8900_t m;
         CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
               "%s machine init failed", capture->name);
@@ -4119,7 +4144,8 @@ static void test_compact_full_extent_uniform_minification(void) {
             (SOURCE_HEIGHT - 1u) * SOURCE_STRIDE + SOURCE_WIDTH * 4u - 1u;
         for (uint32_t page = source_page0;
              page <= (source_last & ~0xfffu); page += 0x1000u)
-            test_map_gpu_page(&m, table2, page,
+            test_map_gpu_page(&m,
+                              test_compact_capture_gart(page, table2, table3), page,
                               source_pa + (page - source_page0));
 
         uint32_t target_first = capture->target +
@@ -4230,12 +4256,15 @@ static void test_compact_full_extent_uniform_minification(void) {
         test_gpu_write32(&m, first, 0x89abcdefu);
         test_gpu_write32(&m, last, 0x76543210u);
         test_gpu_write32(&m, y1_word0, nonuniform_y1);
-        test_gpu_write32(&m, y1_word1, nonuniform_y1);
+        /* Full-extent filtering still requires uniform reduction. Ordinary
+         * filtered rectangles instead reject a non-parallelogram warp. */
+        test_gpu_write32(&m, y1_word1,
+                         half_texel_layout ? captured_y1 : nonuniform_y1);
         m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
         CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
               test_gpu_read32(&m, last) == 0x76543210u &&
               m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-              "%s nonuniform scale partially committed or completed",
+              "%s invalid transform partially committed or completed",
               capture->name);
         m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
         test_gpu_write32(&m, y1_word0, captured_y1);
@@ -4244,8 +4273,9 @@ static void test_compact_full_extent_uniform_minification(void) {
         uint32_t v1_word0 = object + record_offset + 29u * 4u;
         uint32_t v1_word1 = object + record_offset + 32u * 4u;
         uint32_t captured_v1 = capture->record[29];
-        uint32_t full_v1 = test_float_word(
-            (float)SOURCE_HEIGHT / (float)TEXTURE_HEIGHT);
+        uint32_t full_v1 = test_float_word(half_texel_layout
+            ? 1.0f + 1.0f / (float)TEXTURE_HEIGHT
+            : (float)SOURCE_HEIGHT / (float)TEXTURE_HEIGHT);
         test_gpu_write32(&m, first, 0x89abcdefu);
         test_gpu_write32(&m, last, 0x76543210u);
         test_gpu_write32(&m, v1_word0, full_v1);
@@ -4254,7 +4284,7 @@ static void test_compact_full_extent_uniform_minification(void) {
         CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
               test_gpu_read32(&m, last) == 0x76543210u &&
               m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-              "%s non-half-texel UV endpoint partially committed or completed",
+              "%s invalid UV endpoint partially committed or completed",
               capture->name);
         m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
         test_gpu_write32(&m, v1_word0, captured_v1);
@@ -4272,7 +4302,8 @@ static void test_compact_full_extent_uniform_minification(void) {
               capture->name);
         uint32_t late_source = source +
             late_source_y.second * SOURCE_STRIDE + late_source_x.second * 4u;
-        uint32_t source_pte_address = table2 +
+        uint32_t source_pte_address =
+            test_compact_capture_gart(late_source, table2, table3) +
             (((late_source >> 12) & 0x3ffu) * 4u);
         uint32_t source_pte = m.bus.read32(m.bus.ctx, source_pte_address);
         test_gpu_write32(&m, first, 0x89abcdefu);
@@ -5443,15 +5474,13 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
 
         if (form->scaled_sprite) {
             if (form->column_resample) {
-                /* The measured mixed-axis exception has a one-texel-or-less
-                 * horizontal UV span. Preserve both redundant UV corners
-                 * while widening that span by one full texel; the resulting
-                 * two-dimensional transform must remain an atomic rejection. */
+                /* Scaling is independent of sampling state, but UVs must
+                 * still fit the allocation. Keep both redundant corners
+                 * consistent while crossing that bound. */
                 uint32_t texture_width =
                     8u << ((form->quad[1] >> 24) & 7u);
                 uint32_t changed_u1 = test_float_word(
-                    test_float_value(form->quad[30]) +
-                    1.0f / (float)texture_width);
+                    1.0f + 1.0f / (float)texture_width);
                 test_gpu_write32(&m, first, 0x89abcdefu);
                 test_gpu_write32(&m, last_destination, 0x76543210u);
                 test_gpu_write32(&m, object + 0x1f0u + 30u * 4u,
@@ -5461,25 +5490,22 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
                 m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
                 CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
                       test_gpu_read32(&m, last_destination) == 0x76543210u,
-                      "%s wider mixed-axis source partially committed",
+                      "%s out-of-allocation U partially committed",
                       form->name);
                 CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-                      "%s wider mixed-axis source raised completion",
+                      "%s out-of-allocation U raised completion",
                       form->name);
                 test_gpu_write32(&m, object + 0x1f0u + 30u * 4u,
                                  form->quad[30]);
                 test_gpu_write32(&m, object + 0x1f0u + 40u * 4u,
                                  form->quad[40]);
             } else if (form->row_resample) {
-                /* The measured row-resample family preserves the vertical
-                 * source extent at 1:1. Preserve both redundant UV corners
-                 * while extending that extent by one texel; a generic
-                 * two-axis minifier must remain an atomic rejection. */
+                /* Coherent UVs extending beyond the allocation are invalid
+                 * even when destination geometry remains well formed. */
                 uint32_t texture_height =
                     8u << ((form->quad[1] >> 20) & 7u);
                 uint32_t changed_v1 = test_float_word(
-                    test_float_value(form->quad[36]) +
-                    1.0f / (float)texture_height);
+                    1.0f + 1.0f / (float)texture_height);
                 test_gpu_write32(&m, first, 0x89abcdefu);
                 test_gpu_write32(&m, last_destination, 0x76543210u);
                 test_gpu_write32(&m, object + 0x1f0u + 36u * 4u,
@@ -5489,20 +5515,18 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
                 m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
                 CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
                       test_gpu_read32(&m, last_destination) == 0x76543210u,
-                      "%s taller mixed-axis source partially committed",
+                      "%s out-of-allocation V partially committed",
                       form->name);
                 CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-                      "%s taller mixed-axis source raised completion",
+                      "%s out-of-allocation V raised completion",
                       form->name);
                 test_gpu_write32(&m, object + 0x1f0u + 36u * 4u,
                                  form->quad[36]);
                 test_gpu_write32(&m, object + 0x1f0u + 41u * 4u,
                                  form->quad[41]);
             } else {
-                /* Keep geometry and normalized records mutually consistent
-                 * while making only X scale differ. A literal-packet
-                 * whitelist or unchecked generic scaler would both miss this
-                 * rejection. */
+                /* Move only p10 and its normalized duplicate. Independent
+                 * axis scaling is valid; this non-parallelogram warp is not. */
                 uint32_t changed_x1 = test_float_word(
                     test_float_value(form->quad[10]) + 0.25f);
                 uint32_t changed_normalized = test_float_word(
@@ -5510,27 +5534,19 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
                 test_gpu_write32(&m, first, 0x89abcdefu);
                 test_gpu_write32(&m, object + 0x1f0u + 10u * 4u,
                                  changed_x1);
-                test_gpu_write32(&m, object + 0x1f0u + 14u * 4u,
-                                 changed_x1);
                 test_gpu_write32(&m, object + 0x1f0u + 32u * 4u,
-                                 changed_normalized);
-                test_gpu_write32(&m, object + 0x1f0u + 42u * 4u,
                                  changed_normalized);
                 m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
                 CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
-                      "%s nonuniform filtered scale changed the destination",
+                      "%s non-parallelogram warp changed the destination",
                       form->name);
                 CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-                      "%s nonuniform filtered scale raised completion",
+                      "%s non-parallelogram warp raised completion",
                       form->name);
                 test_gpu_write32(&m, object + 0x1f0u + 10u * 4u,
                                  form->quad[10]);
-                test_gpu_write32(&m, object + 0x1f0u + 14u * 4u,
-                                 form->quad[14]);
                 test_gpu_write32(&m, object + 0x1f0u + 32u * 4u,
                                  form->quad[32]);
-                test_gpu_write32(&m, object + 0x1f0u + 42u * 4u,
-                                 form->quad[42]);
             }
 
         }
@@ -5630,6 +5646,57 @@ static const struct mbx_test_status_form navigation_vertical_resample_form = {
         0x3f200000u, 0x3f6e0000u, 0x3ea00000u, 0x3dce0000u,
     },
 };
+
+/* Exercise each validated sampler across all combinations of shrinking,
+ * unity and growing X/Y. These are generated geometry variants, not captures.
+ * Every variant checks full pixels, arbitrary BGRA samples and atomic faults. */
+static void test_filtered_rectangle_scale_matrix(void) {
+    const uint32_t widths[] = {64u, 192u, 320u};
+    const uint32_t heights[] = {32u, 83u, 160u};
+    const uint32_t samplers[][2] = {
+        {0xa6884710u, 0xae504ea0u},
+        {0xcd206c40u, 0xae504ea0u},
+        {0xd6887610u, 0xa3104620u},
+    };
+    for (unsigned s = 0u; s < 3u; s++) {
+        for (unsigned x = 0u; x < 3u; x++) {
+            for (unsigned y = 0u; y < 3u; y++) {
+                struct mbx_test_status_form form = navigation_vertical_resample_form;
+                char name[96];
+                snprintf(name, sizeof name,
+                         "filtered sampler %u source %ux%u to 192x83",
+                         s, widths[x], heights[y]);
+                form.name = name;
+                form.xclip = 0x00c00000u;
+                form.yclip = 0x00700010u;
+                form.tile_x1 = 23u;
+                form.tile_y0 = 1u;
+                form.top = 20u;
+                form.width = 192u;
+                form.height = 83u;
+                form.expected_covered_pixels = 192u * 83u;
+                form.boundary[3] = form.boundary[7] = test_float_word(20.0f);
+                form.boundary[4] = form.boundary[6] = test_float_word(192.0f);
+                form.source_width = widths[x];
+                form.source_height = heights[y];
+                form.quad[1] = 0xa6518000u; /* 512x256 allocation */
+                form.quad[3] = samplers[s][0];
+                form.quad[6] = samplers[s][1];
+                form.quad[10] = form.quad[14] = test_float_word(192.0f);
+                form.quad[32] = form.quad[42] = test_float_word(192.0f / 1024.0f);
+                form.quad[30] = form.quad[40] = test_float_word(
+                    (float)widths[x] / 512.0f);
+                form.quad[36] = form.quad[41] = test_float_word(
+                    (float)heights[y] / 256.0f);
+                form.variable_vertex_alpha = s != 0u;
+                for (unsigned v = 0u; v < 4u; v++)
+                    form.quad[24u + v * 5u] = s == 0u
+                        ? 0xff000000u : 0x80000000u;
+                test_captured_status_form(&form);
+            }
+        }
+    }
+}
 
 /* Safari's tabs transition retained this exact alternate-sampler packet. It
  * stretches a half-texel-wide source column over the 320-pixel surface while
@@ -7359,11 +7426,12 @@ int main(void) {
     test_second_tiled_status_glyph();
     test_compact_opaque_blit_copy();
     test_compact_column_resample();
-    test_compact_full_extent_uniform_minification();
+    test_compact_filtered_captures();
     test_compact_clipped_zero_coverage();
     test_pointer_selected_solid_quad();
     test_unfiltered_mirrored_sprites();
     test_later_tiled_status_sprites();
+    test_filtered_rectangle_scale_matrix();
     test_captured_status_form(&navigation_vertical_resample_form);
     struct mbx_test_status_form vertical = navigation_vertical_resample_form;
     vertical.name = "relocated navigation vertical magnification";

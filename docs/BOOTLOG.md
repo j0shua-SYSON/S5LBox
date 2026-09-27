@@ -1107,6 +1107,30 @@ The targeted MBX suite passes 2,265 checks. Native CI and physical replay remain
 pending. The temporary eight-contact console trace has been removed; its three
 typing trials passed and did not establish the cause of the earlier lost key.
 
+### Separate rectangular scaling from sampler state (2026-09-27)
+
+A follow-up physical control run retained 53 rejected draws during wake/unlock
+and navigation. The final compact packets shrink X while stretching Y; the
+vertical-only exception above could not cover them. The three already decoded
+filtered sampler states specify sampling/blending, independently of the vertex
+extents. Their bounded axis-aligned rectangles now use the existing bilinear
+implementation for independent positive X/Y scales, instead of accumulating
+per-ratio exceptions. This removes renderer code, not validation: shader words,
+finite geometry, source/destination limits, normalized duplicates, texture
+allocation, UV bounds, scissor, tiles and atomic mappings remain checked.
+Affine/perspective semantics and the compact full-extent layout are unchanged.
+
+The exact compact draw and scissor are covered by a fixture with derived
+boundary/region data, including a source crossing two GART banks. A generated
+27-case matrix covers shrinking, unity and growing axes for each of the three
+samplers, full pixel comparisons, arbitrary BGRA inputs and source/target fault
+atomicity. Former ratio-only negative tests now check actual non-parallelogram
+warps or out-of-allocation UVs; the full-extent uniform-scale restriction still
+has its original negative tests. The targeted suite passes 3,373 checks; the
+complete local release suite passes 77/77 (53.44 seconds).
+Exact-build CI and physical replay of this general correction remain pending;
+it is not yet evidence that overall animation duration or lost keys are fixed.
+
 ### Historical instruction-resume narrative
 
 Two interpreter changes make the current instruction counts different from the

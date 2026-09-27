@@ -3164,46 +3164,28 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
             dx <= (float)source_width + epsilon &&
             dy >= (float)source_height - epsilon &&
             dy <= (float)source_height + epsilon;
-        if (!unity_transform) {
+        /* The three validated filtered sampler states describe sampling and
+         * blending, not the vertex scale. Navigation emits ordinary
+         * rectangles with independently changing X/Y extents, including
+         * mixed minification/magnification. Geometry, UVs, allocation, clip,
+         * tile coverage and atomic GART staging remain checked separately.
+         * This does not widen affine or full-extent sampler semantics. */
+        if (half_texel_layout) {
+            if (source_width > MBX_3D_WIDTH || source_height > 480u) {
+                if (why) *why = "filtered sprite source exceeds bounded dimensions";
+                return false;
+            }
+        } else if (!unity_transform) {
             float scale_x = dx / (float)source_width;
             float scale_y = dy / (float)source_height;
             float scale_difference = scale_x > scale_y
                 ? scale_x - scale_y : scale_y - scale_x;
-            /* The device unlock capture is a direct-filtered 67x20 source at
-             * 0.724135x in both axes. Rejecting every direct minification left
-             * 3DIdle false and sent AppleMBX's watchdog into an endless
-             * Graphics Recovery Event loop. Preserve the previously measured
-             * nonuniform magnification family, but admit minification only
-             * when both axes carry the captured uniform-scale invariant. */
-            bool direct_magnification = direct_sampler && half_texel_layout &&
-                scale_x >= 1.0f - epsilon && scale_y >= 1.0f - epsilon;
-            bool direct_uniform_minification =
-                direct_sampler && half_texel_layout &&
-                scale_x > 0.0f && scale_y > 0.0f &&
-                scale_x <= 1.0f + epsilon && scale_y <= 1.0f + epsilon &&
-                scale_difference <= 0.00001f;
-            /* Safari's keyboard/address transition contributes a direct-
-             * filtered row operation with a wide source rectangle. It keeps
-             * the conservative source height exactly 1:1 while reducing only
-             * X. Treat that one-dimensional resample as its own family: this
-             * does not admit vertical minification, mixed two-axis scaling,
-             * or an unchecked generic textured quad. */
-            bool direct_horizontal_minification =
-                direct_sampler && half_texel_layout && source_width > 2u &&
-                scale_x > 0.0f && scale_x <= 1.0f + epsilon &&
-                scale_y >= 1.0f - epsilon && scale_y <= 1.0f + epsilon;
-            /* The compact blit producer used while unlocking back into
-             * Safari carries the same direct filtered sampler as the older
-             * compact records, but selects the 0x0e texture-coordinate layout.
-             * Its independently encoded UV rectangle starts on integer texels
-             * and ends exactly one half texel inside both conservative source
-             * bounds.  Two retained phases uniformly reduce the same 320x356
-             * source to different subpixel rectangles.  Keep this distinct
-             * from the genuinely unfiltered 0x0e perspective producer: both
-             * axes must be strict, positive, uniform minification and neither
-             * source axis may collapse into the narrow-strip family. */
+            /* The compact 0x0e producer's independently encoded UV rectangle
+             * ends half a texel inside its conservative bounds. Only the
+             * captured strict uniform minification establishes filtering for
+             * this otherwise unfiltered layout. Keep that distinction. */
             bool compact_half_texel_envelope =
-                compact_copy && direct_sampler && !half_texel_layout &&
+                compact_copy && direct_sampler &&
                 source_width > 2u && source_height > 2u &&
                 u_texel_start == (float)source_left &&
                 v_texel_start == (float)source_top &&
@@ -3215,73 +3197,12 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                 scale_x < 1.0f - epsilon &&
                 scale_y < 1.0f - epsilon &&
                 scale_difference <= 0.00001f;
-            /* Retained direct, alternate and modulated producer packets all
-             * use a one-texel-or-narrower horizontal UV strip. They magnify
-             * that strip in X while retaining or reducing its rows in Y. The
-             * Spotlight return packet's normalized float round-trip lands
-             * 0.00000191 texels above one, so its conservative floor/ceil
-             * envelope spans two columns. Classify the sampled UV span, while
-             * bounding that envelope to two columns; genuinely wider strips
-             * and vertical magnification still require another measured
-             * family. */
-            bool filtered_narrow_strip_resample =
-                (direct_sampler || modulated_sampler || scaled_sampler) &&
-                half_texel_layout && source_width <= 2u &&
-                u_texel_span <= 1.0f + epsilon &&
-                scale_x >= 1.0f - epsilon &&
-                scale_y > 0.0f && scale_y <= 1.0f + epsilon;
-            bool modulated_uniform_scale =
-                modulated_sampler && half_texel_layout &&
-                scale_x > 0.0f && scale_y > 0.0f &&
-                scale_difference <= 0.00001f;
-            bool alternate_uniform_minification =
-                scaled_sampler && half_texel_layout &&
-                scale_x > 0.0f && scale_y > 0.0f &&
-                scale_x <= 1.0f + epsilon && scale_y <= 1.0f + epsilon &&
-                scale_difference <= 0.00001f;
-            /* Home/Settings navigation also emits this sampler with a
-             * 320x60 source envelope stretched to 320x83. Its scissor can
-             * expose only the final rows. Preserve the horizontal 1:1
-             * invariant while admitting vertical magnification; sampling,
-             * allocation, clip, tile and atomic GART checks are unchanged. */
-            bool alternate_vertical_magnification =
-                scaled_sampler && half_texel_layout &&
-                source_width > 2u && source_height > 2u &&
-                dx >= (float)source_width - epsilon &&
-                dx <= (float)source_width + epsilon &&
-                scale_y > 1.0f + epsilon;
             if (source_width > MBX_3D_WIDTH || source_height > 480u ||
-                (!direct_magnification && !direct_uniform_minification &&
-                 !direct_horizontal_minification &&
-                 !compact_full_extent_uniform_minification &&
-                 !filtered_narrow_strip_resample &&
-                 !modulated_uniform_scale &&
-                 !alternate_uniform_minification &&
-                 !alternate_vertical_magnification)) {
-                if (mbx_trace_state == 1) {
-                    fprintf(stderr,
-                            "MBX3D transform reject: sampler=%s half=%u "
-                            "source=%ux%u uv-span=%.9gx%.9g "
-                            "destination=%.9gx%.9g scale=%.9gx%.9g "
-                            "difference=%.9g quad=%08x/%08x/%08x/%08x/%08x\n",
-                            direct_sampler ? "direct" :
-                            (modulated_sampler ? "modulated" : "scaled"),
-                            half_texel_layout ? 1u : 0u,
-                            source_width, source_height,
-                            (double)u_texel_span, (double)v_texel_span,
-                            (double)dx, (double)dy,
-                            (double)scale_x, (double)scale_y,
-                            (double)scale_difference,
-                            quad[1], quad[2], quad[3], quad[6], quad[7]);
-                }
+                !compact_full_extent_uniform_minification) {
                 if (why) *why =
-                    "filtered transform is outside its measured sampler scale family";
+                    "full-extent transform is outside its measured sampler family";
                 return false;
             }
-        } else if (scaled_sampler) {
-            if (why) *why =
-                "alternate filtered state lacks its measured minification";
-            return false;
         }
     }
     bool filtered_sampling = half_texel_layout ||
