@@ -4,10 +4,19 @@
 #include <stdlib.h>
 #include <string.h>
 
-static bool ram_span(const s5l8920_t *m, uint32_t address, size_t size) {
-    return m && m->ram && address >= S5L8920_RAM_BASE &&
-           size <= S5L8920_RAM_SIZE &&
-           address - S5L8920_RAM_BASE <= S5L8920_RAM_SIZE - size;
+static bool ram_offset(const s5l8920_t *m, uint32_t address, size_t size,
+                        uint32_t *offset) {
+    if (!m || !m->ram || size > S5L8920_RAM_SIZE) return false;
+    if (address >= S5L8920_RAM_BASE &&
+        address - S5L8920_RAM_BASE <= S5L8920_RAM_SIZE - size) {
+        *offset = address - S5L8920_RAM_BASE;
+        return true;
+    }
+    if (m->ram_boot_window && address <= S5L8920_RAM_BOOT_WINDOW - size) {
+        *offset = address;
+        return true;
+    }
+    return false;
 }
 
 /* Matching DT: three banks, 64 KiB stride, each with a 4 KiB PL192 aperture.
@@ -53,8 +62,9 @@ static bool vic_access_supported(const pl192_t *v, uint32_t offset) {
 
 static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
     if (access_failed(m)) return 0u;
-    if (ram_span(m,address,size)) {
-        const uint8_t *p = m->ram + address - S5L8920_RAM_BASE;
+    uint32_t ram_at;
+    if (ram_offset(m,address,size,&ram_at)) {
+        const uint8_t *p = m->ram + ram_at;
         uint32_t value = 0u;
         for (unsigned n = 0; n < size; n++) value |= (uint32_t)p[n] << (8u * n);
         return value;
@@ -94,8 +104,9 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
 
 static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t value) {
     if (access_failed(m)) return;
-    if (ram_span(m,address,size)) {
-        uint8_t *p = m->ram + address - S5L8920_RAM_BASE;
+    uint32_t ram_at;
+    if (ram_offset(m,address,size,&ram_at)) {
+        uint8_t *p = m->ram + ram_at;
         for (unsigned n = 0; n < size; n++) p[n] = (uint8_t)(value >> (8u * n));
         return;
     }
@@ -137,12 +148,25 @@ ACCESSORS(32)
 
 static uint8_t *host_ram(void *ctx, uint32_t address, uint32_t size) {
     s5l8920_t *m = ctx;
-    return size && ram_span(m,address,size) ? m->ram + address - S5L8920_RAM_BASE : NULL;
+    uint32_t offset;
+    return size && ram_offset(m,address,size,&offset) ? m->ram + offset : NULL;
 }
 
 bool s5l8920_load(s5l8920_t *m, uint32_t address, const void *data, size_t size) {
-    if ((!data && size) || !ram_span(m,address,size)) return false;
-    if (size) memmove(m->ram + address - S5L8920_RAM_BASE,data,size);
+    uint32_t offset;
+    if ((!data && size) || !ram_offset(m,address,size,&offset)) return false;
+    if (size) memmove(m->ram + offset,data,size);
+    return true;
+}
+
+bool s5l8920_set_ram_boot_window(s5l8920_t *m, bool enabled) {
+    if (!m || !m->ram) return false;
+    if (m->ram_boot_window != enabled) {
+        m->ram_boot_window = enabled;
+        arm_mmu_tlb_flush(&m->cpu);
+        m->cpu.excl_valid = false;
+        m->cpu.a8_excl_size = 0u;
+    }
     return true;
 }
 
@@ -182,6 +206,7 @@ bool s5l8920_set_irq(s5l8920_t *m, unsigned source, bool asserted) {
 bool s5l8920_reset(s5l8920_t *m) {
     if (!m || !m->ram) return false;
     if (!arm_reset_profile(&m->cpu,&m->bus,ARM_ARCH_V7_CORTEX_A8)) return false;
+    m->ram_boot_window = false;
     s5l8920_uart_reset(&m->uart0);
     m->timebase_ticks=0u;
     for (unsigned bank = 0; bank < S5L8920_VIC_COUNT; bank++) {

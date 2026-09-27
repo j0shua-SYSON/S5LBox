@@ -87,6 +87,117 @@ static void test_geometry_and_refusals(s5l8920_t *m) {
     CHECK(s5l8920_reset(m), "reset after refusals");
 }
 
+static void test_ram_boot_window(s5l8920_t *m) {
+    s5l8920_t empty = {0};
+    CHECK(!s5l8920_set_ram_boot_window(NULL,true) && !s5l8920_set_ram_boot_window(&empty,true) &&
+          !empty.ram_boot_window, "uninitialized board accepted RAM mapping");
+    CHECK(s5l8920_reset(m) && !m->ram_boot_window, "reset invented inherited boot mapping");
+    (void)m->bus.read32(m,0u);
+    s5l8920_bus_failure_t stopped = m->bus_failure;
+    arm_cp15_t cp15 = m->cpu.cp15;
+    m->cpu.a8_par=0x1234507cu;
+    m->cpu.excl_valid=true; m->cpu.a8_excl_size=8u;
+    uint32_t generation=m->cpu.tlb_gen;
+    CHECK(s5l8920_set_ram_boot_window(m,true) && m->ram_boot_window &&
+          m->cpu.tlb_gen!=generation && !m->cpu.excl_valid && !m->cpu.a8_excl_size &&
+          !memcmp(&stopped,&m->bus_failure,sizeof stopped) &&
+          !memcmp(&cp15,&m->cpu.cp15,sizeof cp15) && m->cpu.a8_par==0x1234507cu,
+          "mapping change lost diagnostics/state or retained caches/monitor");
+    generation=m->cpu.tlb_gen; m->cpu.excl_valid=true;
+    CHECK(s5l8920_set_ram_boot_window(m,true) && m->cpu.tlb_gen==generation && m->cpu.excl_valid,
+          "same mapping unnecessarily invalidated execution state");
+    s5l8920_clear_bus_failure(m);
+    const uint32_t offsets[]={0u,1u,0x3ffu,0xffeu,0x1000u,0x123456u,
+                              S5L8920_RAM_SIZE-4u,S5L8920_RAM_SIZE-2u,S5L8920_RAM_SIZE-1u};
+    for (unsigned n=0;n<sizeof offsets/sizeof offsets[0];n++) for (unsigned size=1;size<=4;size*=2) {
+        uint32_t low=offsets[n],high=S5L8920_RAM_BASE+low;
+        if ((uint64_t)low+size>S5L8920_RAM_SIZE) continue;
+        if (size==1u) m->bus.write8(m,low,0x5au);
+        else if (size==2u) m->bus.write16(m,low,0x7654u);
+        else m->bus.write32(m,low,0x98765432u);
+        uint32_t value=size==1u ? m->bus.read8(m,high) : size==2u ? m->bus.read16(m,high) : m->bus.read32(m,high);
+        CHECK(value==(size==1u ? 0x5au : size==2u ? 0x7654u : 0x98765432u), "low-to-high RAM coherence");
+        if (size==1u) m->bus.write8(m,high,0xa5u);
+        else if (size==2u) m->bus.write16(m,high,0xabcd);
+        else m->bus.write32(m,high,0x12345678u);
+        value=size==1u ? m->bus.read8(m,low) : size==2u ? m->bus.read16(m,low) : m->bus.read32(m,low);
+        CHECK(value==(size==1u ? 0xa5u : size==2u ? 0xabcdu : 0x12345678u) &&
+              m->bus.host_ram(m,low,size)==m->ram+low && m->bus.host_ram_write(m,high,size)==m->ram+low,
+              "high-to-low coherence or host-pointer alias");
+    }
+    CHECK(!m->bus.access_failed(m) && !m->bus.host_ram(m,S5L8920_RAM_SIZE-1u,2u) &&
+          !m->bus.host_ram_write(m,S5L8920_RAM_SIZE,1u) && !m->bus.host_ram(m,0u,UINT32_MAX) &&
+          !m->bus.host_ram(m,UINT32_MAX,4u) && !m->bus.host_ram(m,0u,0u), "alias bounds exposed wrapped/non-RAM ranges");
+    for (unsigned n=0;n<16;n++) m->ram[0x20u+n]=(uint8_t)n;
+    CHECK(s5l8920_load(m,0x22u,m->ram+0x20u,8u), "overlapping host alias load");
+    for (unsigned n=0;n<8;n++) CHECK(m->ram[0x22u+n]==n, "alias host load lost memmove semantics");
+    CHECK(s5l8920_load(m,S5L8920_RAM_SIZE,NULL,0u) && !s5l8920_load(m,0u,m->ram,SIZE_MAX) &&
+          !s5l8920_load(m,S5L8920_RAM_SIZE-1u,m->ram,2u), "host alias load bounds");
+    const uint32_t gaps[]={S5L8920_RAM_SIZE,S5L8920_RAM_BASE-4u,S5L8920_RAM_BASE+S5L8920_RAM_SIZE,UINT32_MAX};
+    for (unsigned n=0;n<sizeof gaps/sizeof gaps[0];n++) {
+        s5l8920_clear_bus_failure(m); m->bus.write8(m,gaps[n],0xa5u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_UNMAPPED && m->bus_failure.address==gaps[n], "alias escaped installed RAM");
+    }
+    s5l8920_clear_bus_failure(m); (void)m->bus.read32(m,S5L8920_PMGR_BASE);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && m->ram_boot_window,
+          "handoff selection fabricated the unmodeled remap register");
+    s5l8920_clear_bus_failure(m); m->bus.write32(m,S5L8920_PMGR_BASE,2u);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED, "unmodeled remap write silently succeeded");
+    CHECK(s5l8920_reset(m) && !m->ram_boot_window && !m->bus.host_ram(m,0u,4u) &&
+          !s5l8920_load(m,0u,m->ram+0x20u,1u), "functional reset retained explicit low mapping");
+}
+
+static void test_boot_window_cached_access(s5l8920_t *m) {
+    arm_bus_t original=m->bus;
+    for (unsigned host=0;host<2;host++) for (unsigned mmu=0;mmu<2;mmu++) for (unsigned store=0;store<2;store++) {
+        CHECK(s5l8920_reset(m) && s5l8920_set_ram_boot_window(m,true), "prepare alias CPU access");
+        m->bus.host_ram=host ? original.host_ram : NULL;
+        m->bus.host_ram_write=host ? original.host_ram_write : NULL;
+        put(m,0x300u,store ? 0xe5812000u : 0xe5912000u); /* STR/LDR r2,[r1] */
+        put(m,0x1000u,0x12345678u);
+        uint32_t code=S5L8920_RAM_BASE+0x300u,target=0x1000u;
+        if (mmu) {
+            put(m,0x4000u+0x800u*4u,S5L8920_RAM_BASE|0xc0eu);
+            put(m,0x4000u+0x900u*4u,0xc0eu);
+            m->cpu.cp15.ttbr0=S5L8920_RAM_BASE+0x4000u; m->cpu.cp15.dacr=1u;
+            m->cpu.cp15.sctlr|=ARM_SCTLR_M|ARM_SCTLR_XP;
+            code=0x80000300u; target=0x90001000u;
+        }
+        m->cpu.r[15]=code; m->cpu.r[1]=target; m->cpu.r[2]=0x12345678u;
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[2]==0x12345678u, "warm low RAM data cache");
+        CHECK(s5l8920_set_ram_boot_window(m,false), "remove low RAM mapping");
+        m->cpu.r[15]=code; m->cpu.r[2]=0xabcdef01u;
+        uint64_t cycles=m->cpu.cycles;
+        CHECK(arm_step(&m->cpu)==ARM_HALT && m->cpu.r[15]==code && m->cpu.r[2]==0xabcdef01u &&
+              m->cpu.cycles==cycles && m->bus_failure.address==0x1000u &&
+              m->bus_failure.reason==S5L8920_BUS_UNMAPPED && m->ram[0x1000u]==0x78u,
+              "removed alias leaked through a cached read/write pointer");
+        CHECK(s5l8920_set_ram_boot_window(m,true), "repair low RAM mapping");
+        s5l8920_clear_bus_failure(m);
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.cycles==cycles+1u &&
+              (store ? m->ram[0x1000u]==1u : m->cpu.r[2]==0x12345678u), "repaired mapping did not retry");
+    }
+    m->bus=original;
+    CHECK(s5l8920_reset(m) && s5l8920_set_ram_boot_window(m,true), "prepare low instruction fetch");
+    put(m,0x100u,0xe3a00011u); m->cpu.r[15]=0x100u;
+    CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[0]==0x11u, "low alias instruction fetch");
+    CHECK(s5l8920_set_ram_boot_window(m,false), "remove warm fetch alias");
+    m->cpu.r[15]=0x100u; uint64_t cycles=m->cpu.cycles;
+    CHECK(arm_step(&m->cpu)==ARM_HALT && m->cpu.r[0]==0x11u && m->cpu.r[15]==0x100u &&
+          m->cpu.cycles==cycles && m->bus_failure.address==0x100u, "stale alias instruction fetched");
+    CHECK(s5l8920_set_ram_boot_window(m,true), "repair fetch alias");
+    s5l8920_clear_bus_failure(m); put(m,0x100u,0xe3a00022u);
+    CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[0]==0x22u, "repaired alias did not fetch fresh code");
+    CHECK(s5l8920_reset(m) && s5l8920_set_ram_boot_window(m,true), "prepare alias-end partial store");
+    put(m,0u,0xe4812004u); m->cpu.r[15]=S5L8920_RAM_BASE;
+    m->cpu.r[1]=S5L8920_RAM_SIZE-2u; m->cpu.r[2]=0xabcdef12u;
+    CHECK(arm_step(&m->cpu)==ARM_HALT && m->cpu.r[1]==S5L8920_RAM_SIZE-2u && !m->cpu.cycles &&
+          m->ram[S5L8920_RAM_SIZE-2u]==0x12u && m->ram[S5L8920_RAM_SIZE-1u]==0xefu &&
+          m->bus_failure.address==S5L8920_RAM_SIZE && m->bus_failure.size==1u && m->bus_failure.value==0xcdu,
+          "cross-alias-end store lost prefix, wrapped, or retired writeback");
+    CHECK(s5l8920_reset(m), "reset after alias tests");
+}
+
 static void test_cpu_access_stops(s5l8920_t *m) {
     put(m,0u,0xe5912000u); /* LDR r2,[r1] */
     m->cpu.r[15] = S5L8920_RAM_BASE; m->cpu.r[1] = 0x82500000u; m->cpu.r[2] = 0xdeadbeefu;
@@ -381,6 +492,8 @@ int main(void) {
     CHECK(s5l8920_init(&m), "initialization");
     if (!m.ram) return 1;
     test_geometry_and_refusals(&m);
+    test_ram_boot_window(&m);
+    test_boot_window_cached_access(&m);
     test_cpu_access_stops(&m);
     test_uart_checked_bus(&m);
     test_uart_interrupt_wiring(&m);

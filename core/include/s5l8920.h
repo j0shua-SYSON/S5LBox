@@ -11,6 +11,8 @@
 
 #define S5L8920_RAM_BASE UINT32_C(0x40000000)
 #define S5L8920_RAM_SIZE UINT32_C(0x10000000)
+/* Implemented extent of the explicitly selected low RAM boot window. */
+#define S5L8920_RAM_BOOT_WINDOW S5L8920_RAM_SIZE
 #define S5L8920_VIC_BASE UINT32_C(0xbf200000)
 #define S5L8920_VIC_STRIDE UINT32_C(0x10000)
 #define S5L8920_VIC_COUNT 3u
@@ -44,6 +46,7 @@ typedef struct {
     uint64_t timebase_ticks;
     uint32_t input_levels[S5L8920_VIC_COUNT];
     s5l8920_bus_failure_t bus_failure;
+    bool ram_boot_window;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -59,6 +62,17 @@ void s5l8920_free(s5l8920_t *m);
  * model of power sequencing. The caller owns execution and device timing. */
 bool s5l8920_reset(s5l8920_t *m);
 bool s5l8920_set_irq(s5l8920_t *m, unsigned source, bool asserted);
+
+/* Prepare the inherited RAM boot mapping selected by BF100000[1:0]=2 in
+ * matching iBoot. Enabled low addresses cover the installed RAM and share
+ * its storage at RAM_BASE. This models the RAM selection only, not the full
+ * remap register, ROM/SRAM selections, or physical reset sequencing. The
+ * implemented extent is bounded to RAM_SIZE; larger hardware decode ranges
+ * are not established. A functional reset removes this explicit preparation.
+ * A mapping change invalidates CPU translation/host-pointer caches and the
+ * exclusive monitor, preserving registers, RAM and latched bus diagnostics.
+ * Call between CPU steps; BF100000 MMIO remains unavailable. */
+bool s5l8920_set_ram_boot_window(s5l8920_t *m, bool enabled);
 
 /* Board-owned UART input advances refresh the real interrupt fabric before
  * returning. Use these instead of advancing the embedded component directly

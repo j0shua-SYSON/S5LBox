@@ -89,9 +89,53 @@ checked write at ARM `0x8008973c` after 307,108 steps. A read-only observation
 trace confirms that virtual `0x40000000` has no first-level descriptor, so ATS
 returns the section-translation failure `PAR=0x0b`. The guest subsequently
 maps physical zero at virtual `0xc009b000` and attempts to copy its vector
-instructions there. The board refuses that unmapped physical write. This
-requires further address-provenance investigation; it does not establish a
-missing RAM alias, a valid N88 handoff, or a completed kernel boot.
+instructions there. Without an explicitly prepared boot mapping the board
+refuses that physical write. The subsequent handoff investigation below
+identifies the missing preparation; this remains a partial host diagnostic.
+
+## Inherited RAM boot mapping
+
+The matching iBoot's normal kernel handoff passes stage 3 through
+`0x4ff00a24` and `0x4ff13fa4`. The platform callback at `0x4ff1348c` selects
+the call at `0x4ff134d6`, passing 1 to `0x4ff13acc`. That setter preserves
+the other bits of `0xbf100000`, sets bits [1:0] to 2, and reads the register
+back. The caller subsequently jumps to the kernel entry with the boot arguments.
+This is a connected static path, not an executed bootloader result.
+[OpeniBoot's S5L8920 entry sequence](https://github.com/iDroid-Project/openiBoot/blob/866562fdb1cfd019bcd77885c80fbf0af65d5c15/arch-arm/entry.sx)
+independently identifies this selection as physical RAM at zero.
+
+`s5l8920_set_ram_boot_window` now prepares that inherited RAM selection for
+a direct kernel handoff. Low addresses share the existing storage at
+`0x40000000`; the modeled extent is bounded to the installed 256 MiB.
+That extent follows the RAM-selection interpretation and known RAM geometry;
+it is not a measurement of the complete hardware remap aperture. All bus
+widths, host pointers and host loads use the same checked decoder. Changing
+the selection invalidates translation and host-pointer caches and clears the
+exclusive monitor, while preserving registers, RAM and latched bus failures.
+Initialization and functional reset remove the explicit preparation.
+The full remap register, ROM/SRAM selections and physical reset sequencing
+remain unmodeled, so accesses to `0xbf100000` still stop explicitly.
+
+A frozen private witness executes the original kernel vector-copy routine
+twice, copying `0x90` and `0xf60` bytes while preserving the 16-byte sleep-token
+gap. Before implementation it stops at the first physical-zero write after
+25 retired instructions. Both copies pass on the first implementation in
+49 and 526 instructions, with exact data, register state and access counts.
+Unit regressions cover alias coherence, bounds, reset, retained diagnostics,
+warm instruction/data pointers, MMU and host-pointer variants, and partial
+stores at the window boundary.
+
+All 79 strict and 74 shipping tests pass, as do the 276 existing prepared
+timebase, UART and interrupt-controller calls. The original guarded
+61,650-step diagnostic retains its complete trace.
+
+With this preparation enabled, the labelled generic-CPU kernel diagnostic
+advances to 367,777 steps: Thumb `STR.W r0,[r4,#0x208]` at `0x8027b4e6`
+attempts to write `0x7fffffff` to timer deadline register `0xbf100208`.
+That register remains unsupported. The variant without the mapping exactly
+preserves its previous 307,108-step trace; boot-argument, device-tree and
+CP14 guards remain active in both variants. These results do not establish
+the actual N88 CPU configuration, a complete kernel boot or SpringBoard.
 
 ## Target evidence
 
