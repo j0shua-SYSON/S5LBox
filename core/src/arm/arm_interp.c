@@ -1517,6 +1517,37 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
          * both MRC CP15 to APSR and MCR CP15 from PC are unpredictable
          * (DDI0406C.b B3.15.2). Refuse before changing flags or registers. */
         if (rd == 15u) return ARM_UNDEFINED;
+        if (opc1==0u && crn==7u && ((crm==4u && opc2==0u) ||
+                                  (!load && crm==8u && opc2<=3u))) {
+            /* DDI0344K 3.2.41/table3-78/79: current Secure-state ATS and PAR.
+             * An ATS permission/translation fault reports in PAR without
+             * taking an exception or changing the ordinary fault registers. */
+            if (!cpu_is_priv(c)) return ARM_UNDEFINED;
+            if (crm==4u) {
+                if (load) c->r[rd]=c->a8_par;
+                else {
+                    uint32_t value=c->r[rd];
+                    /* Refuse nonzero reserved/unused bits; preserve all RW
+                     * fields for context switches, including the F bit. */
+                    uint32_t mask=(value&1u) ? 0x7fu : 0xfffff2feu;
+                    if (value&~mask) return ARM_UNDEFINED;
+                    c->a8_par=value;
+                }
+            } else {
+                uint32_t pa; uint16_t attributes;
+                uint32_t fsr=arm_mmu_translate_par(c,c->r[rd],
+                    (opc2&1u) ? ARM_ACCESS_WRITE : ARM_ACCESS_READ,(opc2&2u)==0u,&pa,&attributes);
+                /* The enclosing instruction's checked-bus path halts without
+                 * retirement. A missing host capability is not an abort. */
+                if (fsr==ARM_MMU_BUS_FAILURE) return ARM_OK;
+                if (fsr) c->a8_par=((fsr&15u)<<1)|((fsr&0x400u)>>5)|((fsr&0x1000u)>>6)|1u;
+                else {
+                    if (attributes==ARM_PAR_UNIMPLEMENTED) return ARM_UNDEFINED;
+                    c->a8_par=(pa&((attributes&2u) ? 0xff000000u : 0xfffff000u))|attributes;
+                }
+            }
+            return ARM_OK;
+        }
         if (crn == 0u && c->a8_config.revision == ARM_A8_R3P2) {
             /* DDI0344K 3.2.2-6/21/23/24. These are an explicitly selected
              * generic implementation, never an inferred S5L8920 identity.
@@ -1577,7 +1608,7 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
         }
         /* DDI0344K table3-3 and 3.2.40/41/73: check the full selector
          * before entering the legacy register storage below. Unimplemented
-         * identity/cache-size, translation-result, debug/performance and
+         * identity/cache-size, other-state translation, debug/performance and
          * security banks must not alias ARM1176 registers or return zero.
          * Register bit fields and reset signals still need their own audit. */
         if (opc1 != 0u) return ARM_UNDEFINED;
@@ -1840,6 +1871,7 @@ bool arm_reset_profile(arm_cpu_t *cpu, const arm_bus_t *bus, arm_arch_t arch) {
     cpu->a8_l2actlr = arch == ARM_ARCH_V7_CORTEX_A8 ? 0x42u : 0u;
     memset(&cpu->a8_config, 0, sizeof cpu->a8_config);
     cpu->a8_csselr = 0u;
+    cpu->a8_par = 0u; /* Architecturally UNKNOWN reset value, chosen zero. */
     /*
      * Generation 1, never 0. Entries carry the generation they were filled in
      * and a hit needs a match; a zeroed cpu has every entry at 0, so starting
@@ -1849,6 +1881,7 @@ bool arm_reset_profile(arm_cpu_t *cpu, const arm_bus_t *bus, arm_arch_t arch) {
      */
     memset(cpu->tlb, 0, sizeof cpu->tlb);
     memset(cpu->a8_tlb_memory_type, 0, sizeof cpu->a8_tlb_memory_type);
+    memset(cpu->a8_tlb_par_attributes, 0, sizeof cpu->a8_tlb_par_attributes);
     cpu->tlb_arch_stamp = arch;
     cpu->tlb_gen = 1u;
     /* And the fetch-block cache, which holds a host pointer into the previous

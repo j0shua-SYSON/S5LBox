@@ -1229,6 +1229,10 @@ static void test_legacy_snapshot_requires_arm1176(void) {
     const arm_a8_config_t inactive_config = {ARM_A8_R3P2, 16, 32, 512};
     m.cpu.a8_config = inactive_config;
     m.cpu.a8_csselr = 2u;
+    m.cpu.a8_par = 0x1234507cu;
+    uint16_t inactive_par_attributes[ARM_TLB_ENTRIES];
+    for (unsigned n=0;n<ARM_TLB_ENTRIES;n++) inactive_par_attributes[n]=(uint16_t)(0x200u+n);
+    memcpy(m.cpu.a8_tlb_par_attributes,inactive_par_attributes,sizeof inactive_par_attributes);
     uint64_t inactive_fp[16];
     for (unsigned n = 0; n < 16u; n++)
         inactive_fp[n] = m.cpu.a8_vfp_hi[n] = UINT64_C(0x0123456789abcdef) + n;
@@ -1247,6 +1251,8 @@ static void test_legacy_snapshot_requires_arm1176(void) {
     CHECK(m.cpu.a8_excl_size == 8u, "snapshot save mutated inactive exclusive size");
     CHECK(memcmp(&m.cpu.a8_config, &inactive_config, sizeof inactive_config) == 0 &&
           m.cpu.a8_csselr == 2u, "save mutated inactive A8 configuration");
+    CHECK(m.cpu.a8_par==0x1234507cu && !memcmp(m.cpu.a8_tlb_par_attributes,inactive_par_attributes,sizeof inactive_par_attributes),
+          "save mutated inactive PAR state/cache");
     CHECK(memcmp(inactive_fp, m.cpu.a8_vfp_hi, sizeof inactive_fp) == 0, "snapshot save mutated inactive FP bank");
     CHECK(memcmp(inactive_types, m.cpu.a8_tlb_memory_type, sizeof inactive_types) == 0 &&
           m.cpu.tlb_arch_stamp == ARM_ARCH_V7_CORTEX_A8, "snapshot save mutated derived memory types");
@@ -1268,6 +1274,8 @@ static void test_legacy_snapshot_requires_arm1176(void) {
         CHECK(m.cpu.a8_excl_size == 8u, "rejected save mutated exclusive size");
         CHECK(memcmp(&m.cpu.a8_config, &inactive_config, sizeof inactive_config) == 0 &&
               m.cpu.a8_csselr == 2u, "rejected save mutated A8 configuration");
+        CHECK(m.cpu.a8_par==0x1234507cu && !memcmp(m.cpu.a8_tlb_par_attributes,inactive_par_attributes,sizeof inactive_par_attributes),
+              "rejected save mutated PAR state/cache");
         CHECK(memcmp(inactive_fp, m.cpu.a8_vfp_hi, sizeof inactive_fp) == 0, "rejected save mutated FP bank");
         CHECK(memcmp(inactive_types, m.cpu.a8_tlb_memory_type, sizeof inactive_types) == 0 &&
               m.cpu.tlb_arch_stamp == ARM_ARCH_V7_CORTEX_A8, "rejected save mutated derived memory types");
@@ -1283,6 +1291,8 @@ static void test_legacy_snapshot_requires_arm1176(void) {
                   "rejected restore mutated the target");
             CHECK(memcmp(&m.cpu.a8_config, &inactive_config, sizeof inactive_config) == 0 &&
                   m.cpu.a8_csselr == 2u, "rejected restore mutated A8 configuration");
+            CHECK(m.cpu.a8_par==0x1234507cu && !memcmp(m.cpu.a8_tlb_par_attributes,inactive_par_attributes,sizeof inactive_par_attributes),
+                  "rejected restore mutated PAR state/cache");
             CHECK(memcmp(inactive_types, m.cpu.a8_tlb_memory_type, sizeof inactive_types) == 0 &&
                   m.cpu.tlb_arch_stamp == ARM_ARCH_V7_CORTEX_A8, "rejected restore mutated derived memory types");
         }
@@ -1296,6 +1306,9 @@ static void test_legacy_snapshot_requires_arm1176(void) {
         const arm_a8_config_t cleared_config = {0};
         CHECK(memcmp(&m.cpu.a8_config, &cleared_config, sizeof cleared_config) == 0 &&
               m.cpu.a8_csselr == 0u, "legacy restore retained inactive A8 configuration");
+        memset(inactive_par_attributes,0,sizeof inactive_par_attributes);
+        CHECK(m.cpu.a8_par==0u && !memcmp(m.cpu.a8_tlb_par_attributes,inactive_par_attributes,sizeof inactive_par_attributes),
+              "legacy restore retained inactive PAR state/cache");
         for (unsigned n = 0; n < 16u; n++)
             CHECK(m.cpu.a8_vfp_hi[n] == 0u, "legacy restore retained inactive upper FP bank");
         memset(inactive_types, 0, sizeof inactive_types);

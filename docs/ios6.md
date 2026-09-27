@@ -56,6 +56,43 @@ reproduces the preceding configuration checkpoint's trace with its archived
 library. These host diagnostics establish neither the N88 CPU configuration
 nor a complete kernel boot. The canonical ECC guard remains unchanged.
 
+## Cortex-A8 address translation queries
+
+Privileged current-state `ATS1CPR`, `ATS1CPW`, `ATS1CUR` and `ATS1CUW` now
+report through the Secure Physical Address Register (PAR). These operations
+query privileged or User read/write permission without accessing the target
+data. The existing MMU walk caches the physical address and PAR attributes
+together, including memory type, cache policy, shareability, NS and supersection
+information. Guest translation, domain, access-flag and permission failures
+update PAR without changing the ordinary fault registers or taking an exception.
+An unavailable host page-table access retains the checked-bus halt and leaves
+PAR unchanged. See [DDI0344K, tables 3-78/79 and pages 3-71 through 3-74](https://documentation-service.arm.com/static/5e8e1ac688295d1e18d35fde).
+
+PAR supports privileged reads and writes; its unknown reset value is chosen
+as zero. Nonzero reserved or unused write fields, PC operands and User access
+are refused. Unsupported translation attributes, TEX remapping, big-endian
+walks and extended physical addresses cannot produce a successful PAR result.
+Other-state translations and security-state transitions remain unavailable.
+ARM1176 and Swift retain their existing CP15 behavior.
+
+All 79 strict and 74 shipping tests pass. New regressions exercise ARM/Thumb,
+all four queries, descriptor formats and attributes, permission/fault priority,
+warm mappings and invalidation, checked-bus retry, condition suppression and
+instruction-fetch failures. Legacy v32 snapshots remain byte-identical and
+cross-load in old and new executables despite the appended, unserialized A8
+state. The original 61,650-step guarded diagnostic is unchanged.
+
+A separate generic-CPU diagnostic now routes MMIO through the partial S5L8920
+board and prepares the matching iBoot's PRAM range (`0x4fffc000`, 16 KiB), with
+explicitly assumed zero initial contents. It advances past `ATS1CPR` to a
+checked write at ARM `0x8008973c` after 307,108 steps. A read-only observation
+trace confirms that virtual `0x40000000` has no first-level descriptor, so ATS
+returns the section-translation failure `PAR=0x0b`. The guest subsequently
+maps physical zero at virtual `0xc009b000` and attempts to copy its vector
+instructions there. The board refuses that unmapped physical write. This
+requires further address-provenance investigation; it does not establish a
+missing RAM alias, a valid N88 handoff, or a completed kernel boot.
+
 ## Target evidence
 
 [Apple's iOS 6.1.6 bulletin](https://support.apple.com/en-us/103607) confirms

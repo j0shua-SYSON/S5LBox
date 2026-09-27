@@ -188,7 +188,36 @@ static arm_memory_type_t descriptor_memory_type(const arm_cpu_t *c,
 }
 
 static uint32_t mmu_walk(arm_cpu_t *c, uint32_t va, arm_access_t acc,
-                         bool priv, uint32_t *pa, arm_memory_type_t *memory_type);
+                         bool priv, uint32_t *pa, arm_memory_type_t *memory_type,
+                         uint16_t *par_attributes);
+
+/* DDI0344K table3-78 and DDI0406C.b tablesB3-10/11. Cache these with
+ * the physical mapping: re-walking only for attributes could combine an old
+ * cached PA with a new descriptor. The current A8 model has a 32-bit PA. */
+static uint16_t descriptor_par_attributes(const arm_cpu_t *c,uint32_t descriptor,
+                                          unsigned tex_shift,unsigned share_shift,
+                                          bool ns,bool supersection) {
+    if (descriptor_memory_type(c,descriptor,tex_shift)==ARM_MEMORY_UNIMPLEMENTED ||
+        (supersection && (descriptor&0x00f001e0u))) return ARM_PAR_UNIMPLEMENTED;
+    unsigned encoding=(((descriptor>>tex_shift)&7u)<<2)|((descriptor>>2)&3u);
+    unsigned inner=0u,outer=0u;
+    bool share=((descriptor>>share_shift)&1u)!=0u;
+    switch (encoding) {
+    case 0u: inner=1u; share=true; break;
+    case 1u: inner=3u; share=true; break;
+    case 8u: inner=3u; share=false; break;
+    case 2u: inner=6u; outer=2u; break;
+    case 3u: inner=7u; outer=3u; break;
+    case 4u: break;
+    case 7u: inner=5u; outer=1u; break;
+    default:
+        outer=(encoding>>2)&3u;
+        inner=(encoding&3u) ? 4u+(encoding&3u) : 0u;
+        break;
+    }
+    return (uint16_t)(((unsigned)ns<<9)|((unsigned)share<<7)|(inner<<4)|
+                      (outer<<2)|((unsigned)supersection<<1));
+}
 
 static inline uint32_t mmu_tlb_tag(uint32_t va, arm_access_t acc,
                                    bool priv) {
@@ -233,6 +262,7 @@ void arm_mmu_tlb_flush(arm_cpu_t *c) {
     if (++c->tlb_gen == 0u) {
         memset(c->tlb, 0, sizeof c->tlb);
         memset(c->a8_tlb_memory_type, 0, sizeof c->a8_tlb_memory_type);
+        memset(c->a8_tlb_par_attributes, 0, sizeof c->a8_tlb_par_attributes);
         /*
          * The data block caches die here too, and ONLY here. They carry a
          * generation like the TLB, so an ordinary flush costs them nothing --
@@ -261,9 +291,9 @@ uint32_t arm_mmu_translate(arm_cpu_t *c, uint32_t va, arm_access_t acc,
     return arm_mmu_translate_type(c, va, acc, priv, pa, NULL);
 }
 
-uint32_t arm_mmu_translate_type(arm_cpu_t *c, uint32_t va, arm_access_t acc,
-                                bool priv, uint32_t *pa,
-                                arm_memory_type_t *memory_type) {
+static uint32_t mmu_translate(arm_cpu_t *c, uint32_t va, arm_access_t acc,
+                              bool priv, uint32_t *pa,
+                              arm_memory_type_t *memory_type,uint16_t *par_attributes) {
     if (arm_bus_access_failed(c->bus)) return ARM_MMU_BUS_FAILURE;
     if (!(c->cp15.sctlr & ARM_SCTLR_M)) {
         *pa = va;
@@ -271,6 +301,9 @@ uint32_t arm_mmu_translate_type(arm_cpu_t *c, uint32_t va, arm_access_t acc,
         if (memory_type) *memory_type = c->arch != ARM_ARCH_V7_CORTEX_A8 ?
             ARM_MEMORY_UNIMPLEMENTED : acc == ARM_ACCESS_FETCH ?
             ARM_MEMORY_NORMAL : ARM_MEMORY_STRONGLY_ORDERED;
+        if (par_attributes) *par_attributes = c->arch==ARM_ARCH_V7_CORTEX_A8 &&
+            !(c->cp15.sctlr&((1u<<28)|ARM_SCTLR_EE)) && acc!=ARM_ACCESS_FETCH ?
+            0x90u : ARM_PAR_UNIMPLEMENTED;
         return 0;
     }
 
@@ -338,6 +371,7 @@ uint32_t arm_mmu_translate_type(arm_cpu_t *c, uint32_t va, arm_access_t acc,
             *pa = c->tlb[slot].pa | (va & 0x3ffu);
             if (memory_type)
                 *memory_type = (arm_memory_type_t)c->a8_tlb_memory_type[slot];
+            if (par_attributes) *par_attributes=c->a8_tlb_par_attributes[slot];
         }
         return c->tlb[slot].fsr;
     }
@@ -346,7 +380,8 @@ uint32_t arm_mmu_translate_type(arm_cpu_t *c, uint32_t va, arm_access_t acc,
     /* Straight into the caller's pa, so the untouched-on-fault contract is the
      * walk's own rather than something restated here. */
     arm_memory_type_t type = ARM_MEMORY_UNIMPLEMENTED;
-    uint32_t fsr = mmu_walk(c, va, acc, priv, pa, &type);
+    uint16_t attributes=ARM_PAR_UNIMPLEMENTED;
+    uint32_t fsr = mmu_walk(c, va, acc, priv, pa, &type, &attributes);
     if (fsr == ARM_MMU_BUS_FAILURE) return fsr;
     /* ARMv7 software-managed Access flags (DDI0406C.b B3.7.4): an AF=0
      * descriptor is never held in the TLB. Software sets AF and retries
@@ -362,8 +397,20 @@ uint32_t arm_mmu_translate_type(arm_cpu_t *c, uint32_t va, arm_access_t acc,
     c->tlb[slot].fsr = fsr;
     c->tlb[slot].pa  = (fsr == 0u) ? (*pa & ~0x3ffu) : 0u;
     c->a8_tlb_memory_type[slot] = (uint8_t)type;
+    c->a8_tlb_par_attributes[slot]=attributes;
     if (fsr == 0u && memory_type) *memory_type = type;
+    if (fsr == 0u && par_attributes) *par_attributes=attributes;
     return fsr;
+}
+
+uint32_t arm_mmu_translate_type(arm_cpu_t *c,uint32_t va,arm_access_t acc,
+                                bool priv,uint32_t *pa,arm_memory_type_t *memory_type) {
+    return mmu_translate(c,va,acc,priv,pa,memory_type,NULL);
+}
+
+uint32_t arm_mmu_translate_par(arm_cpu_t *c,uint32_t va,arm_access_t acc,
+                              bool priv,uint32_t *pa,uint16_t *attributes) {
+    return mmu_translate(c,va,acc,priv,pa,NULL,attributes);
 }
 
 bool arm_fetch_cache_try_refill(arm_cpu_t *c, uint32_t va, bool priv) {
@@ -468,7 +515,8 @@ bool arm_data_cache_try_refill(arm_cpu_t *c, uint32_t va,
 }
 
 static uint32_t mmu_walk(arm_cpu_t *c, uint32_t va, arm_access_t acc,
-                         bool priv, uint32_t *pa, arm_memory_type_t *memory_type) {
+                         bool priv, uint32_t *pa, arm_memory_type_t *memory_type,
+                         uint16_t *par_attributes) {
     /* Only a store sets WnR. A fetch is checked against XN, never against WnR:
      * IFSR has no such field. */
     bool write = (acc == ARM_ACCESS_WRITE);
@@ -568,6 +616,7 @@ static uint32_t mmu_walk(arm_cpu_t *c, uint32_t va, arm_access_t acc,
          * certify an extended-PA supersection for type-dependent accesses. */
         *memory_type = supersection && (l1 & 0x00f001e0u) ?
             ARM_MEMORY_UNIMPLEMENTED : descriptor_memory_type(c, l1, 12u);
+        *par_attributes=descriptor_par_attributes(c,l1,12u,16u,(l1&(1u<<19))!=0u,supersection);
         return 0;
     }
 
@@ -625,6 +674,7 @@ static uint32_t mmu_walk(arm_cpu_t *c, uint32_t va, arm_access_t acc,
         if (t2 == 1u) *pa = (l2 & 0xffff0000u) | (va & 0x0000ffffu); /* 64 KB */
         else          *pa = (l2 & 0xfffff000u) | (va & 0x00000fffu); /* 4 KB  */
         *memory_type = descriptor_memory_type(c, l2, t2 == 1u ? 12u : 6u);
+        *par_attributes=descriptor_par_attributes(c,l2,t2==1u ? 12u : 6u,10u,(l1&8u)!=0u,false);
         return 0;
     }
 

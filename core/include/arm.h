@@ -661,6 +661,11 @@ typedef struct arm_cpu {
      * its architecturally unknown reset value is selected as zero. */
     arm_a8_config_t a8_config;
     uint32_t a8_csselr;
+    /* Secure Cortex-A8 PAR and attributes belonging to the same cached
+     * descriptors as tlb[]. Inactive on other profiles; neither is included
+     * in ARM1176 snapshots. Appended to retain all existing field offsets. */
+    uint32_t a8_par;
+    uint16_t a8_tlb_par_attributes[ARM_TLB_ENTRIES];
 } arm_cpu_t;
 
 /*
@@ -710,6 +715,15 @@ uint32_t arm_mmu_translate(arm_cpu_t *cpu, uint32_t va, arm_access_t acc,
 uint32_t arm_mmu_translate_type(arm_cpu_t *cpu, uint32_t va, arm_access_t acc,
                                 bool priv, uint32_t *pa,
                                 arm_memory_type_t *memory_type);
+
+/* The same cached mapping, with Cortex-A8 PAR attributes in bits[9:1].
+ * ARM_PAR_UNIMPLEMENTED on translation success means these attributes cannot
+ * be represented by the supported configuration; it is not a guest fault.
+ * Faults leave both outputs unchanged. No target data access is performed.
+ * The caller combines the PA with these attributes and handles PAR faults. */
+#define ARM_PAR_UNIMPLEMENTED UINT16_C(0xffff)
+uint32_t arm_mmu_translate_par(arm_cpu_t *cpu, uint32_t va, arm_access_t acc,
+                              bool priv, uint32_t *pa, uint16_t *attributes);
 
 /* Rebuild the 1 KiB instruction-fetch host pointer without walking page
  * tables or touching the bus. With the MMU enabled this succeeds only from an

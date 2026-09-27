@@ -1630,6 +1630,10 @@ static void test_cortex_a8_cp15_maintenance_boundary(void) {
             bool user_allowed = crn == 7u && ((crm == 5u && opc2 == 4u) ||
                                 (crm == 10u && (opc2 == 4u || opc2 == 5u)));
             bool allowed = listed && !load && !opc1 && (!user || user_allowed);
+            /* PAR and current-state ATS occupy neighboring c7 coordinates.
+             * Their detailed results are checked by test_a8_translation. */
+            allowed |= crn==7u && opc1==0u && !user &&
+                       ((crm==4u && opc2==0u) || (!load && crm==8u && opc2<=3u));
             uint32_t flags = c.cpsr;
             uint32_t generation = c.tlb_gen;
             uint64_t flushes = c.tlb_flushes;

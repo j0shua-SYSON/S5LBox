@@ -128,7 +128,9 @@ SNAP_SIZE_GUARD(arm_cp15_t,        64,    "snap_cpu");
 /* Explicit A8 configuration/CSSELR bring the compiler-measured size to72368.
  * Inactive on ARM1176, cleared on restore, and excluded under the same A8
  * rejection rule; the serialized bytes and version remain unchanged. */
-SNAP_SIZE_GUARD(arm_cpu_t,         72368,   "snap_cpu");
+/* Compiler-measured80568 adds inactive Secure PAR and derived PAR attributes.
+ * These are cleared on restore; ARM1176 v32 bytes remain unchanged. */
+SNAP_SIZE_GUARD(arm_cpu_t,         80568,   "snap_cpu");
 SNAP_SIZE_GUARD(s5l_uart_t,        8280,  "snap_uart");
 SNAP_SIZE_GUARD(s5l_vic_t,         16,    "snap_vic");
 SNAP_SIZE_GUARD(s5l_timer_t,       40,    "snap_timer");
@@ -237,7 +239,8 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * The size below must be read from the
  * compiler's emitted `.space`, not inferred from source padding. */
 /* 132200 includes the CPU's inactive generic A8 configuration/CSSELR. */
-SNAP_SIZE_GUARD(s5l8900_t,         132200, "snap_mach");
+/* Compiler-measured140400 includes the appended PAR state/cache. */
+SNAP_SIZE_GUARD(s5l8900_t,         140400, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -481,9 +484,11 @@ static void snap_cpu(sn_io_t *io, arm_cpu_t *c) {
         c->a8_l2actlr = 0u;
         memset(&c->a8_config, 0, sizeof c->a8_config);
         c->a8_csselr = 0u;
+        c->a8_par = 0u;
         memset(c->a8_vfp_hi, 0, sizeof c->a8_vfp_hi);
         memset(c->tlb, 0, sizeof c->tlb);
         memset(c->a8_tlb_memory_type, 0, sizeof c->a8_tlb_memory_type);
+        memset(c->a8_tlb_par_attributes, 0, sizeof c->a8_tlb_par_attributes);
         c->tlb_arch_stamp = ARM_ARCH_V6_ARM1176;
         /* And generation 1, for the same reason arm_reset does: an entry at
          * generation 0 in a table whose counter is also 0 is a false hit. */
