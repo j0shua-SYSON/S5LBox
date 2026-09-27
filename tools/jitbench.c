@@ -7847,6 +7847,104 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
     return true;
 }
 
+static bool validate_compact_raw_vfp_resident_arithmetic_oracle(void) {
+    const uint32_t pc = UINT32_C(0x18700);
+    const unsigned budgets[] = {8u, 9u, 10u, 20u};
+    arm_cpu_t reference, compact;
+    uint32_t program[20];
+    unsigned cases = 0u, refusals = 0u, completed;
+    /* All low registers become newer than their memory copies before VFP.
+     * Following ALU/conditional instructions exercise both dispatch tables,
+     * and a second VFP operation exercises reuse of the borrowed scratch.
+     * Every arithmetic width/op gets aliasing, NZCV and split-budget cases. */
+    for (unsigned width = 0u; width < 2u; width++) {
+        const unsigned mask = width ? 15u : 31u;
+        for (unsigned operation = 0u; operation < 9u; operation++) {
+            for (unsigned trial = 0u; trial < 32u; trial++) {
+                unsigned rd = trial & mask;
+                unsigned rn = (trial * 7u + 3u) & mask;
+                unsigned rm = (trial * 11u + 1u) & mask;
+                if ((trial & 3u) == 0u) rn = rd;
+                if ((trial & 3u) == 1u) rm = rd;
+                if ((trial & 3u) == 2u) rm = rn;
+                uint32_t arithmetic = width
+                    ? VFP_ARITH_D(operation / 2u, operation & 1u, rd, rn, rm)
+                    : VFP_ARITH_S(operation / 2u, operation & 1u, rd, rn, rm);
+                if (trial >= 16u)
+                    arithmetic = (arithmetic & UINT32_C(0x0fffffff)) |
+                                 ((trial % 15u) << 28);
+                for (unsigned r = 0u; r < 8u; r++) {
+                    program[r] = UINT32_C(0xe2800001) | (r << 16) | (r << 12);
+                    program[9u + r] = UINT32_C(0xe0200000) |
+                        (r << 16) | (r << 12) | ((r + 1u) & 7u);
+                }
+                program[8] = arithmetic;
+                program[17] = UINT32_C(0x03a02077); /* MOVEQ r2,#0x77 */
+                program[18] = UINT32_C(0x13a03088); /* MOVNE r3,#0x88 */
+                program[19] = arithmetic;
+                for (unsigned b = 0u; b < 4u; b++) {
+                    seed_vfp_oracle(&reference, program, 20u, pc, true);
+                    reference.cpsr = (reference.cpsr & UINT32_C(0x0fffffff)) |
+                                     ((trial & 15u) << 28);
+                    reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL |
+                                          compact_vfp_old_flags(trial);
+                    static_vfp_arith_set_operands(
+                        &reference, arithmetic,
+                        width ? UINT64_C(0x4059000000000000) : UINT32_C(0x42c80000),
+                        width ? UINT64_C(0x4008000000000000) : UINT32_C(0x40400000),
+                        width ? UINT64_C(0x4014000000000000) : UINT32_C(0x40a00000));
+                    compact = reference;
+                    for (unsigned i = 0u; i < budgets[b]; i++)
+                        if (arm_step(&reference) != ARM_OK) return false;
+                    completed = UINT_MAX;
+                    if (!a64_compact_raw_run(&compact, &g_ram[pc], pc,
+                            sizeof program, budgets[b], g_ram, sizeof g_ram,
+                            &completed) || completed != budgets[b] ||
+                        !static_vfp_states_equal(&reference, &compact)) {
+                        fprintf(stderr, "jitbench: resident VFP arithmetic "
+                            "width=%u op=%u trial=%u budget=%u completed=%u\n",
+                            width, operation, trial, budgets[b], completed);
+                        return false;
+                    }
+                    cases++;
+                }
+            }
+        }
+    }
+    /* A pre/post-host-FP rejection must publish exactly the dirty integer
+     * prefix, without leaking scratch registers into guest architectural state. */
+    for (unsigned i = 0u;
+         i < sizeof VFP_ARITH_FALLBACKS / sizeof VFP_ARITH_FALLBACKS[0]; i++) {
+        const static_vfp_arith_fallback_t *test = &VFP_ARITH_FALLBACKS[i];
+        program[8] = test->insn;
+        seed_vfp_oracle(&reference, program, 20u, pc, true);
+        reference.vfp_fpscr = test->fpscr;
+        if (strcmp(test->name, "other-sticky") == 0)
+            reference.vfp_fpscr &= ~ARM_FPSCR_IXC;
+        reference.vfp_fpexc = test->enabled ? ARM_FPEXC_EN : 0u;
+        if (!test->access)
+            reference.cp15.cpacr &= ~(UINT32_C(0xf) << ARM_CPACR_CP10_SHIFT);
+        static_vfp_arith_set_operands(
+            &reference, test->insn, test->d, test->n, test->m);
+        compact = reference;
+        for (unsigned r = 0u; r < 8u; r++)
+            if (arm_step(&reference) != ARM_OK) return false;
+        completed = UINT_MAX;
+        if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, sizeof program,
+                20u, g_ram, sizeof g_ram, &completed) || completed != 8u ||
+            !static_vfp_states_equal(&reference, &compact)) {
+            fprintf(stderr, "jitbench: resident VFP arithmetic refusal %s "
+                    "completed=%u\n", test->name, completed);
+            return false;
+        }
+        refusals++;
+    }
+    printf("COMPACT-RAW-VFP-RESIDENT-ARITH-ORACLE exact=yes cases=%u refusals=%u "
+           "live-low-registers=yes tables=yes flags=yes aliases=yes budgets=4 "
+           "runtime-codegen=no\n", cases, refusals);
+    return true;
+}
+
 static bool validate_compact_raw_vfp_integer_to_float_oracles(void) {
     const bool native = a64_static_host_available();
     const uint32_t pc = UINT32_C(0x18a00);
@@ -9997,6 +10095,8 @@ static bool validate_compact_raw_oracles(void) {
     if (!validate_compact_raw_vfp_nonarith_oracles())
         return false;
     if (!validate_compact_raw_vfp_arithmetic_oracles())
+        return false;
+    if (!validate_compact_raw_vfp_resident_arithmetic_oracle())
         return false;
     if (!validate_compact_raw_vfp_narrow_oracles())
         return false;

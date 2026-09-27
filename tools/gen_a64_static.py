@@ -9,6 +9,7 @@ profile, opcode stream, or other Apple-derived input.
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 
@@ -3055,6 +3056,101 @@ def compact_tlb_refill_body(fetch: bool, thumb: bool = False) -> list[str]:
     return out
 
 
+def compact_vfp_arithmetic_decode() -> list[str]:
+    """Decode scalar arithmetic operands without changing architectural state."""
+    return [
+        ".La64cr_vfp_cdp:",
+        "    ubfx w10, w9, #23, #1",
+        "    ubfx w11, w9, #21, #1",
+        "    orr w10, w11, w10, lsl #1",
+        "    ubfx w11, w9, #20, #1",
+        "    orr w10, w11, w10, lsl #1",
+        "    cmp w10, #7",
+        "    b.eq .La64cr_vfp_cdp_other",
+        # Families 5/6 are later fused operations, not VFPv2.
+        "    cmp w10, #4",
+        "    b.hi .La64cr_fallback",
+        "    ubfx w11, w9, #6, #1",
+        "    cmp w10, #4",
+        "    b.ne .La64cr_vfp_arith_operation",
+        "    cbnz w11, .La64cr_fallback",
+        ".La64cr_vfp_arith_operation:",
+        "    lsl w14, w10, #1",
+        "    add w14, w14, w11",
+        "    tbnz w9, #8, .La64cr_vfp_arith_decode_64",
+        "    ubfx w12, w9, #12, #4",
+        "    ubfx w13, w9, #22, #1",
+        "    orr w12, w13, w12, lsl #1",
+        "    ubfx w10, w9, #16, #4",
+        "    ubfx w13, w9, #7, #1",
+        "    orr w10, w13, w10, lsl #1",
+        "    and w11, w9, #0xf",
+        "    ubfx w13, w9, #5, #1",
+        "    orr w11, w13, w11, lsl #1",
+        "    b .La64cr_vfp_arith_32",
+        ".La64cr_vfp_arith_decode_64:",
+        "    tbnz w9, #22, .La64cr_fallback",
+        "    tbnz w9, #7, .La64cr_fallback",
+        "    tbnz w9, #5, .La64cr_fallback",
+        "    ubfx w12, w9, #12, #4",
+        "    lsl w12, w12, #1",
+        "    ubfx w10, w9, #16, #4",
+        "    lsl w10, w10, #1",
+        "    and w11, w9, #0xf",
+        "    lsl w11, w11, #1",
+        "    b .La64cr_vfp_arith_64",
+    ]
+
+
+def compact_vfp_arithmetic_guard_body() -> list[str]:
+    return [
+        ".La64cr_vfp_guard_arith:",
+        "    ldr w0, [x27, #128]",
+        "    cbz w0, .La64cr_vfp_guard_fail",
+        "    ldr x1, [x27, #112]",
+        "    cbz x1, .La64cr_vfp_guard_fail",
+        "    ldr w0, [x1]",
+        "    tbz w0, #30, .La64cr_vfp_guard_fail",
+        "    ldr x1, [x27, #120]",
+        "    cbz x1, .La64cr_vfp_guard_fail",
+        "    ldr w0, [x1]",
+        # RN/FZ/DN, scalar LEN/STRIDE, no exception enables; preserve NZCV.
+        "    mov w1, #0x9f00",
+        "    movk w1, #0x3c7, lsl #16",
+        "    and w0, w0, w1",
+        "    mov w1, #3",
+        "    lsl w1, w1, #24",
+        "    cmp w0, w1",
+        "    b.ne .La64cr_vfp_guard_fail",
+        "    ldr x1, [x27, #120]",
+        "    ldr w0, [x1]",
+        # Historical flags are not controls. Only IXC must already be sticky;
+        # each operation still rejects every newly raised non-IXC exception.
+        "    tbz w0, #4, .La64cr_vfp_guard_fail",
+        "    mov w0, #1",
+        "    ret",
+    ]
+
+
+def compact_fp_session_begin_body() -> list[str]:
+    return [
+        ".La64cr_fp_session_begin:",
+        "    ldr w0, [x27, #132]",
+        "    cbnz w0, .La64cr_fp_session_begin_done",
+        "    mrs x0, fpcr",
+        "    mrs x1, fpsr",
+        "    str x0, [x27, #136]",
+        "    str x1, [x27, #144]",
+        "    cbz x0, .La64cr_fp_session_fpcr_ready",
+        "    msr fpcr, xzr",
+        ".La64cr_fp_session_fpcr_ready:",
+        "    mov w0, #1",
+        "    str w0, [x27, #132]",
+        ".La64cr_fp_session_begin_done:",
+        "    ret",
+    ]
+
+
 def compact_vfp_nonarith_body() -> list[str]:
     """Return broad exact VFPv2 register/compare/widen live semantics."""
     return [
@@ -3248,47 +3344,7 @@ def compact_vfp_nonarith_body() -> list[str]:
         "    str w2, [x19, w10, uxtw #2]",
         "    b .La64cr_vfp_done",
         "",
-        ".La64cr_vfp_cdp:",
-        "    ubfx w10, w9, #23, #1",
-        "    ubfx w11, w9, #21, #1",
-        "    orr w10, w11, w10, lsl #1",
-        "    ubfx w11, w9, #20, #1",
-        "    orr w10, w11, w10, lsl #1",
-        "    cmp w10, #7",
-        "    b.eq .La64cr_vfp_cdp_other",
-        # Scalar arithmetic families 0..4 map to the nine VFPv2 operations.
-        # Families 5/6 are later fused operations and remain literal.
-        "    cmp w10, #4",
-        "    b.hi .La64cr_fallback",
-        "    ubfx w11, w9, #6, #1",
-        "    cmp w10, #4",
-        "    b.ne .La64cr_vfp_arith_operation",
-        "    cbnz w11, .La64cr_fallback",
-        ".La64cr_vfp_arith_operation:",
-        "    lsl w14, w10, #1",
-        "    add w14, w14, w11",
-        "    tbnz w9, #8, .La64cr_vfp_arith_decode_64",
-        "    ubfx w12, w9, #12, #4",
-        "    ubfx w13, w9, #22, #1",
-        "    orr w12, w13, w12, lsl #1",
-        "    ubfx w10, w9, #16, #4",
-        "    ubfx w13, w9, #7, #1",
-        "    orr w10, w13, w10, lsl #1",
-        "    and w11, w9, #0xf",
-        "    ubfx w13, w9, #5, #1",
-        "    orr w11, w13, w11, lsl #1",
-        "    b .La64cr_vfp_arith_32",
-        ".La64cr_vfp_arith_decode_64:",
-        "    tbnz w9, #22, .La64cr_fallback",
-        "    tbnz w9, #7, .La64cr_fallback",
-        "    tbnz w9, #5, .La64cr_fallback",
-        "    ubfx w12, w9, #12, #4",
-        "    lsl w12, w12, #1",
-        "    ubfx w10, w9, #16, #4",
-        "    lsl w10, w10, #1",
-        "    and w11, w9, #0xf",
-        "    lsl w11, w11, #1",
-        "    b .La64cr_vfp_arith_64",
+        *compact_vfp_arithmetic_decode(),
         ".La64cr_vfp_cdp_other:",
         "    tbz w9, #6, .La64cr_fallback",
         "    ubfx w10, w9, #16, #4",
@@ -3494,33 +3550,7 @@ def compact_vfp_nonarith_body() -> list[str]:
         "    b.ne .La64cr_vfp_guard_fail",
         "    mov w0, #1",
         "    ret",
-        ".La64cr_vfp_guard_arith:",
-        "    ldr w0, [x27, #128]",
-        "    cbz w0, .La64cr_vfp_guard_fail",
-        "    ldr x1, [x27, #112]",
-        "    cbz x1, .La64cr_vfp_guard_fail",
-        "    ldr w0, [x1]",
-        "    tbz w0, #30, .La64cr_vfp_guard_fail",
-        "    ldr x1, [x27, #120]",
-        "    cbz x1, .La64cr_vfp_guard_fail",
-        "    ldr w0, [x1]",
-        # Accept exactly RN/FZ/DN, scalar LEN/STRIDE, no enables. NZCV is outside
-        # this mask and remains available to guest compare/condition logic.
-        "    mov w1, #0x9f00",
-        "    movk w1, #0x3c7, lsl #16",
-        "    and w0, w0, w1",
-        "    mov w1, #3",
-        "    lsl w1, w1, #24",
-        "    cmp w0, w1",
-        "    b.ne .La64cr_vfp_guard_fail",
-        "    ldr x1, [x27, #120]",
-        "    ldr w0, [x1]",
-        # Existing cumulative flags are history, not arithmetic controls. Keep
-        # them untouched; only IXC must already be sticky. The per-operation
-        # host FPSR checks still reject every newly raised non-IXC exception.
-        "    tbz w0, #4, .La64cr_vfp_guard_fail",
-        "    mov w0, #1",
-        "    ret",
+        *compact_vfp_arithmetic_guard_body(),
         ".La64cr_vfp_guard_priv:",
         "    ldr w0, [x27, #128]",
         "    cbz w0, .La64cr_vfp_guard_fail",
@@ -3543,20 +3573,7 @@ def compact_vfp_nonarith_body() -> list[str]:
         "    mov w0, wzr",
         "    ret",
         "",
-        ".La64cr_fp_session_begin:",
-        "    ldr w0, [x27, #132]",
-        "    cbnz w0, .La64cr_fp_session_begin_done",
-        "    mrs x0, fpcr",
-        "    mrs x1, fpsr",
-        "    str x0, [x27, #136]",
-        "    str x1, [x27, #144]",
-        "    cbz x0, .La64cr_fp_session_fpcr_ready",
-        "    msr fpcr, xzr",
-        ".La64cr_fp_session_fpcr_ready:",
-        "    mov w0, #1",
-        "    str w0, [x27, #132]",
-        ".La64cr_fp_session_begin_done:",
-        "    ret",
+        *compact_fp_session_begin_body(),
         "",
         ".La64cr_fp_session_restore:",
         "    ldr w0, [x27, #132]",
@@ -3712,12 +3729,68 @@ def compact_register_memory(prefix: str, double: bool = False) -> list[str]:
     return body
 
 
+def compact_register_vfp_arithmetic() -> list[str]:
+    """Use the existing arithmetic contract without spilling resident r0-r7.
+
+    x16/x17 are dispatch-table pointers outside this closed, callback-free
+    region. Park them in caller-saved d4/d5 while reusing those GPRs as scratch;
+    arithmetic only touches v0-v3. Restore them on success AND every rejection.
+    Operand-decode w13 dies before the helpers reuse it for the old x1 role.
+    The canonical semantic bodies stay shared with the non-resident decoder.
+    """
+    scratch = {0: 15, 1: 13, 6: 8, 7: 16, 8: 17}
+    canonical = [
+        *compact_vfp_arithmetic_decode(),
+        *compact_vfp_arithmetic_body(4),
+        *compact_vfp_arithmetic_body(8),
+        *compact_vfp_arithmetic_guard_body(),
+        *compact_fp_session_begin_body(),
+        ".La64cr_vfp_guard_fail:", "    mov w0, wzr", "    ret",
+    ]
+    body = [
+        ".La64ra_vfp_arith_probe:",
+        # Exact CDP cp10/cp11 encoding, before borrowing the table registers.
+        "    mov w11, #0x0e10", "    movk w11, #0x0f00, lsl #16",
+        "    and w10, w9, w11", "    mov w11, #0x0a00",
+        "    movk w11, #0x0e00, lsl #16", "    cmp w10, w11",
+        "    b.ne .La64ra_decode",
+        "    fmov d4, x16", "    fmov d5, x17",
+    ]
+    for line in canonical:
+        # Fail closed if a future semantic body expands its scratch footprint.
+        registers = {int(n) for n in re.findall(r"\b[wx](\d+)\b", line)}
+        if not registers <= {0, 1, 6, 7, 8, 9, 10, 11, 12, 13, 14, 27}:
+            raise AssertionError("resident VFP scratch contract changed")
+        if re.search(r"\b[bsdqvh][45]\b", line):
+            raise AssertionError("resident VFP clobbers saved dispatch tables")
+        line = re.sub(r"\b([wx])(\d+)\b",
+                      lambda m: m[1] + str(scratch.get(int(m[2]), int(m[2]))),
+                      line)
+        if re.search(r"\b[wx](?:[0-7]|18|28)\b", line):
+            raise AssertionError("resident VFP clobbers a pinned register")
+        line = line.replace(".La64cr_fallback", ".La64ra_vfp_arith_reject")
+        body.append(line.replace(".La64cr_", ".La64ra_"))
+    body += [
+        ".La64ra_vfp_done:",
+        "    fmov x16, d4", "    fmov x17, d5",
+        "    b .La64ra_sequential",
+        ".La64ra_vfp_cdp_other:",
+        ".La64ra_vfp_arith_reject:",
+        "    fmov x16, d4", "    fmov x17, d5",
+        # No guest FP destination was committed. The old decoder supplies
+        # other operations/refusals and restores host FP state before C.
+        "    b .La64ra_decode",
+    ]
+    return body
+
+
 def compact_register_a32() -> tuple[list[str], list[str]]:
     """Live-word A32 execution with the same resident ABI as the Thumb tier.
 
     Tables specialize ISA operands at build time, never guest code. Immediate
     DP, non-PC shifted-register DP, immediate word/byte transfers and B/BL stay
-    resident. Everything else spills into the old decoder exactly once. No
+    resident, as do guarded scalar VFP arithmetic and transfers. Other forms
+    spill into the old decoder exactly once. No
     guest state changes before an instruction's final guard has succeeded.
     """
     prefix = ".La64ra_"
@@ -3903,7 +3976,7 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
              "    mov w11, #0x0f7f", "    movk w11, #0x0fe0, lsl #16",
              "    and w10, w9, w11", "    mov w11, #0x0a10",
              "    movk w11, #0x0e00, lsl #16", "    cmp w10, w11",
-             f"    b.ne {prefix}decode", "    ubfx w10, w9, #12, #4",
+             f"    b.ne {prefix}vfp_arith_probe", "    ubfx w10, w9, #12, #4",
              "    cmp w10, #15", f"    b.eq {prefix}decode",
              f"    bl {prefix}vfp_enabled",
              "    ldr x11, [x27, #104]", "    ubfx w12, w9, #16, #4",
@@ -3928,6 +4001,7 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
              "    str w8, [x19, w10, uxtw #2]", "    ret", "15:",
              *table_address(15, prefix + "vfp_write_core_table"),
              "    ldrsw x10, [x15, w10, uxtw #2]", "    add x15, x15, x10", "    br x15"]
+    body += compact_register_vfp_arithmetic()
     for reg in range(8):
         body += [f"{prefix}vfp_read_core_{reg}:", f"    mov w8, w{reg}", "    ret",
                  f"{prefix}vfp_write_core_{reg}:", f"    mov w{reg}, w8", "    ret"]
