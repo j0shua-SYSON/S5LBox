@@ -1745,7 +1745,8 @@ static a64_compact_raw_admission_t compact_raw_classify_vfp(
      * arithmetic and witnessed memory semantics. Arithmetic admits only the
      * replay-proven RunFast mode plus signed-zero/finite-normal inputs; the
      * native loop separately validates intermediate/results and restores its
-     * lazy host-FP session before every exit or callback. */
+     * lazy host-FP session before every exit or callback. Existing cumulative
+     * flags are preserved; only IXC must be set before ignoring new inexact. */
     if (handler >= A64S_VFP_UNARY32 &&
         handler < A64S_VFP_COMPARE32) {
         return (cpu->vfp_fpscr &
@@ -1758,7 +1759,7 @@ static a64_compact_raw_admission_t compact_raw_classify_vfp(
         const unsigned rm = (immediate >> 8) & 255u;
         if ((cpu->vfp_fpscr & UINT32_C(0x03c79f00)) !=
                 UINT32_C(0x03000000) ||
-            (cpu->vfp_fpscr & UINT32_C(0x9f)) != UINT32_C(0x10) ||
+            (cpu->vfp_fpscr & ARM_FPSCR_IXC) == 0u ||
             !compact_raw_vfp_simple64(cpu->vfp_s, rm))
             return A64_COMPACT_RAW_REJECT_VFP;
         return A64_COMPACT_RAW_ADMIT_EXECUTE;
@@ -1782,7 +1783,7 @@ static a64_compact_raw_admission_t compact_raw_classify_vfp(
 
         if ((cpu->vfp_fpscr & UINT32_C(0x03c79f00)) !=
                 UINT32_C(0x03000000) ||
-            (cpu->vfp_fpscr & UINT32_C(0x9f)) != UINT32_C(0x10))
+            (cpu->vfp_fpscr & ARM_FPSCR_IXC) == 0u)
             return A64_COMPACT_RAW_REJECT_VFP;
         if (dbl) {
             if (!compact_raw_vfp_simple64(cpu->vfp_s, rn) ||

@@ -3515,10 +3515,10 @@ def compact_vfp_nonarith_body() -> list[str]:
         "    b.ne .La64cr_vfp_guard_fail",
         "    ldr x1, [x27, #120]",
         "    ldr w0, [x1]",
-        "    mov w1, #0x9f",
-        "    and w0, w0, w1",
-        "    cmp w0, #0x10",
-        "    b.ne .La64cr_vfp_guard_fail",
+        # Existing cumulative flags are history, not arithmetic controls. Keep
+        # them untouched; only IXC must already be sticky. The per-operation
+        # host FPSR checks still reject every newly raised non-IXC exception.
+        "    tbz w0, #4, .La64cr_vfp_guard_fail",
         "    mov w0, #1",
         "    ret",
         ".La64cr_vfp_guard_priv:",

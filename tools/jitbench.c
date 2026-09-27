@@ -5615,10 +5615,10 @@ static bool validate_compact_raw_admission_shapes(void) {
         cpu.vfp_s[0] = UINT32_C(0x40400000);
         cpu.vfp_fpscr |= ARM_FPSCR_IOC;
         if (a64_compact_raw_classify_instruction(
-                &cpu, arithmetic, false) != A64_COMPACT_RAW_REJECT_VFP) {
+                &cpu, arithmetic, false) != A64_COMPACT_RAW_ADMIT_EXECUTE) {
             fprintf(stderr,
-                    "jitbench: compact raw VFP arithmetic admitted "
-                    "non-IXC sticky state\n");
+                    "jitbench: compact raw VFP arithmetic refused "
+                    "pre-existing sticky state\n");
             return false;
         }
     }
@@ -7361,6 +7361,11 @@ static bool validate_compact_raw_vfp_nonarith_oracles(void) {
     (ARM_FPSCR_FZ | ARM_FPSCR_DN | ARM_FPSCR_IXC | \
      ARM_FPSCR_N | ARM_FPSCR_C)
 
+/* All combinations of cumulative flags other than the required sticky IXC. */
+static uint32_t compact_vfp_old_flags(unsigned combination) {
+    return (combination & 15u) | ((combination & 16u) << 3);
+}
+
 #if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
 typedef struct {
     uint64_t expected_fpcr;
@@ -7397,7 +7402,9 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
      * the host's new IXC is the only cumulative flag that may be ignored. */
     for (unsigned width = 0u; width < 2u; width++) {
         const uint32_t *program = width ? VFP_ARITH64_OPS : VFP_ARITH32_OPS;
-        for (unsigned operation = 0u; operation < 9u; operation++) {
+        for (unsigned trial = 0u; trial < 9u * 32u; trial++) {
+            const unsigned operation = trial % 9u;
+            const uint32_t old_flags = compact_vfp_old_flags(trial / 9u);
             const uint32_t pc = UINT32_C(0x17800) +
                                 (width * 9u + operation) * 4u;
             const uint64_t d = width ? UINT64_C(0x4059000000000000)
@@ -7407,27 +7414,32 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
             const uint64_t m = width ? UINT64_C(0x4014000000000000)
                                      : UINT32_C(0x40a00000);
             seed_vfp_oracle(&reference, &program[operation], 1u, pc, true);
-            reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+            reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL | old_flags;
             static_vfp_arith_set_operands(
                 &reference, program[operation], d, n, m);
             compact = reference;
-            if (arm_step(&reference) != ARM_OK ||
+            if (a64_compact_raw_classify_instruction(
+                    &compact, program[operation], false) !=
+                    A64_COMPACT_RAW_ADMIT_EXECUTE ||
+                arm_step(&reference) != ARM_OK ||
                 !a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                                      g_ram, sizeof g_ram, &completed) ||
                 completed != 1u ||
                 !static_vfp_states_equal(&reference, &compact)) {
                 fprintf(stderr,
                         "jitbench: compact raw VFP arithmetic mismatch "
-                        "width=%u operation=%u completed=%u\n",
-                        width, operation, completed);
+                        "width=%u operation=%u old-flags=%02x completed=%u\n",
+                        width, operation, old_flags, completed);
                 return false;
             }
             exact_cases++;
         }
     }
 
-    /* Signed zero is admitted and must preserve its sign exactly. */
-    for (unsigned width = 0u; width < 2u; width++) {
+    /* Signed zero and every historical flag must preserve their bits. */
+    for (unsigned trial = 0u; trial < 2u * 32u; trial++) {
+        const unsigned width = trial % 2u;
+        const uint32_t old_flags = compact_vfp_old_flags(trial / 2u);
         const uint32_t insn = width ? VFP_ARITH_D(2,0,2,0,1)
                                     : VFP_ARITH_S(2,0,2,0,1);
         const uint32_t pc = UINT32_C(0x17900) + width * 4u;
@@ -7437,7 +7449,7 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
         const uint64_t two = width ? UINT64_C(0x4000000000000000)
                                    : UINT32_C(0x40000000);
         seed_vfp_oracle(&reference, &insn, 1u, pc, true);
-        reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+        reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL | old_flags;
         static_vfp_arith_set_operands(
             &reference, insn, two, negative_zero, two);
         compact = reference;
@@ -7456,13 +7468,22 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
 
     /* Every live-mode, access, operand and post-host-operation rejection must
      * stop before guest mutation and restore any opened FP session. */
-    for (unsigned i = 0u;
-         i < sizeof VFP_ARITH_FALLBACKS / sizeof VFP_ARITH_FALLBACKS[0];
-         i++) {
+    const unsigned fallback_count =
+        sizeof VFP_ARITH_FALLBACKS / sizeof VFP_ARITH_FALLBACKS[0];
+    for (unsigned trial = 0u; trial < fallback_count * 2u; trial++) {
+        const unsigned i = trial % fallback_count;
         const static_vfp_arith_fallback_t *test = &VFP_ARITH_FALLBACKS[i];
         const uint32_t pc = UINT32_C(0x17a00) + i * 4u;
         seed_vfp_oracle(&compact, &test->insn, 1u, pc, true);
         compact.vfp_fpscr = test->fpscr;
+        /* The decoded engine still refuses other-sticky. The raw engine
+         * accepts it only with IXC, already covered by the full matrix above. */
+        if (strcmp(test->name, "other-sticky") == 0)
+            compact.vfp_fpscr &= ~ARM_FPSCR_IXC;
+        /* Historical flags must never hide a new invalid operation, overflow,
+         * underflow, divide by zero, or a rejected intermediate product. */
+        if (trial >= fallback_count)
+            compact.vfp_fpscr |= compact_vfp_old_flags(31u);
         compact.vfp_fpexc = test->enabled ? ARM_FPEXC_EN : 0u;
         if (!test->access)
             compact.cp15.cpacr &= ~(UINT32_C(0xf) <<
@@ -7513,7 +7534,8 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
         };
         const uint32_t pc = UINT32_C(0x17c00);
         seed_vfp_oracle(&reference, partial, 3u, pc, true);
-        reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+        reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL |
+                              compact_vfp_old_flags(31u);
         reference.r[0] = ARM_FPSCR_FZ | ARM_FPSCR_DN;
         reference.vfp_s[0] = UINT32_C(0x3f800000);
         reference.vfp_s[1] = UINT32_C(0x40000000);
@@ -7543,7 +7565,8 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
         bool run_ok;
 
         seed_vfp_oracle(&compact, &insn, 1u, pc, true);
-        compact.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+        compact.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL |
+                            compact_vfp_old_flags(31u);
         static_vfp_arith_set_operands(
             &compact, insn, UINT32_C(0x3f800000),
             rejection ? UINT32_C(0x7f7fffff) : UINT32_C(0x3f800000),
@@ -7598,7 +7621,8 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
         bool run_ok;
 
         seed_vfp_oracle(&reference, session_program, 2u, pc, true);
-        reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+        reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL |
+                              compact_vfp_old_flags(31u);
         static_vfp_arith_set_operands(
             &reference, session_program[0], UINT32_C(0x3f800000),
             UINT32_C(0x40400000), UINT32_C(0x40a00000));
@@ -7651,7 +7675,8 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
         bool run_ok;
 
         seed_vfp_oracle(&compact, &insn, 1u, pc, true);
-        compact.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+        compact.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL |
+                            compact_vfp_old_flags(31u);
         static_vfp_arith_set_operands(
             &compact, insn, UINT32_C(0x3f800000),
             UINT32_C(0x7f7fffff), UINT32_C(0x40000000));
@@ -7689,12 +7714,11 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
 #endif
 
     printf("COMPACT-RAW-VFP-ARITH-ORACLE exact=yes operations=9 widths=2 "
-           "accepted=%u signed-zero=yes inexact=yes fallbacks=%zu "
+           "accepted=%u signed-zero=yes inexact=yes fallbacks=%u "
            "conditions=yes partial-prefix=yes host-fp-state=yes "
            "host-fp-session=yes callback-boundary=yes "
-           "callback-no-retire=yes runtime-codegen=no\n",
-           exact_cases,
-           sizeof VFP_ARITH_FALLBACKS / sizeof VFP_ARITH_FALLBACKS[0]);
+           "callback-no-retire=yes sticky-combinations=32 runtime-codegen=no\n",
+           exact_cases, fallback_count * 2u);
     return true;
 }
 
@@ -7874,8 +7898,9 @@ static bool validate_compact_raw_vfp_narrow_oracles(void) {
          ARM_FPSCR_FZ | ARM_FPSCR_DN, true, true},
         {"directed-rounding", UINT64_C(0x3fd5555555555555),
          COMPACT_VFP_ARITH_CONTROL | (1u << 22), true, true},
-        {"extra-sticky", UINT64_C(0x3ff0000000000000),
-         COMPACT_VFP_ARITH_CONTROL | ARM_FPSCR_IOC, true, true},
+        {"old-flags-without-ixc", UINT64_C(0x3ff0000000000000),
+         ARM_FPSCR_FZ | ARM_FPSCR_DN | ARM_FPSCR_IOC | ARM_FPSCR_IDC,
+         true, true},
         {"short-vector", UINT64_C(0x3ff0000000000000),
          COMPACT_VFP_ARITH_CONTROL | ARM_FPSCR_LEN, true, true},
         {"exception-enable", UINT64_C(0x3ff0000000000000),
@@ -7905,14 +7930,21 @@ static bool validate_compact_raw_vfp_narrow_oracles(void) {
         return true;
     }
 
-    for (unsigned i = 0u; i < sizeof ACCEPTED / sizeof ACCEPTED[0]; i++) {
+    const unsigned accepted_count = sizeof ACCEPTED / sizeof ACCEPTED[0];
+    const unsigned fallback_count = sizeof FALLBACKS / sizeof FALLBACKS[0];
+    for (unsigned trial = 0u; trial < accepted_count * 32u; trial++) {
+        const unsigned i = trial % accepted_count;
         uint32_t pc = UINT32_C(0x18000) + i * 4u;
         seed_vfp_oracle(&reference, &ACCEPTED[i].insn, 1u, pc, true);
-        reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+        reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL |
+                              compact_vfp_old_flags(trial / accepted_count);
         vfp_set_d(&reference, ACCEPTED[i].insn & 15u,
                   ACCEPTED[i].input);
         compact = reference;
-        if (arm_step(&reference) != ARM_OK ||
+        if (a64_compact_raw_classify_instruction(
+                &compact, ACCEPTED[i].insn, false) !=
+                A64_COMPACT_RAW_ADMIT_EXECUTE ||
+            arm_step(&reference) != ARM_OK ||
             !a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                                  g_ram, sizeof g_ram, &completed) ||
             completed != 1u ||
@@ -7924,11 +7956,14 @@ static bool validate_compact_raw_vfp_narrow_oracles(void) {
         }
     }
 
-    for (unsigned i = 0u; i < sizeof FALLBACKS / sizeof FALLBACKS[0]; i++) {
+    for (unsigned trial = 0u; trial < fallback_count * 2u; trial++) {
+        const unsigned i = trial % fallback_count;
         const uint32_t insn = VFP_NARROW(15, 7);
         uint32_t pc = UINT32_C(0x18100) + i * 4u;
         seed_vfp_oracle(&compact, &insn, 1u, pc, true);
         compact.vfp_fpscr = FALLBACKS[i].fpscr;
+        if (trial >= fallback_count)
+            compact.vfp_fpscr |= compact_vfp_old_flags(31u);
         compact.vfp_fpexc = FALLBACKS[i].enabled ? ARM_FPEXC_EN : 0u;
         if (!FALLBACKS[i].access)
             compact.cp15.cpacr &= ~(UINT32_C(0xf) <<
@@ -7947,7 +7982,8 @@ static bool validate_compact_raw_vfp_narrow_oracles(void) {
     }
 
     seed_vfp_oracle(&reference, PARTIAL, 3u, UINT32_C(0x18200), true);
-    reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+    reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL |
+                          compact_vfp_old_flags(31u);
     reference.r[0] = ARM_FPSCR_FZ | ARM_FPSCR_DN;
     vfp_set_d(&reference, 1u, UINT64_C(0x3fd5555555555555));
     vfp_set_d(&reference, 2u, UINT64_C(0x400921fb54442d18));
@@ -7995,7 +8031,8 @@ static bool validate_compact_raw_vfp_narrow_oracles(void) {
         bool run_ok;
 
         seed_vfp_oracle(&compact, &insn, 1u, pc, true);
-        compact.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+        compact.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL |
+                            compact_vfp_old_flags(31u);
         vfp_set_d(&compact, 7u,
                   rejection ? UINT64_C(0x7fefffffffffffff)
                             : UINT64_C(0x3fd5555555555555));
@@ -8047,7 +8084,8 @@ static bool validate_compact_raw_vfp_narrow_oracles(void) {
         bool run_ok;
 
         seed_vfp_oracle(&compact, &insn, 1u, pc, true);
-        compact.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+        compact.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL |
+                            compact_vfp_old_flags(31u);
         vfp_set_d(&compact, 7u, UINT64_C(0x7fefffffffffffff));
         before = compact;
         static_host_fpcr_write(
@@ -8081,12 +8119,11 @@ static bool validate_compact_raw_vfp_narrow_oracles(void) {
     }
 #endif
 
-    printf("COMPACT-RAW-VFP-NARROW-ORACLE exact=yes accepted=%zu "
-           "fallbacks=%zu aliases=yes inexact=yes post-round-rejection=yes "
+    printf("COMPACT-RAW-VFP-NARROW-ORACLE exact=yes accepted=%u "
+           "fallbacks=%u aliases=yes inexact=yes post-round-rejection=yes "
            "conditions=yes partial-prefix=yes host-fp-state=yes "
-           "callback-boundary=yes runtime-codegen=no\n",
-           sizeof ACCEPTED / sizeof ACCEPTED[0],
-           sizeof FALLBACKS / sizeof FALLBACKS[0]);
+           "callback-boundary=yes sticky-combinations=32 runtime-codegen=no\n",
+           accepted_count * 32u, fallback_count * 2u);
     return true;
 }
 
