@@ -940,6 +940,85 @@ F64 remainder fixtures retain their 18,432, 3,680, 6,912, 3,456, 6,144,
 guarded kernel-entry trace remains identical through the 61,650-step L2
 ECC stop.
 
+Advanced SIMD VRECPE.F32 and VRECPS.F32 cover both instruction sets and
+every D/Q register. The estimate uses the architectural 256 input buckets
+and integer division to generate its eight-bit fraction. Standard FP
+controls flush input subnormals with IDC, return signed infinity with DZC
+for zeros, return signed zero for infinities, and flush finite magnitudes
+at least 2^126 to signed zero with UFC. Estimates do not raise IXC. NaNs
+produce the default NaN, with IOC for signaling inputs.
+
+The reciprocal step unpacks both inputs before NaN processing. Infinity
+times zero contributes a positive-zero product without IOC, including
+when a subnormal input flushes to zero and raises IDC. Otherwise the step
+rounds a multiplication and then subtracts that rounded result from 2.0;
+it is not fused. Both stages use the existing integer FP arithmetic and
+standard rounding/FZ/DN controls, accumulating exceptions without changing
+FPSCR.NZCV or ARM flags. Guest rounding, FZ/DN, LEN/STRIDE and trap enables
+do not select the operation. Both instructions stage all destination lanes
+before publication and reject reserved sizes or odd Q operands before
+access checks. U32 estimates and reciprocal-square-root forms remain
+unsupported. This follows
+[DDI0406C.b, A2.7.8 and A8.8.384/385](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Tests cover every D/Q register pair or triple and alias, all 512 guest
+control combinations and ignored trap/AHP fields, seventeen estimate
+anchors and twelve reciprocal-step anchors in both orders. The latter
+include an exact zero after product rounding whose fused counterpart
+would be nonzero. Independent native references check both ends of all
+256 estimate buckets at nine boundary exponents with both signs, all
+pairs of twenty-two FP classes and 1,024 random four-lane inputs. Both
+operations run under sixteen guest FP controls and four host rounding
+modes with pending host exceptions. Further checks cover cumulative
+flags and VMRS, access denial, invalid sizes and Q operands, IT conditions,
+legacy profiles, unsupported neighbors, checked host fetch failures,
+split-page User translation/XN/AP faults and guest enable/return retries.
+
+The first focused run passed the CPU and checked-bus tests. Four older
+MACC-neighbor assertions still expected the newly supported VRECPS encoding
+to stop. Those test expectations were updated; the reciprocal production
+code and frozen firmware fixture and oracle were unchanged.
+
+The original 2,096-byte ARM `vDSP_vdiv` body at
+`0x30821afc..0x3082232c` completes 3,456 prepared calls. Before reciprocal
+support, 256 empty calls returned and the first nonempty call stopped
+after twenty instructions at `0x308222ec`, on `VRECPE.F32 d2, d0`.
+Its complete partial register, flag, memory and access state matched the
+independent baseline: four bytes from each input, an 84-byte frame write,
+twelve argument bytes and no output. The same C fixture and Python runner
+passed on the first run after the implementation, with unchanged hashes.
+
+An exact-rational oracle supplies forty denominator/numerator rows with
+all six separately rounded stages: estimate, reciprocal step, multiply,
+second step, numerator multiply and correction multiply. Seventeen estimate
+anchors, twelve bidirectional step anchors and every estimate bucket's
+endpoints at three exponents and both signs check the oracle. Calls use
+positive unit strides for nine lengths from zero through fifteen and three
+signed nonunit stride tuples for those lengths plus 16, 17, 31, 32, 33 and
+65. Four alignment tuples and all sixteen guest rounding/FZ/DN controls
+exercise finite boundaries, infinities, both kinds of NaN, signed zeros
+and subnormals. Four seeds cover the unstored S1/S13 lanes.
+
+The fixture checks the full FP bank and partial FPSCR/CPSR after each
+arithmetic stage, including input prefetches interleaved with calculation.
+It accounts for software pipelining that can leave four scalar elements
+after the vector loop. Final checks cover all general registers, return
+state, exclusive monitor, whole RAM and exact instruction/input/output,
+84-byte frame and twelve-byte argument accesses. Empty calls read only
+the four-byte count argument. No CPU-family input is prepared or read.
+These are results of the firmware's approximate reciprocal pipeline;
+they do not establish correctly rounded division, aliases, negative unit
+strides, large unit-stride paths, unaligned block accesses, process launch,
+board boot, timing or physical behavior.
+
+After reciprocal support, all 77 strict and 72 shipping tests pass. The
+existing threshold, clipping, F32 dot-product, max/min, F64 dot-product,
+NEON integer, VFP integer, precision, square-root, division, unit F64 ramp,
+F32 ramp and F64 remainder fixtures retain their 8,064, 18,432, 3,680,
+6,912, 3,456, 6,144, 4,096, 4,096, 640, 1,536, 336, 1,824 and 112
+passing calls. The complete guarded kernel-entry trace remains identical
+through the 61,650-step L2 ECC stop.
+
 Advanced SIMD conversions between F32 and signed/unsigned 32-bit integers
 now cover every D/Q register and both instruction sets. They use the same
 integer arithmetic with standard NEON controls: nearest-even for integer
@@ -1648,7 +1727,8 @@ establish that result.
   32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms, 32-bit VLD1/VST1 lane transfers,
   register Boolean operations, VEXT, 8/16/32-bit VTRN, F32 VABS/VNEG,
   immediate constants, core-register VDUP, register VMUL/VADD/VSUB/VMLA/VMLS.F32,
-  F32 VMUL/VMLA/VMLS by scalar, VMAX/VMIN.F32, VCGE.F32 register comparisons, and F32/signed/unsigned 32-bit NEON conversion
+  F32 VMUL/VMLA/VMLS by scalar, VMAX/VMIN.F32, VCGE.F32 register comparisons,
+  VRECPE/VRECPS.F32 and F32/signed/unsigned 32-bit NEON conversion
   described above.
   Other upper-bank VFP arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Remaining shared lower-bank

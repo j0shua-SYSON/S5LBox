@@ -928,6 +928,34 @@ static uint64_t vfp_a8_multiply(uint64_t a, uint64_t b, bool dbl,
     return vfp_a8_round(significand, exp_a + exp_b - bias + (int)carry, result_sign, dbl, fpscr, exceptions);
 }
 
+/* FPRecipEstimate (A2.7.8), standard FZ/DN and an eight-bit estimate.
+ * Quantize the scaled input to bucket q, then round 262144/(2q+1) to
+ * nearest integer. The positive odd denominator cannot produce a tie. */
+uint32_t vfp_a8_neon_recip_estimate(uint32_t value, uint32_t *exceptions) {
+    uint64_t a=value,b=0u,nan_result;
+    if (vfp_a8_unpack_pair(&a,&b,false,ARM_FPSCR_FZ|ARM_FPSCR_DN,exceptions,&nan_result))
+        return (uint32_t)nan_result;
+    uint32_t magnitude=(uint32_t)a&0x7fffffffu,sign=(uint32_t)a&0x80000000u;
+    if (magnitude==0x7f800000u) return sign;
+    if (!magnitude) { *exceptions|=ARM_FPSCR_DZC; return sign|0x7f800000u; }
+    if (magnitude>=0x7e800000u) { *exceptions|=ARM_FPSCR_UFC; return sign; }
+    unsigned q=256u+((magnitude&0x7fffffu)>>15),denominator=2u*q+1u;
+    unsigned estimate=(524288u+denominator)/(2u*denominator);
+    return sign|((253u-(magnitude>>23))<<23)|((estimate-256u)<<15);
+}
+
+/* FPRecipStep deliberately rounds its product before subtraction. The
+ * infinity-times-zero special case produces +0 without Invalid Operation. */
+uint32_t vfp_a8_neon_recip_step(uint32_t left, uint32_t right, uint32_t *exceptions) {
+    const uint32_t controls=ARM_FPSCR_FZ|ARM_FPSCR_DN;
+    uint64_t a=left,b=right,nan_result;
+    if (vfp_a8_unpack_pair(&a,&b,false,controls,exceptions,&nan_result)) return (uint32_t)nan_result;
+    uint32_t ma=(uint32_t)a&0x7fffffffu,mb=(uint32_t)b&0x7fffffffu;
+    if ((ma==0x7f800000u && !mb) || (!ma && mb==0x7f800000u)) return 0x40000000u;
+    uint64_t product=vfp_a8_multiply(a,b,false,controls,exceptions);
+    return (uint32_t)vfp_a8_add_sub(0x40000000u,product,false,true,controls,exceptions);
+}
+
 /* FPDiv (A2.7.8). Long division yields the leading significand and three
  * rounding bits. A nonzero remainder supplies sticky information; neither
  * a 128-bit type nor the host floating-point environment is needed. */

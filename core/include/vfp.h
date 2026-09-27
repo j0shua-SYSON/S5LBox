@@ -201,6 +201,10 @@ uint32_t vfp_a8_neon_minmax(uint32_t left, uint32_t right, bool minimum,
 uint32_t vfp_a8_neon_compare_ge(uint32_t left, uint32_t right,
                                  uint32_t *exceptions);
 
+/* Pure F32 Advanced SIMD reciprocal estimate and rounded reciprocal step. */
+uint32_t vfp_a8_neon_recip_estimate(uint32_t value, uint32_t *exceptions);
+uint32_t vfp_a8_neon_recip_step(uint32_t left, uint32_t right, uint32_t *exceptions);
+
 /*
  * Execute one VFP encoding. `insn` must already have been identified as a
  * cp10/cp11 encoding by the caller and its condition code must already have

@@ -8132,9 +8132,17 @@ static void test_cortex_a8_neon_transpose_fetch_and_retry(void) {
      }
 }
 
-static void test_cortex_a8_neon_minmax_ge_fetch_and_retry(void) {
+static void test_cortex_a8_neon_minmax_ge_recip_fetch_and_retry(void) {
+    static const uint32_t prefixes[2][5]={{0xf240ef80u,0xf260ef80u,0xf340ee80u,0xf3fbe520u,0xf240ef90u},
+        {0xef40ef80u,0xef60ef80u,0xff40ee80u,0xfffbe520u,0xef40ef90u}};
+    static const uint64_t results[5][2]={
+        {UINT64_C(0x7fc0000000000000),UINT64_C(0x3f80000000000000)},
+        {UINT64_C(0x7fc0000080000000),UINT64_C(0x00000000bf800000)},
+        {UINT64_C(0x00000000ffffffff),UINT64_C(0xffffffff00000000)},
+        {UINT64_C(0x7fc000007f800000),UINT64_C(0x3f7f8000bf7f8000)},
+        {UINT64_C(0x7fc0000040000000),UINT64_C(0x4000000040000000)}};
     for (unsigned host=0;host<2u;host++)
-     for (unsigned op=0;op<3u;op++)
+     for (unsigned op=0;op<5u;op++)
       for (unsigned quad=0;quad<2u;quad++)
        for (unsigned fault=0;fault<4u;fault++) {
         memset(g_ram,0,sizeof g_ram); arm_bus_t bus=g_bus; if (host) bus.host_ram=m_host_ram;
@@ -8148,7 +8156,7 @@ static void test_cortex_a8_neon_minmax_ge_fetch_and_retry(void) {
         c.vfp_s[0]=0x80000000u; c.vfp_s[1]=0x3f800000u; c.vfp_s[2]=c.vfp_s[3]=0u;
         uint32_t singles[32],flags=c.cpsr; uint64_t upper[16];
         memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
-        uint32_t insn=(op==2u ? 0xff40ee80u : 0xef40ef80u|(op<<21))|(quad<<6);
+        uint32_t insn=prefixes[1][op]|(quad<<6);
         m_w32(NULL,0x4000u,0x6001u); m_w32(NULL,0x6000u,0x8032u);
         m_w32(NULL,0x6004u,fault==1u ? 0u : fault==2u ? 0xa033u : fault==3u ? 0xa012u : 0xa032u);
         m_w16(NULL,0x8ffeu,(uint16_t)(insn>>16)); m_w16(NULL,0xa000u,(uint16_t)insn); m_w16(NULL,0x9000u,0u);
@@ -8158,14 +8166,13 @@ static void test_cortex_a8_neon_minmax_ge_fetch_and_retry(void) {
             c.cp15.ifar==0x1000u && (c.cp15.ifsr&15u)==(fault==1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION) &&
             !(c.cpsr&(ARM_CPSR_T|TEST_IT_MASK)) && c.vfp_fpexc==0u,"max/min/GE effects preceded full User fetch");
         else {
-            upper[14]=op==2u ? UINT64_C(0x00000000ffffffff) : op ? UINT64_C(0x7fc0000080000000) : UINT64_C(0x7fc0000000000000);
-            if (quad) upper[15]=op==2u ? UINT64_C(0xffffffff00000000) : op ? UINT64_C(0x00000000bf800000) : UINT64_C(0x3f80000000000000);
+            upper[14]=results[op][0]; if (quad) upper[15]=results[op][1];
             CHECK(c.r[15]==0x1002u && c.cpsr==((flags&~TEST_IT_MASK)|test_it_bits(0x18u)),"max/min/GE split fetch IT");
         }
         CHECK(!memcmp(singles,c.vfp_s,sizeof singles) && !memcmp(upper,c.a8_vfp_hi,sizeof upper),"max/min/GE User fetch full register state");
        }
     for (unsigned thumb=0;thumb<2u;thumb++)
-     for (unsigned op=0;op<3u;op++)
+     for (unsigned op=0;op<5u;op++)
       for (unsigned quad=0;quad<2u;quad++) {
         memset(g_ram,0,sizeof g_ram); arm_cpu_t c;
         CHECK(arm_reset_profile(&c,&g_bus,ARM_ARCH_V7_CORTEX_A8),"max/min/GE lazy retry reset");
@@ -8177,8 +8184,7 @@ static void test_cortex_a8_neon_minmax_ge_fetch_and_retry(void) {
         uint32_t singles[32]; uint64_t upper[16];
         memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
         c.r[15]=0x100u; c.r[5]=ARM_FPEXC_EN; c.r[2]=0x12345678u; c.vfp_fpscr=0x08c00002u;
-        uint32_t insn=(op==2u ? (thumb ? 0xff40ee80u : 0xf340ee80u) :
-            (thumb ? 0xef40ef80u : 0xf240ef80u)|(op<<21))|(quad<<6);
+        uint32_t insn=prefixes[thumb][op]|(quad<<6);
         if (thumb) {
             m_w16(NULL,0x100u,0xbf04u); m_w16(NULL,0x102u,(uint16_t)(insn>>16));
             m_w16(NULL,0x104u,(uint16_t)insn); m_w16(NULL,0x106u,0x2201u);
@@ -8191,8 +8197,7 @@ static void test_cortex_a8_neon_minmax_ge_fetch_and_retry(void) {
               !memcmp(upper,c.a8_vfp_hi,sizeof upper),"max/min/GE changed FP state before guest enable");
         CHECK(arm_step(&c)==ARM_OK && c.vfp_fpexc==ARM_FPEXC_EN,"max/min/GE guest enable");
         CHECK(arm_step(&c)==ARM_OK && c.r[15]==pc && c.cpsr==flags,"max/min/GE exception return");
-        upper[14]=op==2u ? UINT64_C(0x00000000ffffffff) : op ? UINT64_C(0x7fc0000080000000) : UINT64_C(0x7fc0000000000000);
-        if (quad) upper[15]=op==2u ? UINT64_C(0xffffffff00000000) : op ? UINT64_C(0x00000000bf800000) : UINT64_C(0x3f80000000000000);
+        upper[14]=results[op][0]; if (quad) upper[15]=results[op][1];
         CHECK(arm_step(&c)==ARM_OK && c.r[15]==pc+4u && c.cpsr==(thumb ? (flags&~TEST_IT_MASK)|test_it_bits(0x08u) : flags) &&
               c.vfp_fpscr==0x08c00083u && !memcmp(singles,c.vfp_s,sizeof singles) && !memcmp(upper,c.a8_vfp_hi,sizeof upper),
               "max/min/GE guest exact retry");
@@ -12449,7 +12454,7 @@ int main(void) {
     test_cortex_a8_neon_transpose_fetch_and_retry();
     test_cortex_a8_neon_macc_fetch_and_retry();
     test_cortex_a8_neon_integer_fetch_and_retry();
-    test_cortex_a8_neon_minmax_ge_fetch_and_retry();
+    test_cortex_a8_neon_minmax_ge_recip_fetch_and_retry();
     test_cortex_a8_neon_by_scalar_fetch_and_retry();
     test_cortex_a8_vfp_single_memory_aborts();
     test_cortex_a8_vfp_multiple_memory_aborts();

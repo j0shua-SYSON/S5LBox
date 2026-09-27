@@ -3233,6 +3233,7 @@ static void test_a8_neon_macc_access_invalid_and_it(void) {
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned enabled = 0; enabled < 2u; enabled++)
       for (unsigned bit = 8u; bit < 12u; bit++) {
+        if (bit == 9u) continue; /* VRECPS.F32 now has separate result/access tests. */
         arm_cpu_t c; a8_move_reset(&c, thumb); c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
         uint32_t flags = c.cpsr, insn = a8_neon_macc(thumb, 0u, 0u, 31u, 16u, 18u) ^ (1u << bit);
         CHECK(a8_move_step(&c, thumb, insn) == ARM_UNDEFINED &&
@@ -4312,13 +4313,14 @@ static void test_a8_neon_minmax_access_invalid_and_it(void) {
               c.vfp_fpscr==fpscr && !memcmp(singles,c.vfp_s,sizeof singles) && !memcmp(upper,c.a8_vfp_hi,sizeof upper),
               "max/min leaked into legacy");
     }
-    /* Adjacent reciprocal-step and pairwise-max/min spaces stay unsupported. */
+    /* Reciprocal-square-root step and pairwise max/min stay unsupported. */
     for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned op=0;op<2u;op++) for (unsigned neighbor=0;neighbor<2u;neighbor++)
      for (unsigned enabled=0;enabled<2u;enabled++) for (unsigned access=0;access<3u;access++) for (unsigned user=0;user<2u;user++) {
         arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u;
         c.cp15.cpacr=permissions[access]*0x00500000u;
         c.cpsr=(c.cpsr&~ARM_CPSR_MODE_MASK)|(user ? ARM_MODE_USR : ARM_MODE_SVC);
         uint32_t insn=a8_neon_minmax(thumb,op,0u,30u,16u,0u)^(neighbor ? 1u<<(thumb ? 28u : 24u) : 1u<<4);
+        if (!neighbor && !op) continue; /* VRECPS.F32 is checked by its own tests. */
         uint32_t flags=c.cpsr,fpscr=c.vfp_fpscr;
         CHECK(a8_move_step(&c,thumb,insn)==ARM_UNDEFINED && c.r[15]==0x100u && c.cpsr==flags &&
               c.vfp_fpscr==fpscr && vfp_get_d(&c,30u)==0u,
@@ -4516,6 +4518,238 @@ static void test_a8_neon_ge_access_invalid_and_it(void) {
         uint32_t flags=c.cpsr,fpscr=c.vfp_fpscr;
         CHECK(a8_move_step(&c,thumb,insn)==ARM_UNDEFINED && c.r[15]==0x100u && c.cpsr==flags &&
               c.vfp_fpscr==fpscr && vfp_get_d(&c,30u)==0u,"GE consumed unsupported neighbor T=%u neighbor=%u EN=%u",thumb,neighbor,enabled);
+    }
+}
+
+static uint32_t a8_neon_recip(unsigned thumb,unsigned step,unsigned quad,unsigned d,unsigned n,unsigned m) {
+    uint32_t prefix=step ? (thumb ? 0xef000f10u : 0xf2000f10u) : (thumb ? 0xffbb0500u : 0xf3bb0500u);
+    return prefix|(quad<<6)|((d&15u)<<12)|((d>>4)<<22)|(m&15u)|((m>>4)<<5)|
+        (step ? ((n&15u)<<16)|((n>>4)<<7) : 0u);
+}
+
+/* The estimate reference evaluates the manual's scaled-real formula through
+ * frexp/ldexp; it does not use the production integer quotient or bit assembly. */
+static uint32_t a8_recip_reference(uint32_t a,uint32_t b,unsigned step,uint32_t *raised) {
+    uint32_t values[2]={a,b}; unsigned count=step ? 2u : 1u; bool nan=false;
+    for (unsigned i=0;i<count;i++) {
+        uint32_t mag=values[i]&0x7fffffffu;
+        if (mag>0x7f800000u) { nan=true; if (!(mag&0x400000u)) *raised|=ARM_FPSCR_IOC; }
+        else if (mag && mag<0x00800000u) { *raised|=ARM_FPSCR_IDC; values[i]&=0x80000000u; }
+    }
+    if (nan) return 0x7fc00000u;
+    a=values[0]; b=values[1]; uint32_t ma=a&0x7fffffffu,mb=b&0x7fffffffu;
+    if (step) {
+        if ((ma==0x7f800000u && !mb) || (!ma && mb==0x7f800000u)) return 0x40000000u;
+        uint32_t pf,sf,controls=ARM_FPSCR_FZ|ARM_FPSCR_DN;
+        uint32_t product=(uint32_t)a8_macc_stage_reference(a,b,0u,1u,controls,&pf);
+        uint32_t result=(uint32_t)a8_macc_stage_reference(0x40000000u,product^0x80000000u,0u,0u,controls,&sf);
+        *raised|=pf|sf; return result;
+    }
+    uint32_t sign=a&0x80000000u;
+    if (ma==0x7f800000u) return sign;
+    if (!ma) { *raised|=ARM_FPSCR_DZC; return sign|0x7f800000u; }
+    if (ma>=0x7e800000u) { *raised|=ARM_FPSCR_UFC; return sign; }
+    fenv_t saved; CHECK(fegetenv(&saved)==0 && fesetround(FE_TONEAREST)==0,"prepare estimate reference");
+    int exponent; double scaled=frexp(fabs((double)u2f(a)),&exponent);
+    double q=floor(scaled*512.0),r=512.0/(q+0.5),s=floor(256.0*r+0.5);
+    float result=(float)ldexp(s/256.0,-exponent);
+    uint32_t raw=f2u(result)|sign;
+    CHECK(fesetenv(&saved)==0,"restore estimate reference"); return raw;
+}
+
+static void a8_recip_check(arm_cpu_t *c,unsigned thumb,unsigned quad,unsigned step,unsigned host) {
+    static const int rounds[]={FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    uint64_t expected[32]; for (unsigned d=0;d<32u;d++) expected[d]=vfp_get_d(c,d);
+    uint32_t raised=0u;
+    for (unsigned r=0;r<=quad;r++) {
+        uint32_t lo=a8_recip_reference((uint32_t)expected[16u+r],(uint32_t)expected[r],step,&raised);
+        uint32_t hi=a8_recip_reference((uint32_t)(expected[16u+r]>>32),(uint32_t)(expected[r]>>32),step,&raised);
+        expected[30u+r]=((uint64_t)hi<<32)|lo;
+    }
+    uint32_t flags=c->cpsr,fpscr=c->vfp_fpscr;
+    c->excl_valid=true; c->excl_addr=0x2468u; c->a8_excl_size=8u;
+    CHECK(fesetround(rounds[host])==0 && feclearexcept(FE_ALL_EXCEPT)==0 &&
+          feraiseexcept(FE_DIVBYZERO|FE_INEXACT)==0,"prepare reciprocal host state");
+    int host_flags=fetestexcept(FE_ALL_EXCEPT);
+    CHECK(a8_move_step(c,thumb,a8_neon_recip(thumb,step,quad,30u,16u,step ? 0u : 16u))==ARM_OK &&
+          c->cycles==1u && c->r[15]==0x104u && c->cpsr==flags && c->vfp_fpscr==(fpscr|raised) && c->vfp_fpexc==ARM_FPEXC_EN &&
+          c->excl_valid && c->excl_addr==0x2468u && c->a8_excl_size==8u,"reciprocal status op=%u",step);
+    bool match=true; for (unsigned d=0;d<32u;d++) match&=vfp_get_d(c,d)==expected[d];
+    for (unsigned r=0;r<15u;r++) match&=c->r[r]==0u;
+    CHECK(match,"reciprocal complete register state op=%u",step);
+    CHECK(fegetround()==rounds[host] && fetestexcept(FE_ALL_EXCEPT)==host_flags,"reciprocal changed host state");
+}
+
+static void test_a8_neon_recip_registers(void) {
+    CHECK(a8_neon_recip(0u,0u,0u,2u,0u,0u)==0xf3bb2500u && a8_neon_recip(0u,1u,1u,4u,0u,2u)==0xf2004f52u &&
+          a8_neon_recip(1u,0u,1u,30u,0u,16u)==0xfffbe560u,"reciprocal encoding anchors");
+    fenv_t saved; CHECK(fegetenv(&saved)==0,"save reciprocal register host state");
+    uint32_t est[32][2],ef[32]={0};
+    for (unsigned r=0;r<32u;r++) {
+        est[r][0]=a8_recip_reference(a8_macc_int_bits((int)r-16),0u,0u,&ef[r]);
+        est[r][1]=a8_recip_reference(a8_macc_int_bits(31-(int)r),0u,0u,&ef[r]);
+    }
+    for (unsigned step=0;step<2u;step++) for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned quad=0;quad<2u;quad++)
+     for (unsigned d=0;d<32u;d+=quad+1u) for (unsigned m=0;m<32u;m+=quad+1u)
+      for (unsigned n=0;n<(step ? 32u : 1u);n+=quad+1u) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.cpsr|=ARM_CPSR_E; c.vfp_fpscr=ARM_FPSCR_NZCV|ARM_FPSCR_QC;
+        c.excl_valid=true; c.excl_addr=0x2468u; c.a8_excl_size=8u;
+        uint64_t expected[32]; for (unsigned r=0;r<32u;r++) {
+            expected[r]=((uint64_t)a8_macc_int_bits(31-(int)r)<<32)|a8_macc_int_bits((int)r-16);
+            vfp_set_d(&c,r,expected[r]);
+        }
+        uint32_t raised=0u,flags=c.cpsr;
+        for (unsigned r=0;r<=quad;r++) {
+            uint32_t lo=step ? a8_macc_int_bits(2-((int)(n+r)-16)*((int)(m+r)-16)) : est[m+r][0];
+            uint32_t hi=step ? a8_macc_int_bits(2-(31-(int)(n+r))*(31-(int)(m+r))) : est[m+r][1];
+            expected[d+r]=((uint64_t)hi<<32)|lo; if (!step) raised|=ef[m+r];
+        }
+        CHECK(a8_move_step(&c,thumb,a8_neon_recip(thumb,step,quad,d,n,m))==ARM_OK && c.cycles==1u && c.r[15]==0x104u &&
+              c.cpsr==flags && c.vfp_fpscr==(ARM_FPSCR_NZCV|ARM_FPSCR_QC|raised) && c.vfp_fpexc==ARM_FPEXC_EN &&
+              c.excl_valid && c.excl_addr==0x2468u && c.a8_excl_size==8u,"reciprocal register status");
+        bool match=true; for (unsigned r=0;r<32u;r++) match&=vfp_get_d(&c,r)==expected[r];
+        for (unsigned r=0;r<15u;r++) match&=c.r[r]==0u;
+        CHECK(match,"reciprocal alias op/T/Q/d/n/m=%u/%u/%u/%u/%u/%u",step,thumb,quad,d,n,m);
+      }
+    CHECK(fesetenv(&saved)==0,"restore reciprocal register host state");
+}
+
+static void test_a8_neon_recip_values(void) {
+    fenv_t saved; CHECK(fegetenv(&saved)==0,"save reciprocal host state");
+    static const uint32_t estimates[][3]={
+        {0x3f800000u,0x3f7f8000u,0u},{0xbf800000u,0xbf7f8000u,0u},{0x40000000u,0x3eff8000u,0u},
+        {0x3f000000u,0x3fff8000u,0u},{0x40400000u,0x3eaa8000u,0u},{0x3fffffffu,0x3f000000u,0u},
+        {0x00800000u,0x7e7f8000u,0u},{0x7e800000u,0u,8u},{0xff7fffffu,0x80000000u,8u},
+        {0x7f800000u,0u,0u},{0xff800000u,0x80000000u,0u},{0u,0x7f800000u,2u},{0x80000000u,0xff800000u,2u},
+        {1u,0x7f800000u,0x82u},{0x807fffffu,0xff800000u,0x82u},{0x7fc12345u,0x7fc00000u,0u},{0xff800001u,0x7fc00000u,1u}
+    };
+    static const uint32_t steps[][4]={
+        {0u,0x7f800000u,0x40000000u,0u},{1u,0xff800000u,0x40000000u,0x80u},{0x7fc12345u,1u,0x7fc00000u,0x80u},
+        {0x7f800001u,0x3f800000u,0x7fc00000u,1u},{0x3f800000u,0x3f800000u,0x3f800000u,0u},
+        {0x40000000u,0x3f800000u,0u,0u},{0x40400000u,0x3f800000u,0xbf800000u,0u},
+        {0x7f7fffffu,0x40000000u,0xff800000u,0x14u},{0x00800000u,0x3f000000u,0x40000000u,8u},
+        {0x3f800000u,0x3f800001u,0x3f7ffffeu,0u},{0x3f800001u,0x3f800001u,0x3f7ffffcu,0x10u},
+        {0x3f800001u,0x3ffffffeu,0u,0x10u}
+    };
+    unsigned ec=sizeof estimates/sizeof estimates[0],sc=sizeof steps/sizeof steps[0];
+    for (unsigned i=0;i<ec;i++) { uint32_t flags=0u; CHECK(a8_recip_reference(estimates[i][0],0u,0u,&flags)==estimates[i][1] && flags==estimates[i][2],"estimate anchor %u",i); }
+    for (unsigned i=0;i<sc;i++) for (unsigned order=0;order<2u;order++) {
+        uint32_t flags=0u; CHECK(a8_recip_reference(steps[i][order],steps[i][1u-order],1u,&flags)==steps[i][2] && flags==steps[i][3],"step anchor %u/%u",i,order);
+    }
+    for (unsigned op=0;op<2u;op++) for (unsigned controls=0;controls<512u;controls++)
+     for (unsigned quad=0;quad<2u;quad++) for (unsigned thumb=0;thumb<2u;thumb++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb);
+        c.vfp_fpscr=ARM_FPSCR_NZCV|ARM_FPSCR_QC|ARM_FPSCR_ENABLES|(1u<<26)|((controls&3u)<<22)|
+            (controls&4u ? ARM_FPSCR_FZ : 0u)|(controls&8u ? ARM_FPSCR_DN : 0u)|(((controls>>4)&7u)<<16)|((controls>>7)<<20);
+        for (unsigned r=0;r<2u;r++) {
+            unsigned i=(controls+2u*r)%(op ? sc : ec),j=(i+1u)%(op ? sc : ec),order=(controls>>1)&1u;
+            vfp_set_d(&c,16u+r,((uint64_t)(op ? steps[j][order] : estimates[j][0])<<32)|(op ? steps[i][order] : estimates[i][0]));
+            vfp_set_d(&c,r,op ? ((uint64_t)steps[j][1u-order]<<32)|steps[i][1u-order] : UINT64_C(0x7f80000100000001));
+        }
+        a8_recip_check(&c,thumb,quad,op,controls&3u);
+     }
+    static const unsigned exponents[]={1u,2u,126u,127u,128u,251u,252u,253u,254u};
+    for (unsigned bucket=0;bucket<256u;bucket++) for (unsigned e=0;e<sizeof exponents/sizeof exponents[0];e++)
+     for (unsigned sign=0;sign<2u;sign++) for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned quad=0;quad<2u;quad++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr=ARM_FPSCR_NZCV|ARM_FPSCR_QC;
+        uint32_t low=(sign<<31)|(exponents[e]<<23)|(bucket<<15);
+        vfp_set_d(&c,16u,((uint64_t)(low|0x7fffu)<<32)|low);
+        vfp_set_d(&c,17u,((uint64_t)(low^0x80000000u)<<32)|(low^0x80000000u)|0x7fffu);
+        a8_recip_check(&c,thumb,quad,0u,(bucket+e)&3u);
+     }
+    unsigned classes=sizeof a8_compare_values/sizeof a8_compare_values[0]; uint32_t random=0xc5a8192du;
+    for (unsigned sample=0;sample<classes*classes+1024u;sample++) {
+        uint32_t a[4],b[4];
+        for (unsigned lane=0;lane<4u;lane++) {
+            random^=random<<13; random^=random>>17; random^=random<<5; a[lane]=random;
+            random^=random<<13; random^=random>>17; random^=random<<5; b[lane]=random;
+            if (sample<classes*classes) {
+                a[lane]=a8_compare_values[(sample/classes+lane)%classes].single;
+                b[lane]=a8_compare_values[(sample%classes+3u*lane)%classes].single;
+            }
+        }
+        for (unsigned op=0;op<2u;op++) for (unsigned controls=0;controls<16u;controls++)
+         for (unsigned quad=0;quad<2u;quad++) for (unsigned thumb=0;thumb<2u;thumb++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.vfp_fpscr=ARM_FPSCR_NZCV|ARM_FPSCR_QC|ARM_FPSCR_DZC|((controls&3u)<<22)|
+                (controls&4u ? ARM_FPSCR_FZ : 0u)|(controls&8u ? ARM_FPSCR_DN : 0u);
+            for (unsigned r=0;r<2u;r++) {
+                vfp_set_d(&c,16u+r,((uint64_t)a[2u*r+1u]<<32)|a[2u*r]);
+                vfp_set_d(&c,r,((uint64_t)b[2u*r+1u]<<32)|b[2u*r]);
+            }
+            a8_recip_check(&c,thumb,quad,op,(sample+controls)&3u);
+         }
+    }
+    for (unsigned thumb=0;thumb<2u;thumb++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr=ARM_FPSCR_NZCV|ARM_FPSCR_QC;
+        static const uint32_t inputs[]={1u,0x7f800001u,0x40000000u}; uint32_t want=c.vfp_fpscr;
+        for (unsigned i=0;i<3u;i++) {
+            vfp_set_d(&c,16u,((uint64_t)0x3f800000u<<32)|inputs[i]); vfp_set_d(&c,0u,UINT64_C(0x3f8000003f800000));
+            CHECK(a8_move_step(&c,thumb,a8_neon_recip(thumb,i!=0u,0u,30u,16u,i ? 0u : 16u))==ARM_OK,"reciprocal cumulative");
+            want|=!i ? ARM_FPSCR_IDC|ARM_FPSCR_DZC : i==1u ? ARM_FPSCR_IOC : 0u;
+            CHECK(c.vfp_fpscr==want && a8_move_step(&c,thumb,VMRS(3u,1u))==ARM_OK && c.r[3]==want,"reciprocal cumulative VMRS");
+        }
+    }
+    CHECK(fesetenv(&saved)==0,"restore reciprocal host state");
+}
+
+static void test_a8_neon_recip_access_invalid_and_it(void) {
+    static const unsigned permissions[]={0u,1u,3u};
+    for (unsigned op=0;op<2u;op++) for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned quad=0;quad<2u;quad++)
+     for (unsigned user=0;user<2u;user++) for (unsigned enabled=0;enabled<2u;enabled++)
+      for (unsigned access=0;access<3u;access++) for (unsigned variant=0;variant<(quad ? 16u : op ? 2u : 4u);variant++)
+       for (unsigned skip=0;skip<(thumb ? 2u : 1u);skip++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb);
+        c.cpsr=(c.cpsr&~ARM_CPSR_MODE_MASK)|(user ? ARM_MODE_USR : ARM_MODE_SVC);
+        c.cp15.cpacr=permissions[access]*0x00500000u; c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u;
+        c.vfp_fpscr=ARM_FPSCR_QC|ARM_FPSCR_DZC|(3u<<22)|ARM_FPSCR_LEN|ARM_FPSCR_STRIDE;
+        for (unsigned r=0;r<32u;r++) vfp_set_d(&c,r,UINT64_C(0x7f800001dead0000)+r);
+        vfp_set_d(&c,16u,UINT64_C(0x7f80000100000001)); vfp_set_d(&c,0u,UINT64_C(0x3f80000080000000));
+        vfp_set_d(&c,17u,UINT64_C(0x3f800000bf800000)); vfp_set_d(&c,1u,0u);
+        uint64_t expected[32]; for (unsigned r=0;r<32u;r++) expected[r]=vfp_get_d(&c,r);
+        if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c)==ARM_OK,"reciprocal IT setup"); }
+        unsigned odd=variant>>(op ? 1u : 2u);
+        uint32_t insn=a8_neon_recip(thumb,op,quad,30u+(odd&1u),16u+((odd>>1)&1u),op ? (odd>>2)&1u : 16u+((odd>>1)&1u));
+        if (op) insn|=(variant&1u)<<20;
+        else insn=(insn&~(3u<<18))|((variant&3u)<<18);
+        uint32_t pc=c.r[15],flags=c.cpsr,fpscr=c.vfp_fpscr; uint64_t cycles=c.cycles;
+        bool valid=variant==(op ? 0u : 2u),allowed=enabled && (permissions[access]==3u || (permissions[access]==1u && !user));
+        uint32_t raised=0u;
+        if (valid && allowed && !skip) {
+            raised=ARM_FPSCR_IOC|ARM_FPSCR_IDC|(op ? 0u : ARM_FPSCR_DZC);
+            expected[30]=op ? UINT64_C(0x7fc0000040000000) : UINT64_C(0x7fc000007f800000);
+            if (quad) expected[31]=op ? UINT64_C(0x4000000040000000) : UINT64_C(0x3f7f8000bf7f8000);
+        }
+        CHECK(a8_move_step(&c,thumb,insn)==(skip || valid ? ARM_OK : ARM_UNDEFINED) && c.cycles==cycles+1u &&
+              c.vfp_fpscr==(fpscr|raised) && c.vfp_fpexc==(enabled ? ARM_FPEXC_EN : 0u),"reciprocal access/encoding disposition op=%u",op);
+        CHECK(skip ? c.r[15]==pc+4u && c.cpsr==(flags&~0x0600fc00u) :
+              !valid ? c.r[15]==pc && c.cpsr==flags : allowed ? c.r[15]==pc+4u && c.cpsr==(flags&~0x0600fc00u) :
+              c.r[15]==ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND]==flags && c.r[14]==pc+(thumb ? 2u : 4u),
+              "reciprocal access precedence/IT retirement");
+        bool match=true; for (unsigned r=0;r<32u;r++) match&=vfp_get_d(&c,r)==expected[r];
+        CHECK(match,"reciprocal invalid/access/result preservation");
+       }
+    const arm_arch_t legacy[]={ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned p=0;p<2u;p++) for (unsigned op=0;op<2u;op++) for (unsigned quad=0;quad<2u;quad++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,legacy[p]),"legacy reciprocal reset");
+        c.cp15.cpacr=0x00f00000u; c.vfp_fpexc=ARM_FPEXC_EN;
+        for (unsigned r=0;r<32u;r++) c.vfp_s[r]=0xdead0000u+r;
+        for (unsigned r=0;r<16u;r++) c.a8_vfp_hi[r]=UINT64_C(0x7f800001beef0000)+r;
+        uint32_t singles[32],fpscr=c.vfp_fpscr; uint64_t upper[16];
+        memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
+        CHECK(a8_move_step(&c,0u,a8_neon_recip(0u,op,quad,30u,16u,16u))==ARM_UNDEFINED && c.r[15]==0u &&
+              c.vfp_fpscr==fpscr && !memcmp(singles,c.vfp_s,sizeof singles) && !memcmp(upper,c.a8_vfp_hi,sizeof upper),"reciprocal leaked into legacy");
+    }
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned neighbor=0;neighbor<3u;neighbor++)
+     for (unsigned enabled=0;enabled<2u;enabled++) for (unsigned access=0;access<3u;access++) for (unsigned user=0;user<2u;user++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u;
+        c.cp15.cpacr=permissions[access]*0x00500000u;
+        c.cpsr=(c.cpsr&~ARM_CPSR_MODE_MASK)|(user ? ARM_MODE_USR : ARM_MODE_SVC);
+        uint32_t insn=a8_neon_recip(thumb,neighbor==2u,0u,30u,16u,16u);
+        insn=neighbor==0u ? insn&~0x100u : insn|(1u<<(neighbor==1u ? 7u : 21u));
+        uint32_t flags=c.cpsr,fpscr=c.vfp_fpscr;
+        CHECK(a8_move_step(&c,thumb,insn)==ARM_UNDEFINED && c.r[15]==0x100u && c.cpsr==flags &&
+              c.vfp_fpscr==fpscr && vfp_get_d(&c,30u)==0u,"reciprocal consumed unsupported neighbor T=%u neighbor=%u EN=%u",thumb,neighbor,enabled);
     }
 }
 
@@ -4732,11 +4966,12 @@ static void test_a8_neon_integer_access_invalid_and_it(void) {
               c.r[15]==0u && c.vfp_fpscr==fpscr && memcmp(singles,c.vfp_s,sizeof singles)==0 &&
               memcmp(upper,c.a8_vfp_hi,sizeof upper)==0,"NEON integer leaked into legacy");
       }
-    /* Adjacent reciprocal estimate allocations remain unsupported. */
+    /* U32 reciprocal estimate and F32 reciprocal-square-root stay unsupported. */
     for (unsigned thumb=0;thumb<2u;thumb++)
      for (unsigned reciprocal=0;reciprocal<2u;reciprocal++) {
         arm_cpu_t c; a8_move_reset(&c,thumb);
-        uint32_t insn=(thumb ? 0xfffb0520u : 0xf3fb0520u)|(reciprocal<<7);
+        uint32_t insn=(thumb ? 0xfffb0520u : 0xf3fb0520u);
+        insn=reciprocal ? insn|0x80u : insn&~0x100u;
         uint32_t fpscr=c.vfp_fpscr;
         CHECK(a8_move_step(&c,thumb,insn)==ARM_UNDEFINED && c.r[15]==0x100u &&
               c.vfp_fpscr==fpscr && vfp_get_d(&c,16u)==0u,"NEON integer consumed reciprocal neighbor");
@@ -7375,6 +7610,9 @@ int main(void) {
     test_a8_neon_ge_registers();
     test_a8_neon_ge_values();
     test_a8_neon_ge_access_invalid_and_it();
+    test_a8_neon_recip_registers();
+    test_a8_neon_recip_values();
+    test_a8_neon_recip_access_invalid_and_it();
     test_a8_neon_integer_values_and_host_state();
     test_a8_neon_integer_access_invalid_and_it();
     test_a8_neon_by_scalar_registers();
