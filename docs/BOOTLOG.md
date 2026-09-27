@@ -1202,7 +1202,18 @@ contact collapse; it is not a claim that cold drawing latency or slow app
 transitions have been resolved.
 
 Local validation: 77/77 tests passed (82.40 s), including 438 controller
-checks. Physical-device validation of this change is still pending.
+checks. All nine exact-revision core CI jobs and the iOS build passed. The
+installed executable was hash-verified. Cold and warm ten-key bursts preserved
+all characters; typing also passed after a 44.8-second explicit pause, guest
+sleep/wake, and checkpoint save/relaunch. Pause time did not spuriously engage
+the input deadline shield. The original guest quartet was restored and checked,
+and the four temporary return clones and retained-locally installer were removed.
+
+These checks do not establish a cold-keyboard latency improvement: screenshot
+capture/transport varied, and the control trial also preserved all ten keys.
+A later Settings navigation tap delivered both controller reports but produced
+no visible response; repeating after sleep/wake worked. That residual input
+case and slow navigation preparation/sliding remain open.
 
 ### Historical instruction-resume narrative
 
