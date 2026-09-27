@@ -101,6 +101,10 @@
  * two-position switch, not a momentary key.
  */
 #define VM_BUTTON_MOMENTARY_MIN_HOLD_NS UINT64_C(50000000)
+/* A Home press that actually resumes PMU hibernation must outlive the resume
+ * debounce, not merely the interrupt acknowledgement. Release when CLCD starts
+ * or after this absolute host bound; ordinary Home/volume presses stay 50 ms. */
+#define VM_BUTTON_HOME_WAKE_MAX_HOLD_NS UINT64_C(500000000)
 
 typedef struct {
     uint8_t  which;     /* an S5L_BUTTON_*, already translated  */
@@ -119,6 +123,7 @@ typedef struct {
 typedef struct {
     bool     active[S5L_BUTTON_COUNT];
     uint64_t delivered_ns[S5L_BUTTON_COUNT];
+    bool     home_wake;
 } vm_button_momentary_holds_t;
 
 typedef struct {
@@ -190,19 +195,21 @@ bool vm_button_power_release_ready(const vm_button_event_t *event,
 
 /*
  * Apply the ordinary Home/volume debounce floor.  Presses, Power, ringer and
- * an unpaired release are immediately ready.  A missing or backwards host
- * clock fails open rather than leaving a physical key stuck forever.
+ * an unpaired release are immediately ready. Home that resumed hibernation
+ * additionally waits for the CLCD wake edge, bounded by a host-time cap.
+ * A missing or backwards clock fails open rather than leaving a key stuck.
  */
 bool vm_button_momentary_release_ready(
     const vm_button_event_t *event,
     const vm_button_momentary_holds_t *holds,
-    uint64_t now_ns);
+    uint64_t now_ns, bool display_running_now);
 
-/* Update those anchors only after the emulated board accepts the transition. */
+/* Update only after board acceptance. Capture waking_home BEFORE that call
+ * clears the PMU state. Repeated held presses preserve the original anchor. */
 void vm_button_momentary_note_accepted(
     const vm_button_event_t *event,
     vm_button_momentary_holds_t *holds,
-    uint64_t delivered_ns);
+    uint64_t delivered_ns, bool waking_home);
 
 /* Remove the oldest transition. Harmless on an empty queue. */
 void vm_button_queue_pop(vm_button_queue_t *q);

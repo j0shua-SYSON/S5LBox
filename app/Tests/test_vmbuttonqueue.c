@@ -369,61 +369,129 @@ static void test_home_and_volume_survive_the_guest_debounce(void) {
     vm_button_momentary_holds_t holds;
     memset(&holds, 0, sizeof holds);
 
-    CHECK(vm_button_momentary_release_ready(&home_down, &holds, down_ns),
+    CHECK(vm_button_momentary_release_ready(&home_down, &holds, down_ns, true),
           "a Home press was delayed");
-    vm_button_momentary_note_accepted(&home_down, &holds, down_ns);
+    vm_button_momentary_note_accepted(&home_down, &holds, down_ns, false);
     CHECK(!vm_button_momentary_release_ready(
               &home_up, &holds,
-              down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS - 1u),
+              down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS - 1u, true),
           "Home was released before the debounce floor");
     CHECK(vm_button_momentary_release_ready(
               &home_up, &holds,
-              down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS),
+              down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS, true),
           "Home stayed held at the exact debounce boundary");
 
     vm_button_momentary_note_accepted(
-        &home_up, &holds, down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS);
-    CHECK(vm_button_momentary_release_ready(&home_up, &holds, down_ns),
+        &home_up, &holds, down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS, false);
+    CHECK(vm_button_momentary_release_ready(&home_up, &holds, down_ns, true),
           "an already-released Home key wedged the queue");
 
     const unsigned volume[] = { S5L_BUTTON_VOLUP, S5L_BUTTON_VOLDOWN };
     for (unsigned i = 0; i < sizeof volume / sizeof volume[0]; i++) {
         vm_button_event_t down = { (uint8_t)volume[i], true };
         vm_button_event_t up = { (uint8_t)volume[i], false };
-        vm_button_momentary_note_accepted(&down, &holds, down_ns);
+        vm_button_momentary_note_accepted(&down, &holds, down_ns, false);
         CHECK(!vm_button_momentary_release_ready(
                   &up, &holds,
-                  down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS - 1u),
+                  down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS - 1u, true),
               "volume button %u ignored the debounce floor", volume[i]);
         CHECK(vm_button_momentary_release_ready(
                   &up, &holds,
-                  down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS),
+                  down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS, true),
               "volume button %u stayed held at the boundary", volume[i]);
         vm_button_momentary_note_accepted(
-            &up, &holds, down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS);
+            &up, &holds, down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS, false);
     }
 
-    CHECK(vm_button_momentary_release_ready(&power_up, &holds, down_ns),
+    CHECK(vm_button_momentary_release_ready(&power_up, &holds, down_ns, true),
           "the ordinary floor captured Power's separate policy");
-    CHECK(vm_button_momentary_release_ready(&ringer_up, &holds, down_ns),
+    CHECK(vm_button_momentary_release_ready(&ringer_up, &holds, down_ns, true),
           "the momentary floor captured the two-position ringer");
-    vm_button_momentary_note_accepted(&power_up, &holds, down_ns);
-    vm_button_momentary_note_accepted(&ringer_up, &holds, down_ns);
+    vm_button_momentary_note_accepted(&power_up, &holds, down_ns, false);
+    vm_button_momentary_note_accepted(&ringer_up, &holds, down_ns, false);
     CHECK(!holds.active[S5L_BUTTON_HOLD] &&
           !holds.active[S5L_BUTTON_RINGERAB],
           "Power or ringer acquired a momentary hold anchor");
 
-    vm_button_momentary_note_accepted(&home_down, &holds, down_ns);
-    CHECK(vm_button_momentary_release_ready(&home_up, &holds, 0u),
+    vm_button_momentary_note_accepted(&home_down, &holds, down_ns, false);
+    CHECK(vm_button_momentary_release_ready(&home_up, &holds, 0u, true),
           "a missing host clock wedged Home");
-    CHECK(vm_button_momentary_release_ready(&home_up, &holds, down_ns - 1u),
+    CHECK(vm_button_momentary_release_ready(&home_up, &holds, down_ns - 1u, true),
           "a backwards host clock wedged Home");
-    CHECK(vm_button_momentary_release_ready(&home_up, NULL, down_ns),
+    CHECK(vm_button_momentary_release_ready(&home_up, NULL, down_ns, true),
           "an unpaired Home release wedged the queue");
-    CHECK(!vm_button_momentary_release_ready(NULL, &holds, down_ns),
+    CHECK(!vm_button_momentary_release_ready(NULL, &holds, down_ns, true),
           "a NULL event was called ready");
-    vm_button_momentary_note_accepted(NULL, &holds, down_ns);
-    vm_button_momentary_note_accepted(&home_down, NULL, down_ns);
+    vm_button_momentary_note_accepted(NULL, &holds, down_ns, false);
+    vm_button_momentary_note_accepted(&home_down, NULL, down_ns, false);
+}
+
+static void test_home_wake_waits_for_display_with_a_host_cap(void) {
+    const uint64_t down_ns = UINT64_C(11000000000);
+    vm_button_event_t down = { S5L_BUTTON_MENU, true };
+    vm_button_event_t up = { S5L_BUTTON_MENU, false };
+    vm_button_event_t volume_down = { S5L_BUTTON_VOLUP, true };
+    vm_button_event_t volume_up = { S5L_BUTTON_VOLUP, false };
+    vm_button_momentary_holds_t holds = {0};
+
+    vm_button_momentary_note_accepted(&down, &holds, down_ns, true);
+    CHECK(holds.home_wake && holds.active[S5L_BUTTON_MENU],
+          "accepted Home wake lost its resume policy");
+    CHECK(!vm_button_momentary_release_ready(
+              &up, &holds, down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS - 1u, true),
+          "CLCD waived the ordinary electrical floor");
+    CHECK(!vm_button_momentary_release_ready(
+              &up, &holds, down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS, false),
+          "a 50 ms Home wake pulse ended before resume debounce");
+    CHECK(vm_button_momentary_release_ready(
+              &up, &holds, down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS, true),
+          "the CLCD wake edge did not release Home");
+    CHECK(!vm_button_momentary_release_ready(
+              &up, &holds, down_ns + VM_BUTTON_HOME_WAKE_MAX_HOLD_NS - 1u, false),
+          "Home ignored the wake cap's lower boundary");
+    CHECK(vm_button_momentary_release_ready(
+              &up, &holds, down_ns + VM_BUTTON_HOME_WAKE_MAX_HOLD_NS, false),
+          "a dark display kept Home held beyond its host cap");
+
+    vm_button_momentary_note_accepted(&down, &holds, down_ns + 1u, false);
+    CHECK(holds.home_wake && holds.delivered_ns[S5L_BUTTON_MENU] == down_ns,
+          "a duplicate held Home replaced its wake anchor");
+    vm_button_momentary_note_accepted(&volume_down, &holds, down_ns, true);
+    CHECK(vm_button_momentary_release_ready(
+              &volume_up, &holds, down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS, false),
+          "Home wake policy leaked to a volume button");
+    vm_button_momentary_note_accepted(&volume_up, &holds, down_ns + 1u, false);
+    CHECK(holds.home_wake, "a volume release cleared Home's pending wake");
+    CHECK(vm_button_momentary_release_ready(&up, &holds, 0u, false) &&
+          vm_button_momentary_release_ready(&up, &holds, down_ns - 1u, false),
+          "a missing or backwards clock wedged Home wake");
+
+    vm_button_momentary_note_accepted(&up, &holds, down_ns + 1u, false);
+    CHECK(!holds.home_wake && !holds.active[S5L_BUTTON_MENU] &&
+          holds.delivered_ns[S5L_BUTTON_MENU] == 0u,
+          "Home release retained a wake anchor");
+    vm_button_momentary_note_accepted(&down, &holds, down_ns, false);
+    CHECK(vm_button_momentary_release_ready(
+              &up, &holds, down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS, false),
+          "an ordinary Home press inherited the wake delay");
+    vm_button_momentary_note_accepted(&up, &holds, down_ns + 1u, false);
+    vm_button_momentary_note_accepted(&down, &holds, 0u, true);
+    CHECK(vm_button_momentary_release_ready(&up, &holds, down_ns, false),
+          "an unavailable press clock wedged Home wake");
+
+    /* Lifecycle cancellation synthesizes the same release; it must obey the
+     * wake boundary without keeping a cancelled queue alive forever. */
+    memset(&holds, 0, sizeof holds);
+    vm_button_momentary_note_accepted(&down, &holds, down_ns, true);
+    vm_button_queue_t q = {0};
+    CHECK(vm_button_queue_push(&q, S5L_BUTTON_MENU, false) &&
+          vm_button_queue_cancel_pending(&q) == 1u && q.count == 0u,
+          "could not cancel a queued wake release");
+    CHECK(!vm_button_momentary_release_ready(
+              &up, &holds, down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS, false) &&
+          vm_button_momentary_release_ready(
+              &up, &holds, down_ns + VM_BUTTON_HOME_WAKE_MAX_HOLD_NS, false),
+          "checkpoint release lost the bounded Home wake policy");
 }
 
 int main(void) {
@@ -435,6 +503,7 @@ int main(void) {
     test_no_transition_is_ever_coalesced();
     test_power_release_uses_display_edge_or_bounded_fallback();
     test_home_and_volume_survive_the_guest_debounce();
+    test_home_wake_waits_for_display_with_a_host_cap();
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

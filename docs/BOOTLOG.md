@@ -1274,8 +1274,22 @@ expanded cases now pass 548 button checks and 1,364 I2C/PMU checks, including
 saved asleep states, initially disabled Home interrupts, repeat presses,
 release backpressure and all 256 command bytes with and without a guest write.
 The full local suite passes 77/77 (41.45 s). Snapshot format and active execution
-pacing are unchanged. Native CI and physical Home-wake validation are pending;
-this is not yet a claim that the remaining input/animation latency is fixed.
+pacing are unchanged. All nine exact-revision core CI jobs and the iOS build
+passed, but the first physical test found a second boundary: an ordinary Home
+tap resumed CPU execution while the display stayed dark. A second press worked.
+With a proven parked guest, both a 1,500 ms hold and a separate 250 ms hold woke
+the lock screen. A GPIO acknowledgement alone did not prove that the guest's
+later debounce callback had observed the original press.
+
+The app now recognizes a Home press that actually resumed PMU hibernation,
+keeps the ordinary 50 ms electrical floor, then releases on the CLCD wake edge
+or a 500 ms absolute host cap. Ordinary Home/volume presses and Power retain
+their existing policies. This host-only anchor is not serialized. Repeated
+held presses preserve it; release clears it; missing/backwards clocks fail open.
+Queue regressions cover these boundaries, unrelated keys and cancellation.
+They pass 154/0; the full local suite passes 77/77 (59.40 s). The release-guard
+follow-up still needs native CI and phone validation. No animation speedup is
+claimed from either Home change.
 
 ### Historical instruction-resume narrative
 

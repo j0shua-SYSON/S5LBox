@@ -138,7 +138,7 @@ static bool uses_momentary_floor(unsigned which) {
 bool vm_button_momentary_release_ready(
     const vm_button_event_t *event,
     const vm_button_momentary_holds_t *holds,
-    uint64_t now_ns) {
+    uint64_t now_ns, bool display_running_now) {
     if (!event) return false;
     if (event->pressed || !uses_momentary_floor(event->which)) return true;
     if (!holds || event->which >= S5L_BUTTON_COUNT ||
@@ -147,22 +147,30 @@ bool vm_button_momentary_release_ready(
     uint64_t delivered_ns = holds->delivered_ns[event->which];
     if (delivered_ns == 0u || now_ns == 0u || now_ns < delivered_ns)
         return true;
-    return now_ns - delivered_ns >= VM_BUTTON_MOMENTARY_MIN_HOLD_NS;
+    uint64_t elapsed = now_ns - delivered_ns;
+    if (elapsed < VM_BUTTON_MOMENTARY_MIN_HOLD_NS) return false;
+    if (event->which == S5L_BUTTON_MENU && holds->home_wake &&
+        !display_running_now && elapsed < VM_BUTTON_HOME_WAKE_MAX_HOLD_NS)
+        return false;
+    return true;
 }
 
 void vm_button_momentary_note_accepted(
     const vm_button_event_t *event,
     vm_button_momentary_holds_t *holds,
-    uint64_t delivered_ns) {
+    uint64_t delivered_ns, bool waking_home) {
     if (!event || !holds || event->which >= S5L_BUTTON_COUNT ||
         !uses_momentary_floor(event->which)) return;
 
     if (event->pressed) {
+        if (holds->active[event->which]) return;
         holds->active[event->which] = true;
         holds->delivered_ns[event->which] = delivered_ns;
+        if (event->which == S5L_BUTTON_MENU) holds->home_wake = waking_home;
     } else {
         holds->active[event->which] = false;
         holds->delivered_ns[event->which] = 0u;
+        if (event->which == S5L_BUTTON_MENU) holds->home_wake = false;
     }
 }
 

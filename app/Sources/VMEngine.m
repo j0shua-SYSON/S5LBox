@@ -1314,25 +1314,30 @@ static double vm_engine_now_seconds(void) {
     /* A UIKit tap can queue down and up in the same emulator chunk.  Every
      * momentary key is sampled by a later guest debounce callback, so a
      * zero-duration electrical pulse can disappear before AppleM68Buttons ever
-     * sees it.  Power additionally has a post-wake boundary.  Both policies
-     * anchor at BOARD acceptance, not at the UI event, because a press may wait
+     * sees it. Power and a hibernation-resuming Home have a wake boundary.
+     * Anchors begin at BOARD acceptance, not the UI event: a press may wait
      * in this queue while the guest arms its line. */
     uint64_t nowNS = vm_now_ns();
     uint64_t nowCycles = _machine.cpu.cycles;
     bool displayRunning = s5l_clcd_running(&_machine.clcd);
-    if (!vm_button_momentary_release_ready(&e, &momentaryHolds, nowNS))
+    if (!vm_button_momentary_release_ready(&e, &momentaryHolds, nowNS,
+                                          displayRunning))
         return;
     if (!vm_button_power_release_ready(&e, &powerHold, nowNS, nowCycles,
                                        displayRunning))
         return;
 
+    bool wakingHome = e.which == S5L_BUTTON_MENU && e.pressed &&
+        s5l_pcf50635_in_hibernation(&_machine.pmu) &&
+        !s5l_pcf50635_in_standby(&_machine.pmu);
     if (s5l8900_set_button(&_machine, e.which, e.pressed)) {
         if (nowNS == 0u) nowNS = vm_now_ns();
         nowCycles = _machine.cpu.cycles;
         pthread_mutex_lock(&_lock);
         vm_button_queue_pop(&_buttonQueue);
         _buttonDelivered++;
-        vm_button_momentary_note_accepted(&e, &_momentaryHolds, nowNS);
+        vm_button_momentary_note_accepted(&e, &_momentaryHolds, nowNS,
+                                         wakingHome);
         if (e.which == S5L_BUTTON_HOLD) {
             if (e.pressed) {
                 _powerHold.active = true;
