@@ -1310,8 +1310,37 @@ release policy. No guest state or checkpoint format changes.
 
 Queue tests pass 180/0, covering all hold policies, repeated pauses, checkpoint
 cancellation, inactive/queued presses, invalid clocks and arithmetic near the
-clock limit. The full local suite passes 77/77 (50.70 s). Physical
-interrupted-wake validation of this change is pending.
+clock limit. The full local suite passes 77/77 (50.70 s). All nine exact-revision
+core CI jobs and the iOS build passed. Physical replay now passes: a restored
+parked guest accepts Home down, stops for over four seconds, then reaches the
+lock screen after Resume. Power interrupted by Pause still sleeps correctly.
+Ten rapid QWERTY taps all appear. A separate fresh-park Home/Pause sequence saved
+through Back while still paused; reopening unlocked to the retained text.
+Ordinary Home, Auto-Lock wake and Settings navigation also passed. These are
+input/lifecycle fixes, not an animation-speed claim.
+
+### Decode a refilled code window in the existing native loop (2026-09-27)
+
+The transition profile contains substantial instruction-classifier activity.
+One source is the fetch-window callback: it decodes and classifies the first
+instruction in C, then the native loop fetches and decodes it again. That loop
+already checks every instruction, including branches within a window and code
+reached immediately after literal fallback.
+
+The candidate keeps the existing exact FETCH proof and privileged device/clock
+boundary, but hands a successful window directly to that decoder. Ownership is
+updated before continuation so an unsupported first instruction falls through
+the next callback rather than retrying the same refill. User fallback can still
+execute one literal instruction; privileged fallback still leaves the resident
+interval. No code cache, guest patch, timer adjustment or snapshot change.
+
+Four additional serialized-machine oracles exercise an unsupported first word
+and its condition-failed form in User and privileged mode, with refill-on,
+refill-off and interpreter controls. Local strict native-configuration syntax
+checks and all 77 portable tests pass (63.28 s); actual AArch64 oracle execution
+and physical performance comparison remain pending. Refill counts now describe
+successful FETCH handoffs even when the first instruction is later refused;
+they must not be mistaken for newly native retirements. No speedup is claimed.
 
 ### Historical instruction-resume narrative
 

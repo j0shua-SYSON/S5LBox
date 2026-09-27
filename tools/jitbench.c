@@ -12144,6 +12144,64 @@ done:
     return ok;
 }
 
+/* A FETCH witness does not admit the first instruction. Exercise a refusal
+ * exactly at the new window, and a condition-failed version of that same raw
+ * encoding. User fallback may retire it; privileged fallback must stay outside
+ * the resident interval. Compare all serialized CPU, RAM and device state. */
+static bool validate_soc_compact_raw_window_first_instruction(void) {
+    enum { LOOP_INSNS = 259u, LOOP_COUNT = 32u,
+           TOTAL_INSNS = LOOP_INSNS * LOOP_COUNT };
+    uint32_t program[LOOP_INSNS];
+    for (unsigned i = 0u; i < 256u; i++)
+        program[i] = UINT32_C(0xe2800001); /* ADD without changing NZCV */
+    program[257] = UINT32_C(0xe2844001);
+    program[258] = UINT32_C(0xeafffefc); /* 0x408 -> 0 */
+
+    for (unsigned priv = 0u; priv < 2u; priv++) {
+        for (unsigned skip = 0u; skip < 2u; skip++) {
+            program[256] = skip ? UINT32_C(0x06bf0f30) /* REVEQ; Z is clear */
+                                : UINT32_C(0xe6bf0f30); /* literal REV */
+            soc_run_result_t reference = {0}, refill_off = {0}, refill_on = {0};
+            bool (*run)(const uint32_t *, unsigned, uint64_t,
+                        soc_entry_path_t, soc_run_result_t *) = priv
+                ? run_soc_compact_raw_privileged_path : run_soc_compact_raw_path;
+            const uint64_t literal = skip ? 0u : LOOP_COUNT;
+            bool ok = run(program, LOOP_INSNS, TOTAL_INSNS,
+                          SOC_ENTRY_REFERENCE, &reference) &&
+                run(program, LOOP_INSNS, TOTAL_INSNS,
+                    SOC_ENTRY_COMPACT_RAW_WINDOW_REFILL_OFF, &refill_off) &&
+                run(program, LOOP_INSNS, TOTAL_INSNS,
+                    SOC_ENTRY_COMPACT_RAW, &refill_on) &&
+                reference.snapshot && refill_off.snapshot && refill_on.snapshot &&
+                reference.snapshot_len == refill_off.snapshot_len &&
+                reference.snapshot_len == refill_on.snapshot_len &&
+                memcmp(reference.snapshot, refill_off.snapshot,
+                       reference.snapshot_len) == 0 &&
+                memcmp(reference.snapshot, refill_on.snapshot,
+                       reference.snapshot_len) == 0 &&
+                refill_on.compact_raw_window_fast_refills != 0u &&
+                refill_off.compact_raw_window_fast_refills == 0u &&
+                refill_on.compact_raw_retired == TOTAL_INSNS - literal &&
+                refill_on.compact_raw_fallback_retired == (priv ? 0u : literal);
+            if (!ok)
+                fprintf(stderr, "jitbench: first-window instruction oracle "
+                        "failed priv=%u skip=%u native=%" PRIu64
+                        " fallback=%" PRIu64 " refills=%" PRIu64 "\n",
+                        priv, skip, refill_on.compact_raw_retired,
+                        refill_on.compact_raw_fallback_retired,
+                        refill_on.compact_raw_window_fast_refills);
+            free_soc_run_result(&reference);
+            free_soc_run_result(&refill_off);
+            free_soc_run_result(&refill_on);
+            if (!ok) return false;
+        }
+    }
+    printf("SOC-COMPACT-RAW-WINDOW-FIRST-INSTRUCTION exact=yes cases=4 "
+           "user=yes privileged=yes unsupported=yes condition-skip=yes "
+           "serialized-machine=yes\n");
+    return true;
+}
+
 /* First real-machine gate for the compact live-byte architecture. Both arms
  * use the app-facing s5l8900_run(), an enabled identity-mapped MMU and User
  * mode. The reference uses the exact interpreter tick batcher; the compact
@@ -12169,7 +12227,8 @@ static bool bench_soc_compact_raw(uint64_t requested, unsigned reps) {
         !validate_soc_compact_raw_resident() ||
         !validate_soc_compact_raw_data_refill() ||
         !validate_soc_compact_raw_windows() ||
-        !validate_soc_compact_raw_privileged_windows())
+        !validate_soc_compact_raw_privileged_windows() ||
+        !validate_soc_compact_raw_window_first_instruction())
         return false;
     total = ((requested + LOOP_INSNS - 1u) / LOOP_INSNS) * LOOP_INSNS;
     reference_rates = (double *)calloc(reps, sizeof *reference_rates);

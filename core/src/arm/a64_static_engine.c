@@ -1882,9 +1882,7 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
     arm_cpu_t *cpu;
     uint32_t step_block;
     uint32_t next_block;
-    uint32_t insn;
     unsigned width;
-    unsigned offset;
     bool thumb;
     bool priv;
     bool crossed;
@@ -1935,9 +1933,10 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
      * execution may it prove and publish the next window. The native runner
      * commits its one-cycle-per-retirement counter before this callback, so the
      * cycle delta is the exact prefix length and cannot include an interpreter
-     * fallback. Unsupported instructions still stop here: arm_step() remains
-     * outside the privileged resident interval and remains the sole owner of
-     * walks, faults, MMIO and control-state changes. */
+     * fallback. This proves FETCH, not instruction admission: the signed loop
+     * already decodes every live instruction and returns unsupported forms to
+     * this callback. arm_step() remains outside privileged resident execution
+     * and remains the sole owner of walks, faults, MMIO and control changes. */
     if (context->state->compact_raw_window_refill_enabled &&
         (!priv ||
          context->state->compact_raw_privileged_window_refill_enabled) &&
@@ -1981,27 +1980,20 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
         }
         if (!arm_fetch_cache_try_refill(cpu, cpu->r[15], priv))
             return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
-        offset = cpu->r[15] - step_block;
-        insn = (uint32_t)cpu->fetch_host[offset] |
-               ((uint32_t)cpu->fetch_host[offset + 1u] << 8);
-        if (!thumb) {
-            insn |= (uint32_t)cpu->fetch_host[offset + 2u] << 16;
-            insn |= (uint32_t)cpu->fetch_host[offset + 3u] << 24;
+        next_window->code = cpu->fetch_host;
+        next_window->code_base = step_block;
+        next_window->code_bytes = UINT32_C(0x400);
+        context->state->compact_raw_window_crossings++;
+        context->state->compact_raw_window_reloads++;
+        context->state->compact_raw_window_fast_refills++;
+        if (priv) {
+            context->state->compact_raw_privileged_window_refills++;
         }
-        if ((unsigned)a64_compact_raw_classify_instruction(cpu, insn, thumb) <
-            (unsigned)A64_COMPACT_RAW_ADMITTED_COUNT) {
-            next_window->code = cpu->fetch_host;
-            next_window->code_base = step_block;
-            next_window->code_bytes = UINT32_C(0x400);
-            context->state->compact_raw_window_crossings++;
-            context->state->compact_raw_window_reloads++;
-            context->state->compact_raw_window_fast_refills++;
-            if (priv) {
-                context->state->compact_raw_privileged_window_refills++;
-            }
-            context->fetch_block = step_block;
-            return A64_COMPACT_RAW_FALLBACK_NO_RETIRE_CONTINUE;
-        }
+        /* Publish ownership before retrying: if the first instruction refuses,
+         * its callback must take the ordinary fallback below, not refill this
+         * same window forever. Neither this handoff nor a refusal retires it. */
+        context->fetch_block = step_block;
+        return A64_COMPACT_RAW_FALLBACK_NO_RETIRE_CONTINUE;
     }
 
     /* An event-bounded region may span many timebase ticks. Publish its exact
