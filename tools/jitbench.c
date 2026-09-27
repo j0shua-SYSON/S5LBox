@@ -5556,7 +5556,7 @@ static bool validate_compact_raw_admission_shapes(void) {
             false) != A64_COMPACT_RAW_REJECT_MEMORY_PC ||
         a64_compact_raw_classify_instruction(
             &cpu, A32_SINGLE_MODE2(14,1,1,1,0,0,1,4,0,0x010),
-            false) != A64_COMPACT_RAW_REJECT_MEMORY_FORM ||
+            false) != A64_COMPACT_RAW_REJECT_CLASS ||
         a64_compact_raw_classify_instruction(
             &cpu, A32_SINGLE_MODE2(14,1,1,1,0,0,1,4,0,0x00f),
             false) != A64_COMPACT_RAW_REJECT_MEMORY_PC ||
@@ -5947,6 +5947,131 @@ static bool compact_raw_a32_register_shift_refusal_case(
                 (unsigned)reference_status, (unsigned)compact_status);
         return false;
     }
+    return true;
+}
+
+static const uint32_t A32_MEDIA_CHAIN[] = {
+    UINT32_C(0xe2800001), /* ADD r0,r0,#1 */
+    UINT32_C(0xe6bf1f30), /* REV r1,r0 */
+    UINT32_C(0xe6cf8471), /* UXTB16 r8,r1,ROR #8 */
+    UINT32_C(0xe6c22078), /* UXTAB16 r2,r2,r8 */
+    UINT32_C(0xe6bf3072), /* SXTH r3,r2 */
+    UINT32_C(0xe6834811), /* PKHBT r4,r3,r1,LSL #16 */
+    UINT32_C(0xe6848053), /* PKHTB r8,r4,r3,ASR #32 */
+    UINT32_C(0xe5878000), /* STR r8,[r7] */
+    UINT32_C(0xe5976000), /* LDR r6,[r7] */
+    UINT32_C(0xe3560000), /* CMP r6,#0 */
+    UINT32_C(0x02855001), /* ADDEQ r5,r5,#1 */
+    UINT32_C(0x12866001), /* ADDNE r6,r6,#1 */
+    UINT32_C(0xeafffff2), /* branch back to first ADD */
+};
+
+static bool compact_raw_a32_media_case(const arm_cpu_t *initial,
+                                        uint32_t insn, unsigned seed,
+                                        uint32_t flags, bool expected) {
+    static const uint32_t values[] = {
+        0u, 1u, UINT32_MAX, UINT32_C(0x80000000), UINT32_C(0x7fffffff),
+        UINT32_C(0x00800080), UINT32_C(0x00ff00ff), UINT32_C(0xff00ff00),
+        UINT32_C(0x80007fff), UINT32_C(0xffff0001), UINT32_C(0x0001ffff),
+        UINT32_C(0x12345678),
+    };
+    arm_cpu_t reference = *initial;
+    const uint32_t pc = initial->r[15];
+    for (unsigned r = 0u; r < 15u; r++)
+        reference.r[r] = values[(seed + r) % (sizeof values / sizeof values[0])];
+    reference.cpsr = (reference.cpsr & ~UINT32_C(0xf80f0000)) | flags;
+    arm_cpu_t compact = reference;
+    mem_w32(NULL, pc, insn);
+    const bool admitted = compact_raw_admission_supported(
+        a64_compact_raw_classify_instruction(&reference, insn, false));
+    unsigned completed = UINT_MAX;
+    if (admitted != expected ||
+        (expected && arm_step(&reference) != ARM_OK) ||
+        !a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                             g_ram, sizeof g_ram, &completed) ||
+        completed != (expected ? 1u : 0u) ||
+        !indirect_register_states_equal(&reference, &compact)) {
+        fprintf(stderr, "jitbench: A32 media insn=%08" PRIx32
+                " seed=%u expected=%u admitted=%u completed=%u\n",
+                insn, seed, expected ? 1u : 0u,
+                admitted ? 1u : 0u, completed);
+        return false;
+    }
+    return true;
+}
+
+static bool validate_compact_raw_a32_media_oracles(void) {
+    static const unsigned extend_ops[] = {8u, 10u, 11u, 12u, 14u, 15u};
+    static const uint32_t reverse[] = {
+        UINT32_C(0xe6bf0f30), UINT32_C(0xe6bf0fb0), UINT32_C(0xe6ff0fb0),
+    };
+    const uint32_t pc = UINT32_C(0x19800);
+    const uint32_t nop = UINT32_C(0xe1a00000);
+    arm_cpu_t initial;
+    unsigned cases = 0u, accepted = 0u, conditions = 0u;
+    seed_cpu_at(&initial, &nop, 1u, false, pc);
+
+    /* Every Rd/Rm (including refused PC), rotation/shift, signedness and
+     * lane width. Rn covers the plain form, both aliases and a third source.
+     * Edge values exercise lane overflow without inter-lane carry. Full CPSR
+     * equality checks NZCV, sticky Q and GE, none of which these ops may alter. */
+    for (unsigned family = 0u; family < 11u; family++) {
+        const bool extend = family < 6u;
+        const bool pack = family >= 9u;
+        for (unsigned amount = 0u; amount < (extend ? 4u : pack ? 32u : 1u); amount++)
+            for (unsigned base = 0u; base < (extend || pack ? 4u : 1u); base++)
+                for (unsigned rd = 0u; rd < 16u; rd++)
+                    for (unsigned rm = 0u; rm < 16u; rm++) {
+                        const unsigned rn = base == 0u ? 15u : base == 1u ? rd :
+                                            base == 2u ? rm : (rd + 7u) % 15u;
+                        const uint32_t insn = extend
+                            ? UINT32_C(0xe6000070) | (extend_ops[family] << 20) |
+                              (rn << 16) | (rd << 12) | (amount << 10) | rm
+                            : pack
+                            ? UINT32_C(0xe6800010) | (rn << 16) | (rd << 12) |
+                              (amount << 7) | ((family - 9u) << 6) | rm
+                            : reverse[family - 6u] | (rd << 12) | rm;
+                        const bool expected = rd != 15u && rm != 15u &&
+                                              (!pack || rn != 15u);
+                        const uint32_t flags = ((cases & 15u) << 28) |
+                            ((cases & 1u) << 27) | (((cases >> 4) & 15u) << 16);
+                        if (!compact_raw_a32_media_case(
+                                &initial, insn, cases, flags, expected))
+                            return false;
+                        cases++;
+                        if (expected) accepted++;
+                    }
+    }
+    /* Full predicates, including NV, across legal forms, PC refusals and a
+     * reserved extend opcode. A failed condition must precede every guard. */
+    static const uint32_t conditional[] = {
+        UINT32_C(0x06bf0f31), UINT32_C(0x06802473), UINT32_C(0x06802453),
+        UINT32_C(0x06bfff31), UINT32_C(0x068f2413), UINT32_C(0x06902473),
+    };
+    for (unsigned cond = 0u; cond < 16u; cond++)
+        for (unsigned flags = 0u; flags < 16u; flags++)
+            for (unsigned i = 0u; i < sizeof conditional / sizeof conditional[0]; i++) {
+                arm_cpu_t predicate = initial;
+                predicate.cpsr = (predicate.cpsr & UINT32_C(0x0fffffff)) |
+                                 (flags << 28);
+                const bool expected = cond != 15u &&
+                    (!arm_cond_passed(&predicate, cond) || i < 3u);
+                if (!compact_raw_a32_media_case(
+                        &initial, conditional[i] | (cond << 28), conditions,
+                        (flags << 28) | UINT32_C(0x080f0000), expected))
+                    return false;
+                conditions++;
+            }
+    for (unsigned budget = 0u; budget <= 64u; budget++)
+        if (!compact_raw_compare("a32-media-chain", A32_MEDIA_CHAIN,
+                sizeof A32_MEDIA_CHAIN / sizeof A32_MEDIA_CHAIN[0],
+                pc, budget, budget, budget))
+            return false;
+    printf("COMPACT-RAW-A32-MEDIA-ORACLE exact=yes cases=%u accepted=%u "
+           "refusals=%u conditions=%u extend=yes reverse=yes pack=yes "
+           "rotations=all shifts=all aliases=yes lane-carry=no "
+           "cpsr-preserved=yes budgets=65 mixed-chain=yes runtime-codegen=no\n",
+           cases, accepted, cases - accepted, conditions);
     return true;
 }
 
@@ -6496,7 +6621,7 @@ static bool validate_compact_raw_a32_register_oracle(void) {
      * memory. NV is not an ordinary predicate: retain the old exact fallback. */
     static const uint32_t conditional[] = {
         UINT32_C(0x02800001), UINT32_C(0x05971000),
-        UINT32_C(0x0b000001), UINT32_C(0x06bf0f30),
+        UINT32_C(0x0b000001), UINT32_C(0x016f0f10),
     };
     for (unsigned cond = 0u; cond < 16u; cond++)
         for (unsigned flags = 0u; flags < 16u; flags++)
@@ -9816,31 +9941,31 @@ static bool validate_compact_raw_oracles(void) {
         UINT32_C(0xe2800001), /* native ADD r0,r0,#1 */
         UINT32_C(0xe5870000), /* fallback STR r0,[r7,#0] */
         UINT32_C(0xe2422001), /* native SUB r2,r2,#1 */
-        UINT32_C(0xe6bf0f30), /* fallback REV r0,r0; MUL is now native */
+        UINT32_C(0xe16f0f10), /* fallback CLZ r0,r0; REV is now native */
         UINT32_C(0xe2855001), /* native ADD r5,r5,#1 */
     };
     const uint32_t resident_cross_sequential[] = {
         UINT32_C(0xe2800001), /* native ADD at 0x5ffc */
-        UINT32_C(0xe6bf0f30), /* fallback REV at next 1 KiB window */
+        UINT32_C(0xe16f0f10), /* fallback CLZ at next 1 KiB window */
         UINT32_C(0xe2855001), /* native ADD after window publication */
     };
     const uint32_t resident_cross_fast[] = {
         UINT32_C(0xe2800001), /* native ADD at 0x5ffc */
         UINT32_C(0xe2844001), /* native ADD after no-retire publication */
-        UINT32_C(0xe6bf0f30), /* fallback REV in the published window */
+        UINT32_C(0xe16f0f10), /* fallback CLZ in the published window */
     };
     const uint32_t resident_cross_branch[] = {
         UINT32_C(0xe2800001), /* native ADD at 0x63f8 */
         UINT32_C(0xea000000), /* native branch 0x63fc -> 0x6404 */
         UINT32_C(0xe2844001), /* skipped */
-        UINT32_C(0xe6bf0f30), /* fallback REV at branch target */
+        UINT32_C(0xe16f0f10), /* fallback CLZ at branch target */
         UINT32_C(0xe2855001), /* native ADD in published window */
     };
     const uint32_t resident_stale_window[] = {
         UINT32_C(0xe2800001), /* native ADD at 0x67fc */
-        UINT32_C(0xe6bf0f30), /* first fallback publishes 0x6800 */
+        UINT32_C(0xe16f0f10), /* first fallback publishes 0x6800 */
         UINT32_C(0xe2855001), /* native ADD in the published window */
-        UINT32_C(0xe6bf0f30), /* fallback continues without publication */
+        UINT32_C(0xe16f0f10), /* fallback continues without publication */
         UINT32_C(0xe2866001), /* must not execute via the stale window */
     };
     const uint32_t resident_fallback_interworking[] = {
@@ -9866,6 +9991,8 @@ static bool validate_compact_raw_oracles(void) {
     unsigned completed = UINT_MAX;
 
     if (!validate_compact_raw_system_coprocessor_oracles())
+        return false;
+    if (!validate_compact_raw_a32_media_oracles())
         return false;
     if (!validate_compact_raw_vfp_nonarith_oracles())
         return false;
@@ -11739,16 +11866,44 @@ done:
 
 /* Prove the resident/native-interpreter partition through the actual machine
  * runner before measuring its compute-only control. The two MMU-on data
- * accesses use already-proven DREAD/DWRITE witnesses; only unsupported REV
+ * accesses use already-proven DREAD/DWRITE witnesses; only unsupported CLZ
  * requires arm_step(). The other four ALU operations plus the loop branch
  * stay in the build-time-linked AArch64 loop. */
+static bool validate_soc_compact_raw_media(void) {
+    const unsigned length = sizeof A32_MEDIA_CHAIN / sizeof A32_MEDIA_CHAIN[0];
+    const unsigned total = length * 512u;
+    soc_run_result_t reference = {0}, compact = {0};
+    const bool ran = run_soc_compact_raw_path(
+            A32_MEDIA_CHAIN, length, total, SOC_ENTRY_REFERENCE, &reference) &&
+        run_soc_compact_raw_path(
+            A32_MEDIA_CHAIN, length, total, SOC_ENTRY_COMPACT_RAW, &compact);
+    const bool exact = ran && reference.snapshot && compact.snapshot &&
+        reference.snapshot_len == compact.snapshot_len &&
+        memcmp(reference.snapshot, compact.snapshot, reference.snapshot_len) == 0 &&
+        compact.compact_raw_retired == total &&
+        compact.compact_raw_fallback_retired == 0u &&
+        compact.dread_hits == 512u && compact.dwrite_hits == 512u &&
+        compact.dread_misses == 0u && compact.dwrite_misses == 0u;
+    if (exact)
+        printf("SOC-COMPACT-RAW-MEDIA-ORACLE exact=yes guest-insns=%u "
+               "mmu=on fallback=zero read=yes write=yes flags=yes "
+               "serialized-machine=yes runtime-codegen=no\n", total);
+    else
+        fprintf(stderr, "jitbench: SoC media mismatch native/fallback=%" PRIu64
+                "/%" PRIu64 "\n", compact.compact_raw_retired,
+                compact.compact_raw_fallback_retired);
+    free_soc_run_result(&reference);
+    free_soc_run_result(&compact);
+    return exact;
+}
+
 static bool validate_soc_compact_raw_resident(void) {
     enum { LOOP_INSNS = 8u, TOTAL_INSNS = 8192u };
     static const uint32_t PROGRAM[LOOP_INSNS] = {
         UINT32_C(0xe2800001), /* native ADD r0,r0,#1 */
         UINT32_C(0xe5870000), /* native DWRITE-hit STR r0,[r7,#0] */
         UINT32_C(0xe2422001), /* native SUB r2,r2,#1 */
-        UINT32_C(0xe6bf0f30), /* fallback REV r0,r0 */
+        UINT32_C(0xe16f0f10), /* fallback CLZ r0,r0 */
         UINT32_C(0xe2855001), /* native ADD r5,r5,#1 */
         UINT32_C(0xe5971000), /* native DREAD-hit LDR r1,[r7,#0] */
         UINT32_C(0xe0266001), /* native EOR r6,r6,r1 */
@@ -11841,7 +11996,7 @@ static bool validate_soc_compact_raw_data_refill(void) {
         UINT32_C(0xe2800001), /* native ADD r0,r0,#1 */
         UINT32_C(0xe5870000), /* cold DWRITE STR r0,[r7,#0] */
         UINT32_C(0xe2422001), /* native SUB r2,r2,#1 */
-        UINT32_C(0xe6bf0f30), /* literal fallback REV r0,r0 */
+        UINT32_C(0xe16f0f10), /* literal fallback CLZ r0,r0 */
         UINT32_C(0xe2855001), /* native ADD r5,r5,#1 */
         UINT32_C(0xe5971000), /* cold DREAD LDR r1,[r7,#0] */
         UINT32_C(0xe0266001), /* native EOR r6,r6,r1 */
@@ -11934,7 +12089,7 @@ static bool validate_soc_compact_raw_windows(void) {
     for (unsigned i = 0u; i < 256u; i++)
         program[i] = UINT32_C(0xe2800001); /* ADD r0,r0,#1 */
     program[256] = UINT32_C(0xe2844001);   /* admitted ADD at 0x400 */
-    program[257] = UINT32_C(0xe6bf0f30);   /* fallback REV at 0x404 */
+    program[257] = UINT32_C(0xe16f0f10);   /* fallback CLZ at 0x404 */
     program[258] = UINT32_C(0xeafffefc);   /* branch 0x408 -> 0x000 */
 
     if (!run_soc_compact_raw_path(
@@ -12093,7 +12248,7 @@ static bool validate_soc_compact_raw_privileged_windows(void) {
     for (unsigned i = 0u; i < 256u; i++)
         program[i] = UINT32_C(0xe2800001); /* ADD r0,r0,#1 */
     program[256] = UINT32_C(0xe2844001);   /* admitted ADD at 0x400 */
-    program[257] = UINT32_C(0xe6bf0f30);   /* fallback REV at 0x404 */
+    program[257] = UINT32_C(0xe16f0f10);   /* fallback CLZ at 0x404 */
     program[258] = UINT32_C(0xeafffefc);   /* branch 0x408 -> 0x000 */
 
     if (!run_soc_compact_raw_privileged_path(
@@ -12196,8 +12351,8 @@ static bool validate_soc_compact_raw_window_first_instruction(void) {
 
     for (unsigned priv = 0u; priv < 2u; priv++) {
         for (unsigned skip = 0u; skip < 2u; skip++) {
-            program[256] = skip ? UINT32_C(0x06bf0f30) /* REVEQ; Z is clear */
-                                : UINT32_C(0xe6bf0f30); /* literal REV */
+            program[256] = skip ? UINT32_C(0x016f0f10) /* CLZEQ; Z is clear */
+                                : UINT32_C(0xe16f0f10); /* literal CLZ */
             soc_run_result_t reference = {0}, refill_off = {0}, refill_on = {0};
             bool (*run)(const uint32_t *, unsigned, uint64_t,
                         soc_entry_path_t, soc_run_result_t *) = priv
@@ -12262,6 +12417,7 @@ static bool bench_soc_compact_raw(uint64_t requested, unsigned reps) {
     if (!validate_soc_compact_raw_privileged_prefix() ||
         !validate_soc_compact_raw_thumb_halfword_entry() ||
         !validate_soc_compact_raw_resident() ||
+        !validate_soc_compact_raw_media() ||
         !validate_soc_compact_raw_data_refill() ||
         !validate_soc_compact_raw_windows() ||
         !validate_soc_compact_raw_privileged_windows() ||

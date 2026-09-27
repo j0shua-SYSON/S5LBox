@@ -232,6 +232,8 @@ jobs:
             test "$compact_status" -eq 0
             test "$compact_soc_status" -eq 0
             grep -Fq 'COMPACT-RAW-A32-RESIDENT-OPERAND-ORACLE exact=yes cases=188160 conditions=480 registers=all-nonpc aliases=yes dirty-inputs=yes carry=both shift-boundaries=yes' <<<"$compact_output"
+            grep -Fq 'COMPACT-RAW-A32-MEDIA-ORACLE exact=yes cases=90880 accepted=65475 refusals=25405 conditions=1536 extend=yes reverse=yes pack=yes rotations=all shifts=all aliases=yes lane-carry=no cpsr-preserved=yes budgets=65 mixed-chain=yes runtime-codegen=no' <<<"$compact_output"
+            grep -Fq 'SOC-COMPACT-RAW-MEDIA-ORACLE exact=yes guest-insns=6656 mmu=on fallback=zero read=yes write=yes flags=yes serialized-machine=yes runtime-codegen=no' <<<"$compact_soc_output"
             if grep -Fq 'SKIP:' <<<"$memory_output"; then
               echo 'Required macOS MAP_JIT memory-policy coverage was skipped.' >&2
               exit 1

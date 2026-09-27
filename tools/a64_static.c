@@ -1973,6 +1973,30 @@ a64_compact_raw_admission_t a64_compact_raw_classify_instruction(
         return A64_COMPACT_RAW_ADMIT_EXECUTE;
     }
 
+    /* ARMv6 media shares the register-offset transfer space, but has no
+     * address or memory access. Decode its fixed fields before LDR/STR guards. */
+    if ((insn & UINT32_C(0x0e000010)) == UINT32_C(0x06000010)) {
+        const unsigned rd = (insn >> 12) & 15u;
+        const unsigned rn = (insn >> 16) & 15u;
+        const unsigned rm = insn & 15u;
+        const unsigned op = (insn >> 20) & 15u;
+        const uint32_t reverse = insn & UINT32_C(0x0fff0ff0);
+        const bool extend =
+            (insn & UINT32_C(0x0f8003f0)) == UINT32_C(0x06800070) &&
+            (op == 8u || op == 10u || op == 11u ||
+             op == 12u || op == 14u || op == 15u);
+        const bool rev = reverse == UINT32_C(0x06bf0f30) ||
+                         reverse == UINT32_C(0x06bf0fb0) ||
+                         reverse == UINT32_C(0x06ff0fb0);
+        const bool pack =
+            (insn & UINT32_C(0x0ff00030)) == UINT32_C(0x06800010);
+        if (!extend && !rev && !pack)
+            return A64_COMPACT_RAW_REJECT_CLASS;
+        if (rd == 15u || rm == 15u || (pack && rn == 15u))
+            return A64_COMPACT_RAW_REJECT_DP_PC;
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
+
     if (((insn >> 26) & 3u) == 1u) {
         const bool indexed = (insn & (1u << 25)) != 0u;
         const bool pre = (insn & (1u << 24)) != 0u;
