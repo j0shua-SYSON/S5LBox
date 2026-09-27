@@ -965,6 +965,43 @@ static arm_status_t exec_a8_neon_transpose(arm_cpu_t *c, uint32_t insn) {
     return ARM_OK;
 }
 
+/* VUZP/VZIP A1/T1 (DDI0406C.b A8.8.422/423). D-sized .32 assembler
+ * spellings alias VTRN.32; the actual D32 encodings here are undefined. */
+static bool a8_neon_zip_space(const arm_cpu_t *c, uint32_t insn) {
+    uint32_t prefix = (c->cpsr & ARM_CPSR_T) ? 0xffb20100u : 0xf3b20100u;
+    return c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn & 0xffb30f10u) == prefix;
+}
+
+static arm_status_t exec_a8_neon_zip(arm_cpu_t *c, uint32_t insn) {
+    unsigned d = ((insn >> 12) & 15u) | ((insn >> 18) & 16u);
+    unsigned m = (insn & 15u) | ((insn >> 1) & 16u), quad = (insn >> 6) & 1u, size = (insn >> 18) & 3u;
+    if (size == 3u || (!quad && size == 2u) || (quad && ((d | m) & 1u))) return ARM_UNDEFINED;
+    if (!vfp_cpacr_permits(c) || !vfp_enabled(c)) return ARM_GUEST_UNDEFINED;
+    /* Valid identical operands have UNKNOWN results, as with VTRN. Check
+     * availability first so a guest can still handle an access denial. */
+    if (d == m) return ARM_UNDEFINED;
+    unsigned words = quad + 1u, bits = 8u << size, lanes = words * 64u / bits;
+    uint64_t source[4], result[4] = {0}, mask = (UINT64_C(1) << bits) - 1u;
+    for (unsigned r = 0; r < words; r++) {
+        source[r] = vfp_get_d(c, d + r);
+        source[words + r] = vfp_get_d(c, m + r);
+    }
+    for (unsigned e = 0; e < 2u * lanes; e++) {
+        /* Indices into concatenated A then B. ZIP alternates sources;
+         * UNZIP collects the even elements followed by the odd ones. */
+        unsigned from = (insn & 0x80u) ? (e % 2u) * lanes + e / 2u : 2u * (e % lanes) + e / lanes;
+        uint64_t lane = (source[from * bits / 64u] >> (from * bits % 64u)) & mask;
+        result[e * bits / 64u] |= lane << (e * bits % 64u);
+    }
+    /* Publish both complete destinations only after reading every lane.
+     * Raw integer rearrangement leaves all FP and core flags untouched. */
+    for (unsigned r = 0; r < words; r++) {
+        vfp_set_d(c, d + r, result[r]);
+        vfp_set_d(c, m + r, result[words + r]);
+    }
+    return ARM_OK;
+}
+
 /* One register and a modified immediate (DDI0406C.b A7.4.6): VMOV, VMVN,
  * VORR and VBIC share this allocation. Keep its reserved form checked. */
 static bool a8_neon_immediate_space(const arm_cpu_t *c, uint32_t insn) {
@@ -1380,7 +1417,7 @@ static bool vfp_lazy_enable_trap(const arm_cpu_t *c, uint32_t insn) {
         a8_neon_replicate_space(c, insn) || a8_neon_bitwise_space(c, insn) ||
         a8_neon_immediate_space(c, insn) || a8_neon_multiply_space(c, insn) || a8_neon_add_space(c, insn) ||
         a8_neon_extract_space(c, insn) || a8_neon_sign_space(c, insn) || a8_neon_transpose_space(c, insn) ||
-        a8_neon_macc_space(c, insn) || a8_neon_by_scalar_space(c, insn) || a8_neon_integer_space(c, insn) ||
+        a8_neon_zip_space(c, insn) || a8_neon_macc_space(c, insn) || a8_neon_by_scalar_space(c, insn) || a8_neon_integer_space(c, insn) ||
         a8_neon_minmax_space(c, insn) || a8_neon_compare_ge_space(c, insn) || a8_neon_compare_zero_space(c, insn) ||
         a8_neon_recip_estimate_space(c, insn) || a8_neon_recip_step_space(c, insn)) return false;
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 &&
@@ -3935,6 +3972,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
     if (a8_neon_extract_space(c, insn)) return exec_a8_neon_extract(c, insn);
     if (a8_neon_sign_space(c, insn)) return exec_a8_neon_sign(c, insn);
     if (a8_neon_transpose_space(c, insn)) return exec_a8_neon_transpose(c, insn);
+    if (a8_neon_zip_space(c, insn)) return exec_a8_neon_zip(c, insn);
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn >> 28) == 0xeu &&
         (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn) ||
          vfp_is_memory_transfer(insn) || vfp_is_bitwise_data(insn) || vfp_is_compare_data(insn) ||
@@ -4587,7 +4625,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
         if (a8_neon_bitwise_space(c, insn) || a8_neon_immediate_space(c, insn) ||
             a8_neon_multiply_space(c, insn) || a8_neon_add_space(c, insn) ||
             a8_neon_extract_space(c, insn) || a8_neon_sign_space(c, insn) || a8_neon_transpose_space(c, insn) ||
-            a8_neon_macc_space(c, insn) || a8_neon_by_scalar_space(c, insn) || a8_neon_integer_space(c, insn) ||
+            a8_neon_zip_space(c, insn) || a8_neon_macc_space(c, insn) || a8_neon_by_scalar_space(c, insn) || a8_neon_integer_space(c, insn) ||
             a8_neon_minmax_space(c, insn) || a8_neon_compare_ge_space(c, insn) || a8_neon_compare_zero_space(c, insn) ||
             a8_neon_recip_estimate_space(c, insn) || a8_neon_recip_step_space(c, insn)) {
             arm_status_t status = a8_neon_bitwise_space(c, insn) ? exec_a8_neon_bitwise(c, insn) :
@@ -4597,6 +4635,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
                 a8_neon_extract_space(c, insn) ? exec_a8_neon_extract(c, insn) :
                 a8_neon_sign_space(c, insn) ? exec_a8_neon_sign(c, insn) :
                 a8_neon_transpose_space(c, insn) ? exec_a8_neon_transpose(c, insn) :
+                a8_neon_zip_space(c, insn) ? exec_a8_neon_zip(c, insn) :
                 a8_neon_by_scalar_space(c, insn) ? exec_a8_neon_by_scalar(c, insn) :
                 a8_neon_integer_space(c, insn) ? exec_a8_neon_integer(c, insn) :
                 a8_neon_minmax_space(c, insn) ? exec_a8_neon_minmax(c, insn) :

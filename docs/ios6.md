@@ -1145,6 +1145,75 @@ groups retain their 66,880 passing calls, for 75,072 calls across sixteen
 groups with the new routines. The complete canonical kernel-entry trace
 remains identical through its 61,650-step L2 ECC guard.
 
+VZIP and VUZP rearrange raw 8- or 16-bit elements in D registers and
+8-, 16- or 32-bit elements in Q registers, in both ARM and Thumb. Both
+destinations are staged before publication. All FP status, core flags and
+the exclusive monitor remain unchanged. Encoded D32, reserved sizes and
+odd Q operands stop before access checks. D32 assembler spellings are
+VTRN aliases. Identical operands have architecturally UNKNOWN results;
+the interpreter explicitly stops after checking access, matching VTRN's
+policy. The source is
+[DDI0406C.b, A8.8.422–423](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Tests cover all legal register pairs, byte-label result anchors, both
+operand orders, the upper register bank, all sixteen rounding/FZ/DN
+combinations and four host rounding modes with a pending exception.
+Access denial, UNKNOWN operands, invalid encodings, IT skipping, legacy
+profiles, checked fetch failures, split User instruction pages and guest
+enable/return retries exercise both instructions and every legal width.
+The existing VTRN bit-8 negative cases remain invalid encoded D32 VZIP.
+
+The private firmware fixture contains the original ARM `vDSP_ctoz`
+body at `0x3083df3c..0x3083e610` (1,748 bytes) and `vDSP_ztoc` at
+`0x3083e61c..0x3083ed90` (1,908 bytes), with their 24 literal bytes.
+It prepares 8,448 calls: both directions, every count from zero through
+65, four raw bit patterns and sixteen FP control combinations. Arrays
+are separate and 16-byte aligned, with interleaved stride two and split
+stride one, following Apple's [ctoz](https://developer.apple.com/documentation/accelerate/vdsp_ctoz)
+and [ztoc](https://developer.apple.com/documentation/accelerate/vdsp_ztoc)
+contracts. Expected FP states come from original array positions at each
+load and permutation; the full bank is checked after every instruction.
+The fixture also checks all general registers, flags, monitor, return,
+whole RAM, exact executed PCs, per-byte fetch/data counts, the 36-byte
+frame, eight-byte descriptor and four-byte count argument.
+
+Large-count paths retain the original entry and family branch and receive
+an explicit prepared `CPUFAMILY_ARM_13` value at `0xffff1080`. Apple's
+public [Cortex-A8 family mapping](https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.41.3/osfmk/arm/cpuid.c)
+and [family constants](https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.41.3/osfmk/mach/machine.h)
+justify that ABI input independently of CPU revision. This modern source
+does not establish actual N88 commpage initialization, MIDR, reset state
+or ECC configuration. No alternate family is supplied to force a path.
+
+The first baseline exposed an incorrect LR-preservation expectation in
+the fixture: the scalar four-element LDM overwrites LR, and the epilogue
+restores the saved return address into PC. That failed fixture was archived
+before correcting the expectation from the original disassembly. The
+corrected pre-implementation baseline passed 1,536 calls, then stopped at
+VUZP at `0x3083e09c` for count eight and VZIP at `0x3083e714` for count
+sixteen. Their independently predicted full partial states matched:
+33/31 instructions, 132/124 fetched bytes, 32/80 input bytes, no output,
+36 frame writes, eight descriptor bytes, four count bytes, four family
+bytes, eight literal bytes and one/five FP events. The corrected harness,
+runner and four primary-source files were frozen before implementation.
+The focused tests passed on their first run. The first frozen firmware
+run passed 6,272 calls, then found a transient FP mismatch at `ztoc`
+count 32 even though final RAM, general registers, flags and access counts
+matched. Its complete artifacts and uncommitted source were preserved.
+The original disassembly showed two independent reference events reversed:
+VLD1 at `0x3083e738` precedes VZIP at `0x3083e73c`. Correcting that
+reference order required no emulator change. The corrected fixture again
+reproduced both complete baseline stops against the preserved old library.
+With that reference correction, all 8,448 calls pass on the unchanged
+implementation, including the intermediate FP states.
+Other strides, alignments, aliases, families, process launch, boot and
+physical behavior remain outside this fixture's scope.
+
+All 77 strict and 72 shipping tests pass. The sixteen earlier firmware
+fixture groups retain all 75,072 passing calls, giving 83,520 across
+seventeen groups with these conversions. The full canonical kernel-entry
+trace remains identical through the 61,650-step L2 ECC configuration guard.
+
 Advanced SIMD conversions between F32 and signed/unsigned 32-bit integers
 now cover every D/Q register and both instruction sets. They use the same
 integer arithmetic with standard NEON controls: nearest-even for integer
@@ -1852,7 +1921,7 @@ establish that result.
   VADD/VSUB/VMUL/VNMUL/VDIV/VSQRT/VMLA/VMLS across the full register bank, and the bounded
   32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms, 32-bit VLD1/VST1 lane transfers,
   32-bit VLD1 broadcasts to one or two D registers,
-  register Boolean operations, VEXT, 8/16/32-bit VTRN, F32 VABS/VNEG,
+  register Boolean operations, VEXT, 8/16/32-bit VTRN, D8/D16 and Q8/Q16/Q32 VZIP/VUZP, F32 VABS/VNEG,
   immediate constants, core-register VDUP, register VMUL/VADD/VSUB/VMLA/VMLS.F32,
   F32 VMUL/VMLA/VMLS by scalar, VMAX/VMIN.F32, VCGE.F32 register comparisons,
   VRECPE/VRECPS/VRSQRTE/VRSQRTS.F32, VCEQ.F32 immediate zero,

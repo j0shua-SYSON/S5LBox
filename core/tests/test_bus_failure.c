@@ -2,6 +2,7 @@
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "arm.h"
 #include "vfp.h"
+#include "neon_zip_cases.h"
 #include <stdio.h>
 #include <string.h>
 #ifdef S5LBOX_STATIC_A64_ENGINE
@@ -587,6 +588,38 @@ static void test_neon_transpose_fetch_and_retry(void) {
          }
 }
 
+static void test_neon_zip_fetch_and_retry(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned zip = 0; zip < 2u; zip++)
+      for (unsigned shape = 0; shape < 5u; shape++)
+       for (unsigned host = 0; host < 2u; host++)
+        for (unsigned enabled = 0; enabled < 2u; enabled++)
+         for (unsigned half = 0; half <= thumb; half++) {
+            fixture_t f; arm_bus_t bus; arm_cpu_t c;
+            setup(&f, &bus, &c, thumb != 0u, host != 0u);
+            if (thumb) c.cpsr |= 0x1800u;
+            c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u; c.vfp_fpscr = 0x0bc00080u;
+            c.excl_valid = true; c.excl_addr = 0x2468u; c.a8_excl_size = 8u;
+            uint32_t insn = (thumb ? neon_zip_cases[shape].thumb : neon_zip_cases[shape].arm) | (zip << 7);
+            if (thumb) { put16(&f, 0u, (uint16_t)(insn >> 16)); put16(&f, 2u, (uint16_t)insn); }
+            else put32(&f, 0u, insn);
+            for (unsigned r = 0; r < 4u; r++) vfp_set_d(&c, (r < 2u ? 30u : 14u) + r, neon_zip_inputs[r]);
+            uint32_t flags = c.cpsr;
+            f.fail_address = half * 2u; f.fail_size = thumb ? 2u : 4u;
+            CHECK(arm_step(&c) == ARM_HALT, "zip failed fetch did not halt");
+            check_stop(&f, &c, 0u, flags);
+            CHECK(c.vfp_fpscr == 0x0bc00080u && c.vfp_fpexc == (enabled ? ARM_FPEXC_EN : 0u) &&
+                c.excl_valid && c.excl_addr == 0x2468u && c.a8_excl_size == 8u, "failed zip fetch altered flags/monitor");
+            for (unsigned r = 0; r < 4u; r++) CHECK(vfp_get_d(&c, (r < 2u ? 30u : 14u) + r) == neon_zip_inputs[r],
+                "failed zip fetch altered operand");
+            f.failed = false; f.fail_size = 0u; c.vfp_fpexc = ARM_FPEXC_EN;
+            CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u && c.cpsr == (flags & ~0x0600fc00u) &&
+                c.vfp_fpscr == 0x0bc00080u && c.excl_valid && c.a8_excl_size == 8u, "zip retry retirement/status");
+            for (unsigned r = 0; r < 4u; r++) CHECK(vfp_get_d(&c, (r < 2u ? 30u : 14u) + r) == neon_zip_cases[shape].result[zip][r],
+                "zip retry result/operand order/upper halves");
+         }
+}
+
 static void test_neon_sign_fetch_and_retry(void) {
     for (unsigned thumb = 0; thumb < 2u; thumb++)
      for (unsigned negate = 0; negate < 2u; negate++)
@@ -1120,6 +1153,7 @@ int main(void) {
     test_thumb_byte_reverse_fetch_retry();
     test_neon_macc_fetch_and_retry();
     test_neon_transpose_fetch_and_retry();
+    test_neon_zip_fetch_and_retry();
     test_neon_pairs_and_retry();
     test_neon_sign_fetch_and_retry();
     test_neon_memory_and_retry();

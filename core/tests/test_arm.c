@@ -8,6 +8,7 @@
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
 #include "arm.h"
+#include "neon_zip_cases.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -8144,6 +8145,61 @@ static void test_cortex_a8_neon_transpose_fetch_and_retry(void) {
      }
 }
 
+static void test_cortex_a8_neon_zip_fetch_and_retry(void) {
+    for (unsigned host = 0; host < 2u; host++)
+     for (unsigned zip = 0; zip < 2u; zip++)
+      for (unsigned shape = 0; shape < 5u; shape++)
+       for (unsigned fault = 0; fault < 4u; fault++) {
+        memset(g_ram, 0, sizeof g_ram);
+        arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c; CHECK(arm_reset_profile(&c, &bus, ARM_ARCH_V7_CORTEX_A8), "zip split fetch reset");
+        c.cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP; c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u; c.cp15.cpacr = 0x00f00000u;
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_N | test_it_bits(0x1cu);
+        c.r[15] = 0xffeu; c.vfp_fpscr = 0x0bc00080u; c.vfp_fpexc = fault ? 0u : ARM_FPEXC_EN;
+        for (unsigned r = 0; r < 4u; r++) c.a8_vfp_hi[(r < 2u ? 14u : 0u) + (r % 2u)] = neon_zip_inputs[r];
+        uint32_t insn = neon_zip_cases[shape].thumb | (zip << 7), flags = c.cpsr;
+        m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x8032u);
+        m_w32(NULL, 0x6004u, fault == 1u ? 0u : fault == 2u ? 0xa033u : fault == 3u ? 0xa012u : 0xa032u);
+        m_w16(NULL, 0x8ffeu, (uint16_t)(insn >> 16)); m_w16(NULL, 0xa000u, (uint16_t)insn);
+        m_w16(NULL, 0x9000u, 0u); /* Physical adjacency is not virtual adjacency. */
+        CHECK(arm_step(&c) == ARM_OK && c.cycles == 1u && c.vfp_fpscr == 0x0bc00080u, "zip split fetch disposition");
+        if (fault) CHECK(c.r[15] == ARM_VEC_PREFETCH && c.r[14] == 0x1002u && c.spsr[ARM_BANK_ABT] == flags &&
+            c.cp15.ifar == 0x1000u && (c.cp15.ifsr & 15u) == (fault == 1u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION) &&
+            !(c.cpsr & (ARM_CPSR_T | TEST_IT_MASK)) && c.vfp_fpexc == 0u,
+            "zip checked access before complete instruction fetch");
+        else CHECK(c.r[15] == 0x1002u && c.cpsr == ((flags & ~TEST_IT_MASK) | test_it_bits(0x18u)), "zip split fetch retirement");
+        for (unsigned r = 0; r < 4u; r++) CHECK(c.a8_vfp_hi[(r < 2u ? 14u : 0u) + (r % 2u)] ==
+            (fault ? neon_zip_inputs[r] : neon_zip_cases[shape].result[zip][r]), "zip split fetch operand corruption");
+       }
+    for (unsigned zip = 0; zip < 2u; zip++)
+     for (unsigned shape = 0; shape < 5u; shape++) {
+        memset(g_ram, 0, sizeof g_ram);
+        arm_cpu_t c; CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "zip lazy retry reset");
+        c.cpsr = ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_Z | ARM_CPSR_Q; c.cp15.cpacr = 0x00f00000u;
+        for (unsigned r = 0; r < 4u; r++) c.a8_vfp_hi[(r < 2u ? 14u : 0u) + (r % 2u)] = neon_zip_inputs[r];
+        c.r[15] = 0x100u; c.r[5] = ARM_FPEXC_EN; c.vfp_fpscr = 0x0bc00080u;
+        uint32_t insn = neon_zip_cases[shape].thumb | (zip << 7);
+        m_w16(NULL, 0x100u, 0xbf04u); /* ITT EQ */
+        m_w16(NULL, 0x102u, (uint16_t)(insn >> 16)); m_w16(NULL, 0x104u, (uint16_t)insn);
+        m_w16(NULL, 0x106u, 0x2201u);
+        put_vfp_system_transfer(0u, ARM_VEC_UNDEFINED, 0u, 8u, 5u); m_w32(NULL, 8u, 0xe25ef002u);
+        CHECK(arm_step(&c) == ARM_OK, "zip lazy IT setup");
+        uint32_t flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == 0x104u && c.spsr[ARM_BANK_UND] == flags,
+            "zip lazy access disposition");
+        for (unsigned r = 0; r < 4u; r++) CHECK(c.a8_vfp_hi[(r < 2u ? 14u : 0u) + (r % 2u)] == neon_zip_inputs[r],
+            "zip lazy access changed an operand");
+        CHECK(arm_step(&c) == ARM_OK && c.vfp_fpexc == ARM_FPEXC_EN, "zip handler enable");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x102u && c.cpsr == flags, "zip guest exception return");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x106u && c.cpsr == ((flags & ~TEST_IT_MASK) | test_it_bits(0x08u)) &&
+            c.vfp_fpscr == 0x0bc00080u, "zip guest enable/retry retirement");
+        for (unsigned r = 0; r < 4u; r++) CHECK(c.a8_vfp_hi[(r < 2u ? 14u : 0u) + (r % 2u)] == neon_zip_cases[shape].result[zip][r],
+            "zip retry did not publish both results exactly once");
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x108u && c.r[2] == 1u && c.cpsr == (flags & ~TEST_IT_MASK) && c.cycles == 6u,
+            "zip retry changed following IT condition");
+     }
+}
+
 static void test_cortex_a8_neon_minmax_ge_recip_fetch_and_retry(void) {
     static const uint32_t prefixes[2][8]={{0xf240ef80u,0xf260ef80u,0xf340ee80u,0xf3fbe520u,0xf240ef90u,0xf3fbe5a0u,0xf260ef90u,0xf3f9e520u},
         {0xef40ef80u,0xef60ef80u,0xff40ee80u,0xfffbe520u,0xef40ef90u,0xfffbe5a0u,0xef60ef90u,0xfff9e520u}};
@@ -12467,6 +12523,7 @@ int main(void) {
     test_cortex_a8_neon_lane_replicate_guest_retry();
     test_cortex_a8_neon_pair_faults();
     test_cortex_a8_neon_transpose_fetch_and_retry();
+    test_cortex_a8_neon_zip_fetch_and_retry();
     test_cortex_a8_neon_macc_fetch_and_retry();
     test_cortex_a8_neon_integer_fetch_and_retry();
     test_cortex_a8_neon_minmax_ge_recip_fetch_and_retry();

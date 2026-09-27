@@ -17,6 +17,7 @@
  */
 #include "arm.h"
 #include "vfp.h"
+#include "neon_zip_cases.h"
 
 #include <fenv.h>
 #include <math.h>
@@ -3497,6 +3498,145 @@ static void test_a8_neon_transpose_invalid_and_it(void) {
         CHECK(a8_move_step(&c, 0u, a8_neon_transpose(0u, 2u, 0u, 31u, 16u)) == ARM_UNDEFINED && c.r[15] == 0u,
               "transpose leaked to legacy profile");
     }
+}
+
+static uint32_t a8_neon_zip(unsigned thumb, unsigned zip, unsigned size, unsigned quad, unsigned d, unsigned m) {
+    return (thumb ? 0xffb20100u : 0xf3b20100u) | (zip << 7) | (size << 18) | (quad << 6) |
+        ((d & 15u) << 12) | ((d >> 4) << 22) | (m & 15u) | ((m >> 4) << 5);
+}
+
+static void a8_zip_expected(uint64_t values[32], unsigned zip, unsigned size, unsigned quad, unsigned d, unsigned m) {
+    /* Byte-label scatter oracle, independent of the core's lane gather. */
+    uint8_t input[32], output[32];
+    unsigned bytes = 8u * (quad + 1u), width = 1u << size, lanes = bytes / width;
+    for (unsigned i = 0; i < bytes; i++) {
+        input[i] = (uint8_t)(values[d + i / 8u] >> (8u * (i % 8u)));
+        input[bytes + i] = (uint8_t)(values[m + i / 8u] >> (8u * (i % 8u)));
+    }
+    for (unsigned e = 0; e < 2u * lanes; e++) for (unsigned b = 0; b < width; b++) {
+        unsigned to = zip ? 2u * (e % lanes) + e / lanes : (e % 2u) * lanes + e / 2u;
+        output[to * width + b] = input[e * width + b];
+    }
+    for (unsigned r = 0; r <= quad; r++) values[d + r] = values[m + r] = 0u;
+    for (unsigned i = 0; i < bytes; i++) {
+        values[d + i / 8u] |= (uint64_t)output[i] << (8u * (i % 8u));
+        values[m + i / 8u] |= (uint64_t)output[bytes + i] << (8u * (i % 8u));
+    }
+}
+
+static void test_a8_neon_zip_registers(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned zip = 0; zip < 2u; zip++)
+      for (unsigned shape = 0; shape < 5u; shape++) {
+        unsigned quad = neon_zip_cases[shape].quad, size = neon_zip_cases[shape].size;
+        CHECK(a8_neon_zip(thumb, zip, size, quad, 30u, 16u) ==
+            ((thumb ? neon_zip_cases[shape].thumb : neon_zip_cases[shape].arm) | (zip << 7)), "zip encoding anchor");
+        for (unsigned d = 0; d < 32u; d += quad + 1u)
+         for (unsigned m = 0; m < 32u; m += quad + 1u) {
+            arm_cpu_t c; a8_move_reset(&c, thumb); c.cpsr |= ARM_CPSR_E;
+            c.vfp_fpscr = 0xfff79f9fu; c.excl_valid = true; c.excl_addr = 0x2468u; c.a8_excl_size = 8u;
+            uint64_t expected[32];
+            for (unsigned r = 0; r < 32u; r++) {
+                expected[r] = UINT64_C(0xff8123456789abcd) ^ ((uint64_t)r * UINT64_C(0x070503010b090f0d));
+                vfp_set_d(&c, r, expected[r]);
+            }
+            for (unsigned r = 0; r < 15u; r++) c.r[r] = 0xa1100000u + r;
+            if (d != m) a8_zip_expected(expected, zip, size, quad, d, m);
+            uint32_t flags = c.cpsr;
+            CHECK(a8_move_step(&c, thumb, a8_neon_zip(thumb, zip, size, quad, d, m)) == (d == m ? ARM_UNDEFINED : ARM_OK) &&
+                c.r[15] == (d == m ? 0x100u : 0x104u) && c.cycles == 1u && c.cpsr == flags &&
+                c.vfp_fpscr == 0xfff79f9fu && c.vfp_fpexc == ARM_FPEXC_EN &&
+                c.excl_valid && c.excl_addr == 0x2468u && c.a8_excl_size == 8u,
+                "zip register/control T=%u op=%u shape=%u D=%u M=%u", thumb, zip, shape, d, m);
+            bool same = true;
+            for (unsigned r = 0; r < 32u; r++) same &= vfp_get_d(&c, r) == expected[r];
+            for (unsigned r = 0; r < 15u; r++) same &= c.r[r] == 0xa1100000u + r;
+            CHECK(same, "zip full register banks/UNKNOWN guard");
+         }
+      }
+}
+
+static void test_a8_neon_zip_access_and_host_state(void) {
+    static const unsigned permissions[] = {0u,1u,3u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned zip = 0; zip < 2u; zip++)
+      for (unsigned shape = 0; shape < 5u; shape++)
+       for (unsigned user = 0; user < 2u; user++)
+        for (unsigned enabled = 0; enabled < 2u; enabled++)
+         for (unsigned access = 0; access < 3u; access++)
+          for (unsigned same = 0; same < 2u; same++) {
+            unsigned quad = neon_zip_cases[shape].quad, size = neon_zip_cases[shape].size;
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permissions[access] * 0x00500000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            uint64_t expected[32];
+            for (unsigned r = 0; r < 32u; r++) { expected[r] = UINT64_C(0xff8123456789abcd) + r; vfp_set_d(&c, r, expected[r]); }
+            bool allowed = enabled && (permissions[access] == 3u || (permissions[access] == 1u && !user));
+            if (allowed && !same) a8_zip_expected(expected, zip, size, quad, 30u, 16u);
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c, thumb, a8_neon_zip(thumb, zip, size, quad, 30u, same ? 30u : 16u)) ==
+                (allowed && same ? ARM_UNDEFINED : ARM_OK) && c.vfp_fpscr == fpscr, "zip access disposition");
+            CHECK(allowed ? c.r[15] == (same ? 0x100u : 0x104u) && c.cpsr == flags :
+                c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == (thumb ? 0x102u : 0x104u) && c.spsr[ARM_BANK_UND] == flags,
+                "zip access must precede UNKNOWN guard");
+            for (unsigned r = 0; r < 32u; r++) CHECK(vfp_get_d(&c, r) == expected[r], "zip denied/UNKNOWN register mutation");
+          }
+    fenv_t saved; CHECK(fegetenv(&saved) == 0, "save zip host state");
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned zip = 0; zip < 2u; zip++)
+      for (unsigned shape = 0; shape < 5u; shape++)
+       for (unsigned controls = 0; controls < 16u; controls++)
+        for (unsigned host = 0; host < 4u; host++) {
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            c.vfp_fpscr = (0xfff79f9fu & ~(ARM_FPSCR_RMODE | ARM_FPSCR_FZ | ARM_FPSCR_DN)) |
+                ((controls & 3u) << 22) | (controls & 4u ? ARM_FPSCR_FZ : 0u) | (controls & 8u ? ARM_FPSCR_DN : 0u);
+            for (unsigned r = 0; r < 4u; r++) vfp_set_d(&c, (r < 2u ? 30u : 14u) + r, neon_zip_inputs[r]);
+            uint32_t fpscr = c.vfp_fpscr, flags = c.cpsr;
+            CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 && feraiseexcept(FE_DIVBYZERO) == 0,
+                "prepare zip host state");
+            int exceptions = fetestexcept(FE_ALL_EXCEPT);
+            uint32_t insn = (thumb ? neon_zip_cases[shape].thumb : neon_zip_cases[shape].arm) | (zip << 7);
+            CHECK(a8_move_step(&c, thumb, insn) == ARM_OK && c.vfp_fpscr == fpscr && c.cpsr == flags &&
+                fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == exceptions, "zip modified FP/host flags");
+            for (unsigned r = 0; r < 4u; r++) CHECK(vfp_get_d(&c, (r < 2u ? 30u : 14u) + r) == neon_zip_cases[shape].result[zip][r],
+                "zip raw lane anchor shape=%u op=%u r=%u", shape, zip, r);
+        }
+    CHECK(fesetenv(&saved) == 0, "restore zip host state");
+}
+
+static void test_a8_neon_zip_invalid_and_it(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned zip = 0; zip < 2u; zip++)
+      for (unsigned enabled = 0; enabled < 2u; enabled++)
+       for (unsigned skip = 0; skip < (thumb ? 2u : 1u); skip++)
+        for (unsigned bad = 0; bad < 6u; bad++) {
+            arm_cpu_t c; a8_move_reset(&c, thumb);
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u; if (skip) c.cp15.cpacr = 0u;
+            uint32_t insn = a8_neon_zip(thumb, zip, bad == 0u ? 3u : 2u, bad == 1u ? 0u : 1u,
+                bad == 2u ? 31u : 30u, bad == 3u ? 17u : bad == 4u ? 30u : 16u);
+            if (thumb) { m_w16(NULL, 0x100u, skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK, "zip IT setup"); }
+            uint32_t pc = c.r[15], flags = c.cpsr, fpscr = c.vfp_fpscr;
+            bool denied = !enabled && bad >= 4u, valid = bad == 5u;
+            CHECK(a8_move_step(&c, thumb, insn) == (skip || valid || denied ? ARM_OK : ARM_UNDEFINED), "zip invalid/IT disposition");
+            if (skip || (!valid && !denied)) CHECK(c.r[15] == (skip ? pc + 4u : pc) &&
+                c.cpsr == (skip ? flags & ~0x0600fc00u : flags), "zip invalid/UNKNOWN/skipped state");
+            else if (denied) CHECK(c.r[15] == ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND] == flags, "zip disabled valid encoding");
+            else CHECK(c.r[15] == pc + 4u && c.cpsr == (flags & ~0x0600fc00u), "zip valid IT retirement");
+            CHECK(c.vfp_fpscr == fpscr, "zip invalid/IT FP status");
+            for (unsigned r = 0; r < 32u; r++) CHECK(vfp_get_d(&c, r) == 0u, "zip invalid/IT register mutation");
+        }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++)
+     for (unsigned zip = 0; zip < 2u; zip++)
+      for (unsigned shape = 0; shape < 5u; shape++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c, &g_bus, legacy[profile]), "legacy zip reset");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        CHECK(a8_move_step(&c, 0u, neon_zip_cases[shape].arm | (zip << 7)) == ARM_UNDEFINED && c.r[15] == 0u,
+            "zip leaked to legacy profile");
+      }
+    /* Existing VTRN bit8 negative tests now name encoded VZIP.32 D forms.
+     * They stay invalid: only the assembler pseudo-op aliases VTRN. */
 }
 
 /* A8.8.280/355 A1/T1, F=1,size=2. These operations do not unpack FP values. */
@@ -7971,6 +8111,9 @@ int main(void) {
     test_a8_neon_transpose_registers();
     test_a8_neon_transpose_access_and_host_state();
     test_a8_neon_transpose_invalid_and_it();
+    test_a8_neon_zip_registers();
+    test_a8_neon_zip_access_and_host_state();
+    test_a8_neon_zip_invalid_and_it();
     test_a8_neon_pair_registers();
     test_a8_neon_pair_alignment_and_access();
     test_a8_neon_pair_invalid_and_it();
