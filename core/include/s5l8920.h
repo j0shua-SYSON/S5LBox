@@ -1,4 +1,4 @@
-/* Partial N88/S5L8920 memory, interrupt fabric and polled UART.
+/* Partial N88/S5L8920 memory, interrupt fabric, UART and timebase.
  * No complete firmware boot.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #ifndef S5LBOX_S5L8920_H
@@ -17,6 +17,9 @@
 #define S5L8920_IRQ_COUNT (32u * S5L8920_VIC_COUNT)
 #define S5L8920_UART0_BASE UINT32_C(0x82500000)
 #define S5L8920_UART0_IRQ 24u
+#define S5L8920_PMGR_BASE UINT32_C(0xbf100000)
+#define S5L8920_TIMEBASE_LOW UINT32_C(0x200)
+#define S5L8920_TIMEBASE_HIGH UINT32_C(0x204)
 
 typedef enum {
     S5L8920_BUS_OK = 0,
@@ -38,6 +41,7 @@ typedef struct {
     uint8_t *ram;
     pl192_t vic[S5L8920_VIC_COUNT];
     s5l8920_uart_t uart0;
+    uint64_t timebase_ticks;
     uint32_t input_levels[S5L8920_VIC_COUNT];
     s5l8920_bus_failure_t bus_failure;
 } s5l8920_t;
@@ -50,7 +54,7 @@ typedef struct {
 bool s5l8920_init(s5l8920_t *m);
 void s5l8920_free(s5l8920_t *m);
 
-/* Reset CPU/controller/UART state and clear host diagnostics while preserving RAM
+/* Reset CPU/controller/UART/timebase state and clear diagnostics while preserving RAM
  * and externally driven interrupt levels. This is a functional reset, not a
  * model of power sequencing. The caller owns execution and device timing. */
 bool s5l8920_reset(s5l8920_t *m);
@@ -65,6 +69,12 @@ bool s5l8920_set_irq(s5l8920_t *m, unsigned source, bool asserted);
 bool s5l8920_uart0_clock(s5l8920_t *m, bool nclk, uint64_t ticks,
                         uint8_t *output, size_t capacity, size_t *count);
 bool s5l8920_uart0_receive(s5l8920_t *m, uint8_t byte);
+
+/* Supply timebase source ticks explicitly, modulo 2^64. Reads and CPU steps do
+ * not advance this counter. Functional reset starts at zero; no physical reset
+ * phase, frequency, gating, deadline register or timer interrupt is modeled.
+ * Like other host events this preserves a latched bus diagnostic. */
+bool s5l8920_timebase_clock(s5l8920_t *m, uint64_t ticks);
 
 /* Host preparation is bounded to RAM and never performs MMIO. Rejected loads
  * leave RAM and existing bus diagnostics untouched. No firmware is patched. */

@@ -2,7 +2,7 @@
 
 The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
 a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
-interrupt fabric and polled UART. A complete machine, kernel boot, and SpringBoard have not
+interrupt fabric, UART and timebase counter. A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
@@ -51,6 +51,40 @@ buffers below RAM top minus 16 KiB, placing the first at `0x4fe3a000` and
 reducing the boot-argument memory size accordingly. This establishes a
 firmware configuration, not a working display model. The device-tree pointer
 at argument offset `0x30` is virtual; its byte length is at `0x34`.
+
+## Timebase counter
+
+The matching tree's `pmgr` node has device type `timer`; its first register
+range maps to `0xbf100000`, size `0x2000`. The original platform initializer
+maps that range and passes base+`0x200` to the CPU callback installer at
+`0x800885a8`. Its original callback table at `0x802ee7f8` includes the ARM
+time reader at `0x800895a4`. `_mach_absolute_time` reaches it through an
+original Thumb entry, interworking veneer and per-CPU callback dispatch.
+The reader samples high, low, high, retries when the high words differ,
+then adds the per-CPU wake-time offset.
+
+The board implements independent word reads at `0xbf100200/204` from one
+64-bit counter. Callers supply source ticks through
+`s5l8920_timebase_clock`; counter arithmetic wraps modulo 2^64. Reads and
+CPU execution do not advance time. Reset to zero is a functional starting
+point, not a measured power-on phase. Physical clock frequency, gating,
+deadline/countdown registers and timer interrupts remain unimplemented.
+Other PMGR selectors, writes, and unsupported widths/alignment retain checked
+stops. The original initializer's deadline programming therefore still stops.
+
+A private fixture frozen before implementation starts at the unchanged public
+entry. On checkpoint 82 it stops at the first high-word read, `0x800895a8`,
+after 10 retired instructions and 11 attempts. The expected full register,
+FP, flags, monitor, RAM and access counts match; the original baseline and
+its seven artifact identities are preserved. All 24 subsequent cases passed
+on the first run, with the fixture and runner unchanged: stable reads, host
+ticks between reads, low-word rollover, 64-bit wrap and wake-offset arithmetic.
+Returns take 20 instructions, or 25 when the original retry loop runs. The
+full strict and shipping host suites pass 78 and 73 tests respectively.
+The 326 existing prepared UART/VIC cases also pass, and the complete
+61,650-step canonical ECC-guard trace is unchanged.
+This is a prepared function contract, not
+timer initialization, FIQ delivery, kernel boot or physical validation.
 
 ## Early UART and transmit interrupts
 

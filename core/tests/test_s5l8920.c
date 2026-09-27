@@ -263,6 +263,59 @@ static void test_uart_interrupt_wiring(s5l8920_t *m) {
           "invalid board event changed output or succeeded");
 }
 
+static void test_timebase(s5l8920_t *m) {
+    const uint32_t low=S5L8920_PMGR_BASE+S5L8920_TIMEBASE_LOW;
+    const uint32_t high=S5L8920_PMGR_BASE+S5L8920_TIMEBASE_HIGH;
+    CHECK(s5l8920_reset(m) && !m->timebase_ticks, "functional timebase reset");
+    CHECK(!s5l8920_timebase_clock(NULL,1u) && s5l8920_timebase_clock(m,UINT32_MAX), "explicit clock input");
+    CHECK(m->bus.read32(m,high)==0u && m->bus.read32(m,low)==UINT32_MAX &&
+          m->timebase_ticks==UINT32_MAX, "timebase read advanced time or latched halves");
+    CHECK(s5l8920_timebase_clock(m,1u) && m->bus.read32(m,high)==1u && m->bus.read32(m,low)==0u,
+          "low-word rollover did not carry");
+    CHECK(s5l8920_timebase_clock(m,UINT64_MAX) && m->bus.read32(m,high)==0u && m->bus.read32(m,low)==UINT32_MAX,
+          "large clock input overflowed intermediate arithmetic");
+    CHECK(s5l8920_timebase_clock(m,UINT64_MAX-UINT32_MAX) && m->timebase_ticks==UINT64_MAX &&
+          s5l8920_timebase_clock(m,1u) && m->timebase_ticks==0u, "full-width rollover");
+    CHECK(s5l8920_timebase_clock(m,UINT64_C(0x1234567887654321)), "seed counter");
+    put(m,0u,0xe5912000u); /* LDR r2,[r1] */
+    m->cpu.r[15]=S5L8920_RAM_BASE;m->cpu.r[1]=low;
+    CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[2]==0x87654321u &&
+          m->timebase_ticks==UINT64_C(0x1234567887654321), "CPU read invented clock ticks");
+    CHECK(!m->bus.host_ram(m,low,4u) && !m->bus.host_ram_write(m,low,4u) && !s5l8920_load(m,low,&low,4u),
+          "timebase bypassed checked MMIO");
+    const uint32_t offsets[]={0u,0x1fcu,0x200u,0x204u,0x208u,0x220u,0x1ffcu};
+    for (unsigned n=0;n<sizeof offsets/sizeof offsets[0];n++) {
+        uint32_t a=S5L8920_PMGR_BASE+offsets[n];
+        for (unsigned kind=0;kind<4;kind++) {
+            s5l8920_clear_bus_failure(m);m->cpu.r[15]=0x1234u;
+            if (!kind) m->bus.write32(m,a,0xabcdef01u);
+            else if (kind==1u) (void)m->bus.read8(m,a);
+            else if (kind==2u) m->bus.write16(m,a,0xcdefu);
+            else (void)m->bus.read32(m,a+1u);
+            CHECK(m->bus_failure.reason==(kind?S5L8920_BUS_ACCESS_UNIMPLEMENTED:S5L8920_BUS_REGISTER_REFUSED) &&
+                  m->timebase_ticks==UINT64_C(0x1234567887654321) && m->bus_failure.pc==0x1234u,
+                  "refused timer access changed state or lacked diagnostics");
+        }
+        if (offsets[n]!=0x200u && offsets[n]!=0x204u) {
+            s5l8920_clear_bus_failure(m);m->cpu.r[15]=S5L8920_RAM_BASE;m->cpu.r[1]=a;m->cpu.r[2]=0xfeedbeefu;
+            uint64_t cycles=m->cpu.cycles;
+            CHECK(arm_step(&m->cpu)==ARM_HALT && m->cpu.r[15]==S5L8920_RAM_BASE &&
+                  m->cpu.r[2]==0xfeedbeefu && m->cpu.cycles==cycles &&
+                  m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && m->bus_failure.address==a,
+                  "unsupported PMGR/deadline read retired or returned invented data");
+        }
+    }
+    s5l8920_bus_failure_t diagnostic=m->bus_failure;
+    CHECK(s5l8920_timebase_clock(m,1u) && !memcmp(&diagnostic,&m->bus_failure,sizeof diagnostic),
+          "host tick cleared a checked stop");
+    uint64_t ticks=m->timebase_ticks;
+    CHECK(m->bus.read32(m,low)==0u && m->timebase_ticks==ticks, "latched stop allowed counter read");
+    s5l8920_clear_bus_failure(m);
+    CHECK(m->bus.read32(m,low)==0x87654322u && !m->cpu.irq_line && !m->cpu.fiq_line,
+          "explicit ticks were lost or generated an unimplemented timer interrupt");
+    CHECK(s5l8920_reset(m) && !m->timebase_ticks && !m->bus_failure.reason, "timebase reset retained state");
+}
+
 static void test_guest_irq_handler(s5l8920_t *m) {
     for (unsigned bank = 0; bank < S5L8920_VIC_COUNT; bank++) {
         CHECK(s5l8920_reset(m), "reset IRQ fixture");
@@ -331,10 +384,12 @@ int main(void) {
     test_cpu_access_stops(&m);
     test_uart_checked_bus(&m);
     test_uart_interrupt_wiring(&m);
+    test_timebase(&m);
     test_guest_irq_handler(&m);
     test_fiq_and_reset(&m);
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
+    CHECK(!s5l8920_timebase_clock(&m,1u) && !m.timebase_ticks, "freed board accepted timebase input");
     size_t count=999u;
     CHECK(!s5l8920_uart0_clock(&m,true,1u,NULL,0u,&count) && count==999u && !s5l8920_uart0_receive(&m,0u),
           "freed board accepted a UART event");
