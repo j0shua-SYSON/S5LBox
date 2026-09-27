@@ -1215,6 +1215,33 @@ A later Settings navigation tap delivered both controller reports but produced
 no visible response; repeating after sleep/wake worked. That residual input
 case and slow navigation preparation/sliding remain open.
 
+### Stop executing the powered-down sleep loop (2026-09-27)
+
+After guest Auto-Lock the physical-device run remained at `_ml_arm_sleep`'s
+final `B .` (`0xc0061eb0`, 7E18), retiring about 160 million instructions per
+second with IRQ/FIQ masked and scanout stopped. The PMU retained-reset wake
+path already existed, but the run loop never parked the powered-down CPU.
+
+Interactive host pacing now waits at this boundary in at most 8 ms requested
+slices. A PMU shutdown command alone is insufficient: the guest must finish
+its timebase save/cache flush and reach a masked privileged ARM self-branch.
+The witness uses live bytes in an existing plain-RAM fetch window, with full
+translation-context checks, no active I2C transaction, and no matching host
+pre-step hook. There is no firmware-address shortcut or decoded-code cache.
+Only the PMU RTC advances during the wait; CPU retirement, PWM, DMA and scanout
+do not. Host input/service and stop/checkpoint requests remain reachable between
+slices. Wake uses the existing retained reset. The sub-tick host remainder is
+not serialized; restored guests rebuild their fetch witness normally. Callback-
+free deterministic execution and the snapshot file format are unchanged.
+
+Regression cases cover shutdown preparation, both PMU states, exact fractional
+RTC time, failed waits/clock samples, bounded oversleep, zero-budget slices,
+host services, restart, wake, restored sleep, stale translations and changed
+instruction bytes. The local suite passes 77/77 (51.00 s), including 86,741
+machine checks. Native CI and physical-device validation are still pending.
+This targets demonstrated sleep-time CPU waste; it is not yet evidence of
+improved animation or keyboard latency.
+
 ### Historical instruction-resume narrative
 
 Two interpreter changes make the current instruction counts different from the

@@ -895,6 +895,162 @@ static bool active_clock_probe_sleep(void *ctx, uint64_t nanoseconds) {
     return !probe->sleep_fails;
 }
 
+static void power_wait_fixture(s5l8900_t *m, active_clock_probe_t *probe) {
+    const uint32_t program[] = {0xe1a00000u, 0xeafffffeu}; /* NOP; B . */
+    CHECK(s5l8900_init(m, 0u, 1u << 20), "power wait init");
+    s5l8900_load(m, 0u, program, sizeof program);
+    m->cpu.cpsr = ARM_MODE_SVC | ARM_CPSR_I | ARM_CPSR_F;
+    m->pmu.regs[PCF50635_OOCSHDWN] = PCF50635_OOCSHDWN_GO_HIBERNATE;
+    m->pmu.written[PCF50635_OOCSHDWN] = 1u;
+    CHECK(s5l8900_set_wfi_host_pacing(m, active_clock_probe_sleep, probe),
+          "power wait callback");
+    arm_status_t status = ARM_OK;
+    CHECK(s5l8900_run(m, 1u, &status) == 1u && status == ARM_OK &&
+          m->cpu.r[15] == 4u && probe->sleep_calls == 0u,
+          "power command stopped shutdown preparation");
+}
+
+static void power_wait_service(void *ctx, unsigned retired) {
+    unsigned *calls = ctx;
+    CHECK(retired == 0u, "powered-down service invented retirements");
+    (*calls)++;
+}
+
+static void test_power_wait_freezes_cpu_and_preserves_rtc_wake_restore(void) {
+    s5l8900_t m;
+    active_clock_probe_t probe = {.succeeds = true};
+    power_wait_fixture(&m, &probe);
+    /* An odd synthetic frequency exercises the sub-tick carry exactly. */
+    uint32_t board_tb_hz = m.tb_hz;
+    m.pmu.tick_hz = m.tb_hz = 12345u;
+    m.pmu.tick_accum = 0u;
+    uint64_t seconds = m.pmu.seconds, cycles = m.cpu.cycles;
+    uint64_t timer = m.timer.ticks, phase = m.tb_accum;
+    unsigned services = 0u;
+    m.uart4_host_service = power_wait_service;
+    m.uart4_host_ctx = &services;
+    arm_status_t status = ARM_HALT;
+    CHECK(s5l8900_run(&m, 0u, &status) == 0u && status == ARM_OK &&
+          probe.sleep_calls == 0u, "zero budget slept");
+    for (unsigned i = 0u; i < 125u; ++i)
+        CHECK(s5l8900_run(&m, 100000u, &status) == 0u && status == ARM_OK,
+              "powered-down slice executed CPU work");
+    CHECK(m.cpu.cycles == cycles && m.cpu.r[15] == 4u &&
+          m.timer.ticks == timer && m.tb_accum == phase &&
+          m.pmu.seconds == seconds + 1u && m.pmu.tick_accum == 0u &&
+          m.power_wait_fraction == 0u && services == 126u &&
+          probe.sleep_calls == 125u &&
+          probe.last_sleep_ns == S5L8900_WFI_PACE_SLICE_NS,
+          "power wait lost RTC fraction, advanced SoC, or starved service");
+    m.uart4_host_service = NULL;
+    m.uart4_host_ctx = NULL;
+    CHECK(s5l8900_run(&m, 1u, &status) == 0u && m.power_wait_fraction != 0u,
+          "fraction fixture did not retain a remainder");
+    m.pmu.tick_hz = m.tb_hz = board_tb_hz;
+    uint8_t *saved = NULL;
+    size_t saved_size = 0u;
+    CHECK(snapshot_save_mem(&m, &saved, &saved_size) == SNAP_OK,
+          "save powered-down machine");
+    CHECK(snapshot_load_mem(&m, saved, saved_size) == SNAP_OK &&
+          m.power_wait_fraction == 0u && !m.cpu.fetch_host &&
+          m.wfi_host_sleep == active_clock_probe_sleep,
+          "restore retained derived proof/remainder or lost host policy");
+    free(saved);
+    unsigned waits = probe.sleep_calls;
+    CHECK(s5l8900_run(&m, 1u, &status) == 1u && status == ARM_OK &&
+          probe.sleep_calls == waits && m.cpu.r[15] == 4u,
+          "restore did not rebuild its fetch witness literally");
+    CHECK(s5l8900_run(&m, 1u, &status) == 0u && status == ARM_OK &&
+          probe.sleep_calls == waits + 1u, "restored sleep failed to park");
+    cycles = m.cpu.cycles;
+    CHECK(s5l8900_wake_from_hibernation(&m) && m.cpu.r[15] == m.ram_base &&
+          m.cpu.cycles == cycles && m.power_wait_fraction == 0u &&
+          !s5l_pcf50635_in_hibernation(&m.pmu), "retained-reset wake failed");
+    CHECK(s5l8900_run(&m, 1u, &status) == 1u && status == ARM_OK &&
+          probe.sleep_calls == waits + 1u, "wake did not resume CPU work");
+    s5l8900_free(&m);
+}
+
+static void test_power_wait_requires_a_live_quiescent_witness(void) {
+    enum { AWAKE, UNWRITTEN, NO_CALLBACK, USER_MODE, IRQ_ENABLED, FIQ_ENABLED,
+           THUMB, BIG_ENDIAN, ABORT_PENDING, MISALIGNED, ACTIVE_I2C,
+           NO_FETCH, FETCH_BLOCK, FETCH_GEN, FETCH_PRIV, SCTLR, TTBR0, TTBR1,
+           TTBCR, DACR, CONTEXT, CHANGED_CODE, HOST_HOOK, BUS_INTERPOSE, CASE_COUNT };
+    for (unsigned which = 0u; which < CASE_COUNT; ++which) {
+        s5l8900_t m;
+        active_clock_probe_t probe = {.succeeds = true};
+        power_wait_fixture(&m, &probe);
+        const uint32_t target = 4u;
+        pre_step_fixture_t hook = {.machine = &m};
+        switch (which) {
+        case AWAKE: m.pmu.regs[PCF50635_OOCSHDWN] = 0u; break;
+        case UNWRITTEN: m.pmu.written[PCF50635_OOCSHDWN] = 0u; break;
+        case NO_CALLBACK: s5l8900_set_wfi_host_pacing(&m, NULL, NULL); break;
+        case USER_MODE: m.cpu.cpsr = ARM_MODE_USR | ARM_CPSR_I | ARM_CPSR_F; break;
+        case IRQ_ENABLED: m.cpu.cpsr &= ~ARM_CPSR_I; break;
+        case FIQ_ENABLED: m.cpu.cpsr &= ~ARM_CPSR_F; break;
+        case THUMB: m.cpu.cpsr |= ARM_CPSR_T; break;
+        case BIG_ENDIAN: m.cpu.cpsr |= ARM_CPSR_E; break;
+        case ABORT_PENDING: m.cpu.abort_pending = true; break;
+        case MISALIGNED: m.cpu.r[15] |= 2u; break;
+        case ACTIVE_I2C: m.i2c[0].active = true; break;
+        case NO_FETCH: m.cpu.fetch_host = NULL; break;
+        case FETCH_BLOCK: m.cpu.fetch_blk += 1024u; break;
+        case FETCH_GEN: m.cpu.fetch_gen++; break;
+        case FETCH_PRIV: m.cpu.fetch_priv = false; break;
+        case SCTLR: m.cpu.cp15.sctlr ^= 1u << 2; break;
+        case TTBR0: m.cpu.cp15.ttbr0 ^= 0x4000u; break;
+        case TTBR1: m.cpu.cp15.ttbr1 ^= 0x4000u; break;
+        case TTBCR: m.cpu.cp15.ttbcr ^= 1u; break;
+        case DACR: m.cpu.cp15.dacr ^= 3u; break;
+        case CONTEXT: m.cpu.cp15.context_id++; break;
+        case CHANGED_CODE: m.bus.write32(&m, 4u, 0xe1a00000u); break;
+        case HOST_HOOK:
+            CHECK(s5l8900_set_pre_step_hook(&m, pre_step_fixture_call, &hook,
+                                            &target, 1u), "power hook setup");
+            break;
+        case BUS_INTERPOSE: m.bus.host_ram = NULL; break;
+        default: break;
+        }
+        arm_status_t status = ARM_OK;
+        (void)s5l8900_run(&m, 1u, &status);
+        CHECK(probe.sleep_calls == 0u, "invalid power wait witness %u accepted", which);
+        if (which == HOST_HOOK)
+            CHECK(hook.calls == 1u, "power wait bypassed host hook");
+        s5l8900_free(&m);
+    }
+}
+
+static void test_power_wait_bounds_clock_and_failed_waits(void) {
+    s5l8900_t m;
+    active_clock_probe_t probe = {.succeeds = true};
+    power_wait_fixture(&m, &probe);
+    m.pmu.regs[PCF50635_OOCSHDWN] = PCF50635_OOCSHDWN_GO_STANDBY;
+    m.pmu.tick_hz = 1000u;
+    m.pmu.tick_accum = 0u;
+    CHECK(s5l8900_set_active_host_clock(&m, active_clock_probe_now, &probe),
+          "power clock setup");
+    arm_status_t status = ARM_OK;
+    probe.sleep_overshoot_ns = UINT64_C(2000000);
+    CHECK(s5l8900_run(&m, 100u, &status) == 0u && status == ARM_OK &&
+          m.pmu.tick_accum == 10u, "successful wait lost measured oversleep");
+    probe.sleep_overshoot_ns = UINT64_C(30000000000);
+    CHECK(s5l8900_run(&m, 100u, &status) == 0u &&
+          m.pmu.tick_accum == 26u, "host suspension escaped bounded wait");
+    probe.sleep_fails = true;
+    CHECK(s5l8900_run(&m, 100u, &status) == 0u && status == ARM_OK &&
+          m.pmu.tick_accum == 26u, "failed wait invented RTC/CPU time");
+    probe.sleep_fails = false;
+    probe.succeeds = false;
+    CHECK(s5l8900_run(&m, 100u, &status) == 0u &&
+          m.pmu.tick_accum == 34u, "failed clock lost successful wait");
+    m.restart_requested = true;
+    unsigned waits = probe.sleep_calls;
+    CHECK(s5l8900_run(&m, 100u, &status) == 0u && status == ARM_RESTART &&
+          probe.sleep_calls == waits, "power wait swallowed restart boundary");
+    s5l8900_free(&m);
+}
+
 static void fill_arm_nops(uint32_t *program, unsigned count) {
     for (unsigned i = 0u; i < count; i++) program[i] = 0xe1a00000u;
 }
@@ -7607,6 +7763,9 @@ int main(void) {
     test_wfi_fast_forwards_to_the_timer_boundary();
     test_wfi_host_pacing_is_optional_exact_and_yields();
     test_wfi_host_pacing_bounds_long_and_failed_waits();
+    test_power_wait_freezes_cpu_and_preserves_rtc_wake_restore();
+    test_power_wait_requires_a_live_quiescent_witness();
+    test_power_wait_bounds_clock_and_failed_waits();
     test_active_host_clock_is_optional_bounded_and_fail_closed();
     test_active_host_clock_does_not_double_count_paced_wfi();
     test_active_host_clock_shields_only_pathological_input_work();

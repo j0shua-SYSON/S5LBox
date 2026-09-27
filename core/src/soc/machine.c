@@ -814,6 +814,7 @@ bool s5l8900_set_wfi_host_pacing(s5l8900_t *m,
     m->wfi_paced_partial_advances = 0u;
     m->wfi_paced_failures = 0u;
     m->wfi_pace_yield = false;
+    m->power_wait_fraction = 0u;
     m->active_clock_idle_oversleep_ns = 0u;
     m->active_clock_idle_credit_ticks = 0u;
     m->active_clock_idle_repaid_ticks = 0u;
@@ -1989,6 +1990,7 @@ static bool wake_from_pmu_power_state(s5l8900_t *m) {
      * remain intact, including the monotonic retired-instruction count above. */
     s5l8900_static_a64_invalidate_derived(m);
     m->wfi_pace_yield = false;
+    m->power_wait_fraction = 0u;
     m->active_clock_last_host_ns = 0u;
     m->active_clock_guest_ticks_since_sync = 0u;
     m->active_clock_fraction = 0u;
@@ -2679,11 +2681,82 @@ unsigned s5l8900_static_a64_fallback_step(s5l8900_t *m,
     return 1u;
 }
 
+static bool powered_down_self_branch(const s5l8900_t *m) {
+    const arm_cpu_t *cpu = &m->cpu;
+    uint32_t pc = cpu->r[15];
+    uint32_t mode = cpu->cpsr & ARM_CPSR_MODE_MASK;
+    if (!m->wfi_host_sleep ||
+        (!s5l_pcf50635_in_hibernation(&m->pmu) &&
+         !s5l_pcf50635_in_standby(&m->pmu)) ||
+        (mode != ARM_MODE_SVC && mode != ARM_MODE_SYS) ||
+        (cpu->cpsr & (ARM_CPSR_T | ARM_CPSR_E | ARM_CPSR_I | ARM_CPSR_F)) !=
+            (ARM_CPSR_I | ARM_CPSR_F) ||
+        (cpu->cp15.sctlr & (1u << 7)) || cpu->abort_pending || (pc & 3u) ||
+        m->i2c[0].active || m->i2c[1].active ||
+        pre_step_target_matches(m, pc) ||
+        cpu->bus != &m->bus || m->bus.ctx != m ||
+        m->bus.host_ram != machine_host_ram || m->bus.read32 != r32 ||
+        m->bus.read16 != r16 || m->bus.read8 != r8 ||
+        !cpu->fetch_host || !cpu->fetch_priv ||
+        cpu->fetch_blk != (pc & ~1023u) || cpu->fetch_gen != cpu->tlb_gen ||
+        cpu->tlb_stamp.sctlr != cpu->cp15.sctlr ||
+        cpu->tlb_stamp.ttbr0 != cpu->cp15.ttbr0 ||
+        cpu->tlb_stamp.ttbr1 != cpu->cp15.ttbr1 ||
+        cpu->tlb_stamp.ttbcr != cpu->cp15.ttbcr ||
+        cpu->tlb_stamp.dacr != cpu->cp15.dacr ||
+        cpu->tlb_stamp.context_id != cpu->cp15.context_id)
+        return false;
+
+    /* OOCSHDWN alone is too early: XNU still saves its timebase and flushes
+     * caches before _ml_arm_sleep's final branch. Read only an already-proven
+     * plain-RAM fetch window, without a page walk, MMIO, or a firmware address
+     * special case. Re-read the bytes on every slice; this is not a code cache. */
+    const uint8_t *p = cpu->fetch_host + (pc & 1023u);
+    return p[0] == 0xfeu && p[1] == 0xffu &&
+           p[2] == 0xffu && p[3] == 0xeau; /* B . */
+}
+
+static bool powered_down_host_wait(s5l8900_t *m) {
+    if (!powered_down_self_branch(m)) {
+        m->power_wait_fraction = 0u;
+        return false;
+    }
+    active_clock_quiesce_input_guard(m);
+    active_clock_reset_anchor(m);
+    uint64_t start_ns = 0u, end_ns = 0u;
+    bool measured = m->active_host_now &&
+        m->active_host_now(m->active_host_now_ctx, &start_ns);
+    if (!m->wfi_host_sleep(m->wfi_host_sleep_ctx, S5L8900_WFI_PACE_SLICE_NS))
+        return true; /* No successful wait, no invented time or CPU work. */
+
+    uint64_t elapsed_ns = S5L8900_WFI_PACE_SLICE_NS;
+    if (measured && m->active_host_now(m->active_host_now_ctx, &end_ns) &&
+        end_ns >= start_ns && end_ns - start_ns > elapsed_ns) {
+        uint64_t maximum = S5L8900_WFI_PACE_SLICE_NS +
+                           S5L8900_ACTIVE_CLOCK_MAX_STEP_NS;
+        elapsed_ns = end_ns - start_ns;
+        if (elapsed_ns > maximum) elapsed_ns = maximum;
+    }
+    /* Only the always-on PMU clock runs here, not PWM, DMA, scanout or ARM.
+     * Measured scheduler oversleep is bounded; an explicit frontend pause
+     * never contributes. The 16 ms ceiling keeps ticks within uint32_t even
+     * at the largest supported PMU rate. */
+    uint64_t ticks = 0u, fraction = 0u;
+    if (active_clock_elapsed_ticks(elapsed_ns, m->pmu.tick_hz,
+                                   m->power_wait_fraction, &ticks, &fraction)) {
+        s5l_pcf50635_tick(&m->pmu, (uint32_t)ticks);
+        m->power_wait_fraction = fraction;
+    }
+    return true;
+}
+
 unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
     arm_status_t st = ARM_OK;
     unsigned n = 0;
     unsigned active_pending_retired = 0u;
     bool active_clock = false;
+    if (max_steps && !m->restart_requested && powered_down_host_wait(m))
+        max_steps = 0u;
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     static_a64_retirement_boundary_t static_boundary = {
         .machine = m,

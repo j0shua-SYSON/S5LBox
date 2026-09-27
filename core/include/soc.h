@@ -4302,6 +4302,9 @@ typedef struct {
     uint64_t              wfi_paced_partial_advances;
     uint64_t              wfi_paced_failures;
     bool                  wfi_pace_yield;
+    /* Host-only sub-tick RTC remainder while the application processor is
+     * powered down. Never serialized or carried across wake/restore. */
+    uint64_t              power_wait_fraction;
 
     /*
      * Optional active host clock, also host policy and never guest state.
@@ -4596,6 +4599,10 @@ s5l_wake_kind_t s5l8900_next_wake(const s5l8900_t *m,
  * NULL` clears it and requires ctx == NULL. Installing or clearing resets its
  * host-only evidence counters. This does not pace active CPU execution and it
  * does not alter the deterministic fast-forward used when no callback exists.
+ * The same interactive sleep callback also parks a powered-down processor
+ * after its masked, privileged ARM self-branch is witnessed in live RAM.
+ * Such a run slice retires zero instructions and advances only the PMU RTC.
+ * Without the callback, deterministic instruction-clock execution is unchanged.
  */
 bool s5l8900_set_wfi_host_pacing(s5l8900_t *m,
                                  s5l_wfi_host_sleep_fn sleep, void *ctx);

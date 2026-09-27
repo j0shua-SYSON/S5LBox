@@ -223,7 +223,9 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * compiler's emitted `.space`, not inferred from source padding. */
 /* 256992 includes transient host-only idle oversleep and prepaid-wait state.
  * Restore clears them; snap_mach() and SNAPSHOT_VERSION are unchanged. */
-SNAP_SIZE_GUARD(s5l8900_t,         256992, "snap_mach");
+/* 257000 adds the powered-down host wait's sub-tick RTC remainder, likewise
+ * cleared on restore and deliberately absent from the serialized stream. */
+SNAP_SIZE_GUARD(s5l8900_t,         257000, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -1603,6 +1605,7 @@ static snapshot_status_t snap_apply(s5l8900_t *m, FILE *f,
      * restored guest instant. The callback, context and accumulated evidence
      * remain the live frontend's, exactly like the other host-only fields. */
     m->wfi_pace_yield = false;
+    m->power_wait_fraction = 0u;
     /* A restored guest instant has no relation to the host instant sampled
      * before restore. Preserve policy/evidence, but require a fresh anchor and
      * discard every transient conversion input. */
