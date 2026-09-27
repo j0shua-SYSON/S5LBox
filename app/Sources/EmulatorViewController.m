@@ -378,12 +378,11 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     _frame = calloc(1, VM_FB_BYTES);
     if (!_frame) { [self append:@"[vm] out of memory for the frame buffer"]; return; }
 
-    // 30 Hz is plenty: the guest cannot repaint 320x480 anywhere near that
-    // fast, so a higher rate would only re-upload identical pixels.
-    //
+    // Match the original panel's 60 Hz ceiling. VMEngine only marks changed
+    // pixels fresh, so an idle guest does not cause repeated image uploads.
     VMDisplayLinkProxy *proxy = [[VMDisplayLinkProxy alloc] initWithTarget:self];
     _link = [CADisplayLink displayLinkWithTarget:proxy selector:@selector(tick:)];
-    _link.preferredFramesPerSecond = 30;
+    _link.preferredFramesPerSecond = 60;
     [_link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
 
     // Interpreting flat out in the background is a good way to be terminated,
@@ -1047,8 +1046,8 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     [self appendConsole:[_engine takePendingConsoleText]];
     [self flushConsole];
 
-    // The status line reads as noise if it changes 30 times a second.
-    if ((++_ticks % 8) == 0) {
+    // Keep status work at its previous cadence, independent of pixel updates.
+    if ((++_ticks % 16) == 0) {
         [self refreshStatusLine];
         // A machine can stop on its own, so the toolbar has to keep asking.
         [self refreshRunControls];
@@ -1063,7 +1062,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
          *
          * Compared against the last note SHOWN rather than against a flag, so
          * this reports each distinct thing once and does not re-alert on the
-         * same sentence every eight frames.
+         * same sentence every sixteen frames.
          */
         [self refreshPrepareOverlay];
 

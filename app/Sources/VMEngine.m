@@ -53,9 +53,9 @@
 // pause latency short without paying the flag check too often.
 static const unsigned kVMChunkInstructions = 100000;
 
-// Publish a snapshot at most this often. The UI redraws at 30 Hz; going faster
-// would only copy the same pixels twice.
-static const double kVMPublishInterval = 1.0 / 30.0;
+// Match the panel and the UI display link. Deadlines retain their phase across
+// bounded guest chunks; unchanged pixels do not become fresh snapshots.
+static const double kVMPublishInterval = 1.0 / 60.0;
 
 /* TCP payload goodput, not UART framing or host socket bytes. A one-second
  * window rejects the short buffering spikes that made earlier network claims
@@ -141,30 +141,6 @@ static uint64_t vm_now_ns(void) {
 - (NSUInteger)copyOptionValuesInto:(bool *)values capacity:(NSUInteger)capacity;
 @end
 
-/*
- * A sampled signature of the frame, not a complete hash.
- *
- * Hashing all 460,800 bytes at up to 60 Hz would be ~27 MB/s of pure
- * measurement overhead on the very phone whose speed is in question, which
- * would make the counter change the number it reports. The 397-byte stride is
- * coprime with the 1,280-byte row pitch, so successive samples walk across
- * rows rather than re-reading one column of every row.
- *
- * Sampling can only ever MISS a change, never invent one, so this undercounts
- * frames that differ in fewer than ~1,160 sampled words -- a cursor-sized
- * change on an otherwise still screen. It is accurate for the animations the
- * 30fps target is about, and the direction of its error is known.
- */
-static uint64_t vm_engine_fb_signature(const uint8_t *fb, size_t n) {
-    uint64_t h = 1469598103934665603ull;
-    for (size_t i = 0; i + 4u <= n; i += 397u) {
-        uint32_t w = (uint32_t)fb[i] | ((uint32_t)fb[i + 1] << 8) |
-                     ((uint32_t)fb[i + 2] << 16) | ((uint32_t)fb[i + 3] << 24);
-        h = (h ^ (uint64_t)w) * 1099511628211ull;
-    }
-    return h;
-}
-
 static double vm_engine_now_seconds(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0.0;
@@ -214,21 +190,9 @@ static double vm_engine_now_seconds(void) {
     BOOL             _snapshotFresh;
     BOOL             _snapshotARGB;  // byte order of the snapshot's pixels
     BOOL             _snapshotBlank;
-    /* Frame rate, measured rather than assumed.
-     *
-     * The goal for this project is "30fps+", and until now the app could not
-     * report it: the status line showed M insn/s, which is not a frame rate
-     * and cannot be converted into one without knowing the per-frame cost.
-     * Every fps figure quoted so far has been extrapolated on a desktop.
-     *
-     * What is counted is a CHANGED published frame, not a publish and not a
-     * guest composite. That is deliberately the user-visible quantity: this
-     * guest composites into a continuously scanned surface and never writes
-     * CLCD_UPDATE, so there is no register edge to count, and publishing an
-     * identical frame is not a frame anyone can see.
-     */
-    uint64_t         _fbSignature;
-    BOOL             _fbSignatureValid;
+    /* Changed snapshots published to the UI, not physical display flips or
+     * guest composites. The consumer can miss a publication if it is busy. */
+    BOOL             _havePublishedFrame;
     uint64_t         _fpsWindowFrames;
     double           _fpsWindowStart;
     double           _fps;
@@ -786,6 +750,10 @@ static double vm_engine_now_seconds(void) {
     _pauseReason = nil;
     _snapshotFresh = NO;
     _snapshotBlank = NO;
+    _havePublishedFrame = NO;
+    _fpsWindowFrames = 0;
+    _fpsWindowStart = 0.0;
+    _fps = 0.0;
     _retired = 0;
     _rate = 0.0;
     _networkStatusValid = NO;
@@ -1719,6 +1687,7 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
 - (void)threadMain:(id)unused {
     (void)unused;
     double lastPublish = vm_now();
+    double nextPublish = lastPublish + kVMPublishInterval;
     uint64_t retired = 0, retiredAtLastPublish = 0;
     arm_status_t status = ARM_OK;
     BOOL stoppedByRequest = NO;
@@ -1852,6 +1821,7 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
                 }
                 usleep(50 * 1000);
                 lastPublish = vm_now();
+                nextPublish = lastPublish + kVMPublishInterval;
                 retiredAtLastPublish = retired;
                 continue;
             }
@@ -1981,12 +1951,18 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
 
             double now = vm_now();
             double elapsed = now - lastPublish;
-            if (elapsed >= kVMPublishInterval || status != ARM_OK) {
+            if (now >= nextPublish || status != ARM_OK) {
                 double instantRate = elapsed > 0
                     ? (double)(retired - retiredAtLastPublish) / elapsed : 0.0;
                 [self publishRetired:retired rate:instantRate status:status];
                 lastPublish = now;
                 retiredAtLastPublish = retired;
+                // Keep the 60 Hz phase without queuing catch-up frames after
+                // a slow chunk or pause. Rate accounting uses actual elapsed
+                // time above, not the nominal presentation interval.
+                nextPublish += kVMPublishInterval;
+                if (nextPublish <= now)
+                    nextPublish = now + kVMPublishInterval;
             }
 
             // A non-OK status means the guest hit an encoding this core does
@@ -2122,18 +2098,25 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
 
     pthread_mutex_lock(&_lock);
     if (fb && _snapshot) {
-        /* A future guest mode may use less than the fixed publication buffer.
-         * Clear the unused tail so a geometry change cannot expose pixels from
-         * the previous frame. */
-        if (fbBytes < VM_FB_BYTES)
-            memset(_snapshot + fbBytes, 0, VM_FB_BYTES - fbBytes);
-        memcpy(_snapshot, fb, fbBytes);
-        /* Counted here, where a frame actually becomes visible, and only when
-         * its contents differ from the one before it. */
-        uint64_t sig = vm_engine_fb_signature(fb, fbBytes);
-        if (!_fbSignatureValid || sig != _fbSignature) {
-            _fbSignature = sig;
-            _fbSignatureValid = YES;
+        BOOL changed = !_havePublishedFrame || _snapshotBlank ||
+            _snapshotWidth != fbW || _snapshotHeight != fbH ||
+            _snapshotStride != fbStride ||
+            _snapshotARGB != (order == VM_ORDER_ARGB) ||
+            memcmp(_snapshot, fb, fbBytes) != 0;
+        if (changed) {
+            // Compare every byte: a sampled hash can miss a cursor or glyph.
+            // The immutable snapshot also avoids main-thread copies/image
+            // allocations while the guest screen is unchanged.
+            memcpy(_snapshot, fb, fbBytes);
+            if (fbBytes < VM_FB_BYTES)
+                memset(_snapshot + fbBytes, 0, VM_FB_BYTES - fbBytes);
+            _snapshotARGB = (order == VM_ORDER_ARGB);
+            _snapshotWidth = fbW;
+            _snapshotHeight = fbH;
+            _snapshotStride = fbStride;
+            _snapshotFresh = YES;
+            _snapshotBlank = NO;
+            _havePublishedFrame = YES;
             _fpsWindowFrames++;
         }
         if (_fpsWindowStart <= 0.0) {
@@ -2145,19 +2128,12 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
             _fpsWindowFrames = 0;
             _fpsWindowStart = nowSec;
         }
-        _snapshotARGB = (order == VM_ORDER_ARGB);
-        /* Published with the pixels. The reader must not assume 320x480: this
-         * geometry came out of whichever CLCD window the guest enabled, and it
-         * is the only description of what the bytes above mean. */
-        _snapshotWidth  = fbW;
-        _snapshotHeight = fbH;
-        _snapshotStride = fbStride;
-        _snapshotFresh = YES;
-        _snapshotBlank = NO;
+        // Do not clear _snapshotFresh when unchanged: the UI may not have
+        // consumed the preceding changed publication yet.
     } else if (_snapshot && !_snapshotBlank) {
         /* A stopped or invalid controller is a black panel, not permission to
          * leave the last good frame on screen forever. Publish that transition
-         * once; do not allocate a new black CGImage at 30 Hz while it remains
+         * once; do not allocate a new black CGImage at 60 Hz while it remains
          * stopped. */
         [self publishBlankSnapshotLocked];
     }
@@ -2280,7 +2256,7 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
     NSString *status = _status;
     NSString *mode = _mode;
     double fps = _fps;
-    BOOL haveFps = _fbSignatureValid;
+    BOOL haveFps = _havePublishedFrame;
     BOOL haveNetwork = _networkStatusValid;
     vm_network_status_t networkStatus = _networkStatus;
     double networkDownRate = _networkDownRate;
