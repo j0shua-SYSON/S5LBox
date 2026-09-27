@@ -1,8 +1,8 @@
 # iPhone 3GS / iOS 6 bring-up
 
 The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
-a distinct Cortex-A8 instruction profile and a partial S5L8920 memory and
-interrupt fabric. A complete machine, kernel boot, and SpringBoard have not
+a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
+interrupt fabric and polled UART. A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
@@ -51,6 +51,81 @@ buffers below RAM top minus 16 KiB, placing the first at `0x4fe3a000` and
 reducing the boot-argument memory size accordingly. This establishes a
 firmware configuration, not a working display model. The device-tree pointer
 at argument offset `0x30` is virtual; its byte length is at `0x34`.
+
+## Early polled UART
+
+UART0 has a separate checked word-access model at `0x82500000`, within the
+matching device tree's 4 KiB aperture. It supports 8N1, disabled or polled
+channels, PCLK/NCLK selection, manual RTS, the divider and sample fields,
+and FIFO enable/reset commands with zero trigger fields. Unsupported
+registers, widths, modes, interrupts, DMA and fractional offsets stop without
+committing the access. The iPhone OS 3 UART remains separate.
+
+The matching kernel's original ARM initializer at `0x8027c3c0` writes ULCON
+`3`, UCON `0x405` (or `5` for an explicit zero clock property), UMCON `0`,
+UBRDIV through its real baud helper, UFCON `3`, and UMCON `1`. Its ready
+callbacks test UTRSTAT transmitter-empty bit 2 and receive-ready bit 0;
+data accesses use word UTXH/URXH. This differs from modern Apple's FIFO-full
+transmit polling and its initializer's reset of both FIFOs. The original
+N88 baud helper reads the 64-bit field at `gPEClockFrequencyInfo+0x90`,
+consistent with `fix_frequency_hz` in the nearby public
+[XNU 2050 header](https://github.com/apple-oss-distributions/xnu/blob/xnu-2050.48.11/pexpert/pexpert/pexpert.h).
+That identifies a clock input, not its actual board frequency.
+
+Register fields and the `(16 - sample_field) * (divider + 1)` clock ratio
+are corroborated by Apple's
+[UART register definitions](https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.41.3/pexpert/pexpert/arm/apple_uart_regs.h)
+and [serial implementation](https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.41.3/pexpert/arm/pe_serial.c).
+The model's functional contract has a 16-byte FIFO in each direction and a
+separate transmit shift register. Callers explicitly supply selected input
+clock cycles; an 8N1 frame completes after ten bit periods. CPU instructions
+and status reads do not drain it. Completed bytes are delivered in order;
+insufficient host output capacity refuses the entire clock advance for retry.
+Receive input consists of already completed, error-free host frames. It does
+not model receive-line sampling or overrun errors.
+
+Functional reset empties this component, but does not claim N88 hardware
+register defaults or the state handed over by iBoot. Configuration reads
+fail until the corresponding register is programmed; status/data require
+all five configuration registers. FIFO reset commands self-clear and affect
+queued bytes, while a transmitting frame continues. Live status follows FIFO
+and shift state; receive and zero-threshold transmit events stay latched until
+W1C. Those transition/timing rules are the explicit component abstraction,
+not a physical N88 timing measurement. Interrupt delivery, clock gating,
+the scheduler's source-clock conversion, other formats and complete driver
+configuration remain unfinished.
+
+A private pre-implementation oracle executed the unchanged 260-byte
+initializer/baud pair, its original 76-byte software divider, function table
+and clock-pointer literal. All 54 prepared combinations of clock input,
+optional clock/sample properties and 16-bit divider override matched the
+predicted instruction trace, six captured writes, full register/FP/flag/monitor
+state, exact data access counts, 32-byte frame and whole-RAM hash. The first
+capture failure was retained: its expected CPSR omitted the negative flag
+from comparing a high mapped pointer with zero. The corrected oracle passed
+before UART implementation. Capture establishes the CPU/control-flow oracle,
+not device operation. A separate actual-board baseline stopped at the first
+ULCON write after seven retirements and verified the complete partial state.
+Prepared clock inputs, including an intentionally synthetic 64-bit case,
+do not establish a physical clock or a bootloader handoff.
+
+The first run of that frozen oracle against the actual new board device
+passed all 54 calls. A separate witness, written after device implementation,
+executes the unchanged ARM sender/receiver and their four callbacks. Its six
+calls cover uninitialized, empty, ready and busy paths, with complete expected
+instruction traces and register/frame checks. The busy sender polls twice
+before explicit selected-clock input completes a preceding frame; its new
+byte completes only after another 2,080 input cycles for the prepared divisor.
+This demonstrates directly entered original routines using the component,
+not a running kernel console or an integrated scheduler.
+
+All 78 strict and 73 shipping tests pass, including clock-source selection,
+frame boundaries, FIFO limits/order, atomic output-capacity retry, receive
+gates, reset commands and checked CPU access retry. The final rebuilt library
+also passes the 54 initialization calls, six polled I/O calls, and all 192
+earlier board-VIC cases. The entire canonical 61,650-step kernel-entry trace
+is unchanged and still stops at the unestablished L2 parity/ECC configuration.
+No CPU implementation, boot guard or legacy machine behavior was changed.
 
 ## CPU boundary
 
@@ -1930,9 +2005,9 @@ establish that result.
   Other upper-bank VFP arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Remaining shared lower-bank
   arithmetic derives from VFP11 and requires a Cortex-A8 semantic audit.
-- The partial S5L8920 RAM and interrupt fabric does not yet supply its UART,
-  clocks, storage, graphics, input or power devices. Build those components
-  from the N88 firmware requirements.
+- The partial S5L8920 fabric supplies a bounded polled UART but still lacks
+  full UART interrupt/DMA/error behavior, clocks, storage, graphics, input
+  and power devices. Build those components from the N88 firmware requirements.
 - Boot arguments, device-tree relocation, importer/storage selection, and
   any compatibility patches need explicit target/version guards. Existing
   iPhone OS 3 patches are not evidence of iOS 6 compatibility.

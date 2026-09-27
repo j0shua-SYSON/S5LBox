@@ -1,4 +1,4 @@
-/* N88 RAM and PL192 wiring, separate from the S5L8900 machine.
+/* N88 RAM, PL192 and polled UART wiring, separate from the S5L8900 machine.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "s5l8920.h"
 #include <stdlib.h>
@@ -57,6 +57,15 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         return value;
     }
     unsigned bank; uint32_t offset, value;
+    if (address>=S5L8920_UART0_BASE && address-S5L8920_UART0_BASE<0x1000u) {
+        offset=address-S5L8920_UART0_BASE;
+        if (size!=4u || (offset&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
+        else if (!s5l8920_uart_read(&m->uart0,offset,&value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        else return value;
+        return 0u;
+    }
     if (!decode_vic(address,&bank,&offset)) {
         fail(m,S5L8920_BUS_UNMAPPED,address,size,false,0u);
     } else if (size != 4u || (offset & 3u)) {
@@ -79,6 +88,14 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         return;
     }
     unsigned bank; uint32_t offset;
+    if (address>=S5L8920_UART0_BASE && address-S5L8920_UART0_BASE<0x1000u) {
+        offset=address-S5L8920_UART0_BASE;
+        if (size!=4u || (offset&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        else if (!s5l8920_uart_write(&m->uart0,offset,value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+        return;
+    }
     if (!decode_vic(address,&bank,&offset)) {
         fail(m,S5L8920_BUS_UNMAPPED,address,size,true,value);
     } else if (size != 4u || (offset & 3u)) {
@@ -128,6 +145,7 @@ bool s5l8920_set_irq(s5l8920_t *m, unsigned source, bool asserted) {
 bool s5l8920_reset(s5l8920_t *m) {
     if (!m || !m->ram) return false;
     if (!arm_reset_profile(&m->cpu,&m->bus,ARM_ARCH_V7_CORTEX_A8)) return false;
+    s5l8920_uart_reset(&m->uart0);
     for (unsigned bank = 0; bank < S5L8920_VIC_COUNT; bank++) {
         pl192_reset(&m->vic[bank]);
         for (unsigned line = 0; line < 32u; line++)

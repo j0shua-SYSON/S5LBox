@@ -30,6 +30,7 @@ add_library(emucore STATIC
     src/soc/vic.c
     src/soc/pl192.c
     src/soc/s5l8920.c
+    src/soc/s5l8920_uart.c
     src/soc/timer.c
     src/soc/mbx.c
     src/soc/power.c
@@ -215,6 +216,10 @@ add_test(NAME arm_bus_failure COMMAND test_bus_failure)
 add_executable(test_s5l8920 tests/test_s5l8920.c)
 target_link_libraries(test_s5l8920 PRIVATE emucore)
 add_test(NAME s5l8920_machine COMMAND test_s5l8920)
+
+add_executable(test_s5l8920_uart tests/test_s5l8920_uart.c)
+target_link_libraries(test_s5l8920_uart PRIVATE emucore)
+add_test(NAME s5l8920_uart COMMAND test_s5l8920_uart)
 
 add_executable(test_vfp tests/test_vfp.c)
 target_link_libraries(test_vfp PRIVATE emucore)

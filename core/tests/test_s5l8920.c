@@ -43,7 +43,7 @@ static void test_geometry_and_refusals(s5l8920_t *m) {
           s5l8920_load(m,S5L8920_RAM_BASE + S5L8920_RAM_SIZE,NULL,0u), "host load bounds");
     const uint32_t invalid[] = {
         S5L8920_RAM_BASE - 4u, S5L8920_RAM_BASE + S5L8920_RAM_SIZE,
-        UINT32_MAX - 1u, 0x82500000u, 0x3cc00000u,
+        UINT32_MAX - 1u, 0x82501000u, 0x3cc00000u,
         S5L8920_VIC_BASE + 0x1000u, S5L8920_VIC_BASE + 0xffffu,
         S5L8920_VIC_BASE + 3u * S5L8920_VIC_STRIDE
     };
@@ -124,6 +124,66 @@ static void map_test_vectors(s5l8920_t *m) {
     m->cpu.r[15] = 0x200u;
 }
 
+static void test_uart_checked_bus(s5l8920_t *m) {
+    const uint32_t uart=S5L8920_UART0_BASE;
+    CHECK(s5l8920_reset(m), "UART test reset");
+    CHECK(!m->bus.host_ram(m,uart,4u) && !m->bus.host_ram_write(m,uart,4u) &&
+          !s5l8920_load(m,uart,m->ram,4u), "UART exposed as host RAM");
+    put(m,0u,0xe5812000u); /* STR r2,[r1] */
+    m->cpu.r[15]=S5L8920_RAM_BASE; m->cpu.r[1]=uart; m->cpu.r[2]=3u;
+    CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.cycles==1u && m->uart0.ulcon==3u &&
+          m->bus.read32(m,uart)==3u, "CPU did not program/read actual UART");
+    const uint32_t registers[]={4u,12u,40u,8u};
+    const uint32_t values[]={0x405u,1u,0x80019u,3u};
+    put(m,4u,0xe5912000u); /* LDR r2,[r1] */
+    m->cpu.r[1]=uart+16u; m->cpu.r[2]=0xdeadbeefu;
+    CHECK(arm_step(&m->cpu)==ARM_HALT && m->cpu.r[2]==0xdeadbeefu && m->cpu.cycles==1u &&
+          m->cpu.r[15]==S5L8920_RAM_BASE+4u && m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,
+          "partially configured UART fabricated status");
+    s5l8920_clear_bus_failure(m);
+    for (unsigned n=0;n<4u;n++) m->bus.write32(m,uart+registers[n],values[n]);
+    CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[2]==6u && m->cpu.cycles==2u,
+          "configuration completion did not repair checked read");
+    CHECK(s5l8920_uart_receive(&m->uart0,0xa5u), "host completed receive frame");
+    put(m,8u,0xe5d12000u); /* LDRB r2,[r1] */
+    m->cpu.r[1]=uart+36u; m->cpu.r[2]=0xdeadbeefu;
+    s5l8920_uart_t before=m->uart0;
+    CHECK(arm_step(&m->cpu)==ARM_HALT && m->bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED &&
+          m->bus_failure.address==uart+36u && m->bus_failure.size==1u &&
+          m->cpu.r[2]==0xdeadbeefu && m->cpu.cycles==2u && !memcmp(&before,&m->uart0,sizeof before),
+          "unsupported data width consumed RX byte or retired");
+    m->bus.write32(m,uart+8u,7u);
+    CHECK(!memcmp(&before,&m->uart0,sizeof before), "latched failure allowed later UART effects");
+    s5l8920_clear_bus_failure(m); put(m,8u,0xe5912000u);
+    CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[2]==0xa5u && m->cpu.cycles==3u &&
+          m->uart0.rx_count==0u, "word retry did not consume exactly one byte");
+    for (unsigned n=0;n<17u;n++) m->bus.write32(m,uart+32u,n);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_OK && m->uart0.tx_count==16u && m->uart0.tx_busy,
+          "fill actual UART FIFO and shifter");
+    put(m,12u,0xe4812004u); /* STR r2,[r1],#4 */
+    m->cpu.r[1]=uart+32u; m->cpu.r[2]=0xb5u; before=m->uart0;
+    CHECK(arm_step(&m->cpu)==ARM_HALT && m->cpu.r[1]==uart+32u && m->cpu.cycles==3u &&
+          m->cpu.r[15]==S5L8920_RAM_BASE+12u && m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+          m->bus_failure.write && m->bus_failure.value==0xb5u && !memcmp(&before,&m->uart0,sizeof before),
+          "full transmitter accepted data or retired postindex");
+    uint8_t output[17]; size_t count=0u;
+    CHECK(s5l8920_uart_clock(&m->uart0,true,UINT64_MAX,output,sizeof output,&count) && count==17u,
+          "external selected-clock advance");
+    for (unsigned n=0;n<17u;n++) CHECK(output[n]==n, "board TX output order");
+    s5l8920_clear_bus_failure(m);
+    CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[1]==uart+36u && m->cpu.cycles==4u &&
+          m->uart0.tx_shift==0xb5u && m->uart0.tx_busy, "full FIFO repair did not retry once");
+    CHECK(!m->cpu.irq_line && !m->cpu.fiq_line && m->input_levels[0]==0u,
+          "polled UART asserted an unimplemented interrupt");
+    s5l8920_clear_bus_failure(m); m->bus.write32(m,uart+4u,0x2405u);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && m->uart0.ucon==0x405u,
+          "unsupported interrupt mode silently enabled");
+    s5l8920_clear_bus_failure(m); (void)m->bus.read32(m,uart+0xfffu);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED, "aperture end alignment");
+    CHECK(s5l8920_reset(m) && !m->uart0.tx_busy && !m->uart0.programmed &&
+          m->bus_failure.reason==S5L8920_BUS_OK, "functional board reset retained UART state");
+}
+
 static void test_guest_irq_handler(s5l8920_t *m) {
     for (unsigned bank = 0; bank < S5L8920_VIC_COUNT; bank++) {
         CHECK(s5l8920_reset(m), "reset IRQ fixture");
@@ -190,6 +250,7 @@ int main(void) {
     if (!m.ram) return 1;
     test_geometry_and_refusals(&m);
     test_cpu_access_stops(&m);
+    test_uart_checked_bus(&m);
     test_guest_irq_handler(&m);
     test_fiq_and_reset(&m);
     s5l8920_free(&m);

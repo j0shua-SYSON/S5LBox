@@ -1,10 +1,12 @@
-/* Partial N88/S5L8920 memory and interrupt fabric. No complete firmware boot.
+/* Partial N88/S5L8920 memory, interrupt fabric and polled UART.
+ * No complete firmware boot.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #ifndef S5LBOX_S5L8920_H
 #define S5LBOX_S5L8920_H
 
 #include "arm.h"
 #include "pl192.h"
+#include "s5l8920_uart.h"
 #include <stddef.h>
 
 #define S5L8920_RAM_BASE UINT32_C(0x40000000)
@@ -13,6 +15,7 @@
 #define S5L8920_VIC_STRIDE UINT32_C(0x10000)
 #define S5L8920_VIC_COUNT 3u
 #define S5L8920_IRQ_COUNT (32u * S5L8920_VIC_COUNT)
+#define S5L8920_UART0_BASE UINT32_C(0x82500000)
 
 typedef enum {
     S5L8920_BUS_OK = 0,
@@ -33,18 +36,20 @@ typedef struct {
     arm_bus_t bus;
     uint8_t *ram;
     pl192_t vic[S5L8920_VIC_COUNT];
+    s5l8920_uart_t uart0;
     uint32_t input_levels[S5L8920_VIC_COUNT];
     s5l8920_bus_failure_t bus_failure;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
  * iBoot RAM geometry and selects Cortex-A8. CPU identity/ECC configuration,
- * clocks, ROM, storage and other peripherals remain incomplete; reset PC zero
+ * clocks, ROM, storage and other peripherals remain incomplete; UART traffic
+ * advances only with explicit source-clock input from its caller. Reset PC zero
  * is not redirected into a fabricated boot image. No S5L8900 HLE is installed. */
 bool s5l8920_init(s5l8920_t *m);
 void s5l8920_free(s5l8920_t *m);
 
-/* Reset CPU/controller state and clear host diagnostics while preserving RAM
+/* Reset CPU/controller/UART state and clear host diagnostics while preserving RAM
  * and externally driven interrupt levels. This is a functional reset, not a
  * model of power sequencing. The caller owns execution and device timing. */
 bool s5l8920_reset(s5l8920_t *m);
