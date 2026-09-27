@@ -197,6 +197,10 @@ uint32_t vfp_a8_neon_integer(uint32_t value, bool to_integer, bool is_signed,
 uint32_t vfp_a8_neon_minmax(uint32_t left, uint32_t right, bool minimum,
                              uint32_t *exceptions);
 
+/* Pure Advanced SIMD FPCompareGE mask with standard FP controls. */
+uint32_t vfp_a8_neon_compare_ge(uint32_t left, uint32_t right,
+                                 uint32_t *exceptions);
+
 /*
  * Execute one VFP encoding. `insn` must already have been identified as a
  * cp10/cp11 encoding by the caller and its condition code must already have

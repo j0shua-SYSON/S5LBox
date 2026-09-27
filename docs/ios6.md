@@ -885,6 +885,61 @@ fixtures retain their 3,456, 6,144, 4,096, 4,096, 640, 1,536, 336, 1,824 and
 112 passing calls. The complete guarded kernel-entry trace remains identical
 through the 61,650-step L2 ECC stop.
 
+Advanced SIMD VCGE.F32 register comparisons cover both instruction sets and
+every D/Q register. Each lane produces all ones for greater-than-or-equal
+and zero otherwise. Both operands are unpacked with standard FP controls:
+subnormals become signed zero and set IDC, including when the other operand
+is a NaN. Either kind of NaN produces false and sets IOC. Positive and
+negative zero compare equal. Finite and infinite values use integer ordering,
+without host FP state or rounding. All results are staged before publication
+to preserve overlapping sources, and lane exceptions accumulate without
+changing FPSCR.NZCV or ARM flags. Reserved sizes and odd Q operands stop
+before coprocessor access checks. Integer, immediate-zero, absolute and
+other comparison operations remain unsupported. This follows
+[DDI0406C.b, A2.7.8 and A8.8.293](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Tests cover all D/Q register triples and aliases, all 512 guest rounding,
+FZ/DN/LEN/STRIDE combinations and ignored trap/AHP fields. Twenty raw anchors
+check an independent native-comparison oracle in both operand orders. All
+pairs of 22 classes and 1,024 random four-lane inputs exercise sixteen guest
+controls, four host rounding modes and pending host exceptions. Additional
+checks cover cumulative flags and VMRS, access denial, invalid encodings,
+IT conditions, legacy and neighboring operations, checked host fetch failures,
+split-page User translation/XN/AP faults, and guest enable/return retries.
+
+The unchanged 468-byte ARM unit-stride portion of `vDSP_vthres`, at
+`0x3082b060..0x3082b234`, completes 8,064 prepared calls. Before comparison
+support, the first 1,536 empty calls returned and the first nonempty call
+stopped after twenty instructions at `0x3082b218`, on `VCGE.F32 d4, d2, d0`,
+before any output write. The C fixture, shared storage helper and Python
+runner were unchanged for the first successful run. An independent
+exact-rational oracle supplies 168 rows, checked against twenty raw anchors
+in both operand orders and four retained-subnormal identities. The comparison
+flushes subnormal operands, but the following VAND masks the original input:
+a true comparison can therefore preserve a raw subnormal in the output.
+
+Calls cover counts zero through fifteen, sixteen source/output word-alignment
+pairs for short calls, four matching alignment pairs for block paths, six
+raw thresholds, twenty-eight input classes and all sixteen guest rounding,
+FZ/DN controls. The fixture checks the full FP bank and partial FPSCR/CPSR
+after every VDUP, VCGE and VAND, including the repeatedly transformed,
+unstored S5 lane. It also checks every general register, the return state,
+exclusive monitor, whole RAM and exact instruction/input/threshold/output,
+four-byte frame and eight-byte argument access counts. Empty calls read
+only the four-byte count. No CPU-family input is prepared or read. Coverage
+excludes nonunit strides, counts of sixteen or more, source/output aliases,
+unaligned block accesses, process launch, board boot, timing and physical
+behavior. The first build and all three focused tests passed without
+production, test, fixture or oracle corrections.
+
+After comparison support, all 77 strict and 72 shipping tests pass. The
+existing clipping, F32 dot-product, max/min, F64 dot-product, NEON integer,
+VFP integer, precision, square-root, division, unit F64 ramp, F32 ramp and
+F64 remainder fixtures retain their 18,432, 3,680, 6,912, 3,456, 6,144,
+4,096, 4,096, 640, 1,536, 336, 1,824 and 112 passing calls. The entire
+guarded kernel-entry trace remains identical through the 61,650-step L2
+ECC stop.
+
 Advanced SIMD conversions between F32 and signed/unsigned 32-bit integers
 now cover every D/Q register and both instruction sets. They use the same
 integer arithmetic with standard NEON controls: nearest-even for integer
@@ -1593,7 +1648,7 @@ establish that result.
   32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms, 32-bit VLD1/VST1 lane transfers,
   register Boolean operations, VEXT, 8/16/32-bit VTRN, F32 VABS/VNEG,
   immediate constants, core-register VDUP, register VMUL/VADD/VSUB/VMLA/VMLS.F32,
-  F32 VMUL/VMLA/VMLS by scalar, VMAX/VMIN.F32, and F32/signed/unsigned 32-bit NEON conversion
+  F32 VMUL/VMLA/VMLS by scalar, VMAX/VMIN.F32, VCGE.F32 register comparisons, and F32/signed/unsigned 32-bit NEON conversion
   described above.
   Other upper-bank VFP arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Remaining shared lower-bank

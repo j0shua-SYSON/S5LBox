@@ -4326,6 +4326,199 @@ static void test_a8_neon_minmax_access_invalid_and_it(void) {
     }
 }
 
+static uint32_t a8_neon_ge(unsigned thumb,unsigned quad,unsigned d,unsigned n,unsigned m) {
+    return (thumb ? 0xff000e00u : 0xf3000e00u)|(quad<<6)|
+        ((d&15u)<<12)|((d>>4)<<22)|((n&15u)<<16)|((n>>4)<<7)|(m&15u)|((m>>4)<<5);
+}
+
+/* Compare sanitized native F32 values, independently of the integer-key core. */
+static uint32_t a8_ge_reference(uint32_t a,uint32_t b,uint32_t *raised) {
+    uint32_t inputs[]={a,b}; bool nan=false;
+    for (unsigned i=0;i<2u;i++) {
+        uint32_t magnitude=inputs[i]&0x7fffffffu;
+        if (magnitude>0x7f800000u) { nan=true; *raised|=ARM_FPSCR_IOC; }
+        else if (magnitude && magnitude<0x00800000u) { *raised|=ARM_FPSCR_IDC; inputs[i]&=0x80000000u; }
+    }
+    if (nan) return 0u;
+    float x,y; memcpy(&x,&inputs[0],4u); memcpy(&y,&inputs[1],4u);
+    return x>=y ? UINT32_MAX : 0u;
+}
+
+static void a8_ge_check(arm_cpu_t *c,unsigned thumb,unsigned quad,unsigned host) {
+    static const int rounds[]={FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    uint64_t expected[32]; for (unsigned d=0;d<32u;d++) expected[d]=vfp_get_d(c,d);
+    uint32_t raised=0u;
+    for (unsigned r=0;r<=quad;r++) {
+        uint32_t lo=a8_ge_reference((uint32_t)expected[16u+r],(uint32_t)expected[r],&raised);
+        uint32_t hi=a8_ge_reference((uint32_t)(expected[16u+r]>>32),(uint32_t)(expected[r]>>32),&raised);
+        expected[30u+r]=((uint64_t)hi<<32)|lo;
+    }
+    uint32_t flags=c->cpsr,fpscr=c->vfp_fpscr;
+    c->excl_valid=true; c->excl_addr=0x2468u; c->a8_excl_size=8u;
+    CHECK(fesetround(rounds[host])==0 && feclearexcept(FE_ALL_EXCEPT)==0 &&
+          feraiseexcept(FE_DIVBYZERO|FE_INEXACT)==0,"prepare GE host state");
+    int host_flags=fetestexcept(FE_ALL_EXCEPT);
+    CHECK(a8_move_step(c,thumb,a8_neon_ge(thumb,quad,30u,16u,0u))==ARM_OK && c->r[15]==0x104u &&
+          c->cycles==1u && c->cpsr==flags && c->vfp_fpscr==(fpscr|raised) && c->vfp_fpexc==ARM_FPEXC_EN &&
+          c->excl_valid && c->excl_addr==0x2468u && c->a8_excl_size==8u,"GE result status T=%u Q=%u",thumb,quad);
+    bool match=true; for (unsigned d=0;d<32u;d++) match&=vfp_get_d(c,d)==expected[d];
+    for (unsigned r=0;r<15u;r++) match&=c->r[r]==0u;
+    CHECK(match,"GE complete register state");
+    CHECK(fegetround()==rounds[host] && fetestexcept(FE_ALL_EXCEPT)==host_flags,"GE changed host state");
+}
+
+static void test_a8_neon_ge_registers(void) {
+    CHECK(a8_neon_ge(0u,0u,4u,2u,0u)==0xf3024e00u && a8_neon_ge(0u,1u,24u,16u,0u)==0xf3408ec0u &&
+          a8_neon_ge(1u,1u,30u,16u,0u)==0xff40eec0u,"GE encoding anchors");
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned quad=0;quad<2u;quad++)
+     for (unsigned d=0;d<32u;d+=quad+1u) for (unsigned n=0;n<32u;n+=quad+1u) for (unsigned m=0;m<32u;m+=quad+1u) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.cpsr|=ARM_CPSR_E; c.vfp_fpscr=0xfff79f9fu;
+        c.excl_valid=true; c.excl_addr=0x2468u; c.a8_excl_size=8u;
+        uint64_t expected[32];
+        for (unsigned r=0;r<32u;r++) {
+            expected[r]=((uint64_t)a8_macc_int_bits(31-(int)r)<<32)|a8_macc_int_bits((int)r-16);
+            vfp_set_d(&c,r,expected[r]);
+        }
+        for (unsigned r=0;r<=quad;r++) expected[d+r]=(n<=m ? UINT64_C(0xffffffff00000000) : 0u)|(n>=m ? UINT32_MAX : 0u);
+        uint32_t flags=c.cpsr;
+        CHECK(a8_move_step(&c,thumb,a8_neon_ge(thumb,quad,d,n,m))==ARM_OK && c.cycles==1u && c.r[15]==0x104u &&
+              c.cpsr==flags && c.vfp_fpscr==0xfff79f9fu && c.vfp_fpexc==ARM_FPEXC_EN &&
+              c.excl_valid && c.excl_addr==0x2468u && c.a8_excl_size==8u,"GE register status");
+        bool match=true; for (unsigned r=0;r<32u;r++) match&=vfp_get_d(&c,r)==expected[r];
+        for (unsigned r=0;r<15u;r++) match&=c.r[r]==0u;
+        CHECK(match,"GE register aliases T=%u Q=%u D/N/M=%u/%u/%u",thumb,quad,d,n,m);
+     }
+}
+
+static void test_a8_neon_ge_values(void) {
+    fenv_t saved; CHECK(fegetenv(&saved)==0,"save GE host state");
+    /* a,b,forward mask,reverse mask,flags: NaNs always raise IOC here. */
+    static const uint32_t anchors[][5]={
+        {0u,0x80000000u,UINT32_MAX,UINT32_MAX,0u},{0x80000000u,0x80000000u,UINT32_MAX,UINT32_MAX,0u},
+        {1u,0x80000001u,UINT32_MAX,UINT32_MAX,0x80u},{0x00800000u,1u,UINT32_MAX,0u,0x80u},
+        {0x80800000u,0x80000001u,0u,UINT32_MAX,0x80u},{0x3f800000u,0x40000000u,0u,UINT32_MAX,0u},
+        {0xc0000000u,0xbf800000u,0u,UINT32_MAX,0u},{0xff800000u,0x7f800000u,0u,UINT32_MAX,0u},
+        {0x7f800000u,0x7f800000u,UINT32_MAX,UINT32_MAX,0u},{0xff800000u,0xff800000u,UINT32_MAX,UINT32_MAX,0u},
+        {0x7f7fffffu,0x7f800000u,0u,UINT32_MAX,0u},{0x7fc12345u,0x3f800000u,0u,0u,1u},
+        {0xffc12345u,0u,0u,0u,1u},{0x7f800001u,0x3f800000u,0u,0u,1u},{0xff800001u,0x7fc12345u,0u,0u,1u},
+        {0x7fc12345u,1u,0u,0u,0x81u},{0x80000001u,0xff800001u,0u,0u,0x81u},
+        {0x3f800001u,0x3f800000u,UINT32_MAX,0u,0u},{0xbf800001u,0xbf800000u,0u,UINT32_MAX,0u},
+        {0x40490fdbu,0x40490fdbu,UINT32_MAX,UINT32_MAX,0u}
+    };
+    unsigned anchor_count=sizeof anchors/sizeof anchors[0];
+    for (unsigned i=0;i<anchor_count;i++) for (unsigned order=0;order<2u;order++) {
+        uint32_t raised=0u;
+        CHECK(a8_ge_reference(anchors[i][order],anchors[i][1u-order],&raised)==anchors[i][2u+order] &&
+              raised==anchors[i][4],"GE independent anchor row=%u order=%u",i,order);
+    }
+    for (unsigned controls=0;controls<512u;controls++) for (unsigned quad=0;quad<2u;quad++) for (unsigned thumb=0;thumb<2u;thumb++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb);
+        c.vfp_fpscr=ARM_FPSCR_NZCV|ARM_FPSCR_QC|ARM_FPSCR_DZC|ARM_FPSCR_ENABLES|(1u<<26)|
+            ((controls&3u)<<22)|(controls&4u ? ARM_FPSCR_FZ : 0u)|(controls&8u ? ARM_FPSCR_DN : 0u)|
+            (((controls>>4)&7u)<<16)|((controls>>7)<<20);
+        for (unsigned r=0;r<2u;r++) {
+            const uint32_t *low=anchors[(controls+2u*r)%anchor_count],*high=anchors[(controls+2u*r+1u)%anchor_count];
+            unsigned order=(controls>>1)&1u;
+            vfp_set_d(&c,16u+r,((uint64_t)high[order]<<32)|low[order]);
+            vfp_set_d(&c,r,((uint64_t)high[1u-order]<<32)|low[1u-order]);
+        }
+        a8_ge_check(&c,thumb,quad,controls&3u);
+    }
+    unsigned classes=sizeof a8_compare_values/sizeof a8_compare_values[0]; uint32_t random=0x6b8c201du;
+    for (unsigned sample=0;sample<classes*classes+1024u;sample++) {
+        uint32_t a[4],b[4];
+        for (unsigned lane=0;lane<4u;lane++) {
+            random^=random<<13; random^=random>>17; random^=random<<5; a[lane]=random;
+            random^=random<<13; random^=random>>17; random^=random<<5; b[lane]=random;
+            if (sample<classes*classes) {
+                a[lane]=a8_compare_values[(sample/classes+lane)%classes].single;
+                b[lane]=a8_compare_values[(sample%classes+3u*lane)%classes].single;
+            }
+        }
+        for (unsigned controls=0;controls<16u;controls++) for (unsigned quad=0;quad<2u;quad++) for (unsigned thumb=0;thumb<2u;thumb++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.vfp_fpscr=ARM_FPSCR_NZCV|ARM_FPSCR_QC|ARM_FPSCR_DZC|((controls&3u)<<22)|
+                (controls&4u ? ARM_FPSCR_FZ : 0u)|(controls&8u ? ARM_FPSCR_DN : 0u);
+            for (unsigned r=0;r<2u;r++) {
+                vfp_set_d(&c,16u+r,((uint64_t)a[2u*r+1u]<<32)|a[2u*r]);
+                vfp_set_d(&c,r,((uint64_t)b[2u*r+1u]<<32)|b[2u*r]);
+            }
+            a8_ge_check(&c,thumb,quad,(sample+controls)&3u);
+        }
+    }
+    for (unsigned thumb=0;thumb<2u;thumb++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr=ARM_FPSCR_NZCV|ARM_FPSCR_QC|ARM_FPSCR_DZC;
+        static const uint32_t inputs[]={1u,0x7fc12345u,0x3f800000u}; uint32_t want=c.vfp_fpscr;
+        for (unsigned i=0;i<3u;i++) {
+            vfp_set_d(&c,16u,inputs[i]); vfp_set_d(&c,0u,0u);
+            CHECK(a8_move_step(&c,thumb,a8_neon_ge(thumb,0u,30u,16u,0u))==ARM_OK,"GE cumulative operation");
+            want|=i==0u ? ARM_FPSCR_IDC : i==1u ? ARM_FPSCR_IOC : 0u;
+            CHECK(c.vfp_fpscr==want,"GE cumulative flags");
+            CHECK(a8_move_step(&c,thumb,VMRS(3u,1u))==ARM_OK && c.r[3]==want,"GE VMRS visibility");
+        }
+    }
+    CHECK(fesetenv(&saved)==0,"restore GE host state");
+}
+
+static void test_a8_neon_ge_access_invalid_and_it(void) {
+    static const unsigned permissions[]={0u,1u,3u};
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned quad=0;quad<2u;quad++)
+     for (unsigned user=0;user<2u;user++) for (unsigned enabled=0;enabled<2u;enabled++)
+      for (unsigned access=0;access<3u;access++) for (unsigned variant=0;variant<(quad ? 16u : 2u);variant++)
+       for (unsigned skip=0;skip<(thumb ? 2u : 1u);skip++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb);
+        c.cpsr=(c.cpsr&~ARM_CPSR_MODE_MASK)|(user ? ARM_MODE_USR : ARM_MODE_SVC);
+        c.cp15.cpacr=permissions[access]*0x00500000u; c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u;
+        c.vfp_fpscr=ARM_FPSCR_QC|ARM_FPSCR_DZC|(3u<<22)|ARM_FPSCR_LEN|ARM_FPSCR_STRIDE;
+        for (unsigned r=0;r<32u;r++) vfp_set_d(&c,r,UINT64_C(0x7f800001dead0000)+r);
+        vfp_set_d(&c,16u,UINT64_C(0x7fc1234500000001)); vfp_set_d(&c,0u,UINT64_C(0x3f80000080000000));
+        vfp_set_d(&c,17u,UINT64_C(0x3f800000bf800000)); vfp_set_d(&c,1u,0u);
+        uint64_t expected[32]; for (unsigned r=0;r<32u;r++) expected[r]=vfp_get_d(&c,r);
+        if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c)==ARM_OK,"GE IT setup"); }
+        unsigned odd=variant>>1;
+        uint32_t insn=a8_neon_ge(thumb,quad,30u+(odd&1u),16u+((odd>>1)&1u),(odd>>2)&1u)|((variant&1u)<<20);
+        uint32_t pc=c.r[15],flags=c.cpsr,fpscr=c.vfp_fpscr; uint64_t cycles=c.cycles;
+        bool valid=variant==0u,allowed=enabled && (permissions[access]==3u || (permissions[access]==1u && !user));
+        uint32_t raised=0u;
+        if (valid && allowed && !skip) {
+            raised=ARM_FPSCR_IOC|ARM_FPSCR_IDC; expected[30]=UINT64_C(0x00000000ffffffff);
+            if (quad) expected[31]=UINT64_C(0xffffffff00000000);
+        }
+        CHECK(a8_move_step(&c,thumb,insn)==(skip || valid ? ARM_OK : ARM_UNDEFINED) && c.cycles==cycles+1u &&
+              c.vfp_fpscr==(fpscr|raised) && c.vfp_fpexc==(enabled ? ARM_FPEXC_EN : 0u),"GE access/encoding disposition");
+        CHECK(skip ? c.r[15]==pc+4u && c.cpsr==(flags&~0x0600fc00u) :
+              !valid ? c.r[15]==pc && c.cpsr==flags : allowed ? c.r[15]==pc+4u && c.cpsr==(flags&~0x0600fc00u) :
+              c.r[15]==ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND]==flags && c.r[14]==pc+(thumb ? 2u : 4u),
+              "GE access precedence/IT retirement");
+        bool match=true; for (unsigned r=0;r<32u;r++) match&=vfp_get_d(&c,r)==expected[r];
+        CHECK(match,"GE invalid/access/result preservation");
+       }
+    const arm_arch_t legacy[]={ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned p=0;p<2u;p++) for (unsigned quad=0;quad<2u;quad++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,legacy[p]),"legacy GE reset");
+        c.cp15.cpacr=0x00f00000u; c.vfp_fpexc=ARM_FPEXC_EN;
+        for (unsigned r=0;r<32u;r++) c.vfp_s[r]=0xdead0000u+r;
+        for (unsigned r=0;r<16u;r++) c.a8_vfp_hi[r]=UINT64_C(0x7f800001beef0000)+r;
+        uint32_t singles[32],fpscr=c.vfp_fpscr; uint64_t upper[16];
+        memcpy(singles,c.vfp_s,sizeof singles); memcpy(upper,c.a8_vfp_hi,sizeof upper);
+        CHECK(a8_move_step(&c,0u,a8_neon_ge(0u,quad,30u,16u,0u))==ARM_UNDEFINED && c.r[15]==0u &&
+              c.vfp_fpscr==fpscr && !memcmp(singles,c.vfp_s,sizeof singles) && !memcmp(upper,c.a8_vfp_hi,sizeof upper),"GE leaked into legacy");
+    }
+    /* EQ, GT, absolute and integer register comparisons remain unsupported. */
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned neighbor=0;neighbor<4u;neighbor++)
+     for (unsigned enabled=0;enabled<2u;enabled++) for (unsigned access=0;access<3u;access++) for (unsigned user=0;user<2u;user++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpexc=enabled ? ARM_FPEXC_EN : 0u;
+        c.cp15.cpacr=permissions[access]*0x00500000u;
+        c.cpsr=(c.cpsr&~ARM_CPSR_MODE_MASK)|(user ? ARM_MODE_USR : ARM_MODE_SVC);
+        uint32_t insn=a8_neon_ge(thumb,0u,30u,16u,0u);
+        if (neighbor==3u) insn=(insn&~0xf10u)|0x310u;
+        else insn^=1u<<(neighbor==0u ? (thumb ? 28u : 24u) : neighbor==1u ? 21u : 4u);
+        uint32_t flags=c.cpsr,fpscr=c.vfp_fpscr;
+        CHECK(a8_move_step(&c,thumb,insn)==ARM_UNDEFINED && c.r[15]==0x100u && c.cpsr==flags &&
+              c.vfp_fpscr==fpscr && vfp_get_d(&c,30u)==0u,"GE consumed unsupported neighbor T=%u neighbor=%u EN=%u",thumb,neighbor,enabled);
+    }
+}
+
 static uint32_t a8_neon_integer(unsigned thumb, unsigned op, unsigned quad,
                                 unsigned d, unsigned m, unsigned size) {
     return (thumb ? 0xffb30600u : 0xf3b30600u) | (size<<18) | (op<<7) | (quad<<6) |
@@ -7179,6 +7372,9 @@ int main(void) {
     test_a8_neon_minmax_registers();
     test_a8_neon_minmax_values();
     test_a8_neon_minmax_access_invalid_and_it();
+    test_a8_neon_ge_registers();
+    test_a8_neon_ge_values();
+    test_a8_neon_ge_access_invalid_and_it();
     test_a8_neon_integer_values_and_host_state();
     test_a8_neon_integer_access_invalid_and_it();
     test_a8_neon_by_scalar_registers();
