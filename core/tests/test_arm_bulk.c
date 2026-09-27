@@ -2,6 +2,8 @@
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "arm_bulk.h"
 #include "soc.h"
+#include "vfp.h"
+#include <fenv.h>
 #include <stdio.h>
 #include <string.h>
 #if defined(S5LBOX_STATIC_A64_ENGINE)
@@ -1086,6 +1088,180 @@ static void test_joined_search_dependencies(void) {
     arm_bulk_cache_destroy(cache); arm_ram_watch_destroy(watch);
 }
 
+static const uint32_t weighted_code[] = {
+    0xee199a90u, 0xe1e03002u, 0xe1a03fa3u, 0xe28ee001u,
+    0xe1520009u, 0xa3a03000u, 0xe3530000u, 0xe2822001u,
+    0x15d03000u, 0x1d917a00u, 0xe2800001u, 0xe2811004u,
+    0x1e063a10u, 0x1ef87ac6u, 0x1e476a87u, 0xe152000cu,
+    0xdaffffeeu,
+};
+
+static uint32_t weighted_random(uint32_t *seed) {
+    *seed = *seed * UINT32_C(1664525) + UINT32_C(1013904223);
+    return *seed;
+}
+
+static void weighted_setup(arm_cpu_t *cpu, arm_bulk_memory_t *memory,
+                            uint32_t seed, uint32_t x, uint32_t end,
+                            uint32_t width, bool cached) {
+    setup(cpu, memory, DATA, 128u, (seed & 15u) << 28, false);
+    for (unsigned i = 0u; i < 17u; i++) w32(NULL, CODE + 4u * i, weighted_code[i]);
+    memory->code_bytes = sizeof weighted_code;
+    cpu->r[0] = DATA;
+    cpu->r[1] = 0x2000u;
+    cpu->r[2] = x;
+    cpu->r[12] = end;
+    cpu->cp15.cpacr = UINT32_C(0x00f00000);
+    cpu->vfp_fpexc = ARM_FPEXC_EN;
+    cpu->vfp_fpscr = ARM_FPSCR_IXC | ((seed & 3u) << 24) | ((seed & 15u) << 28);
+    for (unsigned i = 0u; i < 32u; i++) cpu->vfp_s[i] = weighted_random(&seed);
+    cpu->vfp_s[13] = seed & 1u ? 0u : UINT32_C(0x3f800001);
+    cpu->vfp_s[19] = width;
+    for (unsigned i = 0u; i < 128u; i++) {
+        *mapped(DATA + i) = (uint8_t)(weighted_random(&seed) >> 24);
+        uint32_t bits = ((weighted_random(&seed) % 126u + 1u) << 23) |
+                         (weighted_random(&seed) & UINT32_C(0x7fffff));
+        if (i % 13u == 0u) bits = UINT32_C(0x3f800000);
+        if (i % 17u == 0u) bits = 0u;
+        w32(NULL, 0x2000u + i * 4u, bits);
+    }
+    if (cached) {
+        memory->flat_ram = NULL; memory->data_cache = true;
+        CHECK(arm_data_cache_try_refill(cpu, DATA, ARM_ACCESS_READ, false), "byte grant");
+        CHECK(arm_data_cache_try_refill(cpu, 0x2000u, ARM_ACCESS_READ, false), "weight grant");
+    }
+}
+
+static unsigned weighted_differential(arm_cpu_t *cpu,
+                                       const arm_bulk_memory_t *memory,
+                                       unsigned budget) {
+    arm_cpu_t initial = *cpu, slow = *cpu, expected = *cpu;
+    unsigned reads = bus_reads, writes = bus_writes;
+    memcpy(before_ram, ram, sizeof ram);
+    unsigned n = arm_bulk_string_try(cpu, memory, budget);
+    CHECK(n && n <= budget && n % 17u == 0u, "weighted retirement %u/%u", n, budget);
+    CHECK(bus_reads == reads && bus_writes == writes, "weighted loop touched bus");
+    CHECK(memcmp(before_ram, ram, sizeof ram) == 0, "weighted loop wrote RAM");
+    for (unsigned i = 0u; i < n; i++)
+        CHECK(arm_step(&slow) == ARM_OK, "weighted oracle failed at %08x", slow.r[15]);
+    memcpy(expected.r, slow.r, sizeof expected.r);
+    memcpy(expected.vfp_s, slow.vfp_s, sizeof expected.vfp_s);
+    expected.cpsr = slow.cpsr; expected.vfp_fpscr = slow.vfp_fpscr;
+    if (!memory->flat_ram)
+        for (unsigned i = 0u; i < n / 17u; i++) {
+            uint32_t x = initial.r[2] + i;
+            if ((int32_t)x >= 0 && (int32_t)x < (int32_t)initial.vfp_s[19])
+                expected.dread_hits += 2u;
+        }
+    CHECK(memcmp(cpu, &expected, sizeof expected) == 0,
+          "weighted state differs: n=%u x=%08x sum=%08x/%08x cpsr=%08x/%08x fpscr=%08x/%08x",
+          n, initial.r[2], cpu->vfp_s[13], slow.vfp_s[13], cpu->cpsr, slow.cpsr,
+          cpu->vfp_fpscr, slow.vfp_fpscr);
+    return n;
+}
+
+static void test_weighted_bytes(void) {
+    static const unsigned budgets[] = {17u, 18u, 33u, 34u, 35u, 67u, 68u, 69u, 250u, 1024u};
+    static const uint32_t starts[] = {0u, 1u, 9u, UINT32_MAX - 3u,
+                                     0x7ffffffeu, 0x80000000u};
+    for (unsigned cached = 0u; cached < 2u; cached++)
+        for (unsigned start = 0u; start < sizeof starts / sizeof starts[0]; start++)
+            for (unsigned b = 0u; b < sizeof budgets / sizeof budgets[0]; b++) {
+                arm_cpu_t cpu; arm_bulk_memory_t memory;
+                weighted_setup(&cpu, &memory, b, starts[start], 30u, 19u, cached != 0u);
+                (void)weighted_differential(&cpu, &memory, budgets[b]);
+            }
+    /* Every byte, random normal weights over the whole admitted exponent
+     * range, and both rounding stages, including widely separated sums. */
+    for (unsigned trial = 0u; trial < 2048u; trial++) {
+        arm_cpu_t cpu; arm_bulk_memory_t memory;
+        uint32_t seed = trial + 37u;
+        weighted_setup(&cpu, &memory, seed, 0u, 63u, 64u, false);
+        for (unsigned i = 0u; i < 64u; i++)
+            *mapped(DATA + i) = (uint8_t)(trial + i);
+        if (trial & 1u)
+            cpu.vfp_s[13] = ((weighted_random(&seed) % 156u + 1u) << 23) |
+                            (weighted_random(&seed) & UINT32_C(0x7fffff));
+        (void)weighted_differential(&cpu, &memory, 1088u);
+    }
+    /* Refusal must preserve the entire CPU and memory, not just its result. */
+    for (unsigned scenario = 0u; scenario < 31u; scenario++) {
+        arm_cpu_t cpu; arm_bulk_memory_t memory;
+        weighted_setup(&cpu, &memory, 4u, 0u, 5u, 6u, scenario >= 20u);
+        switch (scenario) {
+        case 0: cpu.vfp_fpexc = 0u; break;
+        case 1: cpu.cp15.cpacr = 0u; break;
+        case 2: cpu.cp15.cpacr = 0x00500000u; break;
+        case 3: cpu.vfp_fpscr &= ~ARM_FPSCR_IXC; break;
+        case 4: cpu.vfp_fpscr |= 1u << 22; break;
+        case 5: cpu.vfp_fpscr |= 1u << 16; break;
+        case 6: cpu.vfp_fpscr |= 1u << 20; break;
+        case 7: cpu.vfp_fpscr |= ARM_FPSCR_IXE; break;
+        case 8: cpu.vfp_s[13] = 0x80000000u; break;
+        case 9: cpu.vfp_s[13] = 1u; break;
+        case 10: cpu.vfp_s[13] = 0x7fc00000u; break;
+        case 11: cpu.vfp_s[13] = 0x7f800000u; break;
+        case 12: w32(NULL, 0x2000u, 1u); break;
+        case 13: w32(NULL, 0x2000u, 0x80000000u); break;
+        case 14: w32(NULL, 0x2000u, 0x3f800001u); break;
+        case 15: w32(NULL, 0x2000u, 0x7f800000u); break;
+        case 16: w32(NULL, 0x2000u, 0x7fc00000u); break;
+        case 17: cpu.r[1]++; break;
+        case 18: memory.code_bytes--; break;
+        case 19: cpu.abort_pending = true; break;
+        case 20: cpu.dread[(DATA >> 10) & (ARM_DREAD_ENTRIES - 1u)].host = NULL; break;
+        case 21: cpu.dread[(0x2000u >> 10) & (ARM_DREAD_ENTRIES - 1u)].host = NULL; break;
+        case 22: cpu.dread[(0x2000u >> 10) & (ARM_DREAD_ENTRIES - 1u)].gen++; break;
+        case 23: cpu.dread[(0x2000u >> 10) & (ARM_DREAD_ENTRIES - 1u)].tag ^= 1u; break;
+        case 24: cpu.cp15.context_id++; break;
+        case 25: cpu.irq_line = true; break;
+        case 26: cpu.fiq_line = true; break;
+        case 27: cpu.cpsr |= ARM_CPSR_E; break;
+        case 28: cpu.cpsr = ARM_MODE_SVC; break;
+        case 29: cpu.vfp_fpscr |= ARM_FPSCR_IDE; break;
+        case 30: cpu.vfp_fpscr |= ARM_FPSCR_OFE; break;
+        }
+        refusal(&cpu, &memory, 1024u);
+    }
+    for (unsigned i = 0u; i < 17u; i++) {
+        arm_cpu_t cpu; arm_bulk_memory_t memory;
+        weighted_setup(&cpu, &memory, i, 0u, 5u, 6u, false);
+        w32(NULL, CODE + i * 4u, weighted_code[i] ^ 1u);
+        refusal(&cpu, &memory, 1024u);
+    }
+    for (unsigned budget = 0u; budget < 17u; budget++) {
+        arm_cpu_t cpu; arm_bulk_memory_t memory;
+        weighted_setup(&cpu, &memory, 0u, 0u, 5u, 6u, false);
+        refusal(&cpu, &memory, budget);
+    }
+    for (unsigned scenario = 0u; scenario < 4u; scenario++) {
+        arm_cpu_t cpu; arm_bulk_memory_t memory;
+        weighted_setup(&cpu, &memory, scenario, 0u, 5u, 6u, true);
+        if (scenario < 2u) {
+            /* Retire the proved prefix, then leave the unproved iteration. */
+            if (scenario == 0u) w32(NULL, 0x2004u, 0x7fc00000u);
+            else { cpu.r[1] = 0x23fcu; w32(NULL, 0x23fcu, 0x3f800000u); }
+            CHECK(weighted_differential(&cpu, &memory, 1024u) == 17u, "weighted unsafe prefix");
+            refusal(&cpu, &memory, 1024u);
+        } else {
+            /* Clipped samples must not resolve or touch either pointer. */
+            cpu.r[0] = 0x90000000u; cpu.r[1] = 0xffffffffu;
+            cpu.vfp_s[19] = 0u;
+            (void)weighted_differential(&cpu, &memory, 1024u);
+        }
+    }
+    /* No host arithmetic or fenv change is hidden inside the native path. */
+    arm_cpu_t cpu; arm_bulk_memory_t memory;
+    weighted_setup(&cpu, &memory, 7u, 0u, 63u, 64u, false);
+    fenv_t saved;
+    (void)fegetenv(&saved); (void)fesetround(FE_UPWARD);
+    (void)feclearexcept(FE_ALL_EXCEPT); (void)feraiseexcept(FE_DIVBYZERO);
+    unsigned n = arm_bulk_string_try(&cpu, &memory, 1088u);
+    CHECK(n == 1088u && fegetround() == FE_UPWARD &&
+          fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO, "weighted host FP state changed");
+    (void)fesetenv(&saved);
+}
+
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 typedef struct {
     arm_cpu_t *cpu;
@@ -1213,12 +1389,47 @@ static void test_native_resident_bulk_transitions(void) {
            (unsigned long long)accepted);
 }
 
+static void test_native_weighted_bytes(void) {
+    static const unsigned budgets[] = {1u, 2u, 3u, 16u, 17u, 18u, 19u,
+                                      20u, 33u, 34u, 35u, 250u, 400u};
+    uint64_t calls = 0u;
+    for (unsigned scenario = 0u; scenario < 5u; scenario++)
+        for (unsigned flags = 0u; flags < 16u; flags++)
+            for (unsigned enabled = 0u; enabled < 2u; enabled++)
+                for (unsigned b = 0u; b < sizeof budgets / sizeof budgets[0]; b++) {
+                    arm_cpu_t cpu; arm_bulk_memory_t memory;
+                    weighted_setup(&cpu, &memory, flags, 0u, 15u, 9u, true);
+                    cpu.r[4] = 0u; cpu.r[2] = 0xf0000000u;
+                    w32(NULL, CODE - 8u, 0xe1a02004u); /* MOV r2,r4 */
+                    w32(NULL, CODE - 4u, 0xe3550001u); /* CMP r5,#1 */
+                    memory.code_base -= 8u; memory.code -= 8u;
+                    memory.code_bytes += 8u; cpu.r[15] -= 8u;
+                    if (scenario == 1u) w32(NULL, CODE + 40u, 0xe2800002u);
+                    if (scenario == 2u) memory.code_bytes = 12u;
+                    if (scenario == 3u) cpu.vfp_fpscr &= ~ARM_FPSCR_IXC;
+                    if (scenario == 4u)
+                        memset(cpu.dread, 0, sizeof cpu.dread);
+                    uint64_t accepted = native_differential(&cpu, &memory,
+                        budgets[b], enabled != 0u);
+                    if (scenario < 3u) {
+                        bool eligible = scenario == 0u && enabled && budgets[b] >= 19u;
+                        CHECK((accepted != 0u) == eligible,
+                              "weighted native admission scenario=%u budget=%u enabled=%u calls=%llu",
+                              scenario, budgets[b], enabled, (unsigned long long)accepted);
+                    }
+                    calls += accepted;
+                }
+    CHECK(calls > 0u, "native weighted loop never executed");
+    printf("arm_bulk weighted bytes: %llu native calls\n", (unsigned long long)calls);
+}
+
 static void test_native_integration(void) {
     if (!a64_static_host_available()) {
         printf("arm_bulk native integration: SKIP (host has no signed A64 runner)\n");
         return;
     }
     test_native_resident_bulk_transitions();
+    test_native_weighted_bytes();
     /* Enter the word-scan candidate after resident code changes r2 and NZCV.
      * Test the successful bridge, a changed-body refusal, and a window ending
      * just after SUB. The latter must not read unproven following words. */
@@ -1607,6 +1818,7 @@ static void test_long_chain_index(bool fragmented) {
 }
 
 int main(void) {
+    test_weighted_bytes();
     test_lengths();
     test_refusals();
     test_cached_boundaries();

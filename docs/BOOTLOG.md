@@ -1128,8 +1128,47 @@ atomicity. Former ratio-only negative tests now check actual non-parallelogram
 warps or out-of-allocation UVs; the full-extent uniform-scale restriction still
 has its original negative tests. The targeted suite passes 3,373 checks; the
 complete local release suite passes 77/77 (53.44 seconds).
-Exact-build CI and physical replay of this general correction remain pending;
-it is not yet evidence that overall animation duration or lost keys are fixed.
+Exact-build iOS run 36286788674 and all nine core jobs in 36286788667 passed.
+The installed executable was hash-verified, and all four saved-machine files
+survived installation unchanged. Physical wake/unlock, Settings forward/back,
+Home/Safari, alert, keyboard and sleep/wake testing completed 6,518 3D draws
+with zero rejected or degraded draws. This was not the identical checkpoint
+used for the earlier 53-rejection control, so it is not a paired timing result.
+
+Transitions remain slow: a Settings forward slide was still in progress at
+1,935 ms, and Back was settled by the 1,187 ms screenshot. Three confirmed warm
+typing bursts delivered all 10, 10 and 6 characters. Replaying the older empty
+keyboard checkpoint delivered all ten characters by 2,688 ms, but the 1,165 ms
+shot still showed the first-key popup with an empty field. All 20 controller
+reports were accepted/read, with zero drops or rejected draws. The initial
+stall therefore remains; these passing bursts do not prove the intermittent
+lost-key issue fixed. The temporary replay return clones were removed only
+after restoring and hash-verifying the saved machine state.
+
+### Bounded weighted-byte execution candidate (2026-09-27)
+
+The existing keyboard samples include the byte/weight accumulation loop in
+`UIKBApplyKeyBackgroundShadowToPixels`. The bulk runner now recognizes its
+complete 17-instruction A32 shape at any address, including signed clipping
+and the back edge. It represents exact original instruction counts and stops
+at the existing event budget; there is no generated executable code, retained
+guest-code cache, skipped drawing, clock change or assumed function ABI.
+
+Only proved plain-RAM reads and bounded positive normal/zero values qualify.
+Both binary32 rounding stages use integer arithmetic, so VMLA is not fused and
+the host FP environment is untouched. The scalar round-to-nearest gate requires
+IXC already sticky, disallows exception enables and preserves every scratch
+register, FPSCR and final NZCV. An unsafe iteration is left for the interpreter
+without consuming either read or changing state. Clipped samples do not touch
+their pointers. Portable differential tests cover randomized weights and bytes,
+budgets, clipping, exceptional values, code changes and lost mapping witnesses.
+Native bridge coverage also checks live resident registers and refusal paths.
+The local release suite passes 77/77 (68.85 seconds), including 50,176,424 bulk
+checks; full generated ARM64 text also cross-assembles successfully. Native
+execution of the new bridge remains a separate CI gate.
+This is a candidate for reducing keyboard drawing cost, not evidence that the
+overall first-key delay or navigation duration is fixed; physical benefit is
+still unmeasured.
 
 ### Historical instruction-resume narrative
 

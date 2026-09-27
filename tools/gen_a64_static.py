@@ -3059,6 +3059,17 @@ def compact_vfp_nonarith_body() -> list[str]:
     """Return broad exact VFPv2 register/compare/widen live semantics."""
     return [
         ".La64cr_vfp_decode:",
+        # A complete live byte/weight loop may retire through the existing
+        # bounded bulk contract. Refusal resumes this VMOV exactly once.
+        "    mov w10, #0x9a90",
+        "    movk w10, #0xee19, lsl #16",
+        "    cmp w9, w10",
+        "    b.ne .La64cr_vfp_decode_plain",
+        "    ldr x10, [x27, #344]",
+        "    cbz x10, .La64cr_vfp_decode_plain",
+        "    mov w0, #5",
+        "    b .La64cr_bulk_call",
+        ".La64cr_vfp_decode_plain:",
         # MCR/MRC core/system transfers.
         "    mov w10, #0x0e10",
         "    movk w10, #0x0f00, lsl #16",
@@ -3912,6 +3923,9 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
              f"    tbnz w9, #20, {prefix}vfp_to_core",
              f"    bl {prefix}vfp_read_core", "    str w8, [x11]",
              f"    b {prefix}sequential", f"{prefix}vfp_to_core:",
+             "    ldr x14, [x27, #344]", "    cbz x14, 1f",
+             "    mov w15, #0x9a90", "    movk w15, #0xee19, lsl #16",
+             "    cmp w9, w15", f"    b.eq {prefix}decode", "1:",
              "    ldr w8, [x11]", f"    bl {prefix}vfp_write_core",
              f"    b {prefix}sequential",
              f"{prefix}vfp_enabled:",
@@ -4746,6 +4760,8 @@ def compact_raw_function() -> list[str]:
         "    ldp x14, x15, [sp, #48]",
         "    ldp x16, x17, [sp, #64]",
         "    add sp, sp, #96",
+        "    cmp w0, #5",
+        "    b.eq .La64cr_vfp_decode_plain",
         "    cmp w0, #3",
         "    b.eq .La64cr_thumb_high_mov_plain",
         "    cmp w0, #4",
