@@ -775,6 +775,16 @@ register indices, operand order and boundaries against the word-based
 implementation. See
 [DDI0406C.b, A8.8.316](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 
+NEON VREV16, VREV32 and VREV64 reverse whole elements within halfwords,
+words and doublewords. Both ARM and Thumb encodings cover all legal D/Q
+registers, including in-place reversal. Reserved element/block sizes and odd
+Q operands stop before access checks. The operation preserves core flags,
+FPSCR, FPEXC and host FP state. An independent byte-array oracle and six raw
+result anchors cover every register pair, both fetch paths, access denial and
+IT execution/skips. The first test-only run recorded 31,740 failures; the
+first implementation passed the VFP suite without corrections. See
+[DDI0406C.b, A8.8.386](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
 NEON VTRN transposes 8-, 16- or 32-bit elements across two D or Q operands,
 staging both complete results before updating either operand. It preserves
 ARM flags, FPSCR and the host FP environment. Reserved widths and odd Q
@@ -2213,6 +2223,35 @@ only the budget to 50 million reaches a guarded read of CPU0's zero-valued
 steps. No timer ticks are supplied. This is further host diagnostic progress,
 not a validated N88 CPU configuration, complete boot or physical-device result.
 
+A subsequent private handoff experiment retains the supplied zero-valued
+CPU0, memory and PWM vibrator `reg` properties as explicit unchanged-property
+assumptions. The original kernel formats their registry locations as `0`;
+this does not establish normal bootloader output or memory geometry. For VRAM,
+61 original matching iBoot instructions derive base `0x4fe3a000` and size
+`0x1c2000` from a prepared active 320x480 display configuration. That witness
+executes the range producer, but does not initialize display hardware or run
+the complete bootloader. Its first run had an incorrect expected instruction
+address; correcting that oracle required no emulator change.
+
+The same diagnostic retains the VIC, GPIO and PMU's supplied zero
+`#address-cells` values as interrupt-specifier metadata. The actual kernel
+consumer takes its zero-cell branch for all three. Only those exact properties
+are admitted; all other unprepared fields retain their guards. A 50-million
+instruction run exhausts its budget, and extending only that limit to 100
+million reaches `VREV32.8 q4,q12` at `0x8063e170` after 94,289,747 steps.
+The new implementation executes all four consecutive reversals and reaches
+the next unsupported instruction, `VADD.I32 q12,q4,q15` at `0x8063e180`,
+after 94,289,751 steps. The frozen reference reproduces the earlier complete
+trace. Generic CPU/no-ECC, test-seed, zero-PRAM and inherited-RAM assumptions
+remain explicit; no source clocks or physical evidence are supplied.
+
+For the reversal change, all 74 shipping tests and 78 of 79 strict tests pass.
+The strict failure is the existing 512 MiB machine-allocation test under low
+Windows commit headroom. A targeted retry and the unchanged parent emulator
+library reproduce the same allocation failure; it remains a local validation
+limitation. All 276 prepared timebase, UART and interrupt-controller calls
+pass, and the original 61,650-step guarded trace remains byte-identical.
+
 The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates
 C only as prescribed by the immediate form, preserving V. Invalid zero
@@ -2277,7 +2316,7 @@ establish that result.
   VADD/VSUB/VMUL/VNMUL/VDIV/VSQRT/VMLA/VMLS across the full register bank, and the bounded
   32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms, 32-bit VLD1/VST1 lane transfers,
   32-bit VLD1 broadcasts to one or two D registers,
-  register Boolean operations, VEXT, 8/16/32-bit VTRN, D8/D16 and Q8/Q16/Q32 VZIP/VUZP, F32 VABS/VNEG,
+  register Boolean operations, VEXT, VREV16/32/64, 8/16/32-bit VTRN, D8/D16 and Q8/Q16/Q32 VZIP/VUZP, F32 VABS/VNEG,
   immediate constants, core-register VDUP, register VMUL/VADD/VSUB/VMLA/VMLS.F32,
   F32 VMUL/VMLA/VMLS by scalar, VMAX/VMIN.F32, VCGE.F32 register comparisons,
   VRECPE/VRECPS/VRSQRTE/VRSQRTS.F32, VCEQ.F32 immediate zero,

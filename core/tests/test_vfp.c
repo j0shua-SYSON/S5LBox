@@ -3360,6 +3360,142 @@ static void test_a8_neon_macc_access_invalid_and_it(void) {
     }
 }
 
+static uint32_t a8_neon_reverse(unsigned thumb, unsigned op, unsigned size, unsigned quad, unsigned d, unsigned m) {
+    return (thumb ? 0xffb00000u : 0xf3b00000u) | (op << 7) | (size << 18) | (quad << 6) |
+        ((d & 15u) << 12) | ((d >> 4) << 22) | (m & 15u) | ((m >> 4) << 5);
+}
+
+static uint8_t *a8_reverse_host_ram(void *ctx, uint32_t address, uint32_t length) {
+    (void)ctx;
+    return (uint64_t)address + length <= RAM_SIZE ? g_ram + address : NULL;
+}
+
+static void a8_reverse_expected(uint64_t values[32], unsigned op, unsigned size, unsigned quad, unsigned d, unsigned m) {
+    /* Independent byte-array reversal: copy whole elements from the far end
+     * of each block, preserving byte order inside an element. */
+    uint8_t input[16], output[16];
+    unsigned bytes = 8u * (quad + 1u), block = 8u >> op, element = 1u << size;
+    for (unsigned i = 0; i < bytes; i++) input[i] = (uint8_t)(values[m + i / 8u] >> (8u * (i % 8u)));
+    for (unsigned start = 0; start < bytes; start += block)
+        for (unsigned at = 0; at < block; at += element)
+            for (unsigned b = 0; b < element; b++)
+                output[start + at + b] = input[start + block - element - at + b];
+    for (unsigned r = 0; r <= quad; r++) values[d + r] = 0u;
+    for (unsigned i = 0; i < bytes; i++) values[d + i / 8u] |= (uint64_t)output[i] << (8u * (i % 8u));
+}
+
+static void test_a8_neon_reverse_registers(void) {
+    CHECK(a8_neon_reverse(0u,1u,0u,1u,8u,24u) == 0xf3b080e8u &&
+          a8_neon_reverse(1u,1u,0u,1u,8u,24u) == 0xffb080e8u, "VREV32.8 encoding anchors");
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned op = 0; op < 3u; op++)
+      for (unsigned size = 0; size + op < 3u; size++)
+       for (unsigned quad = 0; quad < 2u; quad++)
+        for (unsigned d = 0; d < 32u; d += quad + 1u)
+         for (unsigned m = 0; m < 32u; m += quad + 1u) {
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            arm_bus_t bus = g_bus;
+            bool host = ((d + m / (quad + 1u)) & 1u) != 0u;
+            if (host) bus.host_ram = a8_reverse_host_ram;
+            c.bus = &bus;
+            c.cpsr |= ((d ^ m) & 2u) ? ARM_CPSR_E : 0u;
+            c.vfp_fpscr = 0xfff79f9fu;
+            c.excl_valid = true; c.excl_addr = 0x2468u; c.a8_excl_size = 8u;
+            uint64_t expected[32];
+            for (unsigned r = 0; r < 32u; r++) {
+                expected[r] = UINT64_C(0xff8123456789abcd) ^ ((uint64_t)r * UINT64_C(0x070503010b090f0d));
+                vfp_set_d(&c,r,expected[r]);
+            }
+            a8_reverse_expected(expected,op,size,quad,d,m);
+            uint32_t flags = c.cpsr, fpexc = c.vfp_fpexc;
+            CHECK(a8_move_step(&c,thumb,a8_neon_reverse(thumb,op,size,quad,d,m)) == ARM_OK &&
+                c.r[15] == 0x104u && c.cycles == 1u && c.cpsr == flags && c.vfp_fpscr == 0xfff79f9fu &&
+                c.vfp_fpexc == fpexc && c.excl_valid && c.excl_addr == 0x2468u && c.a8_excl_size == 8u,
+                "reverse register/control T=%u op=%u size=%u Q=%u D=%u M=%u",thumb,op,size,quad,d,m);
+            bool same = true;
+            for (unsigned r = 0; r < 32u; r++) same &= vfp_get_d(&c,r) == expected[r];
+            for (unsigned r = 0; r < 15u; r++) same &= c.r[r] == 0u;
+            CHECK(same && (c.fetch_host != NULL) == host, "reverse ordering/aliases/register bank/fetch path");
+         }
+}
+
+static void test_a8_neon_reverse_access_and_host_state(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned op = 0; op < 3u; op++)
+      for (unsigned size = 0; size + op < 3u; size++)
+       for (unsigned quad = 0; quad < 2u; quad++)
+        for (unsigned user = 0; user < 2u; user++)
+         for (unsigned enabled = 0; enabled < 2u; enabled++)
+          for (unsigned permission = 0; permission < 4u; permission++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permission * 0x00500000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            uint64_t expected[32];
+            for (unsigned r = 0; r < 32u; r++) { expected[r] = UINT64_C(0x0123456789abcdef) + r; vfp_set_d(&c,r,expected[r]); }
+            bool allowed = enabled && (permission == 3u || (permission == 1u && !user));
+            if (allowed) a8_reverse_expected(expected,op,size,quad,30u,30u);
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c,thumb,a8_neon_reverse(thumb,op,size,quad,30u,30u)) == ARM_OK && c.vfp_fpscr == fpscr,
+                "reverse access disposition");
+            CHECK(allowed ? c.r[15] == 0x104u && c.cpsr == flags : c.r[15] == ARM_VEC_UNDEFINED &&
+                c.r[14] == (thumb ? 0x102u : 0x104u) && c.spsr[ARM_BANK_UND] == flags, "reverse access exception state");
+            for (unsigned r = 0; r < 32u; r++) CHECK(vfp_get_d(&c,r) == expected[r], "reverse denied/in-place state");
+          }
+    static const uint64_t raw[3][3] = {
+        {UINT64_C(0xefcdab8967452301),UINT64_C(0xcdef89ab45670123),UINT64_C(0x89abcdef01234567)},
+        {UINT64_C(0x67452301efcdab89),UINT64_C(0x45670123cdef89ab),0u},
+        {UINT64_C(0x23016745ab89efcd),0u,0u}
+    };
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    fenv_t saved; CHECK(fegetenv(&saved) == 0,"save reverse host state");
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned op = 0; op < 3u; op++)
+      for (unsigned size = 0; size + op < 3u; size++)
+       for (unsigned host = 0; host < 4u; host++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpscr = 0xfff79f9fu;
+            vfp_set_d(&c,31u,UINT64_C(0x0123456789abcdef));
+            CHECK(fesetround(rounds[host]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 && feraiseexcept(FE_DIVBYZERO) == 0,
+                "prepare reverse host state");
+            int exceptions = fetestexcept(FE_ALL_EXCEPT);
+            CHECK(a8_move_step(&c,thumb,a8_neon_reverse(thumb,op,size,0u,31u,31u)) == ARM_OK &&
+                vfp_get_d(&c,31u) == raw[op][size] && c.vfp_fpscr == 0xfff79f9fu &&
+                fegetround() == rounds[host] && fetestexcept(FE_ALL_EXCEPT) == exceptions, "reverse raw anchor/host state");
+       }
+    CHECK(fesetenv(&saved) == 0,"restore reverse host state");
+}
+
+static void test_a8_neon_reverse_invalid_and_it(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned op = 0; op < 4u; op++)
+      for (unsigned size = 0; size < 4u; size++)
+       for (unsigned enabled = 0; enabled < 2u; enabled++)
+        for (unsigned skip = 0; skip < (thumb ? 2u : 1u); skip++)
+         for (unsigned shape = 0; shape < 4u; shape++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u; if (skip) c.cp15.cpacr = 0u;
+            unsigned quad = shape != 0u, d = shape == 2u ? 31u : 30u, m = shape == 3u ? 17u : 16u;
+            if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK,"reverse IT setup"); }
+            uint32_t flags = c.cpsr, pc = c.r[15], fpscr = c.vfp_fpscr;
+            bool valid = op + size < 3u && shape < 2u;
+            CHECK(a8_move_step(&c,thumb,a8_neon_reverse(thumb,op,size,quad,d,m)) == (skip || valid ? ARM_OK : ARM_UNDEFINED),
+                "reverse invalid/IT disposition T=%u op=%u size=%u shape=%u",thumb,op,size,shape);
+            if (skip || !valid) CHECK(c.r[15] == (skip ? pc + 4u : pc) &&
+                c.cpsr == (skip ? flags & ~0x0600fc00u : flags),"reverse invalid/skipped state");
+            else if (!enabled) CHECK(c.r[15] == ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND] == flags,"reverse lazy enable");
+            else CHECK(c.r[15] == pc + 4u && c.cpsr == (flags & ~0x0600fc00u),"reverse valid IT retirement");
+            CHECK(c.vfp_fpscr == fpscr,"reverse invalid/IT status");
+            for (unsigned r = 0; r < 32u; r++) CHECK(vfp_get_d(&c,r) == 0u,"reverse invalid/IT register mutation");
+         }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++)
+     for (unsigned op = 0; op < 3u; op++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,legacy[profile]),"legacy reverse reset");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        CHECK(a8_move_step(&c,0u,a8_neon_reverse(0u,op,0u,0u,31u,16u)) == ARM_UNDEFINED && c.r[15] == 0u,
+            "reverse changed legacy decoding");
+     }
+}
+
 static uint32_t a8_neon_transpose(unsigned thumb, unsigned size, unsigned quad, unsigned d, unsigned m) {
     return (thumb ? 0xffb20080u : 0xf3b20080u) | (size << 18) | (quad << 6) |
         ((d & 15u) << 12) | ((d >> 4) << 22) | (m & 15u) | ((m >> 4) << 5);
@@ -8108,6 +8244,9 @@ int main(void) {
     test_a8_neon_macc_registers();
     test_a8_neon_macc_values_and_host_state();
     test_a8_neon_macc_access_invalid_and_it();
+    test_a8_neon_reverse_registers();
+    test_a8_neon_reverse_access_and_host_state();
+    test_a8_neon_reverse_invalid_and_it();
     test_a8_neon_transpose_registers();
     test_a8_neon_transpose_access_and_host_state();
     test_a8_neon_transpose_invalid_and_it();

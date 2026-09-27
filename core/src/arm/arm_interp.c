@@ -911,6 +911,36 @@ static arm_status_t exec_a8_neon_extract(arm_cpu_t *c, uint32_t insn) {
     return ARM_OK;
 }
 
+/* VREV16/32/64 A1/T1, DDI0406C.b A8.8.386. Keep the reserved op/size
+ * combinations in this allocation so they fail before access checks. */
+static bool a8_neon_reverse_space(const arm_cpu_t *c, uint32_t insn) {
+    uint32_t prefix = (c->cpsr & ARM_CPSR_T) ? 0xffb00000u : 0xf3b00000u;
+    return c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn & 0xffb30e10u) == prefix;
+}
+
+static arm_status_t exec_a8_neon_reverse(arm_cpu_t *c, uint32_t insn) {
+    unsigned d = ((insn >> 12) & 15u) | ((insn >> 18) & 16u);
+    unsigned m = (insn & 15u) | ((insn >> 1) & 16u), quad = (insn >> 6) & 1u;
+    unsigned op = (insn >> 7) & 3u, size = (insn >> 18) & 3u;
+    if (op + size >= 3u || (quad && ((d | m) & 1u))) return ARM_UNDEFINED;
+    if (!vfp_cpacr_permits(c) || !vfp_enabled(c)) return ARM_GUEST_UNDEFINED;
+    uint64_t result[2];
+    for (unsigned r = 0; r <= quad; r++) {
+        uint64_t value = vfp_get_d(c, m + r);
+        /* Swap successively larger groups, leaving each element intact.
+         * Q forms reverse within each D word, never across the pair. */
+        if (!size) value = ((value & UINT64_C(0x00ff00ff00ff00ff)) << 8) |
+            ((value >> 8) & UINT64_C(0x00ff00ff00ff00ff));
+        if (op <= 1u && size <= 1u) value = ((value & UINT64_C(0x0000ffff0000ffff)) << 16) |
+            ((value >> 16) & UINT64_C(0x0000ffff0000ffff));
+        if (!op) value = (value << 32) | (value >> 32);
+        result[r] = value;
+    }
+    /* Complete reads before in-place writes; all FP/core flags unchanged. */
+    for (unsigned r = 0; r <= quad; r++) vfp_set_d(c, d + r, result[r]);
+    return ARM_OK;
+}
+
 /* VABS/VNEG.F32 A1/T1 (DDI0406C.b A8.8.280/355). Keep F=1 size
  * encodings together so reserved widths stop before availability checks. */
 static bool a8_neon_sign_space(const arm_cpu_t *c, uint32_t insn) {
@@ -4065,6 +4095,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
     if (a8_neon_recip_estimate_space(c, insn)) return exec_a8_neon_reciprocal(c, insn, false);
     if (a8_neon_recip_step_space(c, insn)) return exec_a8_neon_reciprocal(c, insn, true);
     if (a8_neon_extract_space(c, insn)) return exec_a8_neon_extract(c, insn);
+    if (a8_neon_reverse_space(c, insn)) return exec_a8_neon_reverse(c, insn);
     if (a8_neon_sign_space(c, insn)) return exec_a8_neon_sign(c, insn);
     if (a8_neon_transpose_space(c, insn)) return exec_a8_neon_transpose(c, insn);
     if (a8_neon_zip_space(c, insn)) return exec_a8_neon_zip(c, insn);
@@ -4747,7 +4778,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
         }
         if (a8_neon_bitwise_space(c, insn) || a8_neon_immediate_space(c, insn) ||
             a8_neon_multiply_space(c, insn) || a8_neon_add_space(c, insn) ||
-            a8_neon_extract_space(c, insn) || a8_neon_sign_space(c, insn) || a8_neon_transpose_space(c, insn) ||
+            a8_neon_extract_space(c, insn) || a8_neon_reverse_space(c, insn) || a8_neon_sign_space(c, insn) || a8_neon_transpose_space(c, insn) ||
             a8_neon_zip_space(c, insn) || a8_neon_macc_space(c, insn) || a8_neon_by_scalar_space(c, insn) || a8_neon_integer_space(c, insn) ||
             a8_neon_minmax_space(c, insn) || a8_neon_compare_ge_space(c, insn) || a8_neon_compare_zero_space(c, insn) ||
             a8_neon_recip_estimate_space(c, insn) || a8_neon_recip_step_space(c, insn)) {
@@ -4756,6 +4787,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
                 a8_neon_multiply_space(c, insn) ? exec_a8_neon_multiply(c, insn) :
                 a8_neon_add_space(c, insn) ? exec_a8_neon_add(c, insn) :
                 a8_neon_extract_space(c, insn) ? exec_a8_neon_extract(c, insn) :
+                a8_neon_reverse_space(c, insn) ? exec_a8_neon_reverse(c, insn) :
                 a8_neon_sign_space(c, insn) ? exec_a8_neon_sign(c, insn) :
                 a8_neon_transpose_space(c, insn) ? exec_a8_neon_transpose(c, insn) :
                 a8_neon_zip_space(c, insn) ? exec_a8_neon_zip(c, insn) :
