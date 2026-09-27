@@ -1280,6 +1280,36 @@ static arm_status_t exec_a8_neon_multiply(arm_cpu_t *c, uint32_t insn) {
     return ARM_OK;
 }
 
+/* VADD/VSUB integer A1/T1 (DDI0406C.b A8.8.282/414). All four
+ * element widths wrap independently, without changing FPSCR or core flags. */
+static bool a8_neon_int_addsub_space(const arm_cpu_t *c, uint32_t insn) {
+    bool thumb = (c->cpsr & ARM_CPSR_T) != 0u;
+    return c->arch == ARM_ARCH_V7_CORTEX_A8 &&
+        (insn & (thumb ? 0xef800f10u : 0xfe800f10u)) == (thumb ? 0xef000800u : 0xf2000800u);
+}
+
+static arm_status_t exec_a8_neon_int_addsub(arm_cpu_t *c, uint32_t insn) {
+    unsigned d = ((insn >> 12) & 15u) | ((insn >> 18) & 16u);
+    unsigned n = ((insn >> 16) & 15u) | ((insn >> 3) & 16u);
+    unsigned m = (insn & 15u) | ((insn >> 1) & 16u), quad = (insn >> 6) & 1u;
+    if (quad && ((d | n | m) & 1u)) return ARM_UNDEFINED;
+    if (!vfp_cpacr_permits(c) || !vfp_enabled(c)) return ARM_GUEST_UNDEFINED;
+    unsigned bits = 8u << ((insn >> 20) & 3u);
+    uint64_t mask = bits == 64u ? UINT64_MAX : (UINT64_C(1) << bits) - 1u;
+    bool subtract = (insn & (1u << ((c->cpsr & ARM_CPSR_T) ? 28u : 24u))) != 0u;
+    uint64_t result[2] = {0u, 0u};
+    for (unsigned r = 0; r <= quad; r++) {
+        uint64_t left = vfp_get_d(c, n + r), right = vfp_get_d(c, m + r);
+        for (unsigned shift = 0; shift < 64u; shift += bits) {
+            uint64_t a = (left >> shift) & mask, b = (right >> shift) & mask;
+            result[r] |= ((subtract ? a - b : a + b) & mask) << shift;
+        }
+    }
+    /* Sources may alias either destination half; finish all reads first. */
+    for (unsigned r = 0; r <= quad; r++) vfp_set_d(c, d + r, result[r]);
+    return ARM_OK;
+}
+
 /* VADD/VSUB.F32 A1/T1 (DDI0406C.b A8.8.283/415), including reserved sz. */
 static bool a8_neon_add_space(const arm_cpu_t *c, uint32_t insn) {
     uint32_t prefix = (c->cpsr & ARM_CPSR_T) ? 0xef000d00u : 0xf2000d00u;
@@ -1446,6 +1476,7 @@ static bool vfp_lazy_enable_trap(const arm_cpu_t *c, uint32_t insn) {
     if (a8_neon_single_elements_space(c, insn) || a8_neon_pairs_space(c, insn) || a8_neon_lane_space(c, insn) ||
         a8_neon_replicate_space(c, insn) || a8_neon_bitwise_space(c, insn) ||
         a8_neon_immediate_space(c, insn) || a8_neon_multiply_space(c, insn) || a8_neon_add_space(c, insn) ||
+        a8_neon_int_addsub_space(c, insn) ||
         a8_neon_extract_space(c, insn) || a8_neon_sign_space(c, insn) || a8_neon_transpose_space(c, insn) ||
         a8_neon_zip_space(c, insn) || a8_neon_macc_space(c, insn) || a8_neon_by_scalar_space(c, insn) || a8_neon_integer_space(c, insn) ||
         a8_neon_minmax_space(c, insn) || a8_neon_compare_ge_space(c, insn) || a8_neon_compare_zero_space(c, insn) ||
@@ -4086,6 +4117,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
     if (a8_neon_immediate_space(c, insn)) return exec_a8_neon_immediate(c, insn);
     if (a8_neon_multiply_space(c, insn)) return exec_a8_neon_multiply(c, insn);
     if (a8_neon_add_space(c, insn)) return exec_a8_neon_add(c, insn);
+    if (a8_neon_int_addsub_space(c, insn)) return exec_a8_neon_int_addsub(c, insn);
     if (a8_neon_macc_space(c, insn)) return exec_a8_neon_macc(c, insn);
     if (a8_neon_by_scalar_space(c, insn)) return exec_a8_neon_by_scalar(c, insn);
     if (a8_neon_integer_space(c, insn)) return exec_a8_neon_integer(c, insn);
@@ -4778,6 +4810,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
         }
         if (a8_neon_bitwise_space(c, insn) || a8_neon_immediate_space(c, insn) ||
             a8_neon_multiply_space(c, insn) || a8_neon_add_space(c, insn) ||
+            a8_neon_int_addsub_space(c, insn) ||
             a8_neon_extract_space(c, insn) || a8_neon_reverse_space(c, insn) || a8_neon_sign_space(c, insn) || a8_neon_transpose_space(c, insn) ||
             a8_neon_zip_space(c, insn) || a8_neon_macc_space(c, insn) || a8_neon_by_scalar_space(c, insn) || a8_neon_integer_space(c, insn) ||
             a8_neon_minmax_space(c, insn) || a8_neon_compare_ge_space(c, insn) || a8_neon_compare_zero_space(c, insn) ||
@@ -4786,6 +4819,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
                 a8_neon_immediate_space(c, insn) ? exec_a8_neon_immediate(c, insn) :
                 a8_neon_multiply_space(c, insn) ? exec_a8_neon_multiply(c, insn) :
                 a8_neon_add_space(c, insn) ? exec_a8_neon_add(c, insn) :
+                a8_neon_int_addsub_space(c, insn) ? exec_a8_neon_int_addsub(c, insn) :
                 a8_neon_extract_space(c, insn) ? exec_a8_neon_extract(c, insn) :
                 a8_neon_reverse_space(c, insn) ? exec_a8_neon_reverse(c, insn) :
                 a8_neon_sign_space(c, insn) ? exec_a8_neon_sign(c, insn) :

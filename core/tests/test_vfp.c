@@ -3496,6 +3496,164 @@ static void test_a8_neon_reverse_invalid_and_it(void) {
      }
 }
 
+static uint32_t a8_neon_int_addsub(unsigned thumb, unsigned sub, unsigned size, unsigned quad,
+                                  unsigned d, unsigned n, unsigned m) {
+    return (thumb ? 0xef000800u : 0xf2000800u) | (sub << (thumb ? 28u : 24u)) |
+        (size << 20) | (quad << 6) | ((d & 15u) << 12) | ((d >> 4) << 22) |
+        ((n & 15u) << 16) | ((n >> 4) << 7) | (m & 15u) | ((m >> 4) << 5);
+}
+
+static void a8_int_addsub_expected(uint64_t values[32], unsigned sub, unsigned size, unsigned quad,
+                                   unsigned d, unsigned n, unsigned m) {
+    /* Independent byte carry/borrow oracle. Carry never crosses a lane,
+     * including the boundary between the two 64-bit lanes of a Q register. */
+    uint8_t left[16], right[16], result[16];
+    unsigned bytes = (quad + 1u) * 8u, element = 1u << size;
+    for (unsigned i = 0; i < bytes; i++) {
+        left[i] = (uint8_t)(values[n + i / 8u] >> (8u * (i % 8u)));
+        right[i] = (uint8_t)(values[m + i / 8u] >> (8u * (i % 8u)));
+    }
+    for (unsigned lane = 0; lane < bytes; lane += element) {
+        int carry = 0;
+        for (unsigned b = 0; b < element; b++) {
+            unsigned at = lane + b;
+            int digit = sub ? (int)left[at] - right[at] - carry : (int)left[at] + right[at] + carry;
+            result[at] = (uint8_t)digit;
+            carry = sub ? digit < 0 : digit > 255;
+        }
+    }
+    for (unsigned r = 0; r <= quad; r++) values[d + r] = 0u;
+    for (unsigned i = 0; i < bytes; i++) values[d + i / 8u] |= (uint64_t)result[i] << (8u * (i % 8u));
+}
+
+static void a8_int_addsub_case(unsigned thumb, unsigned sub, unsigned size, unsigned quad,
+                              unsigned d, unsigned n, unsigned m, uint64_t left, uint64_t right, bool host) {
+    arm_cpu_t c; a8_move_reset(&c,thumb);
+    arm_bus_t bus = g_bus; if (host) bus.host_ram = a8_reverse_host_ram; c.bus = &bus;
+    if ((d ^ n ^ m) & 2u) c.cpsr |= ARM_CPSR_E;
+    c.vfp_fpscr = 0xfff79f9fu;
+    c.excl_valid = true; c.excl_addr = 0x2468u; c.a8_excl_size = 8u;
+    uint64_t expected[32];
+    for (unsigned r = 0; r < 32u; r++) expected[r] = UINT64_C(0x8877665544332211) ^ ((uint64_t)r * UINT64_C(0x010307090b0d0f11));
+    for (unsigned r = 0; r <= quad; r++) expected[n + r] = r ? ~left : left;
+    for (unsigned r = 0; r <= quad; r++) expected[m + r] = r ? ~right : right;
+    for (unsigned r = 0; r < 32u; r++) vfp_set_d(&c,r,expected[r]);
+    a8_int_addsub_expected(expected,sub,size,quad,d,n,m);
+    uint32_t flags = c.cpsr, fpexc = c.vfp_fpexc;
+    CHECK(a8_move_step(&c,thumb,a8_neon_int_addsub(thumb,sub,size,quad,d,n,m)) == ARM_OK &&
+        c.r[15] == 0x104u && c.cycles == 1u && c.cpsr == flags && c.vfp_fpscr == 0xfff79f9fu &&
+        c.vfp_fpexc == fpexc && c.cp15.cpacr == 0x00f00000u && c.excl_valid &&
+        c.excl_addr == 0x2468u && c.a8_excl_size == 8u, "integer add/sub controls T=%u sub=%u size=%u Q=%u D=%u N=%u M=%u",
+        thumb,sub,size,quad,d,n,m);
+    bool same = true;
+    for (unsigned r = 0; r < 32u; r++) same &= vfp_get_d(&c,r) == expected[r];
+    for (unsigned r = 0; r < 15u; r++) same &= c.r[r] == 0u;
+    CHECK(same && (c.fetch_host != NULL) == host,"integer add/sub lanes, aliases, register bank or fetch path");
+}
+
+static void test_a8_neon_int_addsub_registers(void) {
+    CHECK(a8_neon_int_addsub(0u,0u,2u,1u,24u,8u,30u) == 0xf268886eu &&
+          a8_neon_int_addsub(1u,0u,2u,1u,24u,8u,30u) == 0xef68886eu &&
+          a8_neon_int_addsub(0u,1u,2u,1u,24u,8u,30u) == 0xf368886eu &&
+          a8_neon_int_addsub(1u,1u,2u,1u,24u,8u,30u) == 0xff68886eu, "integer add/sub encoding anchors");
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned sub = 0; sub < 2u; sub++)
+      for (unsigned size = 0; size < 4u; size++)
+       for (unsigned quad = 0; quad < 2u; quad++)
+        for (unsigned reg = 0; reg < 32u; reg += quad + 1u)
+         for (unsigned role = 0; role < 7u; role++) {
+            unsigned d = 30u, n = 16u, m = 0u;
+            switch (role) {
+            case 0: d = reg; break;
+            case 1: n = reg; break;
+            case 2: m = reg; break;
+            case 3: d = n = reg; break;
+            case 4: d = m = reg; break;
+            case 5: n = m = reg; break;
+            default: d = n = m = reg; break;
+            }
+            a8_int_addsub_case(thumb,sub,size,quad,d,n,m,
+                UINT64_C(0xff00ffff7fffffff) ^ ((uint64_t)reg * UINT64_C(0x0102030405060708)),
+                UINT64_C(0x0101800080000001), ((reg / (quad + 1u) + role) & 1u) != 0u);
+         }
+    static const uint64_t values[] = {0u,1u,UINT64_MAX,UINT64_C(0x8000000000000000),UINT64_C(0x7fffffffffffffff),
+        UINT64_C(0x0101010101010101),UINT64_C(0x8080808080808080),UINT64_C(0x00ff00ff00ff00ff),UINT64_C(0x0000ffff0000ffff)};
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    fenv_t saved; CHECK(fegetenv(&saved) == 0,"save integer add/sub host state");
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned sub = 0; sub < 2u; sub++)
+      for (unsigned size = 0; size < 4u; size++)
+       for (unsigned quad = 0; quad < 2u; quad++)
+        for (unsigned a = 0; a < sizeof values / sizeof values[0]; a++)
+         for (unsigned b = 0; b < sizeof values / sizeof values[0]; b++) {
+            unsigned mode = (a + b) % 4u;
+            CHECK(fesetround(rounds[mode]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 && feraiseexcept(FE_DIVBYZERO) == 0,
+                "prepare integer add/sub host state");
+            int exceptions = fetestexcept(FE_ALL_EXCEPT);
+            a8_int_addsub_case(thumb,sub,size,quad,30u,16u,18u,values[a],values[b],(a & 1u) != 0u);
+            CHECK(fegetround() == rounds[mode] && fetestexcept(FE_ALL_EXCEPT) == exceptions,"integer add/sub touched host FP state");
+         }
+    CHECK(fesetenv(&saved) == 0,"restore integer add/sub host state");
+}
+
+static void test_a8_neon_int_addsub_access_and_it(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned sub = 0; sub < 2u; sub++)
+      for (unsigned size = 0; size < 4u; size++)
+       for (unsigned quad = 0; quad < 2u; quad++)
+        for (unsigned user = 0; user < 2u; user++)
+         for (unsigned permission = 0; permission < 4u; permission++)
+          for (unsigned enabled = 0; enabled < 2u; enabled++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permission * 0x00500000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            uint64_t expected[32];
+            for (unsigned r = 0; r < 32u; r++) { expected[r] = UINT64_C(0xffffffff00000001) + r; vfp_set_d(&c,r,expected[r]); }
+            bool allowed = enabled && (permission == 3u || (permission == 1u && !user));
+            if (allowed) a8_int_addsub_expected(expected,sub,size,quad,30u,16u,18u);
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c,thumb,a8_neon_int_addsub(thumb,sub,size,quad,30u,16u,18u)) == ARM_OK && c.vfp_fpscr == fpscr,
+                "integer add/sub access disposition");
+            CHECK(allowed ? c.r[15] == 0x104u && c.cpsr == flags : c.r[15] == ARM_VEC_UNDEFINED &&
+                c.r[14] == (thumb ? 0x102u : 0x104u) && c.spsr[ARM_BANK_UND] == flags,"integer add/sub access exception");
+            for (unsigned r = 0; r < 32u; r++) CHECK(vfp_get_d(&c,r) == expected[r],"integer add/sub access data");
+          }
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned sub = 0; sub < 2u; sub++)
+      for (unsigned size = 0; size < 4u; size++)
+       for (unsigned enabled = 0; enabled < 2u; enabled++)
+        for (unsigned skip = 0; skip < (thumb ? 2u : 1u); skip++)
+         for (unsigned shape = 0; shape < 6u; shape++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            if (skip) c.cp15.cpacr = 0u;
+            unsigned quad = shape != 0u, d = shape == 2u || shape == 5u ? 31u : 30u;
+            unsigned n = shape == 3u || shape == 5u ? 17u : 16u, m = shape >= 4u ? 19u : 18u;
+            uint64_t expected[32];
+            for (unsigned r = 0; r < 32u; r++) { expected[r] = UINT64_C(0xff00ff000000ffff) + r; vfp_set_d(&c,r,expected[r]); }
+            bool valid = shape < 2u;
+            if (valid && enabled && !skip) a8_int_addsub_expected(expected,sub,size,quad,d,n,m);
+            if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK,"integer add/sub IT setup"); }
+            uint32_t flags = c.cpsr, pc = c.r[15], fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c,thumb,a8_neon_int_addsub(thumb,sub,size,quad,d,n,m)) == (skip || valid ? ARM_OK : ARM_UNDEFINED),
+                "integer add/sub invalid/IT disposition");
+            if (skip || !valid) CHECK(c.r[15] == (skip ? pc + 4u : pc) && c.cpsr == (skip ? flags & ~0x0600fc00u : flags),
+                "integer add/sub invalid/skipped state");
+            else if (!enabled) CHECK(c.r[15] == ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND] == flags,"integer add/sub lazy enable");
+            else CHECK(c.r[15] == pc + 4u && c.cpsr == (flags & ~0x0600fc00u),"integer add/sub IT retirement");
+            CHECK(c.vfp_fpscr == fpscr,"integer add/sub invalid/IT flags");
+            for (unsigned r = 0; r < 32u; r++) CHECK(vfp_get_d(&c,r) == expected[r],"integer add/sub invalid/IT data");
+         }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++)
+     for (unsigned sub = 0; sub < 2u; sub++)
+      for (unsigned size = 0; size < 4u; size++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,legacy[profile]),"legacy integer add/sub reset");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        CHECK(a8_move_step(&c,0u,a8_neon_int_addsub(0u,sub,size,0u,31u,16u,17u)) == ARM_UNDEFINED && c.r[15] == 0u,
+            "integer add/sub changed legacy decoding");
+      }
+}
+
 static uint32_t a8_neon_transpose(unsigned thumb, unsigned size, unsigned quad, unsigned d, unsigned m) {
     return (thumb ? 0xffb20080u : 0xf3b20080u) | (size << 18) | (quad << 6) |
         ((d & 15u) << 12) | ((d >> 4) << 22) | (m & 15u) | ((m >> 4) << 5);
@@ -8247,6 +8405,8 @@ int main(void) {
     test_a8_neon_reverse_registers();
     test_a8_neon_reverse_access_and_host_state();
     test_a8_neon_reverse_invalid_and_it();
+    test_a8_neon_int_addsub_registers();
+    test_a8_neon_int_addsub_access_and_it();
     test_a8_neon_transpose_registers();
     test_a8_neon_transpose_access_and_host_state();
     test_a8_neon_transpose_invalid_and_it();

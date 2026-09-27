@@ -795,6 +795,17 @@ oracle, permission and enable checks, IT execution, neighboring encodings,
 split fetch faults, checked-bus retry and guest enable/exception-return retry.
 See [DDI0406C.b, A8.8.420](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 
+NEON integer VADD and VSUB implement independent modular arithmetic in
+8-, 16-, 32- and 64-bit lanes across the full D/Q bank. ARM and Thumb share
+unsigned arithmetic, with all source reads completed before destination
+writes. Core flags, FPSCR and the host FP environment are preserved. Odd
+Q operands stop before access checks; valid denied accesses enter the guest
+Undefined handler, and Thumb honors IT conditions. An independent bytewise
+carry/borrow oracle checks wraparound, boundaries, register roles and aliases,
+both fetch paths and access controls. The test-only baseline recorded 17,280
+failures; the first implementation passed the full VFP suite. See
+[DDI0406C.b, A8.8.282/414](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
 NEON immediate VMOV, VMVN, VORR and VBIC also cover the full D/Q bank.
 The decoder expands the encoded integer or F32 constant as raw bits,
 including byte masks for VMOV.I64 and the trailing-one forms. It rejects
@@ -2252,6 +2263,21 @@ library reproduce the same allocation failure; it remains a local validation
 limitation. All 276 prepared timebase, UART and interrupt-controller calls
 pass, and the original 61,650-step guarded trace remains byte-identical.
 
+The subsequent integer VADD/VSUB implementation executes all four additions
+and advances the same diagnostic to `VSHL.I32 q12,q8,#1` at `0x8063e1dc`,
+after 94,289,774 steps. A frozen old-library run exactly reproduces the
+previous bounded trace, register state and guarded-access counters. The
+diagnostic's optional RAM read pointer excludes the entire boot-argument
+and device-tree regions; writes and guarded accesses retain their callbacks.
+All handoff observers still pass. This establishes instruction progress
+under the existing assumptions, without adding clocks or a complete boot.
+
+For integer addition/subtraction, all 79 strict and 74 shipping tests pass,
+including the unchanged large-allocation test. The preceding checkpoint's
+host allocation failure remains recorded above as a historical result.
+All 276 prepared firmware calls pass again, and the complete canonical
+61,650-step guarded trace remains byte-identical.
+
 The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates
 C only as prescribed by the immediate form, preserving V. Invalid zero
@@ -2317,7 +2343,8 @@ establish that result.
   32/64-bit NEON VLD1/VST1 and 32-bit VLD2/VST2 memory forms, 32-bit VLD1/VST1 lane transfers,
   32-bit VLD1 broadcasts to one or two D registers,
   register Boolean operations, VEXT, VREV16/32/64, 8/16/32-bit VTRN, D8/D16 and Q8/Q16/Q32 VZIP/VUZP, F32 VABS/VNEG,
-  immediate constants, core-register VDUP, register VMUL/VADD/VSUB/VMLA/VMLS.F32,
+  immediate constants, core-register VDUP, 8/16/32/64-bit integer VADD/VSUB,
+  register VMUL/VADD/VSUB/VMLA/VMLS.F32,
   F32 VMUL/VMLA/VMLS by scalar, VMAX/VMIN.F32, VCGE.F32 register comparisons,
   VRECPE/VRECPS/VRSQRTE/VRSQRTS.F32, VCEQ.F32 immediate zero,
   and F32/signed/unsigned 32-bit NEON conversion
