@@ -1337,10 +1337,15 @@ interval. No code cache, guest patch, timer adjustment or snapshot change.
 Four additional serialized-machine oracles exercise an unsupported first word
 and its condition-failed form in User and privileged mode, with refill-on,
 refill-off and interpreter controls. Local strict native-configuration syntax
-checks and all 77 portable tests pass (63.28 s); actual AArch64 oracle execution
-and physical performance comparison remain pending. Refill counts now describe
-successful FETCH handoffs even when the first instruction is later refused;
-they must not be mistaken for newly native retirements. No speedup is claimed.
+checks and all 77 portable tests pass (63.28 s). Both native correctness gates
+also pass, including the four new first-window cases. Three physical trials
+from the same restored General screen, with three control trials, show no
+reliable navigation improvement. Controls first show a settled Settings screen
+in capture requests 1352-1581, 1224-1428 and 1072-1319 ms after Back; candidate
+requests are 1392-1657, 1373-1566 and 1246-1448 ms. These are coarse request
+bounds, not exact animation durations, and overlap materially. The runtime
+change is removed; the first-window regression oracle remains. No speedup is
+claimed, and the prior input, sleep and pause fixes remain unchanged.
 
 ### Historical instruction-resume narrative
 
