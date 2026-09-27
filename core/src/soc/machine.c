@@ -2651,8 +2651,19 @@ static bool static_a64_retirement_boundary(void *opaque, unsigned retired) {
         !boundary->pending_retired || !retired)
         return false;
     bool was_active = *boundary->active_clock;
+    s5l8900_t *m = boundary->machine;
+    /* A clean RAM-only prefix has not changed any interrupt level. In active
+     * clock mode there is no elapsed device time until the periodic sample.
+     * Reuse the event-region proof that SPI and DMA cannot progress: an empty
+     * receive channel may remain enabled, but any runnable/invalid descriptor,
+     * queued SPI word, MMIO, external input or live trace keeps the refresh.
+     * Public tick(0), run entry and actual clock samples remain unconditional.
+     * No cached device state or larger interrupt/input interval is introduced. */
+    bool refresh = !was_active || g_tick_eager || m->level_dirty ||
+        ext_inputs(m) != m->ext_seen || m->power_trace_ticks_left ||
+        m->pre_step_hook || !region_dma_inert(m);
     run_clock_retired(boundary->machine, boundary->active_clock,
-                      boundary->pending_retired, retired, false, true);
+                      boundary->pending_retired, retired, false, refresh);
     /* A region admitted under wall time has no instruction-clock event
      * horizon. Re-enter through the outer scheduler if the guard switches. */
     if (was_active != *boundary->active_clock) return false;

@@ -7301,6 +7301,101 @@ static void test_signed_static_a64_thumb_read_oracle(void) {
     s5l8900_free(&reference);
 }
 
+/* A stationary active clock isolates zero-time resident boundaries. The
+ * literal interpreter still refreshes devices after every privileged step. */
+static void test_compact_active_window_boundaries(void) {
+    if (!s5l8900_static_a64_available()) {
+        printf("  COMPACT-ACTIVE-WINDOWS SKIP: no signed AArch64 handlers\n");
+        return;
+    }
+    unsigned cases = 0u;
+    int failures_before = g_fail;
+    for (unsigned scenario = 0u; scenario < 5u; scenario++) {
+        s5l8900_t fast = {0}, reference = {0};
+        bool aok = s5l8900_init(&fast, 0u, 1u << 20);
+        bool bok = s5l8900_init(&reference, 0u, 1u << 20);
+        CHECK(aok && bok, "active-window initialization failed");
+        if (!aok || !bok) {
+            if (aok) s5l8900_free(&fast);
+            if (bok) s5l8900_free(&reference);
+            return;
+        }
+        active_clock_probe_t clocks[2] = {
+            {.succeeds = true}, {.succeeds = true}
+        };
+        s5l8900_t *machines[] = {&fast, &reference};
+        for (unsigned j = 0u; j < 2u; j++) {
+            s5l8900_t *m = machines[j];
+            const uint32_t first[] = {0xe2800001u, 0xea0000bdu};
+            const uint32_t second[] = {0xe2811001u, 0xeaffff3du};
+            /* ADD/B to 0x400, ADD/B back to 0x100: every two instructions
+             * cross a live FETCH witness without changing a device. */
+            s5l8900_load(m, 0x100u, first, sizeof first);
+            s5l8900_load(m, 0x400u, second, sizeof second);
+            m->cpu.cpsr = ARM_MODE_SVC | ARM_CPSR_I | ARM_CPSR_F;
+            m->cpu.r[15] = 0x100u;
+            CHECK(s5l8900_set_active_host_clock(
+                      m, active_clock_probe_now, &clocks[j]),
+                  "active-window clock refused");
+            if (scenario == 1u || scenario == 2u) {
+                m->dmac[0].config = PL080_CONFIG_EN;
+                m->dmac[0].ch[0].cfg = PL080_CFG_EN |
+                    (2u << PL080_CFG_FLOW_SHIFT);
+                m->dmac[0].ch[0].src = S5L8900_UART4_BASE + UART_URXH;
+                m->dmac[0].ch[0].dst = 0x800u;
+                m->dmac[0].ch[0].ctrl = 1u | PL080_CTRL_I;
+            }
+            if (scenario == 3u) m->power_trace_ticks_left = 1000u;
+            if (scenario == 4u) {
+                const uint32_t store = 0xe5834020u; /* STR r4,[r3,#UTXH] */
+                s5l8900_load(m, 0x400u, &store, sizeof store);
+                m->cpu.r[3] = S5L8900_UART0_BASE;
+                m->cpu.r[4] = 'A';
+            }
+        }
+        CHECK(s5l8900_static_a64_set_enabled(&fast, true) &&
+              s5l8900_static_a64_set_compact_raw(&fast, true) &&
+              s5l8900_static_a64_set_compact_raw_privileged(&fast, true) &&
+              s5l8900_static_a64_set_compact_raw_privileged_window_refill(
+                  &fast, true), "active-window native policy refused");
+        for (unsigned phase = 0u; phase < 2u; phase++) {
+            if (phase && scenario == 2u) {
+                CHECK(s5l_uart_rx_push(&fast.uart4, 'Z') &&
+                      s5l_uart_rx_push(&reference.uart4, 'Z'),
+                      "active-window UART injection failed");
+            }
+            arm_status_t fs = ARM_OK, rs = ARM_OK;
+            CHECK(s5l8900_run(&fast, 1024u, &fs) == 1024u && fs == ARM_OK &&
+                  s5l8900_run(&reference, 1024u, &rs) == 1024u && rs == ARM_OK,
+                  "active-window execution stopped (%u/%u)", scenario, phase);
+            uint8_t *a = NULL, *b = NULL;
+            size_t an = 0u, bn = 0u;
+            CHECK(snapshot_save_mem(&fast, &a, &an) == SNAP_OK &&
+                  snapshot_save_mem(&reference, &b, &bn) == SNAP_OK &&
+                  a && b && an == bn && !memcmp(a, b, an),
+                  "active-window serialized state differs (%u/%u)",
+                  scenario, phase);
+            CHECK(fast.tb_accum == reference.tb_accum &&
+                  fast.level_dirty == reference.level_dirty &&
+                  fast.ext_seen == reference.ext_seen,
+                  "active-window deferred state differs (%u/%u)", scenario, phase);
+            free(a); free(b);
+            cases++;
+        }
+        CHECK(s5l8900_static_a64_compact_raw_privileged_boundary_retired(&fast) > 0u,
+              "active-window oracle did not exercise resident boundaries");
+        if (scenario == 2u)
+            CHECK(fast.ram[0x800u] == 'Z' && fast.dmac[0].bytes_moved == 1u,
+                  "empty receive witness lost newly arrived input");
+        if (scenario == 4u)
+            CHECK(fast.uart0.tx_len == 512u, "MMIO prefix lost UART output");
+        s5l8900_free(&fast); s5l8900_free(&reference);
+    }
+    if (g_fail == failures_before)
+        printf("  COMPACT-ACTIVE-WINDOWS exact=yes cases=%u empty-rx=yes "
+               "input=yes mmio=yes trace=yes serialized-machine=yes\n", cases);
+}
+
 /* A long region must be indistinguishable from literal instruction/tick pairs,
  * including a timer read after a 900-instruction prefix and interrupt entry
  * before that read. This uses the shipped run API, not the raw handler helper. */
@@ -7712,6 +7807,7 @@ int main(void) {
     test_signed_static_a64_thumb_oracle();
     test_signed_static_a64_thumb_read_oracle();
     test_compact_event_regions();
+    test_compact_active_window_boundaries();
     test_compact_pc_sampling_excludes_fallback_tracing();
     test_compact_pc_sampling_records_guest_cursor();
     test_stub_window_stores_and_counts();
