@@ -1226,6 +1226,9 @@ static void test_legacy_snapshot_requires_arm1176(void) {
     m.bus.access_failed = snapshot_bus_failure_probe;
     m.cpu.a8_l2actlr = 0x02000042u;
     m.cpu.a8_excl_size = 8u;
+    const arm_a8_config_t inactive_config = {ARM_A8_R3P2, 16, 32, 512};
+    m.cpu.a8_config = inactive_config;
+    m.cpu.a8_csselr = 2u;
     uint64_t inactive_fp[16];
     for (unsigned n = 0; n < 16u; n++)
         inactive_fp[n] = m.cpu.a8_vfp_hi[n] = UINT64_C(0x0123456789abcdef) + n;
@@ -1242,6 +1245,8 @@ static void test_legacy_snapshot_requires_arm1176(void) {
           "host callback or inactive/derived A8 state changed legacy snapshot bytes");
     CHECK(m.cpu.a8_l2actlr == 0x02000042u, "snapshot save mutated CPU state");
     CHECK(m.cpu.a8_excl_size == 8u, "snapshot save mutated inactive exclusive size");
+    CHECK(memcmp(&m.cpu.a8_config, &inactive_config, sizeof inactive_config) == 0 &&
+          m.cpu.a8_csselr == 2u, "save mutated inactive A8 configuration");
     CHECK(memcmp(inactive_fp, m.cpu.a8_vfp_hi, sizeof inactive_fp) == 0, "snapshot save mutated inactive FP bank");
     CHECK(memcmp(inactive_types, m.cpu.a8_tlb_memory_type, sizeof inactive_types) == 0 &&
           m.cpu.tlb_arch_stamp == ARM_ARCH_V7_CORTEX_A8, "snapshot save mutated derived memory types");
@@ -1261,6 +1266,8 @@ static void test_legacy_snapshot_requires_arm1176(void) {
               "rejected snapshot returned data");
         CHECK(m.cpu.a8_l2actlr == 0x02000042u, "rejected save mutated L2 state");
         CHECK(m.cpu.a8_excl_size == 8u, "rejected save mutated exclusive size");
+        CHECK(memcmp(&m.cpu.a8_config, &inactive_config, sizeof inactive_config) == 0 &&
+              m.cpu.a8_csselr == 2u, "rejected save mutated A8 configuration");
         CHECK(memcmp(inactive_fp, m.cpu.a8_vfp_hi, sizeof inactive_fp) == 0, "rejected save mutated FP bank");
         CHECK(memcmp(inactive_types, m.cpu.a8_tlb_memory_type, sizeof inactive_types) == 0 &&
               m.cpu.tlb_arch_stamp == ARM_ARCH_V7_CORTEX_A8, "rejected save mutated derived memory types");
@@ -1274,6 +1281,8 @@ static void test_legacy_snapshot_requires_arm1176(void) {
                   m.cpu.a8_excl_size == 8u &&
                   memcmp(inactive_fp, m.cpu.a8_vfp_hi, sizeof inactive_fp) == 0,
                   "rejected restore mutated the target");
+            CHECK(memcmp(&m.cpu.a8_config, &inactive_config, sizeof inactive_config) == 0 &&
+                  m.cpu.a8_csselr == 2u, "rejected restore mutated A8 configuration");
             CHECK(memcmp(inactive_types, m.cpu.a8_tlb_memory_type, sizeof inactive_types) == 0 &&
                   m.cpu.tlb_arch_stamp == ARM_ARCH_V7_CORTEX_A8, "rejected restore mutated derived memory types");
         }
@@ -1284,6 +1293,9 @@ static void test_legacy_snapshot_requires_arm1176(void) {
               "legacy ARM1176 restore regressed");
         CHECK(m.cpu.arch == ARM_ARCH_V6_ARM1176 && m.cpu.a8_l2actlr == 0u && m.cpu.a8_excl_size == 0u,
               "legacy restore lost the default profile or retained inactive L2 state");
+        const arm_a8_config_t cleared_config = {0};
+        CHECK(memcmp(&m.cpu.a8_config, &cleared_config, sizeof cleared_config) == 0 &&
+              m.cpu.a8_csselr == 0u, "legacy restore retained inactive A8 configuration");
         for (unsigned n = 0; n < 16u; n++)
             CHECK(m.cpu.a8_vfp_hi[n] == 0u, "legacy restore retained inactive upper FP bank");
         memset(inactive_types, 0, sizeof inactive_types);

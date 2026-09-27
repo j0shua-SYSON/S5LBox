@@ -125,7 +125,10 @@ SNAP_SIZE_GUARD(arm_cp15_t,        64,    "snap_cpu");
 /* The derived memory-type cache and profile stamp bring the compiler-measured
  * size to 72352. Like the TLB they are cleared on restore and never serialized;
  * no ARM1176 snapshot field or version changes. */
-SNAP_SIZE_GUARD(arm_cpu_t,         72352,   "snap_cpu");
+/* Explicit A8 configuration/CSSELR bring the compiler-measured size to72368.
+ * Inactive on ARM1176, cleared on restore, and excluded under the same A8
+ * rejection rule; the serialized bytes and version remain unchanged. */
+SNAP_SIZE_GUARD(arm_cpu_t,         72368,   "snap_cpu");
 SNAP_SIZE_GUARD(s5l_uart_t,        8280,  "snap_uart");
 SNAP_SIZE_GUARD(s5l_vic_t,         16,    "snap_vic");
 SNAP_SIZE_GUARD(s5l_timer_t,       40,    "snap_timer");
@@ -233,8 +236,8 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * the guest snapshot byte stream and version remain unchanged.
  * The size below must be read from the
  * compiler's emitted `.space`, not inferred from source padding. */
-/* 132184 includes the CPU's derived memory types and profile stamp. */
-SNAP_SIZE_GUARD(s5l8900_t,         132184, "snap_mach");
+/* 132200 includes the CPU's inactive generic A8 configuration/CSSELR. */
+SNAP_SIZE_GUARD(s5l8900_t,         132200, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -476,6 +479,8 @@ static void snap_cpu(sn_io_t *io, arm_cpu_t *c) {
     if (sn_reading(io)) {
         c->a8_excl_size = 0u;
         c->a8_l2actlr = 0u;
+        memset(&c->a8_config, 0, sizeof c->a8_config);
+        c->a8_csselr = 0u;
         memset(c->a8_vfp_hi, 0, sizeof c->a8_vfp_hi);
         memset(c->tlb, 0, sizeof c->tlb);
         memset(c->a8_tlb_memory_type, 0, sizeof c->a8_tlb_memory_type);

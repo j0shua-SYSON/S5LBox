@@ -380,6 +380,17 @@ typedef enum {
     ARM_ARCH_V7_CORTEX_A8 = 2 /* S5L8920 / iPhone 3GS; no integer divide   */
 } arm_arch_t;
 
+/* Explicit generic core configuration from DDI0344K. Selecting r3p2 is not
+ * evidence of a particular board's CPU revision. The ordinary A8 instruction
+ * profile leaves these implementation-dependent ID/cache registers unknown. */
+typedef enum { ARM_A8_UNSPECIFIED = 0, ARM_A8_R3P2 = 1 } arm_a8_revision_t;
+typedef struct {
+    arm_a8_revision_t revision;
+    uint32_t l1_instruction_kib; /* 16 or 32 */
+    uint32_t l1_data_kib;        /* 16 or 32, independently selected */
+    uint32_t l2_kib;            /* 0, 128, 256, 512 or 1024 */
+} arm_a8_config_t;
+
 /* Profile identifiers are stable names, not an ordered ISA version. In
  * particular Cortex-A8 implements MOVW/MOVT but neither form of integer
  * division (Cortex-A8 TRM DDI0344K, section 3.2.15). Unknown identifiers
@@ -645,6 +656,11 @@ typedef struct arm_cpu {
      * is serialized; reset/restore clears them with the translation cache. */
     uint8_t a8_tlb_memory_type[ARM_TLB_ENTRIES];
     arm_arch_t tlb_arch_stamp;
+    /* Explicit generic A8 identity/cache configuration, inactive on legacy
+     * profiles and absent from their snapshots. CSSELR is Secure-only here;
+     * its architecturally unknown reset value is selected as zero. */
+    arm_a8_config_t a8_config;
+    uint32_t a8_csselr;
 } arm_cpu_t;
 
 /*
@@ -744,6 +760,13 @@ void arm_reset(arm_cpu_t *cpu, const arm_bus_t *bus);
  * does not realize a board or imply complete ARMv7 system/VFP support.
  * Reject a null CPU or unknown profile without modifying the CPU. */
 bool arm_reset_profile(arm_cpu_t *cpu, const arm_bus_t *bus, arm_arch_t arch);
+
+/* Reset an explicitly configured generic Cortex-A8. Validate all parameters
+ * before modifying CPU storage; config may alias cpu->a8_config. This retains
+ * the no-ECC, Secure-only functional model and coherent cache maintenance;
+ * it does not select or establish any board's hardware configuration. */
+bool arm_reset_cortex_a8(arm_cpu_t *cpu, const arm_bus_t *bus,
+                         const arm_a8_config_t *config);
 
 /* Install or clear the optional privileged-SVC host-service callback. */
 void arm_bus_set_privileged_svc_handler(arm_bus_t *bus,

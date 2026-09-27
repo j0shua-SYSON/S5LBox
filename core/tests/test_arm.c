@@ -12329,6 +12329,140 @@ static void exclusive_put(bool thumb, uint32_t pc, uint32_t insn) {
     if (thumb) { m_w16(NULL, pc, (uint16_t)(insn >> 16)); m_w16(NULL, pc + 2u, (uint16_t)insn); }
     else m_w32(NULL, pc, insn);
 }
+static void test_cortex_a8_generic_configuration(void) {
+    const arm_a8_config_t config = {ARM_A8_R3P2, 32, 32, 256};
+    static const uint32_t l2_sizes[] = {0u,128u,256u,512u,1024u};
+    static const uint32_t l2_ids[] = {0xf0000000u,0xf01fe03au,0xf03fe03au,0xf07fe03au,0xf0ffe03au};
+    arm_cpu_t c, saved;
+    memset(&c, 0xa5, sizeof c);
+    saved = c;
+    CHECK(!arm_reset_cortex_a8(NULL, &g_bus, &config) &&
+          !arm_reset_cortex_a8(&c, &g_bus, NULL) && memcmp(&c, &saved, sizeof c) == 0,
+          "invalid A8 reset arguments changed destination");
+    const arm_a8_config_t invalid[] = {
+        {ARM_A8_UNSPECIFIED,32,32,256}, {(arm_a8_revision_t)2,32,32,256},
+        {ARM_A8_R3P2,0,32,256}, {ARM_A8_R3P2,64,32,256}, {ARM_A8_R3P2,32,31,256},
+        {ARM_A8_R3P2,32,32,64}, {ARM_A8_R3P2,32,32,255}, {ARM_A8_R3P2,32,32,2048},
+        {ARM_A8_R3P2,UINT32_MAX,32,256}, {ARM_A8_R3P2,32,UINT32_MAX,256},
+        {ARM_A8_R3P2,32,32,UINT32_MAX}
+    };
+    for (unsigned n = 0; n < sizeof invalid / sizeof invalid[0]; n++)
+        CHECK(!arm_reset_cortex_a8(&c, &g_bus, &invalid[n]) && memcmp(&c, &saved, sizeof c) == 0,
+              "invalid A8 reset mutated storage case=%u", n);
+    CHECK(arm_reset_cortex_a8(&c, NULL, &config) && !c.bus, "null bus reset failed");
+    c.a8_csselr = 13u;
+    CHECK(arm_reset_cortex_a8(&c, &g_bus, &c.a8_config) &&
+          memcmp(&c.a8_config, &config, sizeof config) == 0 && c.a8_csselr == 0u &&
+          c.arch == ARM_ARCH_V7_CORTEX_A8 && c.a8_l2actlr == 0x42u,
+          "aliased config reset lost identity or existing reset semantics");
+    for (unsigned profile = 0; profile < 3u; profile++) {
+        CHECK(arm_reset_cortex_a8(&c, &g_bus, &config), "reset");
+        CHECK(arm_reset_profile(&c, &g_bus, (arm_arch_t)profile), "reset");
+        const arm_a8_config_t zero = {0};
+        CHECK(memcmp(&c.a8_config, &zero, sizeof zero) == 0 && c.a8_csselr == 0u,
+              "ordinary reset inherited generic A8 configuration");
+        if (profile == ARM_ARCH_V7_CORTEX_A8) {
+            m_w32(NULL, 0, 0xee104f10u);
+            CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u,
+                  "ordinary A8 profile acquired an unselected MIDR");
+        }
+    }
+    for (unsigned host = 0; host < 2u; host++) {
+     for (unsigned thumb = 0; thumb < 2u; thumb++) {
+      for (unsigned i = 0; i < 2u; i++) for (unsigned d = 0; d < 2u; d++) {
+       for (unsigned l2 = 0; l2 < 5u; l2++) {
+        arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
+        const arm_a8_config_t selected = {ARM_A8_R3P2, 16u << i, 16u << d, l2_sizes[l2]};
+        CHECK(arm_reset_cortex_a8(&c, &bus, &selected), "valid cache geometry rejected");
+        c.cpsr |= ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_Q | (thumb ? ARM_CPSR_T : 0u);
+        c.excl_valid = true; c.excl_addr = 0x4321u;
+        uint32_t flags = c.cpsr, generation = c.tlb_gen;
+        for (unsigned sel = 0; sel < 16u; sel++) {
+            uint32_t pc = sel * 20u;
+            c.r[0] = sel;
+            exclusive_put(thumb, pc, 0xee400f10u);       /* MCR CSSELR */
+            exclusive_put(thumb, pc + 4u, 0xee301f10u);  /* MRC CCSIDR */
+            exclusive_put(thumb, pc + 8u, 0xee502f10u);  /* MRC CSSELR */
+            exclusive_put(thumb, pc + 12u, 0xee303f30u); /* MRC CLIDR */
+            exclusive_put(thumb, pc + 16u, 0xee104f30u); /* MRC CTR */
+            for (unsigned n = 0; n < 5u; n++) CHECK(arm_step(&c) == ARM_OK, "cache discovery instruction refused");
+            uint32_t expected = sel == 0u ? (d ? 0xe00fe01au : 0xe007e01au) :
+                                sel == 1u ? (i ? 0x200fe01au : 0x2007e01au) :
+                                sel == 2u ? l2_ids[l2] : 0u;
+            CHECK(c.r[1] == expected && c.r[2] == sel && c.a8_csselr == sel &&
+                  c.r[3] == (l2 ? 0x0a000023u : 0x0a000003u) && c.r[4] == 0x82048004u &&
+                  c.cpsr == flags && c.tlb_gen == generation && c.excl_valid && c.excl_addr == 0x4321u &&
+                  c.r[15] == pc + 20u && c.cycles == (sel + 1u) * 5u,
+                  "cache geometry/selection/state mismatch host=%u T=%u I=%u D=%u L2=%u sel=%u",host,thumb,i,d,l2,sel);
+        }
+        /* Enable controls do not change the implemented geometry. */
+        c.cp15.actlr &= ~2u; c.r[15] = 0;
+        exclusive_put(thumb, 0, 0xee303f30u);
+        CHECK(arm_step(&c) == ARM_OK && c.r[3] == (l2 ? 0x0a000023u : 0x0a000003u),
+              "L2 disable changed CLIDR topology");
+       }
+      }
+     }
+    }
+    /* Every c0 selector: no board silicon-ID, feature-bank or legacy alias
+     * fallback. User/PC/writes are refused without altering saved CPU state. */
+    for (unsigned thumb = 0; thumb < 2u; thumb++) for (unsigned user = 0; user < 2u; user++)
+     for (unsigned load = 0; load < 2u; load++) for (unsigned op1 = 0; op1 < 8u; op1++)
+      for (unsigned crm = 0; crm < 16u; crm++) for (unsigned op2 = 0; op2 < 8u; op2++) {
+        CHECK(arm_reset_cortex_a8(&c, &g_bus, &config), "reset");
+        c.cpsr = (user ? ARM_MODE_USR : ARM_MODE_SVC) | ARM_CPSR_N | ARM_CPSR_Q | (thumb ? ARM_CPSR_T : 0u);
+        c.r[4] = 2u; c.excl_valid = true; c.excl_addr = 0x7654u;
+        uint32_t flags = c.cpsr;
+        bool select = op1 == 2u && op2 == 0u;
+        bool allowed = !user && crm == 0u && (select || (load && (op1 == 0u || (op1 == 1u && op2 <= 1u))));
+        uint32_t expected = select ? (load ? 0u : 2u) : op1 == 1u ? (op2 ? 0x0a000023u : 0xe00fe01au) :
+                            op2 == 1u ? 0x82048004u : op2 == 2u || op2 == 5u ? 0u : op2 == 3u ? 0x00202001u : 0x413fc082u;
+        if (!allowed || !load) expected = 2u;
+        exclusive_put(thumb, 0, 0xee004f10u | (load << 20) | (op1 << 21) | (op2 << 5) | crm);
+        CHECK(arm_step(&c) == (allowed ? ARM_OK : ARM_UNDEFINED) && c.r[4] == expected &&
+              c.r[15] == (allowed ? 4u : 0u) && c.cycles == 1u && c.cpsr == flags &&
+              c.excl_valid && c.excl_addr == 0x7654u && c.a8_csselr == (allowed && select && !load ? 2u : 0u),
+              "c0 selector/access mismatch T=%u U=%u L=%u op1=%u crm=%u op2=%u",thumb,user,load,op1,crm,op2);
+    }
+    for (unsigned thumb = 0; thumb < 2u; thumb++) for (unsigned bit = 4; bit < 32u; bit++) {
+        CHECK(arm_reset_cortex_a8(&c, &g_bus, &config), "reset");
+        c.cpsr |= thumb ? ARM_CPSR_T : 0u; c.a8_csselr = 1u; c.r[4] = (1u << bit) | 2u;
+        exclusive_put(thumb, 0, 0xee404f10u);
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && c.a8_csselr == 1u,
+              "CSSELR reserved write mutated selection bit=%u",bit);
+    }
+    for (unsigned thumb = 0; thumb < 2u; thumb++) for (unsigned load = 0; load < 2u; load++) {
+        CHECK(arm_reset_cortex_a8(&c, &g_bus, &config), "reset");
+        c.cpsr |= thumb ? ARM_CPSR_T : 0u;
+        exclusive_put(thumb, 0, 0xee00ff10u | (load << 20));
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u && !c.a8_csselr, "PC CP15 operand accepted");
+        /* False condition skips even a reserved CSSELR source. */
+        c.r[4] = UINT32_MAX;
+        if (thumb) {
+            m_w16(NULL, 0, 0xbf08u); /* IT EQ; Z clear */
+            exclusive_put(true, 2u, 0xee404f10u | (load << 20));
+            CHECK(arm_step(&c) == ARM_OK, "IT");
+        } else m_w32(NULL, 0, 0x0e404f10u | (load << 20));
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == (thumb ? 6u : 4u) &&
+              c.r[4] == UINT32_MAX && c.a8_csselr == 0u, "failed condition executed configuration access");
+    }
+    /* A Thumb selector write cannot occur until both virtual halfwords have
+     * been fetched. The second physical page is deliberately nonadjacent. */
+    for (unsigned host = 0; host < 2u; host++) for (unsigned fault = 0; fault < 3u; fault++) {
+        memset(g_ram, 0, sizeof g_ram);
+        arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
+        CHECK(arm_reset_cortex_a8(&c, &bus, &config), "reset");
+        c.cp15.sctlr |= ARM_SCTLR_M; c.cp15.ttbr0 = 0x4000u; c.cp15.dacr = 1u;
+        c.cpsr |= ARM_CPSR_T; c.r[15] = 0xffeu; c.r[4] = 2u;
+        m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x8012u);
+        m_w32(NULL, 0x6004u, fault == 1u ? 0u : fault == 2u ? 0xa013u : 0xa012u);
+        m_w16(NULL, 0x8ffeu, 0xee40u); m_w16(NULL, 0xa000u, 0x4f10u); m_w16(NULL, 0x9000u, 0xff10u);
+        CHECK(arm_step(&c) == ARM_OK, "selector split fetch failed");
+        CHECK(fault ? (c.r[15] == ARM_VEC_PREFETCH && c.cp15.ifar == 0x1000u && c.a8_csselr == 0u) :
+                      (c.r[15] == 0x1002u && c.a8_csselr == 2u), "CSSELR changed before complete fetch");
+    }
+}
+
 static void exclusive_setup(arm_cpu_t *c, bool thumb, uint32_t insn) {
     memset(g_ram, 0, sizeof g_ram);
     CHECK(arm_reset_profile(c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
@@ -12686,6 +12820,7 @@ int main(void) {
     test_cp15_cache_op_is_accepted();
     test_cp15_wfi_uses_only_the_exact_privileged_hook();
     test_cortex_a8_cp15_selector_boundary();
+    test_cortex_a8_generic_configuration();
     test_cortex_a8_cp15_maintenance_boundary();
     test_cortex_a8_l2_auxiliary_control();
     test_cortex_a8_system_control_register();

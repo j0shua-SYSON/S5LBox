@@ -6,6 +6,36 @@ interrupt fabric, UART and timebase counter. A complete machine, kernel boot, an
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
+## Explicit generic CPU configuration
+
+The CPU API also provides an **explicit generic Cortex-A8 r3p2 configuration**
+for implementation testing. `arm_reset_cortex_a8` validates the revision and
+independent L1 instruction/data sizes (16 or 32 KiB) and L2 size (absent,
+128, 256, 512 or 1024 KiB) before changing CPU state. Its identity registers
+come from [ARM DDI0344K](https://documentation-service.arm.com/static/5e8e1ac688295d1e18d35fde),
+sections 3.2.2–6, 3.2.21, 3.2.23 and 3.2.24. This configuration is not
+selected by the S5L8920 machine or by ordinary `arm_reset_profile` calls.
+It does not establish the 3GS CPU revision or cache geometry.
+
+The selected generic core implements privileged MIDR (including its documented
+aliases), CTR, TCMTR, TLBTR, MPIDR, CLIDR, CCSIDR and Secure CSSELR accesses.
+CSSELR selects the actual configured cache geometry; its architecturally
+unknown reset value is chosen as zero. Reserved upper write bits are refused,
+and reserved low selections return the zero CCSIDR encoding documented by
+table 3-42. Writes to read-only IDs, User accesses, PC operands, board silicon
+ID and unaudited feature-bank selectors remain refused. ARM and Thumb use the
+same checked path. Cache maintenance remains synchronous over coherent memory;
+this adds no cache timing, ECC faults or Nonsecure transitions. ARM1176
+snapshots exclude and clear this inactive state without changing format v32.
+
+Host validation passed all 78 strict and 73 shipping tests, plus the existing
+24 timebase and 192 interrupt-controller firmware cases. Old and new snapshot
+executables cross-load the same byte-identical v32 save. A separately labelled
+kernel diagnostic selects r3p2, 32 KiB L1I/L1D, 256 KiB L2 and no ECC: it
+reaches a 76,172-step stop on an unsupported Thumb `ADDW` at `0x80021b34`.
+This is a generic configuration hypothesis. The original N88
+diagnostic retains its entire 61,650-step trace and ECC configuration guard.
+
 ## Target evidence
 
 [Apple's iOS 6.1.6 bulletin](https://support.apple.com/en-us/103607) confirms

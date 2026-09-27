@@ -1517,6 +1517,46 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
          * both MRC CP15 to APSR and MCR CP15 from PC are unpredictable
          * (DDI0406C.b B3.15.2). Refuse before changing flags or registers. */
         if (rd == 15u) return ARM_UNDEFINED;
+        if (crn == 0u && c->a8_config.revision == ARM_A8_R3P2) {
+            /* DDI0344K 3.2.2-6/21/23/24. These are an explicitly selected
+             * generic implementation, never an inferred S5L8920 identity.
+             * Unknown selectors still stop before the legacy CP15 path. */
+            if (!cpu_is_priv(c) || crm != 0u) return ARM_UNDEFINED;
+            if (opc1 == 2u && opc2 == 0u) {
+                if (load) c->r[rd] = c->a8_csselr;
+                else {
+                    if (c->r[rd] & ~15u) return ARM_UNDEFINED; /* UNP/SBZ */
+                    c->a8_csselr = c->r[rd];
+                }
+                return ARM_OK;
+            }
+            if (!load) return ARM_UNDEFINED;
+            uint32_t value;
+            if (opc1 == 0u) {
+                switch (opc2) {
+                case 1u: value = 0x82048004u; break; /* CTR */
+                case 2u: case 5u: value = 0u; break; /* No TCM; uniprocessor */
+                case 3u: value = 0x00202001u; break; /* TLBTR */
+                default: value = 0x413fc082u; break; /* MIDR and 4/6/7 aliases */
+                }
+            } else if (opc1 == 1u && opc2 == 1u) {
+                value = c->a8_config.l2_kib ? 0x0a000023u : 0x0a000003u;
+            } else if (opc1 == 1u && opc2 == 0u) {
+                /* Table3-42: 64-byte lines, 4-way L1 and 8-way L2. Sizes
+                 * are reset-validated. Reserved low CSSELR selections have
+                 * the explicitly documented zero CCSIDR encoding. */
+                unsigned sel = c->a8_csselr;
+                if (sel < 2u) {
+                    uint32_t kib = sel ? c->a8_config.l1_instruction_kib : c->a8_config.l1_data_kib;
+                    value = (sel ? 0x2000001au : 0xe000001au) | ((kib * 4u - 1u) << 13);
+                } else if (sel == 2u) {
+                    uint32_t kib = c->a8_config.l2_kib;
+                    value = kib ? 0xf000003au | ((kib * 2u - 1u) << 13) : 0xf0000000u;
+                } else value = 0u;
+            } else return ARM_UNDEFINED; /* Including board SILICONID input. */
+            c->r[rd] = value;
+            return ARM_OK;
+        }
         if (opc1 == 1u && crn == 9u && crm == 0u && opc2 == 2u) {
             /* DDI0344K 3.2.55: L2ACTLR is privileged R/W in Secure state.
              * This profile stays in the Secure reset state: SCR, SMC and
@@ -1798,6 +1838,8 @@ bool arm_reset_profile(arm_cpu_t *cpu, const arm_bus_t *bus, arm_arch_t arch) {
         cpu->cp15.actlr = 2u;
     }
     cpu->a8_l2actlr = arch == ARM_ARCH_V7_CORTEX_A8 ? 0x42u : 0u;
+    memset(&cpu->a8_config, 0, sizeof cpu->a8_config);
+    cpu->a8_csselr = 0u;
     /*
      * Generation 1, never 0. Entries carry the generation they were filled in
      * and a hit needs a match; a zeroed cpu has every entry at 0, so starting
@@ -1840,6 +1882,19 @@ bool arm_reset_profile(arm_cpu_t *cpu, const arm_bus_t *bus, arm_arch_t arch) {
     cpu->cpsr   = ARM_MODE_SVC | ARM_CPSR_I | ARM_CPSR_F | ARM_CPSR_A;
     cpu->cycles = 0;
     cpu->bus    = bus;
+    return true;
+}
+
+bool arm_reset_cortex_a8(arm_cpu_t *cpu, const arm_bus_t *bus,
+                         const arm_a8_config_t *config) {
+    if (!cpu || !config || config->revision != ARM_A8_R3P2 ||
+        (config->l1_instruction_kib != 16u && config->l1_instruction_kib != 32u) ||
+        (config->l1_data_kib != 16u && config->l1_data_kib != 32u) ||
+        (config->l2_kib != 0u && config->l2_kib != 128u && config->l2_kib != 256u &&
+         config->l2_kib != 512u && config->l2_kib != 1024u)) return false;
+    arm_a8_config_t selected = *config; /* May alias reset destination. */
+    if (!arm_reset_profile(cpu, bus, ARM_ARCH_V7_CORTEX_A8)) return false;
+    cpu->a8_config = selected;
     return true;
 }
 
