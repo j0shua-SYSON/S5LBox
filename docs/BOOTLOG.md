@@ -1171,6 +1171,39 @@ prove that intermittent bug fixed. The saved user quartet was restored and
 hash-verified across reinstallation of `8221add`; only the four temporary
 return clones and the two retained-locally installation uploads were deleted.
 
+### Rapid contact releases need distinct wire timestamps (2026-09-27)
+
+The controller can deliver a press and release inside one guest millisecond.
+Accepting both reports is insufficient: MultitouchSupport's current-contact
+collector (`0x33cfd670..688`, 7E18) omits a zero-amplitude BreakTouch, while
+MultitouchHID's `_mthm_FlushStuckContacts` (`+0x2630..263c`) retains the old
+contact when its timestamp equals the new frame's. A release can therefore
+leave a contact down, and the next key becomes a drag instead of another tap.
+The earlier statement that equal timestamps were safe confused parser
+acceptance with downstream contact lifecycle behavior.
+
+The exact cold-keyboard checkpoint reproduced this with eight scheduled taps,
+each held for 100,000 retired instructions and spaced 500,000 apart. All sixteen
+reports were read without refusal, but Q/W/E/R merged into a drag ending at R;
+the 60-million-instruction observation ended with R inserted and an I popup.
+Giving reports distinct wire milliseconds, with **unchanged delivery instruction
+counts and no added wait**, produced eight UIKit press/release pairs, eight
+insertions and `qwertyui`. A separate delivery-spacing experiment also passed,
+but is unnecessary for this defect.
+
+The board API now uses guest milliseconds with a minimal one-millisecond tie
+break. It does not alter machine time, add a delivery throttle, change contact
+IDs/phases, or restore the old fixed 16 ms timestamp cadence. Refused reports
+do not consume timestamps; idle and held durations still follow the guest
+clock. The existing 32-bit wire-time saturation limit remains. Regression
+coverage includes rapid edges, unread/invalid refusals, restore, legacy times
+ahead of the clock, clock catch-up and saturation. This fixes the reproduced
+contact collapse; it is not a claim that cold drawing latency or slow app
+transitions have been resolved.
+
+Local validation: 77/77 tests passed (82.40 s), including 438 controller
+checks. Physical-device validation of this change is still pending.
+
 ### Historical instruction-resume narrative
 
 Two interpreter changes make the current instruction counts different from the

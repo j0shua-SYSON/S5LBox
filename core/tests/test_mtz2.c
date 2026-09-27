@@ -1553,7 +1553,7 @@ static void test_machine_contact_time_follows_guest_time(void) {
     CHECK(s5l8900_set_contacts(&m, &c, 1u), "first contact refused");
     CHECK(read_report_timestamp(&s) == 1u, "zero time must stay nonzero");
     CHECK(s5l8900_set_contacts(&m, &c, 1u), "same-time report refused");
-    CHECK(read_report_timestamp(&s) == 1u, "reports manufactured elapsed time");
+    CHECK(read_report_timestamp(&s) == 2u, "same-time reports shared a wire time");
 
     /* Guest idle time and a half-second hold are not two 16 ms steps. */
     m.timer.ticks = (uint64_t)m.tb_hz * 120u + m.tb_hz / 4u;
@@ -1580,13 +1580,16 @@ static void test_machine_contact_time_follows_guest_time(void) {
     free(blob);
     s5l_spi_slave_t rs = restored.spi[1].slaves[0];
     CHECK(s5l8900_set_contacts(&restored, &c, 1u), "restored contact refused");
-    CHECK(read_report_timestamp(&rs) == 120750u,
-          "restore introduced elapsed host time or a synthetic frame step");
+    CHECK(read_report_timestamp(&rs) == 120751u,
+          "restore lost the one-millisecond report tie break");
 
     /* Legacy count timestamps can be ahead of a tiny synthetic timebase. */
     restored.timer.ticks = 0u;
     CHECK(s5l8900_set_contacts(&restored, &c, 1u), "legacy contact refused");
-    CHECK(read_report_timestamp(&rs) == 120750u, "legacy time went backwards");
+    CHECK(read_report_timestamp(&rs) == 120752u, "legacy report time was not distinct");
+    restored.timer.ticks = (uint64_t)restored.tb_hz * 121u;
+    CHECK(s5l8900_set_contacts(&restored, &c, 1u), "clock catch-up refused");
+    CHECK(read_report_timestamp(&rs) == 121000u, "tie break displaced guest time");
     restored.timer.ticks = UINT64_MAX;
     restored.tb_hz = 1u;
     CHECK(s5l8900_set_contacts(&restored, &c, 1u), "large time refused");
@@ -1595,6 +1598,40 @@ static void test_machine_contact_time_follows_guest_time(void) {
     CHECK(s5l8900_set_contacts(&restored, &c, 1u), "no-timebase fallback refused");
     CHECK(read_report_timestamp(&rs) == UINT32_MAX, "fallback wrapped to zero");
     s5l8900_free(&restored);
+    s5l8900_free(&m);
+}
+
+/* All lifecycle edges must remain distinguishable even when queued input
+ * drains faster than the wire clock's one-millisecond resolution. */
+static void test_machine_fast_edges_have_distinct_wire_times(void) {
+    s5l8900_t m;
+    s5l_spi_slave_t s;
+    CHECK(s5l8900_init(&m, 0u, 1u << 16), "machine init failed");
+    bring_up(&m.mtz2, &s);
+    m.timer.ticks = (uint64_t)m.tb_hz * 100u;
+    uint64_t ticks = m.timer.ticks;
+    s5l_mt_contact_t c = one_finger(14u, 289u, MTZ2_PHASE_MAKE_TOUCH);
+    for (unsigned i = 0; i < 16u; i++) {
+        c.phase = (i & 1u) ? MTZ2_PHASE_BREAK_TOUCH : MTZ2_PHASE_MAKE_TOUCH;
+        c.pressure = (i & 1u) ? 0u : 160u;
+        c.x = (uint16_t)(14u + 32u * (i / 2u));
+        CHECK(s5l8900_set_contacts(&m, &c, 1u), "edge %u refused", i);
+        uint32_t accepted = m.mtz2.frame_ms;
+        uint8_t seq = m.mtz2.frame_seq;
+        uint8_t pending[MTZ2_PAYLOAD_LIMIT];
+        memcpy(pending, m.mtz2.frame, sizeof pending);
+        CHECK(!s5l8900_set_contacts(&m, &c, 1u), "unread edge overwritten");
+        CHECK(m.mtz2.frame_ms == accepted && m.mtz2.frame_seq == seq &&
+              memcmp(pending, m.mtz2.frame, sizeof pending) == 0,
+              "refused edge consumed time or changed the wire frame");
+        CHECK(read_report_timestamp(&s) == 100000u + i,
+              "edge %u did not get the minimal distinct time", i);
+        CHECK(m.timer.ticks == ticks, "report tie break advanced machine time");
+    }
+    uint32_t accepted = m.mtz2.frame_ms;
+    c.id = 0u;
+    CHECK(!s5l8900_set_contacts(&m, &c, 1u), "invalid contact accepted");
+    CHECK(m.mtz2.frame_ms == accepted, "invalid contact consumed time");
     s5l8900_free(&m);
 }
 
@@ -2145,6 +2182,7 @@ int main(void) {
     test_a_coordinate_maps_back_to_the_pixel_it_came_from();
     test_injection_refuses_when_the_device_cannot_report();
     test_machine_contact_time_follows_guest_time();
+    test_machine_fast_edges_have_distinct_wire_times();
     test_five_contacts_fit_and_survive_the_wire();
     test_mutations_are_caught();
     test_an_injection_reaches_the_cpu_through_the_cascade();

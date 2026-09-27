@@ -1571,10 +1571,19 @@ bool s5l8900_set_contacts(s5l8900_t *m, const s5l_mt_contact_t *c, unsigned n) {
         seconds * 1000u + (m->timer.ticks % m->tb_hz) * 1000u / m->tb_hz;
     if (ms > UINT32_MAX) ms = UINT32_MAX;
     if (!ms) ms = 1u;
-    /* Old checkpoints carry a report-count timestamp. Do not send a
-     * decreasing value while their timebase catches up. The parser accepts
-     * equal values; inventing another millisecond per report would recreate
-     * the drift. Saturate at the wire limit rather than wrapping to zero. */
-    if (ms < m->mtz2.frame_ms) ms = m->mtz2.frame_ms;
+    /* Distinct reports need distinct wire times, even within one quantized
+     * millisecond. The parser accepts ties, but the next layer does not:
+     * 7E18 MultitouchSupport 0x33cfd670..688 omits zero-amplitude BreakTouch
+     * contacts, and MultitouchHID _mthm_FlushStuckContacts (+0x2630..263c)
+     * retains the previous contact when its timestamp equals this frame's.
+     * A tied press/release therefore becomes a finger still held down.
+     * Use only a one-millisecond tie break, not the old fixed 16 ms cadence;
+     * real idle/held time still wins once the guest clock catches up. This
+     * also handles legacy checkpoints whose report-count time is ahead.
+     * The existing finite wire limit saturates rather than wrapping to zero.
+     * Only set_contacts_at commits the time, after all refusal checks. */
+    if (ms <= m->mtz2.frame_ms)
+        ms = m->mtz2.frame_ms == UINT32_MAX ? UINT32_MAX :
+             (uint64_t)m->mtz2.frame_ms + 1u;
     return set_contacts_at(&m->mtz2, c, n, (uint32_t)ms);
 }

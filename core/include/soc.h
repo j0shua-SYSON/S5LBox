@@ -4480,7 +4480,8 @@ bool s5l8900_overlaps(uint32_t a, uint32_t alen, uint32_t b, uint32_t blen);
 void s5l8900_tick(s5l8900_t *m, uint32_t ticks);
 
 /* Same device/backpressure contract as s5l_mtz2_set_contacts, timestamped in
- * the guest timebase. The caller still refreshes input levels with tick(0).
+ * the guest timebase, with a 1 ms tie break for distinct reports (saturating
+ * at UINT32_MAX). The caller still refreshes input levels with tick(0).
  * No timebase (tb_hz == 0) retains the isolated-device synthetic cadence. */
 bool s5l8900_set_contacts(s5l8900_t *m, const s5l_mt_contact_t *contacts,
                           unsigned n);
