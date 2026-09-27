@@ -1008,8 +1008,8 @@ standard rounding/FZ/DN controls, accumulating exceptions without changing
 FPSCR.NZCV or ARM flags. Guest rounding, FZ/DN, LEN/STRIDE and trap enables
 do not select the operation. Both instructions stage all destination lanes
 before publication and reject reserved sizes or odd Q operands before
-access checks. U32 estimates and reciprocal-square-root forms remain
-unsupported. This follows
+access checks. U32 estimates remain unsupported; reciprocal-square-root
+forms are described below. This follows
 [DDI0406C.b, A2.7.8 and A8.8.384/385](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 
 Tests cover every D/Q register pair or triple and alias, all 512 guest
@@ -1069,6 +1069,81 @@ F32 ramp and F64 remainder fixtures retain their 8,064, 18,432, 3,680,
 6,912, 3,456, 6,144, 4,096, 4,096, 640, 1,536, 336, 1,824 and 112
 passing calls. The complete guarded kernel-entry trace remains identical
 through the 61,650-step L2 ECC stop.
+
+Advanced SIMD VRSQRTE.F32, VRSQRTS.F32 and VCEQ.F32 immediate zero cover
+both instruction sets and every D/Q register. The square-root estimate
+uses exact integer squared-midpoint comparisons for the architectural
+128 buckets at each exponent parity. It returns signed infinity with DZC
+for signed zero, including flushed subnormals with IDC; positive infinity
+returns zero, and negative nonzero inputs return the default NaN with IOC.
+Quiet NaNs return the default NaN without IOC; signaling NaNs raise IOC.
+Finite estimates do not raise IXC. The refinement step rounds its product
+first, then rounds the exact halved difference `(3-product)/2` once.
+The shared integer add/subtract routine adjusts the exponent before final
+rounding; existing callers retain their original behavior. Zero times
+infinity has the special result 1.5 without IOC, while input flushing can
+still raise IDC.
+
+Immediate equality with zero returns an all-ones lane for either signed
+zero or a flushed subnormal. Other inputs return zero. Its quiet-NaN
+behavior differs from the signaling GE comparison: only signaling NaNs
+raise IOC. All three operations use standard FP controls and accumulate
+exceptions without changing the guest's other FPSCR fields or ARM flags.
+Destination lanes are staged, and invalid sizes or odd Q operands stop
+before access checks. U32 estimates and other immediate comparisons remain
+unsupported. See
+[DDI0406C.b, A2.7.8 and A8.8.292/391/392](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
+Tests cover all register pairs/triples and aliases, all 512 guest control
+combinations, independent native arithmetic references, special-value and
+rounding-boundary anchors, and all 65,024 positive-normal estimate bucket
+endpoints across 254 exponents. Representative boundary exponents
+also pass through both decoders. All pairs of twenty-two FP classes and
+1,024 random four-lane inputs run under sixteen guest controls and four
+host rounding modes with pending exceptions. Access, encoding, IT, legacy,
+neighbor refusal, cumulative flags, VMRS, checked fetch failures, User
+split-page translation/XN/AP faults and guest enable/return retry matrices
+include all three operations.
+
+The first focused run passed the CPU and checked-bus tests and all new
+arithmetic checks. Four older sign-operation neighbor assertions still
+expected the newly supported VCEQ encoding to stop. Those expectations
+were updated; production code and the frozen firmware fixture and oracle
+were unchanged.
+
+The frozen firmware fixture covers the original short-count Thumb bodies
+`_vvrsqrtf` at `0x30866b80..0x30866c26` (166 bytes) and `_vvsqrtf` at
+`0x308669bc..0x30866a7a` (190 bytes). It prepares 8,192 calls: both routines,
+counts zero through fifteen, all sixteen word-aligned input/output pairs
+and sixteen guest rounding/FZ/DN combinations. Before implementation, 512
+empty calls returned; the first nonempty call in each routine stopped
+after twenty instructions, at `0x30866bf2` on VRSQRTE and `0x30866a3a` on
+VCEQ immediate zero. Both complete partial states matched the baseline:
+62 fetched bytes, four input bytes, four count bytes, two raw FP events
+and no output. The first run after implementation completed all 8,192
+calls with every check passing; the harness, runner and both oracle helpers
+retained their pre-implementation hashes.
+
+The independent exact-rational oracle checks all nine or twelve arithmetic
+and bitwise stages, including the different estimate/zero-comparison order
+in the square-root tail. Its 101 rows include retained upper-lane values
+from preceding blocks and four initial seed pairs. Decimal and rational
+square inequalities independently verify all estimate bucket endpoints.
+The fixture checks the full FP bank and flags at each stage, all general
+registers, return state, monitor, whole RAM and exact instruction/data
+access counts, including duplicated accesses in two-element tails. No
+stack frame, external call or CPU-family input is involved. These bounds
+do not establish large-count paths, aliases, unaligned inputs, correctly
+rounded mathematical square roots, process launch, boot or physical behavior.
+For example, the original reciprocal-square-root pipeline returns the
+default NaN for signed zero with IOC and DZC; the square-root pipeline
+returns positive zero with the same exceptions. These are the observed
+instruction-pipeline results, not scalar libm guarantees.
+
+All 77 strict and 72 shipping tests pass. Fifteen earlier firmware fixture
+groups retain their 66,880 passing calls, for 75,072 calls across sixteen
+groups with the new routines. The complete canonical kernel-entry trace
+remains identical through its 61,650-step L2 ECC guard.
 
 Advanced SIMD conversions between F32 and signed/unsigned 32-bit integers
 now cover every D/Q register and both instruction sets. They use the same
@@ -1780,7 +1855,8 @@ establish that result.
   register Boolean operations, VEXT, 8/16/32-bit VTRN, F32 VABS/VNEG,
   immediate constants, core-register VDUP, register VMUL/VADD/VSUB/VMLA/VMLS.F32,
   F32 VMUL/VMLA/VMLS by scalar, VMAX/VMIN.F32, VCGE.F32 register comparisons,
-  VRECPE/VRECPS.F32 and F32/signed/unsigned 32-bit NEON conversion
+  VRECPE/VRECPS/VRSQRTE/VRSQRTS.F32, VCEQ.F32 immediate zero,
+  and F32/signed/unsigned 32-bit NEON conversion
   described above.
   Other upper-bank VFP arithmetic, the remaining NEON families, and full
   context-switch semantics remain to implement. Remaining shared lower-bank

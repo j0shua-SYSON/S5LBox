@@ -197,13 +197,16 @@ uint32_t vfp_a8_neon_integer(uint32_t value, bool to_integer, bool is_signed,
 uint32_t vfp_a8_neon_minmax(uint32_t left, uint32_t right, bool minimum,
                              uint32_t *exceptions);
 
-/* Pure Advanced SIMD FPCompareGE mask with standard FP controls. */
+/* Pure Advanced SIMD GE/register and EQ/zero masks with standard FP controls. */
 uint32_t vfp_a8_neon_compare_ge(uint32_t left, uint32_t right,
                                  uint32_t *exceptions);
+uint32_t vfp_a8_neon_compare_zero(uint32_t value, uint32_t *exceptions);
 
-/* Pure F32 Advanced SIMD reciprocal estimate and rounded reciprocal step. */
+/* Pure F32 Advanced SIMD reciprocal/root estimates and rounded steps. */
 uint32_t vfp_a8_neon_recip_estimate(uint32_t value, uint32_t *exceptions);
 uint32_t vfp_a8_neon_recip_step(uint32_t left, uint32_t right, uint32_t *exceptions);
+uint32_t vfp_a8_neon_rsqrt_estimate(uint32_t value, uint32_t *exceptions);
+uint32_t vfp_a8_neon_rsqrt_step(uint32_t left, uint32_t right, uint32_t *exceptions);
 
 /*
  * Execute one VFP encoding. `insn` must already have been identified as a

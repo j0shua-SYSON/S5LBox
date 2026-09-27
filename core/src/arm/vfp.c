@@ -840,7 +840,17 @@ uint32_t vfp_a8_neon_compare_ge(uint32_t left, uint32_t right, uint32_t *excepti
     return key_a >= key_b ? UINT32_MAX : 0u;
 }
 
-static uint64_t vfp_a8_add_sub(uint64_t a, uint64_t b, bool dbl, bool sub,
+/* FPCompareEQ with +0 is quiet for QNaNs; FPUnpack still reports SNaNs and
+ * flushed subnormals. It does not share GE's signaling unordered behavior. */
+uint32_t vfp_a8_neon_compare_zero(uint32_t value, uint32_t *exceptions) {
+    uint64_t a=value,b=0u,nan_result;
+    if (vfp_a8_unpack_pair(&a,&b,false,ARM_FPSCR_FZ|ARM_FPSCR_DN,exceptions,&nan_result)) return 0u;
+    return ((uint32_t)a&0x7fffffffu)==0u ? UINT32_MAX : 0u;
+}
+
+/* FPHalvedSub (A2-90) scales the exact difference before its single rounding.
+ * NaN, infinity and exact signed-zero cases are invariant under halving. */
+static uint64_t vfp_a8_add_sub(uint64_t a, uint64_t b, bool dbl, bool sub, bool halve,
                                uint32_t fpscr, uint32_t *exceptions) {
     const unsigned fraction = dbl ? 52u : 23u;
     const uint64_t hidden = UINT64_C(1) << fraction;
@@ -888,7 +898,7 @@ static uint64_t vfp_a8_add_sub(uint64_t a, uint64_t b, bool dbl, bool sub,
             exponent--;
         }
     }
-    return vfp_a8_round(significand, (int)exponent, result_sign, dbl, fpscr, exceptions);
+    return vfp_a8_round(significand, (int)exponent - (halve ? 1 : 0), result_sign, dbl, fpscr, exceptions);
 }
 
 /* FPMul (A2.7.8). Four 32-bit limb products retain the complete 106-bit
@@ -953,7 +963,40 @@ uint32_t vfp_a8_neon_recip_step(uint32_t left, uint32_t right, uint32_t *excepti
     uint32_t ma=(uint32_t)a&0x7fffffffu,mb=(uint32_t)b&0x7fffffffu;
     if ((ma==0x7f800000u && !mb) || (!ma && mb==0x7f800000u)) return 0x40000000u;
     uint64_t product=vfp_a8_multiply(a,b,false,controls,exceptions);
-    return (uint32_t)vfp_a8_add_sub(0x40000000u,product,false,true,controls,exceptions);
+    return (uint32_t)vfp_a8_add_sub(0x40000000u,product,false,true,false,controls,exceptions);
+}
+
+/* FPRSqrtEstimate (A2-87/88): round the reciprocal square root of a bucket
+ * midpoint to units of 1/256. Squared midpoint comparisons are exact, with
+ * every product below 2^30; no host square root or floating state is used. */
+uint32_t vfp_a8_neon_rsqrt_estimate(uint32_t value, uint32_t *exceptions) {
+    uint64_t a=value,b=0u,nan_result;
+    if (vfp_a8_unpack_pair(&a,&b,false,ARM_FPSCR_FZ|ARM_FPSCR_DN,exceptions,&nan_result))
+        return (uint32_t)nan_result;
+    uint32_t magnitude=(uint32_t)a&0x7fffffffu,sign=(uint32_t)a&0x80000000u;
+    if (!magnitude) { *exceptions|=ARM_FPSCR_DZC; return sign|0x7f800000u; }
+    if (sign) { *exceptions|=ARM_FPSCR_IOC; return 0x7fc00000u; }
+    if (magnitude==0x7f800000u) return 0u;
+    unsigned exponent=magnitude>>23,q=128u+((magnitude&0x7fffffu)>>16);
+    unsigned boundary=1u<<(27u+(exponent&1u)),low=256u,high=512u;
+    while (low<high) {
+        unsigned mid=(low+high)/2u,twice=2u*mid+1u;
+        if (twice*twice*(2u*q+1u)<=boundary) low=mid+1u;
+        else high=mid;
+    }
+    return (((380u-exponent)/2u)<<23)|((low-256u)<<15);
+}
+
+/* The product rounds first, then (3-product)/2 rounds once. Zero*infinity
+ * has the architectural special result 1.5, including flushed inputs. */
+uint32_t vfp_a8_neon_rsqrt_step(uint32_t left, uint32_t right, uint32_t *exceptions) {
+    const uint32_t controls=ARM_FPSCR_FZ|ARM_FPSCR_DN;
+    uint64_t a=left,b=right,nan_result;
+    if (vfp_a8_unpack_pair(&a,&b,false,controls,exceptions,&nan_result)) return (uint32_t)nan_result;
+    uint32_t ma=(uint32_t)a&0x7fffffffu,mb=(uint32_t)b&0x7fffffffu;
+    if ((ma==0x7f800000u && !mb) || (!ma && mb==0x7f800000u)) return 0x3fc00000u;
+    uint64_t product=vfp_a8_multiply(a,b,false,controls,exceptions);
+    return (uint32_t)vfp_a8_add_sub(0x40400000u,product,false,true,true,controls,exceptions);
 }
 
 /* FPDiv (A2.7.8). Long division yields the leading significand and three
@@ -1080,10 +1123,10 @@ static arm_status_t vfp_a8_arithmetic_data(arm_cpu_t *c, uint32_t pc, uint32_t i
                 if (sub_or_neg) product ^= dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
                 unsigned dr = vfp_short_vector_reg(&shape, rd, lane, false);
                 uint64_t accumulator = dbl ? vfp_get_d(c, dr) : vfp_get_s(c, dr);
-                result[lane] = vfp_a8_add_sub(accumulator, product, dbl, false, c->vfp_fpscr, &exceptions);
+                result[lane] = vfp_a8_add_sub(accumulator, product, dbl, false, false, c->vfp_fpscr, &exceptions);
             } else result[lane] = divide ? vfp_a8_divide(a, b, dbl, c->vfp_fpscr, &exceptions) :
                                  multiply ? vfp_a8_multiply(a, b, dbl, c->vfp_fpscr, &exceptions) :
-                                            vfp_a8_add_sub(a, b, dbl, sub_or_neg, c->vfp_fpscr, &exceptions);
+                                            vfp_a8_add_sub(a, b, dbl, sub_or_neg, false, c->vfp_fpscr, &exceptions);
         }
         /* VNMUL applies FPNeg after rounding, even to a NaN or signed zero. */
         if (multiply && sub_or_neg) result[lane] ^= dbl ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);

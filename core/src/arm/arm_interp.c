@@ -1065,7 +1065,7 @@ static arm_status_t exec_a8_neon_minmax(arm_cpu_t *c, uint32_t insn) {
 }
 
 /* VCGE.F32 register A2/T2 (DDI0406C.b A8.8.293), including reserved sz.
- * Integer, zero-immediate and other comparison operations stay unsupported. */
+ * Integer and zero-immediate GE forms stay unsupported. */
 static bool a8_neon_compare_ge_space(const arm_cpu_t *c, uint32_t insn) {
     uint32_t prefix = (c->cpsr & ARM_CPSR_T) ? 0xff000e00u : 0xf3000e00u;
     return c->arch == ARM_ARCH_V7_CORTEX_A8 && (insn & 0xffa00f10u) == prefix;
@@ -1089,16 +1089,38 @@ static arm_status_t exec_a8_neon_compare_ge(arm_cpu_t *c, uint32_t insn) {
     return ARM_OK;
 }
 
-/* VRECPE.F32 / VRECPS.F32 (DDI0406C.b A8.8.384/385). Keep reserved
- * sizes inside the checked allocation; U32 and square-root forms are separate. */
+/* VCEQ.F32 #0 (A8.8.292), including reserved F32 sizes. */
+static bool a8_neon_compare_zero_space(const arm_cpu_t *c, uint32_t insn) {
+    uint32_t prefix=(c->cpsr&ARM_CPSR_T) ? 0xffb10500u : 0xf3b10500u;
+    return c->arch==ARM_ARCH_V7_CORTEX_A8 && (insn&0xffb30f90u)==prefix;
+}
+
+static arm_status_t exec_a8_neon_compare_zero(arm_cpu_t *c, uint32_t insn) {
+    unsigned d=((insn>>12)&15u)|((insn>>18)&16u),m=(insn&15u)|((insn>>1)&16u),quad=(insn>>6)&1u;
+    if (((insn>>18)&3u)!=2u || (quad && ((d|m)&1u))) return ARM_UNDEFINED;
+    if (!vfp_cpacr_permits(c) || !vfp_enabled(c)) return ARM_GUEST_UNDEFINED;
+    uint64_t result[2]; uint32_t exceptions=0u;
+    for (unsigned r=0;r<=quad;r++) {
+        uint64_t value=vfp_get_d(c,m+r);
+        uint32_t lo=vfp_a8_neon_compare_zero((uint32_t)value,&exceptions);
+        uint32_t hi=vfp_a8_neon_compare_zero((uint32_t)(value>>32),&exceptions);
+        result[r]=((uint64_t)hi<<32)|lo;
+    }
+    for (unsigned r=0;r<=quad;r++) vfp_set_d(c,d+r,result[r]);
+    c->vfp_fpscr|=exceptions;
+    return ARM_OK;
+}
+
+/* VRECPE/VRECPS and VRSQRTE/VRSQRTS.F32 (A8.8.384/385/391/392).
+ * Keep reserved sizes checked; U32 estimates remain separate. */
 static bool a8_neon_recip_estimate_space(const arm_cpu_t *c, uint32_t insn) {
     uint32_t prefix=(c->cpsr&ARM_CPSR_T) ? 0xffb30500u : 0xf3b30500u;
-    return c->arch==ARM_ARCH_V7_CORTEX_A8 && (insn&0xffb30f90u)==prefix;
+    return c->arch==ARM_ARCH_V7_CORTEX_A8 && (insn&0xffb30f10u)==prefix;
 }
 
 static bool a8_neon_recip_step_space(const arm_cpu_t *c, uint32_t insn) {
     uint32_t prefix=(c->cpsr&ARM_CPSR_T) ? 0xef000f10u : 0xf2000f10u;
-    return c->arch==ARM_ARCH_V7_CORTEX_A8 && (insn&0xffa00f10u)==prefix;
+    return c->arch==ARM_ARCH_V7_CORTEX_A8 && (insn&0xff800f10u)==prefix;
 }
 
 static arm_status_t exec_a8_neon_reciprocal(arm_cpu_t *c, uint32_t insn, bool step) {
@@ -1107,13 +1129,20 @@ static arm_status_t exec_a8_neon_reciprocal(arm_cpu_t *c, uint32_t insn, bool st
     if ((step ? (insn&(1u<<20))!=0u : ((insn>>18)&3u)!=2u) || (quad && ((d|n|m)&1u)))
         return ARM_UNDEFINED;
     if (!vfp_cpacr_permits(c) || !vfp_enabled(c)) return ARM_GUEST_UNDEFINED;
+    bool root=(insn&(1u<<(step ? 21u : 7u)))!=0u;
     uint64_t result[2]; uint32_t exceptions=0u;
     for (unsigned r=0;r<=quad;r++) {
         uint64_t a=vfp_get_d(c,n+r),b=vfp_get_d(c,m+r);
-        uint32_t lo=step ? vfp_a8_neon_recip_step((uint32_t)a,(uint32_t)b,&exceptions) :
-            vfp_a8_neon_recip_estimate((uint32_t)b,&exceptions);
-        uint32_t hi=step ? vfp_a8_neon_recip_step((uint32_t)(a>>32),(uint32_t)(b>>32),&exceptions) :
-            vfp_a8_neon_recip_estimate((uint32_t)(b>>32),&exceptions);
+        uint32_t lo,hi;
+        if (step) {
+            lo=root ? vfp_a8_neon_rsqrt_step((uint32_t)a,(uint32_t)b,&exceptions) :
+                vfp_a8_neon_recip_step((uint32_t)a,(uint32_t)b,&exceptions);
+            hi=root ? vfp_a8_neon_rsqrt_step((uint32_t)(a>>32),(uint32_t)(b>>32),&exceptions) :
+                vfp_a8_neon_recip_step((uint32_t)(a>>32),(uint32_t)(b>>32),&exceptions);
+        } else {
+            lo=root ? vfp_a8_neon_rsqrt_estimate((uint32_t)b,&exceptions) : vfp_a8_neon_recip_estimate((uint32_t)b,&exceptions);
+            hi=root ? vfp_a8_neon_rsqrt_estimate((uint32_t)(b>>32),&exceptions) : vfp_a8_neon_recip_estimate((uint32_t)(b>>32),&exceptions);
+        }
         result[r]=((uint64_t)hi<<32)|lo;
     }
     for (unsigned r=0;r<=quad;r++) vfp_set_d(c,d+r,result[r]);
@@ -1352,7 +1381,7 @@ static bool vfp_lazy_enable_trap(const arm_cpu_t *c, uint32_t insn) {
         a8_neon_immediate_space(c, insn) || a8_neon_multiply_space(c, insn) || a8_neon_add_space(c, insn) ||
         a8_neon_extract_space(c, insn) || a8_neon_sign_space(c, insn) || a8_neon_transpose_space(c, insn) ||
         a8_neon_macc_space(c, insn) || a8_neon_by_scalar_space(c, insn) || a8_neon_integer_space(c, insn) ||
-        a8_neon_minmax_space(c, insn) || a8_neon_compare_ge_space(c, insn) ||
+        a8_neon_minmax_space(c, insn) || a8_neon_compare_ge_space(c, insn) || a8_neon_compare_zero_space(c, insn) ||
         a8_neon_recip_estimate_space(c, insn) || a8_neon_recip_step_space(c, insn)) return false;
     if (c->arch == ARM_ARCH_V7_CORTEX_A8 &&
         (vfp_is_system_transfer(insn) || vfp_is_core_transfer(insn) ||
@@ -3900,6 +3929,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
     if (a8_neon_integer_space(c, insn)) return exec_a8_neon_integer(c, insn);
     if (a8_neon_minmax_space(c, insn)) return exec_a8_neon_minmax(c, insn);
     if (a8_neon_compare_ge_space(c, insn)) return exec_a8_neon_compare_ge(c, insn);
+    if (a8_neon_compare_zero_space(c, insn)) return exec_a8_neon_compare_zero(c, insn);
     if (a8_neon_recip_estimate_space(c, insn)) return exec_a8_neon_reciprocal(c, insn, false);
     if (a8_neon_recip_step_space(c, insn)) return exec_a8_neon_reciprocal(c, insn, true);
     if (a8_neon_extract_space(c, insn)) return exec_a8_neon_extract(c, insn);
@@ -4558,7 +4588,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
             a8_neon_multiply_space(c, insn) || a8_neon_add_space(c, insn) ||
             a8_neon_extract_space(c, insn) || a8_neon_sign_space(c, insn) || a8_neon_transpose_space(c, insn) ||
             a8_neon_macc_space(c, insn) || a8_neon_by_scalar_space(c, insn) || a8_neon_integer_space(c, insn) ||
-            a8_neon_minmax_space(c, insn) || a8_neon_compare_ge_space(c, insn) ||
+            a8_neon_minmax_space(c, insn) || a8_neon_compare_ge_space(c, insn) || a8_neon_compare_zero_space(c, insn) ||
             a8_neon_recip_estimate_space(c, insn) || a8_neon_recip_step_space(c, insn)) {
             arm_status_t status = a8_neon_bitwise_space(c, insn) ? exec_a8_neon_bitwise(c, insn) :
                 a8_neon_immediate_space(c, insn) ? exec_a8_neon_immediate(c, insn) :
@@ -4571,6 +4601,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
                 a8_neon_integer_space(c, insn) ? exec_a8_neon_integer(c, insn) :
                 a8_neon_minmax_space(c, insn) ? exec_a8_neon_minmax(c, insn) :
                 a8_neon_compare_ge_space(c, insn) ? exec_a8_neon_compare_ge(c, insn) :
+                a8_neon_compare_zero_space(c, insn) ? exec_a8_neon_compare_zero(c, insn) :
                 a8_neon_recip_estimate_space(c, insn) ? exec_a8_neon_reciprocal(c, insn, false) :
                 a8_neon_recip_step_space(c, insn) ? exec_a8_neon_reciprocal(c, insn, true) : exec_a8_neon_macc(c, insn);
             if (status == ARM_GUEST_UNDEFINED) return take_undefined_instruction(c, pc);

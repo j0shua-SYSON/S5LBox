@@ -404,16 +404,19 @@ static void test_vfp_integer_fetch_and_retry(void) {
 }
 
 static void test_neon_minmax_ge_recip_fetch_and_retry(void) {
-    static const uint32_t prefixes[2][5]={{0xf240ef80u,0xf260ef80u,0xf340ee80u,0xf3fbe520u,0xf240ef90u},
-        {0xef40ef80u,0xef60ef80u,0xff40ee80u,0xfffbe520u,0xef40ef90u}};
-    static const uint64_t results[5][2]={
+    static const uint32_t prefixes[2][8]={{0xf240ef80u,0xf260ef80u,0xf340ee80u,0xf3fbe520u,0xf240ef90u,0xf3fbe5a0u,0xf260ef90u,0xf3f9e520u},
+        {0xef40ef80u,0xef60ef80u,0xff40ee80u,0xfffbe520u,0xef40ef90u,0xfffbe5a0u,0xef60ef90u,0xfff9e520u}};
+    static const uint64_t results[8][2]={
         {UINT64_C(0x7fc0000000000000),UINT64_C(0x3f80000000000000)},
         {UINT64_C(0x7fc0000080000000),UINT64_C(0x00000000bf800000)},
         {UINT64_C(0x00000000ffffffff),UINT64_C(0xffffffff00000000)},
         {UINT64_C(0x7fc000007f800000),UINT64_C(0x3f7f8000bf7f8000)},
-        {UINT64_C(0x7fc0000040000000),UINT64_C(0x4000000040000000)}};
+        {UINT64_C(0x7fc0000040000000),UINT64_C(0x4000000040000000)},
+        {UINT64_C(0x7fc000007f800000),UINT64_C(0x3f7f80007fc00000)},
+        {UINT64_C(0x7fc000003fc00000),UINT64_C(0x3fc000003fc00000)},
+        {UINT64_C(0x00000000ffffffff),0u}};
     for (unsigned thumb=0;thumb<2u;thumb++)
-     for (unsigned op=0;op<5u;op++)
+     for (unsigned op=0;op<8u;op++)
       for (unsigned quad=0;quad<2u;quad++)
        for (unsigned host=0;host<2u;host++)
         for (unsigned enabled=0;enabled<2u;enabled++)
