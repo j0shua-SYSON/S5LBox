@@ -394,7 +394,7 @@ static void test_timebase(s5l8920_t *m) {
           m->timebase_ticks==UINT64_C(0x1234567887654321), "CPU read invented clock ticks");
     CHECK(!m->bus.host_ram(m,low,4u) && !m->bus.host_ram_write(m,low,4u) && !s5l8920_load(m,low,&low,4u),
           "timebase bypassed checked MMIO");
-    const uint32_t offsets[]={0u,0x1fcu,0x200u,0x204u,0x208u,0x220u,0x1ffcu};
+    const uint32_t offsets[]={0u,0x1fcu,0x200u,0x204u,0x20cu,0x220u,0x1ffcu};
     for (unsigned n=0;n<sizeof offsets/sizeof offsets[0];n++) {
         uint32_t a=S5L8920_PMGR_BASE+offsets[n];
         for (unsigned kind=0;kind<4;kind++) {
@@ -425,6 +425,162 @@ static void test_timebase(s5l8920_t *m) {
     CHECK(m->bus.read32(m,low)==0x87654322u && !m->cpu.irq_line && !m->cpu.fiq_line,
           "explicit ticks were lost or generated an unimplemented timer interrupt");
     CHECK(s5l8920_reset(m) && !m->timebase_ticks && !m->bus_failure.reason, "timebase reset retained state");
+}
+
+static void test_deadline_countdown(s5l8920_t *m) {
+    const uint32_t count=S5L8920_PMGR_BASE+S5L8920_DEADLINE_COUNT;
+    const uint32_t control=S5L8920_PMGR_BASE+S5L8920_DEADLINE_CONTROL;
+    const uint32_t line=1u<<S5L8920_DEADLINE_IRQ;
+    CHECK(s5l8920_reset(m), "deadline reset");
+    m->bus.write32(m,control,1u);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !m->deadline.enabled &&
+          !m->deadline.programmed, "enable invented an unprogrammed reset count");
+    s5l8920_clear_bus_failure(m); m->bus.write32(m,control,2u);
+    CHECK(!m->bus_failure.reason && !m->deadline.pending, "unprogrammed disable/ack refused");
+    put(m,0u,0xe4912004u); /* LDR r2,[r1],#4 */
+    m->cpu.r[15]=S5L8920_RAM_BASE; m->cpu.r[1]=count; m->cpu.r[2]=0xdeadbeefu;
+    CHECK(arm_step(&m->cpu)==ARM_HALT && !m->cpu.cycles && m->cpu.r[1]==count &&
+          m->cpu.r[2]==0xdeadbeefu && m->bus_failure.address==count && !m->deadline.programmed,
+          "unknown reset count retired a read/writeback");
+    m->bus.write32(m,count,7u);
+    CHECK(!m->deadline.programmed, "latched checked failure allowed deadline programming");
+    s5l8920_clear_bus_failure(m); m->bus.write32(m,count,7u);
+    CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.cycles==1u && m->cpu.r[2]==7u &&
+          m->cpu.r[1]==count+4u && !m->deadline.enabled, "programmed count did not repair CPU read");
+    CHECK(!m->bus.host_ram(m,count,4u) && !m->bus.host_ram_write(m,count,4u) &&
+          !s5l8920_load(m,count,&count,4u), "deadline bypassed checked MMIO");
+
+    const uint32_t intervals[]={0u,1u,2u,0x7fffffffu,UINT32_MAX};
+    for (unsigned n=0;n<sizeof intervals/sizeof intervals[0];n++) {
+        CHECK(s5l8920_reset(m) && s5l8920_timebase_clock(m,UINT64_MAX-3u), "prepare counter wrap");
+        m->bus.write32(m,count,intervals[n]);
+        CHECK(s5l8920_timebase_clock(m,UINT64_MAX) && m->bus.read32(m,count)==intervals[n] &&
+              !m->deadline.pending && !m->deadline.expired, "disabled deadline advanced or overflowed");
+        m->bus.write32(m,control,3u);
+        uint64_t before=m->timebase_ticks;
+        CHECK(s5l8920_timebase_clock(m,0u) && m->timebase_ticks==before &&
+              m->bus.read32(m,count)==intervals[n] && !m->deadline.pending,
+              "zero host ticks or a register read expired the deadline");
+        put(m,0u,0xe5912000u); m->cpu.r[15]=S5L8920_RAM_BASE; m->cpu.r[1]=count;
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[2]==intervals[n] &&
+              m->timebase_ticks==before && !m->deadline.pending, "CPU read invented timer ticks");
+        uint64_t early=intervals[n] ? intervals[n]-1u:0u;
+        CHECK(s5l8920_timebase_clock(m,early) && !m->deadline.pending &&
+              m->bus.read32(m,count)==(intervals[n] ? 1u:0u), "deadline expired early or lost countdown readback");
+        CHECK(s5l8920_timebase_clock(m,1u) && m->deadline.expired && m->deadline.pending &&
+              (m->vic[0].input&line) && !m->cpu.irq_line && !m->cpu.fiq_line &&
+              m->timebase_ticks==before+early+1u, "logical expiry failed across timebase wrap");
+        vic_write(m,0u,PL192_INTENABLE,line);
+        CHECK(m->cpu.irq_line, "VIC enable lost a pending deadline");
+        m->cpu.r[15]=S5L8920_RAM_BASE; m->cpu.r[2]=0xfeedbeefu;
+        uint64_t cycles=m->cpu.cycles;
+        CHECK(arm_step(&m->cpu)==ARM_HALT && m->cpu.cycles==cycles && m->cpu.r[2]==0xfeedbeefu &&
+              m->cpu.r[15]==S5L8920_RAM_BASE && m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+              m->bus_failure.address==count, "unestablished post-expiry value was consumed");
+        s5l8920_bus_failure_t diagnostic=m->bus_failure;
+        CHECK(s5l8920_timebase_clock(m,UINT64_MAX) && m->deadline.pending && m->cpu.irq_line &&
+              !memcmp(&diagnostic,&m->bus_failure,sizeof diagnostic), "host event changed latched diagnostics/cause");
+        s5l8920_clear_bus_failure(m); m->bus.write32(m,control,0u);
+        CHECK(!m->deadline.enabled && m->deadline.pending && m->cpu.irq_line, "counter stop acknowledged an event");
+        m->bus.write32(m,control,1u);
+        CHECK(m->deadline.pending && m->cpu.irq_line, "enable acknowledged an event");
+        m->bus.write32(m,control,3u); m->bus.write32(m,control,1u);
+        CHECK(!m->deadline.pending && !m->cpu.irq_line && s5l8920_timebase_clock(m,UINT64_MAX) &&
+              !m->deadline.pending, "acknowledgement rearmed an expired one-shot");
+        m->bus.write32(m,count,5u);
+        CHECK(s5l8920_timebase_clock(m,2u) && m->bus.read32(m,count)==3u && !m->deadline.pending,
+              "enabled count write did not arm a fresh interval");
+        m->bus.write32(m,count,2u);
+        CHECK(s5l8920_timebase_clock(m,1u) && m->bus.read32(m,count)==1u &&
+              s5l8920_timebase_clock(m,1u) && m->deadline.pending, "live interval replacement");
+        m->bus.write32(m,count,9u);
+        CHECK(m->deadline.pending && m->cpu.irq_line && m->bus.read32(m,count)==9u,
+              "count write implicitly acknowledged the previous cause");
+        m->bus.write32(m,control,2u);
+        CHECK(!m->deadline.pending && !m->deadline.enabled && !m->cpu.irq_line &&
+              s5l8920_timebase_clock(m,100u) && m->bus.read32(m,count)==9u, "disable/ack did not freeze remaining count");
+        m->bus.write32(m,control,1u);
+        CHECK(s5l8920_timebase_clock(m,UINT64_MAX) && m->deadline.expired && m->cpu.irq_line,
+              "large supplied interval truncated before expiry");
+    }
+    CHECK(s5l8920_reset(m), "reset deadline refusal fixture");
+    m->bus.write32(m,count,9u); m->bus.write32(m,control,3u);
+    s5l8920_deadline_t before=m->deadline;
+    for (unsigned bit=2u;bit<32u;bit++) {
+        s5l8920_clear_bus_failure(m); m->bus.write32(m,control,(1u<<bit)|3u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+              !memcmp(&before,&m->deadline,sizeof before), "reserved control bits changed timer state");
+    }
+    for (unsigned reg=0;reg<2u;reg++) for (unsigned kind=0;kind<4u;kind++) {
+        uint32_t address=reg ? control:count;
+        s5l8920_clear_bus_failure(m);
+        if (!kind) (void)m->bus.read8(m,address);
+        else if (kind==1u) m->bus.write16(m,address,3u);
+        else if (kind==2u) (void)m->bus.read32(m,address+1u);
+        else m->bus.write32(m,address+1u,3u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED &&
+              !memcmp(&before,&m->deadline,sizeof before), "unsupported timer access width/alignment committed");
+    }
+    s5l8920_clear_bus_failure(m); (void)m->bus.read32(m,control);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+          !memcmp(&before,&m->deadline,sizeof before), "control read invented register semantics");
+    CHECK(s5l8920_reset(m) && !m->deadline.programmed && !m->deadline.enabled && !m->deadline.expired &&
+          !m->deadline.pending && !m->timebase_ticks, "reset retained a timer configuration/cause");
+}
+
+static void test_deadline_interrupt_wiring(s5l8920_t *m) {
+    const uint32_t count=S5L8920_PMGR_BASE+S5L8920_DEADLINE_COUNT;
+    const uint32_t control=S5L8920_PMGR_BASE+S5L8920_DEADLINE_CONTROL;
+    const uint32_t line=1u<<S5L8920_DEADLINE_IRQ;
+    for (unsigned fiq=0;fiq<2u;fiq++) {
+        CHECK(s5l8920_reset(m), "reset deadline interrupt fixture");
+        vic_write(m,0u,PL192_VECTADDR0+4u*S5L8920_DEADLINE_IRQ,0x80000006u);
+        vic_write(m,0u,PL192_INTSELECT,fiq ? line:0u); vic_write(m,0u,PL192_INTENABLE,line);
+        m->bus.write32(m,count,2u); m->bus.write32(m,control,3u);
+        CHECK(s5l8920_timebase_clock(m,1u) && !m->cpu.irq_line && !m->cpu.fiq_line,
+              "deadline routed before expiry");
+        CHECK(s5l8920_set_irq(m,S5L8920_DEADLINE_IRQ,true), "assert external source6");
+        m->bus.write32(m,control,2u);
+        CHECK((m->vic[0].input&line) && !m->deadline.pending &&
+              m->cpu.irq_line==(fiq==0u) && m->cpu.fiq_line==(fiq!=0u), "timer ack erased external source6");
+        CHECK(s5l8920_set_irq(m,S5L8920_DEADLINE_IRQ,false) && !m->cpu.irq_line && !m->cpu.fiq_line,
+              "external withdrawal retained acknowledged source6");
+        m->bus.write32(m,control,1u);
+        CHECK(s5l8920_timebase_clock(m,1u) && s5l8920_set_irq(m,S5L8920_DEADLINE_IRQ,false) &&
+              m->deadline.pending && m->cpu.irq_line==(fiq==0u) && m->cpu.fiq_line==(fiq!=0u),
+              "countdown expiry or external update lost internal source6");
+        /* Synthetic vectors test actual CPU/fabric delivery, not N88 scheduler setup. */
+        map_test_vectors(m);
+        put(m,0x4000u+(S5L8920_PMGR_BASE>>20)*4u,S5L8920_PMGR_BASE|0xc02u);
+        uint32_t vector=fiq ? 0x1cu:0x18u;
+        put(m,vector,0xea000000u|((0x1000u-vector-8u)>>2));
+        uint32_t at=0x1000u;
+        if (!fiq) { put(m,at,0xe5932000u); at+=4u; } /* VIC ACK */
+        put(m,at,0xe5810000u); at+=4u;               /* timer control3 */
+        put(m,at,0xe2400002u); at+=4u;               /* SUB r0,#2 */
+        put(m,at,0xe5810000u); at+=4u;               /* timer control1 */
+        put(m,at,0xe5856000u); at+=4u;               /* new count */
+        if (!fiq) { put(m,at,0xe5834000u); at+=4u; } /* VIC EOI */
+        put(m,at,0xe25ef004u);                        /* SUBS pc,lr,#4 */
+        m->cpu.r[0]=3u; m->cpu.r[1]=control; m->cpu.r[2]=0x12345678u;
+        m->cpu.r[3]=vic_address(0u,PL192_ADDRESS); m->cpu.r[4]=0u; m->cpu.r[5]=count; m->cpu.r[6]=5u;
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[15]==vector && m->cpu.r[14]==0x204u &&
+              (m->cpu.cpsr&ARM_CPSR_MODE_MASK)==(fiq ? ARM_MODE_FIQ:ARM_MODE_IRQ), "timer-driven CPU exception entry");
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[15]==0x1000u, "timer vector branch");
+        unsigned steps=0u;
+        while (m->cpu.r[15]!=0x200u && steps++<9u) if (arm_step(&m->cpu)!=ARM_OK) break;
+        CHECK(m->cpu.r[15]==0x200u && m->cpu.cpsr==(ARM_MODE_SYS|ARM_CPSR_C) &&
+              !m->bus_failure.reason && !m->deadline.pending && m->deadline.enabled &&
+              m->bus.read32(m,count)==5u && !m->cpu.irq_line && !m->cpu.fiq_line && !m->vic[0].in_service,
+              "timer ack/reprogram/EOI/return failed or guest instructions consumed time");
+        if (!fiq) CHECK(m->cpu.r[2]==0x80000006u, "timer source6 acknowledgement vector");
+        CHECK(s5l8920_timebase_clock(m,4u) && !m->deadline.pending &&
+              s5l8920_timebase_clock(m,1u) && m->deadline.pending, "guest-rearmed timer did not fire once");
+        CHECK(s5l8920_set_irq(m,S5L8920_DEADLINE_IRQ,true) && s5l8920_reset(m) &&
+              m->vic[0].input==line && m->input_levels[0]==line && !m->deadline.programmed &&
+              !m->deadline.pending && !m->cpu.irq_line && !m->cpu.fiq_line, "reset lost external source6 or retained timer cause");
+        CHECK(s5l8920_set_irq(m,S5L8920_DEADLINE_IRQ,false), "release external source6");
+    }
 }
 
 static void test_guest_irq_handler(s5l8920_t *m) {
@@ -498,6 +654,8 @@ int main(void) {
     test_uart_checked_bus(&m);
     test_uart_interrupt_wiring(&m);
     test_timebase(&m);
+    test_deadline_countdown(&m);
+    test_deadline_interrupt_wiring(&m);
     test_guest_irq_handler(&m);
     test_fiq_and_reset(&m);
     s5l8920_free(&m);

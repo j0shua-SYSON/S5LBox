@@ -26,6 +26,9 @@ static void refresh_interrupts(s5l8920_t *m) {
     (void)pl192_set_line(&m->vic[0],S5L8920_UART0_IRQ,
                         (m->input_levels[0]&(1u<<S5L8920_UART0_IRQ))!=0u ||
                         s5l8920_uart_irq(&m->uart0));
+    (void)pl192_set_line(&m->vic[0],S5L8920_DEADLINE_IRQ,
+                        (m->input_levels[0]&(1u<<S5L8920_DEADLINE_IRQ))!=0u ||
+                        m->deadline.pending);
     pl192_set_daisy(&m->vic[S5L8920_VIC_COUNT - 1u],false,false,0u);
     for (unsigned bank = S5L8920_VIC_COUNT - 1u; bank > 0u; bank--)
         pl192_set_daisy(&m->vic[bank - 1u],pl192_irq(&m->vic[bank]),
@@ -76,6 +79,8 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
         else if (offset==S5L8920_TIMEBASE_LOW) return (uint32_t)m->timebase_ticks;
         else if (offset==S5L8920_TIMEBASE_HIGH) return (uint32_t)(m->timebase_ticks>>32);
+        else if (offset==S5L8920_DEADLINE_COUNT && m->deadline.programmed && !m->deadline.expired)
+            return m->deadline.remaining;
         else fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
         return 0u;
     }
@@ -112,8 +117,19 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
     }
     unsigned bank; uint32_t offset;
     if (address>=S5L8920_PMGR_BASE && address-S5L8920_PMGR_BASE<0x2000u) {
-        fail(m,(size!=4u || (address&3u))?S5L8920_BUS_ACCESS_UNIMPLEMENTED:
-             S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+        offset=address-S5L8920_PMGR_BASE;
+        if (size!=4u || (offset&3u)) {
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        } else if (offset==S5L8920_DEADLINE_COUNT) {
+            m->deadline.remaining=value;
+            m->deadline.programmed=true;
+            m->deadline.expired=false;
+        } else if (offset==S5L8920_DEADLINE_CONTROL && !(value&~3u) &&
+                   (!(value&1u) || m->deadline.programmed)) {
+            m->deadline.enabled=(value&1u)!=0u;
+            if (value&2u) m->deadline.pending=false;
+            refresh_interrupts(m);
+        } else fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
         return;
     }
     if (address>=S5L8920_UART0_BASE && address-S5L8920_UART0_BASE<0x1000u) {
@@ -190,6 +206,14 @@ bool s5l8920_uart0_receive(s5l8920_t *m,uint8_t byte) {
 bool s5l8920_timebase_clock(s5l8920_t *m,uint64_t ticks) {
     if (!m || !m->ram) return false;
     m->timebase_ticks+=ticks;
+    if (ticks && m->deadline.enabled && m->deadline.programmed && !m->deadline.expired) {
+        if (ticks>=m->deadline.remaining) {
+            m->deadline.remaining=0u;
+            m->deadline.expired=true;
+            m->deadline.pending=true;
+        } else m->deadline.remaining-=(uint32_t)ticks;
+    }
+    refresh_interrupts(m);
     return true;
 }
 
@@ -209,6 +233,7 @@ bool s5l8920_reset(s5l8920_t *m) {
     m->ram_boot_window = false;
     s5l8920_uart_reset(&m->uart0);
     m->timebase_ticks=0u;
+    memset(&m->deadline,0,sizeof m->deadline);
     for (unsigned bank = 0; bank < S5L8920_VIC_COUNT; bank++) {
         pl192_reset(&m->vic[bank]);
         for (unsigned line = 0; line < 32u; line++)

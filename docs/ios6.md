@@ -2,7 +2,7 @@
 
 The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
 a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
-interrupt fabric, UART and timebase counter. A complete machine, kernel boot, and SpringBoard have not
+interrupt fabric, UART, timebase counter and deadline timer. A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
@@ -132,7 +132,7 @@ timebase, UART and interrupt-controller calls. The original guarded
 With this preparation enabled, the labelled generic-CPU kernel diagnostic
 advances to 367,777 steps: Thumb `STR.W r0,[r4,#0x208]` at `0x8027b4e6`
 attempts to write `0x7fffffff` to timer deadline register `0xbf100208`.
-That register remains unsupported. The variant without the mapping exactly
+That register was the next unsupported operation. The variant without the mapping exactly
 preserves its previous 307,108-step trace; boot-argument, device-tree and
 CP14 guards remain active in both variants. These results do not establish
 the actual N88 CPU configuration, a complete kernel boot or SpringBoard.
@@ -183,7 +183,7 @@ reducing the boot-argument memory size accordingly. This establishes a
 firmware configuration, not a working display model. The device-tree pointer
 at argument offset `0x30` is virtual; its byte length is at `0x34`.
 
-## Timebase counter
+## Timebase counter and deadline timer
 
 The matching tree's `pmgr` node has device type `timer`; its first register
 range maps to `0xbf100000`, size `0x2000`. The original platform initializer
@@ -198,10 +198,10 @@ The board implements independent word reads at `0xbf100200/204` from one
 64-bit counter. Callers supply source ticks through
 `s5l8920_timebase_clock`; counter arithmetic wraps modulo 2^64. Reads and
 CPU execution do not advance time. Reset to zero is a functional starting
-point, not a measured power-on phase. Physical clock frequency, gating,
-deadline/countdown registers and timer interrupts remain unimplemented.
-Other PMGR selectors, writes, and unsupported widths/alignment retain checked
-stops. The original initializer's deadline programming therefore still stops.
+point, not a measured power-on phase. Physical clock frequency and gating
+remain unimplemented. The initial counter implementation left deadline
+programming unavailable; the deadline model below now handles that operation.
+Other PMGR selectors and unsupported widths/alignment retain checked stops.
 
 A private fixture frozen before implementation starts at the unchanged public
 entry. On checkpoint 82 it stops at the first high-word read, `0x800895a8`,
@@ -216,6 +216,51 @@ The 326 existing prepared UART/VIC cases also pass, and the complete
 61,650-step canonical ECC-guard trace is unchanged.
 This is a prepared function contract, not
 timer initialization, FIQ delivery, kernel boot or physical validation.
+
+The deadline model implements word programming at `0xbf100208` and the
+enable/acknowledge sequence at `0xbf100220`, with its latched event routed to
+VIC source 6. Matching iBoot's selected timer table at `0x4ff298dc` identifies
+both addresses and the source. Its complete deadline routine at `0x4ff04c1c`
+samples the timebase, writes `0xffffffff`, writes control `3`, and replaces
+the count with a clamped relative interval. A null callback writes control `2`.
+The original kernel initializer writes `0x7fffffff`, then control `3` and `1`;
+its hardware callbacks read or replace the count without another start write.
+
+Supplied timebase ticks now decrement an enabled interval and latch one event
+at expiry. Control bit 0 runs or stops the counter; bit 1 acknowledges the
+event. Replacing the interval, stopping it or enabling it does not acknowledge
+an existing cause. An expired interval requires a new count to fire again.
+External source 6 is ORed with the timer cause, and reset preserves that
+external input while clearing the timer configuration. This is a functional
+one-shot interpretation of the firmware sequences. Logical expiry follows
+the supplied interval; a zero interval waits for the next supplied tick.
+It does not establish physical bus/clock phase. Unprogrammed and post-expiry
+count reads, control reads, other control bits and the second timer remain
+refused because their observable semantics are not established.
+
+A frozen private fixture executes eight original iBoot calls, including a
+null callback, one-tick and ordinary intervals, low-word carry, large-distance
+clamping and past/equal deadlines. The retained baseline stops at the predicted
+first device writes. All calls pass unchanged on the first implementation,
+returning in 11 or 48 instructions with the expected full register state,
+stack, data-access counts and programming order. No ticks occur during these
+calls. Separate component tests exercise countdown, wrap, reprogramming,
+acknowledgement, external input sharing and checked-bus failures. Synthetic
+guest vectors establish IRQ/FIQ entry, device acknowledgement, rearming,
+VIC completion and exception return without advancing time through CPU steps.
+
+All 79 strict and 74 shipping tests pass, together with the 276 existing
+prepared timebase/UART/VIC calls, both original vector copies, and the complete
+unchanged 61,650-step canonical diagnostic trace.
+
+The guarded generic-CPU diagnostic now advances from the deadline write to
+370,765 steps, where Thumb `LDRB r1,[r0,r4]` at `0x8027b586` first reads the
+unprepared `/device-tree/chosen/random-seed` property at physical `0x4110264c`.
+The original tree contains a two-byte placeholder; it is not bootloader-supplied
+entropy. The archived preceding library and its own board header reproduce
+the entire prior 367,777-step trace with the same inputs. The new diagnostic
+still uses the explicit generic CPU, zero-PRAM and inherited-RAM assumptions;
+no source clocks, completed kernel boot or physical result are claimed.
 
 ## Early UART and transmit interrupts
 

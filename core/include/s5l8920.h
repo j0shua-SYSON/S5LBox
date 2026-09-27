@@ -22,6 +22,14 @@
 #define S5L8920_PMGR_BASE UINT32_C(0xbf100000)
 #define S5L8920_TIMEBASE_LOW UINT32_C(0x200)
 #define S5L8920_TIMEBASE_HIGH UINT32_C(0x204)
+#define S5L8920_DEADLINE_COUNT UINT32_C(0x208)
+#define S5L8920_DEADLINE_CONTROL UINT32_C(0x220)
+#define S5L8920_DEADLINE_IRQ 6u
+
+typedef struct {
+    uint32_t remaining;
+    bool programmed, enabled, expired, pending;
+} s5l8920_deadline_t;
 
 typedef enum {
     S5L8920_BUS_OK = 0,
@@ -47,6 +55,7 @@ typedef struct {
     uint32_t input_levels[S5L8920_VIC_COUNT];
     s5l8920_bus_failure_t bus_failure;
     bool ram_boot_window;
+    s5l8920_deadline_t deadline;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -57,7 +66,7 @@ typedef struct {
 bool s5l8920_init(s5l8920_t *m);
 void s5l8920_free(s5l8920_t *m);
 
-/* Reset CPU/controller/UART/timebase state and clear diagnostics while preserving RAM
+/* Reset CPU/controller/UART/timer state and clear diagnostics while preserving RAM
  * and externally driven interrupt levels. This is a functional reset, not a
  * model of power sequencing. The caller owns execution and device timing. */
 bool s5l8920_reset(s5l8920_t *m);
@@ -84,10 +93,19 @@ bool s5l8920_uart0_clock(s5l8920_t *m, bool nclk, uint64_t ticks,
                         uint8_t *output, size_t capacity, size_t *count);
 bool s5l8920_uart0_receive(s5l8920_t *m, uint8_t byte);
 
-/* Supply timebase source ticks explicitly, modulo 2^64. Reads and CPU steps do
- * not advance this counter. Functional reset starts at zero; no physical reset
- * phase, frequency, gating, deadline register or timer interrupt is modeled.
- * Like other host events this preserves a latched bus diagnostic. */
+/* Supply timebase source ticks explicitly, modulo 2^64, and advance the enabled
+ * deadline countdown. Reads and CPU steps do not advance time. A programmed
+ * interval produces one latched source6 event after that many supplied ticks;
+ * zero waits for the next supplied tick. This is logical deadline timing, not
+ * measured bus/clock phase. Reprogramming replaces the interval without
+ * acknowledging an existing event. Control bit0 runs/stops the countdown;
+ * bit1 acknowledges the event. Other bits and control reads remain refused.
+ * Unprogrammed or expired count reads are refused: physical reset count and
+ * post-expiry underflow/reload/readback are not established. Acknowledgement
+ * alone does not rearm an expired interval. External source6 is ORed with the
+ * timer cause. Functional reset disables/unprograms the deadline and starts
+ * the timebase at zero. No physical reset phase, source frequency or gating
+ * is inferred. Like other host events this preserves a latched bus diagnostic. */
 bool s5l8920_timebase_clock(s5l8920_t *m, uint64_t ticks);
 
 /* Host preparation is bounded to RAM and never performs MMIO. Rejected loads
