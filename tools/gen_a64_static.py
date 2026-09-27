@@ -4537,7 +4537,7 @@ def compact_raw_function() -> list[str]:
         "    cmp w11, w24",
         "    b.hi .La64cr_fallback",
         "    ldr w9, [x22, w8, uxtw]",
-        # Use the compact live-word decoder for this A32 dispatch comparison.
+        "    b .La64ra_enter",
         # ARM and AArch64 share the fourteen ordinary condition predicates.
         # Keep AL on a direct fast path; other predicates use a tiny signed
         # branch table after loading the guest's NZCV.  A failed condition
