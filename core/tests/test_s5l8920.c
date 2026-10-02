@@ -684,8 +684,8 @@ static void test_gpio_output_registers(s5l8920_t *m) {
     CHECK(!m->bus.host_ram(m,0x83000000u,4u) &&
           !m->bus.host_ram_write(m,0x83000000u,4u) &&
           !s5l8920_load(m,0x83000000u,m->ram,4u),"GPIO exposed as plain RAM");
-    const uint32_t rejected[]={0u,1u,0x202u,0x214u,0x216u,0x218u,0x21au,
-        0x21cu,0x21eu,0x232u,0x252u,0x272u,0x392u,0x612u,0x1212u,
+    const uint32_t rejected[]={0u,1u,0x202u,0x014u,0x016u,0x018u,0x01au,
+        0x01cu,0x21eu,0x232u,0x252u,0x272u,0x392u,0x612u,0x1212u,
         0x10000212u,UINT32_MAX};
     for (unsigned n=0;n<sizeof rejected/sizeof rejected[0];n++) {
         s5l8920_clear_bus_failure(m); m->bus.write32(m,0x83000000u,0x213u);
@@ -698,7 +698,7 @@ static void test_gpio_output_registers(s5l8920_t *m) {
         s5l8920_clear_bus_failure(m);
         CHECK(m->bus.read32(m,0x83000000u)==0x213u,"rejected/latched write changed GPIO output");
     }
-    const uint32_t selectors[]={0x5c0u,0x800u,0x818u,0x900u,0xffcu};
+    const uint32_t selectors[]={0x5c0u,0x81cu,0x820u,0x900u,0xffcu};
     for (unsigned n=0;n<sizeof selectors/sizeof selectors[0];n++) {
         s5l8920_clear_bus_failure(m); (void)m->bus.read32(m,0x83000000u+selectors[n]);
         CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"unsupported GPIO selector read supplied a value");
@@ -804,6 +804,187 @@ static void test_gpio_checked_cpu(s5l8920_t *m) {
     CHECK(s5l8920_reset(m),"reset after GPIO CPU fixture");
 }
 
+static void test_gpio_interrupt_modes(s5l8920_t *m) {
+    /* N88 has seven status words and source94. Modes encode high/low levels,
+     * rising/falling/either edges. Explicit samples supply the transitions. */
+    const uint32_t modes[]={0x204u,0x206u,0x208u,0x20au,0x20cu};
+    for (unsigned pin=0;pin<224u;pin++) for (unsigned kind=0;kind<5u;kind++) {
+        uint32_t address=0x83000000u+4u*pin, status=0x83000800u+4u*(pin/32u);
+        uint32_t bit=1u<<(pin%32u), control=modes[kind];
+        bool active=kind!=1u && kind!=3u;
+        CHECK(s5l8920_reset(m) && s5l8920_gpio_input(m,pin,!active),"reset/sample GPIO interrupt fixture");
+        vic_write(m,2u,PL192_INTENABLE,1u<<30);
+        m->bus.write32(m,address,control|0x10u);
+        CHECK(!m->bus_failure.reason && m->bus.read32(m,status)==0u && !m->cpu.irq_line,
+              "IRQ configuration created a false event or was refused");
+        s5l8920_clear_bus_failure(m);
+        CHECK(s5l8920_gpio_input(m,pin,active) && m->bus.read32(m,status)==bit && !m->cpu.irq_line,
+              "masked sample did not latch cause or incorrectly asserted parent");
+        s5l8920_clear_bus_failure(m);
+        m->bus.write32(m,address,control);
+        CHECK(!m->bus_failure.reason && m->cpu.irq_line && m->bus.read32(m,status)==bit &&
+              m->bus.read32(m,address)==(control|(active ? 1u:0u)),"unmask/input readback lost pending cause");
+        s5l8920_clear_bus_failure(m);
+        m->bus.write32(m,status,bit);
+        CHECK(!m->bus_failure.reason && m->bus.read32(m,status)==(kind<2u ? bit:0u) &&
+              m->cpu.irq_line==(kind<2u),"W1C edge clear/active-level reassertion");
+        s5l8920_clear_bus_failure(m);
+        CHECK(s5l8920_gpio_input(m,pin,active) &&
+              m->bus.read32(m,status)==(kind<2u ? bit:0u),"repeated sample manufactured an edge");
+        s5l8920_clear_bus_failure(m);
+        CHECK(s5l8920_gpio_input(m,pin,!active) &&
+              m->bus.read32(m,status)==((kind<2u || kind==4u) ? bit:0u),
+              "wrong reverse-edge polarity or level event erased before ack");
+        s5l8920_clear_bus_failure(m); m->bus.write32(m,status,bit);
+        CHECK(!m->bus_failure.reason && m->bus.read32(m,status)==0u && !m->cpu.irq_line,
+              "inactive source acknowledgement left an interrupt");
+        s5l8920_clear_bus_failure(m);
+        CHECK(s5l8920_gpio_input(m,pin,active),"second active sample");
+        m->bus.write32(m,address,control|0x10u);
+        CHECK(!m->bus_failure.reason && !m->cpu.irq_line && m->bus.read32(m,status)==bit,
+              "mask erased cause or failed to suppress parent");
+        CHECK(s5l8920_reset(m) && m->bus.read32(m,status)==0u && !m->cpu.irq_line,
+              "reset retained GPIO pending/parent state");
+    }
+    CHECK(s5l8920_reset(m),"reset after GPIO interrupt modes");
+}
+
+static void test_gpio_irq_banks_and_bounds(s5l8920_t *m) {
+    CHECK(s5l8920_reset(m),"reset GPIO bank fixture");
+    CHECK(S5L8920_GPIO_IRQ==94u && S5L8920_GPIO_IRQ_PINS==224u &&
+          S5L8920_GPIO_IRQ_GROUPS==7u && S5L8920_GPIO_IRQ_STATUS==0x800u,"GPIO IRQ geometry");
+    vic_write(m,2u,PL192_INTENABLE,1u<<30);
+    for (unsigned pin=0;pin<224u;pin++) {
+        CHECK(s5l8920_gpio_input(m,pin,false),"bank initial sample");
+        m->bus.write32(m,0x83000000u+4u*pin,0x208u);
+        CHECK(s5l8920_gpio_input(m,pin,true),"bank rising sample");
+    }
+    for (unsigned group=0;group<7u;group++) {
+        uint32_t status=0x83000800u+4u*group;
+        CHECK(m->bus.read32(m,status)==UINT32_MAX && m->cpu.irq_line,"full pending bank");
+        m->bus.write32(m,status,0x55555555u);
+        CHECK(m->bus.read32(m,status)==0xaaaaaaaau,"partial W1C changed unselected causes");
+        m->bus.write32(m,status,0u);
+        CHECK(m->bus.read32(m,status)==0xaaaaaaaau,"zero W1C cleared causes");
+        for (unsigned kind=0;kind<6u;kind++) {
+            if (kind==0u) (void)m->bus.read8(m,status);
+            else if (kind==1u) (void)m->bus.read16(m,status);
+            else if (kind==2u) (void)m->bus.read32(m,status+1u);
+            else if (kind==3u) m->bus.write8(m,status,0xffu);
+            else if (kind==4u) m->bus.write16(m,status,0xffffu);
+            else m->bus.write32(m,status+2u,UINT32_MAX);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED,"IRQ status width/alignment accepted");
+            s5l8920_clear_bus_failure(m);
+            CHECK(m->bus.read32(m,status)==0xaaaaaaaau,"rejected IRQ status access changed causes");
+        }
+        m->bus.write32(m,status,UINT32_MAX);
+        CHECK(m->bus.read32(m,status)==0u && m->cpu.irq_line==(group<6u),"bank W1C lost other bank interrupt");
+    }
+    for (unsigned pin=224u;pin<368u;pin++) {
+        uint32_t address=0x83000000u+4u*pin;
+        m->bus.write32(m,address,0x213u);
+        for (unsigned mode=4u;mode<=0xcu;mode+=2u) {
+            m->bus.write32(m,address,0x200u|mode);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"non-interrupt pin accepted IRQ mode");
+            s5l8920_clear_bus_failure(m);
+            CHECK(m->bus.read32(m,address)==0x213u,"rejected IRQ mode changed ordinary output");
+        }
+    }
+    CHECK(s5l8920_set_irq(m,94u,true),"assert external GPIO parent");
+    m->bus.write32(m,0x83000800u,UINT32_MAX);
+    CHECK(m->cpu.irq_line && s5l8920_set_irq(m,94u,false) && !m->cpu.irq_line,
+          "GPIO acknowledgement erased external source94");
+    CHECK(s5l8920_gpio_input(m,0u,false) && s5l8920_gpio_input(m,0u,true) &&
+          s5l8920_set_irq(m,94u,false) && m->cpu.irq_line,"external update erased GPIO cause");
+    (void)m->bus.read32(m,0x8300081cu);
+    s5l8920_bus_failure_t stopped=m->bus_failure;
+    CHECK(s5l8920_gpio_input(m,1u,false) && s5l8920_gpio_input(m,1u,true) &&
+          !memcmp(&stopped,&m->bus_failure,sizeof stopped),"IRQ input event erased latched diagnostic");
+    s5l8920_clear_bus_failure(m);
+    CHECK(m->bus.read32(m,0x83000800u)==3u,"latched diagnostic blocked external GPIO event");
+    CHECK(s5l8920_set_irq(m,94u,true) && s5l8920_reset(m) &&
+          m->vic[2].input==(1u<<30) && !m->cpu.irq_line && m->bus.read32(m,0x83000800u)==0u,
+          "reset lost external source94 or retained internal cause");
+    CHECK(s5l8920_set_irq(m,94u,false),"withdraw external GPIO parent");
+}
+
+static bool test_gpio_irq_first_samples(s5l8920_t *m) {
+    /* Fresh board state without two simultaneous 256 MiB allocations. */
+    s5l8920_free(m);
+    bool ready=s5l8920_init(m);
+    CHECK(ready,"fresh GPIO sample board");
+    if (!ready) return false;
+    const uint32_t modes[]={0x208u,0x20au,0x20cu,0x204u,0x206u};
+    for (unsigned n=0;n<5u;n++) for (unsigned high=0;high<2u;high++) {
+        unsigned pin=2u*n+high; uint32_t bit=1u<<pin;
+        m->bus.write32(m,0x83000000u+4u*pin,modes[n]);
+        CHECK(!m->bus_failure.reason && m->bus.read32(m,0x83000800u)==0u,
+              "unsampled input generated an interrupt");
+        (void)m->bus.read32(m,0x83000000u+4u*pin);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"IRQ config invented input sample");
+        CHECK(s5l8920_gpio_input(m,pin,high!=0u),"first sample");
+        s5l8920_clear_bus_failure(m);
+        bool level=(n==3u && high) || (n==4u && !high);
+        CHECK(m->bus.read32(m,0x83000800u)==(level ? bit:0u),"initial sample created an edge or missed active level");
+        m->bus.write32(m,0x83000000u+4u*pin,0x210u);
+        m->bus.write32(m,0x83000800u,UINT32_MAX);
+    }
+    CHECK(s5l8920_gpio_input(m,10u,true),"sample before IRQ programming");
+    m->bus.write32(m,0x83000028u,0x214u);
+    CHECK(m->bus.read32(m,0x83000800u)==(1u<<10) && !m->gpio_irq,
+          "programming active masked level missed its cause");
+    m->bus.write32(m,0x83000028u,0x210u); m->bus.write32(m,0x83000800u,UINT32_MAX);
+    m->bus.write32(m,0x83000028u,0x208u);
+    CHECK(m->bus.read32(m,0x83000800u)==0u && !m->gpio_irq,"reconfiguration fabricated an edge");
+    m->bus.write32(m,0x83000028u,0x204u);
+    CHECK(m->bus.read32(m,0x83000800u)==(1u<<10) && m->gpio_irq,
+          "programming active unmasked level missed its cause");
+    CHECK(s5l8920_reset(m),"reset first-sample board");
+    return true;
+}
+
+static void test_gpio_irq_cpu(s5l8920_t *m) {
+    for (unsigned fiq=0;fiq<2u;fiq++) {
+        CHECK(s5l8920_reset(m) && s5l8920_gpio_input(m,223u,false),"reset GPIO CPU IRQ fixture");
+        m->bus.write32(m,0x8300037cu,0x208u);
+        vic_write(m,2u,PL192_VECTADDR0+4u*30u,0x8000005eu);
+        vic_write(m,2u,PL192_INTSELECT,fiq ? 1u<<30:0u);
+        vic_write(m,2u,PL192_INTENABLE,1u<<30);
+        map_test_vectors(m);
+        put(m,0x4000u+(0x830u*4u),0x83000c02u);
+        uint32_t vector=fiq ? 0x1cu:0x18u;
+        put(m,vector,0xea000000u|((0x1000u-vector-8u)>>2));
+        uint32_t at=0x1000u;
+        if (!fiq) {
+            put(m,at,0xe5910000u); at+=4u; /* Read root vector. */
+            put(m,at,0xe2811801u); at+=4u; /* Next cascade bank. */
+            put(m,at,0xe5910000u); at+=4u;
+        }
+        put(m,at,0xe5845000u); at+=4u; /* GPIO W1C. */
+        if (!fiq) for (unsigned bank=0;bank<3u;bank++) {
+            if (bank) { put(m,at,0xe2422801u); at+=4u; }
+            put(m,at,0xe5823000u); at+=4u; /* Cascade EOI. */
+        }
+        put(m,at,0xe25ef004u);
+        m->cpu.r[1]=vic_address(0u,PL192_ADDRESS); m->cpu.r[2]=vic_address(2u,PL192_ADDRESS);
+        m->cpu.r[3]=0u; m->cpu.r[4]=0x83000818u; m->cpu.r[5]=0x80000000u;
+        CHECK(s5l8920_gpio_input(m,223u,true) && m->cpu.irq_line==(fiq==0u) &&
+              m->cpu.fiq_line==(fiq!=0u),"GPIO source94 IRQ/FIQ routing");
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[15]==vector && m->cpu.r[14]==0x204u &&
+              (m->cpu.cpsr&ARM_CPSR_MODE_MASK)==(fiq ? ARM_MODE_FIQ:ARM_MODE_IRQ),"GPIO CPU exception entry");
+        unsigned steps=0;
+        while (m->cpu.r[15]!=0x200u && steps++<20u) if (arm_step(&m->cpu)!=ARM_OK) break;
+        CHECK(m->cpu.r[15]==0x200u && m->cpu.cpsr==(ARM_MODE_SYS|ARM_CPSR_C) &&
+              !m->bus_failure.reason && m->bus.read32(m,0x83000818u)==0u &&
+              !m->cpu.irq_line && !m->cpu.fiq_line,"GPIO acknowledge/EOI/exception return");
+        for (unsigned bank=0;bank<3u;bank++) CHECK(!m->vic[bank].in_service,"GPIO cascade left in service");
+        CHECK(s5l8920_gpio_input(m,223u,false) && !m->cpu.irq_line && !m->cpu.fiq_line &&
+              s5l8920_gpio_input(m,223u,true) && m->cpu.irq_line==(fiq==0u) &&
+              m->cpu.fiq_line==(fiq!=0u),"GPIO edge failed to rearm after handler");
+    }
+    CHECK(s5l8920_reset(m),"reset after GPIO CPU IRQ fixture");
+}
+
 static void test_fiq_and_reset(s5l8920_t *m) {
     CHECK(s5l8920_reset(m), "reset FIQ fixture");
     map_test_vectors(m); put(m,0x1cu,0xe25ef004u);
@@ -841,6 +1022,10 @@ int main(void) {
     test_gpio_output_registers(&m);
     test_gpio_input_samples(&m);
     test_gpio_checked_cpu(&m);
+    test_gpio_interrupt_modes(&m);
+    test_gpio_irq_banks_and_bounds(&m);
+    if (!test_gpio_irq_first_samples(&m)) return 1;
+    test_gpio_irq_cpu(&m);
     test_fiq_and_reset(&m);
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");

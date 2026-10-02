@@ -28,6 +28,10 @@
 #define S5L8920_NVRAM_PROXY_SIZE 8192u
 #define S5L8920_GPIO_BASE UINT32_C(0x83000000)
 #define S5L8920_GPIO_PIN_COUNT 368u
+#define S5L8920_GPIO_IRQ_GROUPS 7u
+#define S5L8920_GPIO_IRQ_PINS (32u * S5L8920_GPIO_IRQ_GROUPS)
+#define S5L8920_GPIO_IRQ_STATUS UINT32_C(0x800)
+#define S5L8920_GPIO_IRQ 94u
 
 typedef struct {
     uint16_t control;
@@ -65,6 +69,8 @@ typedef struct {
     bool ram_boot_window;
     s5l8920_deadline_t deadline;
     s5l8920_gpio_pin_t gpio[S5L8920_GPIO_PIN_COUNT];
+    uint32_t gpio_pending[S5L8920_GPIO_IRQ_GROUPS];
+    bool gpio_irq;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -104,13 +110,20 @@ bool s5l8920_uart0_clock(s5l8920_t *m, bool nclk, uint64_t ticks,
 bool s5l8920_uart0_receive(s5l8920_t *m, uint8_t byte);
 
 /* Supply a digital sample for an ordinary GPIO pin (port * 8 + bit). No pin
- * configuration or interrupt is inferred. Samples persist across functional
+ * configuration is inferred. Samples persist across functional
  * reset and preserve latched bus diagnostics. Call between CPU steps.
  * Word MMIO supports explicitly programmed, interrupt-masked input/output
- * controls only: 0x210/0x212, data bit0, pull selection 0/0x80/0x100. Input
+ * controls: 0x210/0x212, data bit0, pull selection 0/0x80/0x100. Input
  * reads require a supplied sample; output reads return the programmed level.
  * Pulls are retained without inventing analog/floating-pin behavior. Unknown
- * configuration, alternate functions and interrupt registers remain refused. */
+ * configuration, alternate functions and unknown register bits remain refused.
+ * Pins0..223 also support input IRQ modes 0x204 high, 0x206 low, 0x208 rising,
+ * 0x20a falling and 0x20c either edge; bit0x10 masks delivery to source94.
+ * Seven pending words at0x800..0x818 are W1C. Masked events latch; initial
+ * samples cannot create edges. Active levels relatch on acknowledgement.
+ * Configuration changes create no edges; pending survives until W1C/reset.
+ * Functional reset clears pending. External source94 is ORed with GPIO.
+ * This is logical sampling/latching, not measured phase or debounce timing. */
 bool s5l8920_gpio_input(s5l8920_t *m, unsigned pin, bool high);
 
 /* Supply timebase source ticks explicitly, modulo 2^64, and advance the enabled

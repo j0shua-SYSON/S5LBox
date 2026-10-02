@@ -2,12 +2,12 @@
 
 The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
 a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
-interrupt fabric, UART, timebase counter, deadline timer and GPIO polling.
+interrupt fabric, UART, timebase counter, deadline timer and GPIO.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
-## Partial GPIO polling
+## Partial GPIO polling and interrupts
 
 The matching device tree describes 46 ports of eight pins at `0x83000000`,
 inside a 4 KiB aperture. Aligned word accesses now support explicitly
@@ -23,15 +23,38 @@ reads require a supplied sample; output reads reflect the programmed level.
 Input writes and pull settings do not fabricate external levels. Functional
 reset preserves samples but invalidates all pin programming. No power-on or
 bootloader pin configuration is assumed. Unsupported widths, alternate
-functions, unmasked interrupt modes and interrupt-status registers retain
-checked failures before mutating device state.
+functions and unknown register bits retain checked failures before mutating
+device state.
+
+The first 224 pins also support high/low level, rising/falling edge and
+either-edge interrupt modes (`0x204`, `0x206`, `0x208`, `0x20a`, `0x20c`).
+Control bit `0x10` masks delivery; seven status words at offsets
+`0x800..0x818` acknowledge selected causes by writing one bits. The matching
+kernel's configuration, mask and dispatcher routines establish the mode
+fields, masking and acknowledgement order. A
+[later Apple GPIO driver](https://kernel.googlesource.com/pub/scm/linux/kernel/git/jikos/trivial/+/1ff2fc02862d52e18fd3daabcfe840ec27e920a8/drivers/pinctrl/pinctrl-apple-gpio.c)
+corroborates the trigger polarities; that is a cross-generation inference,
+not a measurement of N88. Its different masking and parent-group layout
+are excluded.
+
+This logical model latches events while masked and suppresses parent source
+94 until unmasked. An initial sample cannot create an edge; active levels
+relatch after acknowledgement. Programming a level mode evaluates the supplied
+sample, while configuration changes cannot create edges. External source 94
+is combined with the GPIO cause, and reset clears internal pending state.
+These sampling/latching choices do not establish physical timing, debounce
+or analog behavior.
 
 The private firmware witness passes 14,352 original iBoot polling calls,
 including all pins, pull selections and both levels. With explicitly
 prepared pin state and a synthetic object/vtable, the original kernel
 initialization loop reads and writes all 368 controls and fills its shadow
-array. Its following interrupt-status clear at physical `0x83000800`
-remains refused. This is bounded driver execution, not an executed bootloader
+array. The initial polling implementation stopped at the following
+interrupt-status clear at physical `0x83000800`. Interrupt support now allows
+all seven clears and passes 1,120 original kernel configuration, unmask and
+full-dispatcher cases. A synthetic client callback verifies its arguments
+and observes edge acknowledgement before dispatch and level acknowledgement
+after dispatch. This is bounded driver execution, not an executed bootloader
 or complete GPIO controller.
 
 The separately prepared kernel diagnostic now reaches GPIO after its

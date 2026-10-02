@@ -24,6 +24,9 @@ static bool ram_offset(const s5l8920_t *m, uint32_t address, size_t size,
  * DDI0273A 2.3.2 blocking wiring: no acknowledgement is forwarded downstream.
  * Logical levels are propagated without asserting physical timing accuracy. */
 static void refresh_interrupts(s5l8920_t *m) {
+    (void)pl192_set_line(&m->vic[S5L8920_GPIO_IRQ/32u],S5L8920_GPIO_IRQ%32u,
+                        (m->input_levels[S5L8920_GPIO_IRQ/32u]&(1u<<(S5L8920_GPIO_IRQ%32u)))!=0u ||
+                        m->gpio_irq);
     (void)pl192_set_line(&m->vic[0],S5L8920_UART0_IRQ,
                         (m->input_levels[0]&(1u<<S5L8920_UART0_IRQ))!=0u ||
                         s5l8920_uart_irq(&m->uart0));
@@ -36,6 +39,36 @@ static void refresh_interrupts(s5l8920_t *m) {
                        pl192_fiq(&m->vic[bank]),pl192_vector(&m->vic[bank]));
     m->cpu.irq_line = pl192_irq(&m->vic[0]);
     m->cpu.fiq_line = pl192_fiq(&m->vic[0]);
+}
+
+static bool gpio_control_supported(unsigned index,uint32_t control) {
+    if ((control&~0x39fu) || !(control&0x200u) || (control&0x180u)==0x180u) return false;
+    unsigned mode=control&0xeu;
+    if (mode<=2u) return (control&0x10u)!=0u;
+    return index<S5L8920_GPIO_IRQ_PINS && mode<=0xcu;
+}
+
+static void gpio_latch_level(s5l8920_t *m,unsigned index) {
+    if (index>=S5L8920_GPIO_IRQ_PINS) return;
+    const s5l8920_gpio_pin_t *pin=&m->gpio[index];
+    unsigned mode=pin->control&0xeu;
+    if (pin->programmed && pin->input_valid &&
+        ((mode==4u && pin->input_high) || (mode==6u && !pin->input_high)))
+        m->gpio_pending[index/32u]|=1u<<(index%32u);
+}
+
+static void gpio_refresh_irq(s5l8920_t *m) {
+    m->gpio_irq=false;
+    for (unsigned index=0;index<S5L8920_GPIO_IRQ_PINS;index++) {
+        const s5l8920_gpio_pin_t *pin=&m->gpio[index];
+        unsigned mode=pin->control&0xeu;
+        if ((m->gpio_pending[index/32u]&(1u<<(index%32u))) && pin->programmed &&
+            !(pin->control&0x10u) && mode>=4u && mode<=0xcu) {
+            m->gpio_irq=true;
+            break;
+        }
+    }
+    refresh_interrupts(m);
 }
 
 static bool access_failed(void *ctx) {
@@ -80,11 +113,15 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
         } else if (offset/4u<S5L8920_GPIO_PIN_COUNT) {
             const s5l8920_gpio_pin_t *pin=&m->gpio[offset/4u];
-            if (pin->programmed && ((pin->control&2u) || pin->input_valid))
-                return (pin->control&2u) ? pin->control :
+            bool output=(pin->control&0xeu)==2u;
+            if (pin->programmed && (output || pin->input_valid))
+                return output ? pin->control :
                        (pin->control&~1u)|(pin->input_high ? 1u:0u);
             fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
-        } else fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        } else if (offset>=S5L8920_GPIO_IRQ_STATUS &&
+                   offset-S5L8920_GPIO_IRQ_STATUS<4u*S5L8920_GPIO_IRQ_GROUPS)
+            return m->gpio_pending[(offset-S5L8920_GPIO_IRQ_STATUS)/4u];
+        else fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
         return 0u;
     }
     if (address>=S5L8920_PMGR_BASE && address-S5L8920_PMGR_BASE<0x2000u) {
@@ -134,12 +171,18 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         offset=address-S5L8920_GPIO_BASE;
         if (size!=4u || (offset&3u)) {
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
-        } else if (offset/4u<S5L8920_GPIO_PIN_COUNT && !(value&~0x393u) &&
-                   (value&0x270u)==0x210u && (value&0x180u)!=0x180u) {
-            /* Matching iBoot polling forms only; no IRQ or alternate mode. */
+        } else if (offset/4u<S5L8920_GPIO_PIN_COUNT && gpio_control_supported(offset/4u,value)) {
             s5l8920_gpio_pin_t *pin=&m->gpio[offset/4u];
             pin->control=(uint16_t)value;
             pin->programmed=true;
+            gpio_latch_level(m,offset/4u);
+            gpio_refresh_irq(m);
+        } else if (offset>=S5L8920_GPIO_IRQ_STATUS &&
+                   offset-S5L8920_GPIO_IRQ_STATUS<4u*S5L8920_GPIO_IRQ_GROUPS) {
+            unsigned group=(offset-S5L8920_GPIO_IRQ_STATUS)/4u;
+            m->gpio_pending[group]&=~value;
+            for (unsigned index=32u*group;index<32u*(group+1u);index++) gpio_latch_level(m,index);
+            gpio_refresh_irq(m);
         } else fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
         return;
     }
@@ -259,8 +302,15 @@ bool s5l8920_uart0_receive(s5l8920_t *m,uint8_t byte) {
 
 bool s5l8920_gpio_input(s5l8920_t *m,unsigned pin,bool high) {
     if (!m || !m->ram || pin>=S5L8920_GPIO_PIN_COUNT) return false;
+    unsigned mode=m->gpio[pin].control&0xeu;
+    if (pin<S5L8920_GPIO_IRQ_PINS && m->gpio[pin].programmed &&
+        m->gpio[pin].input_valid && high!=m->gpio[pin].input_high &&
+        ((mode==8u && high) || (mode==0xau && !high) || mode==0xcu))
+        m->gpio_pending[pin/32u]|=1u<<(pin%32u);
     m->gpio[pin].input_high=high;
     m->gpio[pin].input_valid=true;
+    gpio_latch_level(m,pin);
+    gpio_refresh_irq(m);
     return true;
 }
 
@@ -295,6 +345,8 @@ bool s5l8920_reset(s5l8920_t *m) {
     s5l8920_uart_reset(&m->uart0);
     m->timebase_ticks=0u;
     memset(&m->deadline,0,sizeof m->deadline);
+    memset(m->gpio_pending,0,sizeof m->gpio_pending);
+    m->gpio_irq=false;
     for (unsigned pin=0;pin<S5L8920_GPIO_PIN_COUNT;pin++) {
         m->gpio[pin].control=0u;
         m->gpio[pin].programmed=false;
