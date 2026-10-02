@@ -661,6 +661,149 @@ static void test_guest_irq_handler(s5l8920_t *m) {
     }
 }
 
+static void test_gpio_output_registers(s5l8920_t *m) {
+    /* Matching N88 DT has 46 ports of eight pins at 0x83000000. The iBoot
+     * output helper writes 0x212/0x213, retaining the pull selection. These
+     * tests program digital outputs; they do not assume inherited pin state. */
+    CHECK(s5l8920_reset(m), "reset GPIO output fixture");
+    (void)m->bus.read32(m,0x83000000u);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,
+          "unprepared GPIO read did not stop");
+    const uint32_t pulls[]={0u,0x80u,0x100u};
+    for (unsigned pin=0;pin<368u;pin++) {
+        uint32_t address=0x83000000u+4u*pin;
+        for (unsigned n=0;n<3u;n++) {
+            uint32_t value=0x212u|pulls[n]|((pin+n)&1u);
+            s5l8920_clear_bus_failure(m);
+            m->bus.write32(m,address,value);
+            CHECK(!m->bus_failure.reason && m->bus.read32(m,address)==value,
+                  "programmed GPIO output/pull readback");
+        }
+    }
+    s5l8920_clear_bus_failure(m);
+    CHECK(!m->bus.host_ram(m,0x83000000u,4u) &&
+          !m->bus.host_ram_write(m,0x83000000u,4u) &&
+          !s5l8920_load(m,0x83000000u,m->ram,4u),"GPIO exposed as plain RAM");
+    const uint32_t rejected[]={0u,1u,0x202u,0x214u,0x216u,0x218u,0x21au,
+        0x21cu,0x21eu,0x232u,0x252u,0x272u,0x392u,0x612u,0x1212u,
+        0x10000212u,UINT32_MAX};
+    for (unsigned n=0;n<sizeof rejected/sizeof rejected[0];n++) {
+        s5l8920_clear_bus_failure(m); m->bus.write32(m,0x83000000u,0x213u);
+        m->cpu.r[15]=0x1234u; m->bus.write32(m,0x83000000u,rejected[n]);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+              m->bus_failure.address==0x83000000u && m->bus_failure.value==rejected[n] &&
+              m->bus_failure.pc==0x1234u && m->bus_failure.write,
+              "unsupported GPIO configuration accepted or wrong diagnostic");
+        m->bus.write32(m,0x83000000u,0x212u);
+        s5l8920_clear_bus_failure(m);
+        CHECK(m->bus.read32(m,0x83000000u)==0x213u,"rejected/latched write changed GPIO output");
+    }
+    const uint32_t selectors[]={0x5c0u,0x800u,0x818u,0x900u,0xffcu};
+    for (unsigned n=0;n<sizeof selectors/sizeof selectors[0];n++) {
+        s5l8920_clear_bus_failure(m); (void)m->bus.read32(m,0x83000000u+selectors[n]);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"unsupported GPIO selector read supplied a value");
+        s5l8920_clear_bus_failure(m); m->bus.write32(m,0x83000000u+selectors[n],0u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"unsupported GPIO selector write accepted");
+    }
+    for (unsigned kind=0;kind<6u;kind++) {
+        s5l8920_clear_bus_failure(m);
+        if (kind==0u) (void)m->bus.read8(m,0x83000000u);
+        else if (kind==1u) (void)m->bus.read16(m,0x83000000u);
+        else if (kind==2u) (void)m->bus.read32(m,0x83000001u);
+        else if (kind==3u) m->bus.write8(m,0x83000000u,0u);
+        else if (kind==4u) m->bus.write16(m,0x83000000u,0u);
+        else m->bus.write32(m,0x83000002u,0u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED,
+              "unsupported GPIO width/alignment reached registers");
+    }
+    CHECK(s5l8920_reset(m),"reset programmed GPIO outputs");
+    (void)m->bus.read32(m,0x83000000u);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"reset retained programmed GPIO state");
+    s5l8920_clear_bus_failure(m);
+    (void)m->bus.read32(m,0x83001000u);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_UNMAPPED,"GPIO aperture expanded past DT range");
+    CHECK(s5l8920_reset(m),"reset after GPIO fixture");
+}
+
+static void test_gpio_input_samples(s5l8920_t *m) {
+    s5l8920_t empty={0};
+    CHECK(S5L8920_GPIO_PIN_COUNT==368u && S5L8920_GPIO_BASE==0x83000000u,
+          "GPIO geometry differs from matching DT");
+    CHECK(!s5l8920_gpio_input(NULL,0u,true) && !s5l8920_gpio_input(&empty,0u,true) &&
+          !empty.gpio[0].input_valid,"uninitialized GPIO host input accepted");
+    CHECK(s5l8920_reset(m),"reset GPIO sample fixture");
+    const uint32_t pulls[]={0u,0x80u,0x100u};
+    for (unsigned pin=0;pin<368u;pin++) {
+        uint32_t address=0x83000000u+4u*pin;
+        m->bus.write32(m,address,0x211u);
+        (void)m->bus.read32(m,address);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,
+              "input data write fabricated an unsupplied sample");
+        s5l8920_bus_failure_t stopped=m->bus_failure;
+        CHECK(s5l8920_gpio_input(m,pin,false) &&
+              !memcmp(&stopped,&m->bus_failure,sizeof stopped),"host sample lost checked stop");
+        s5l8920_clear_bus_failure(m);
+        for (unsigned pull=0;pull<3u;pull++) for (unsigned high=0;high<2u;high++) {
+            CHECK(s5l8920_gpio_input(m,pin,high!=0u),"explicit GPIO sample refused");
+            m->bus.write32(m,address,0x210u|pulls[pull]|(high^1u));
+            CHECK(m->bus.read32(m,address)==(0x210u|pulls[pull]|high) && !m->bus_failure.reason,
+                  "input read used written data/pull instead of supplied sample");
+            m->bus.write32(m,address,0x212u|pulls[pull]|(high^1u));
+            CHECK(m->bus.read32(m,address)==(0x212u|pulls[pull]|(high^1u)),
+                  "external sample overrode driven output");
+        }
+    }
+    s5l8920_gpio_pin_t before[368]; memcpy(before,m->gpio,sizeof before);
+    CHECK(!s5l8920_gpio_input(m,368u,true) && !s5l8920_gpio_input(m,UINT32_MAX,true) &&
+          !memcmp(before,m->gpio,sizeof before),"invalid pin changed GPIO state");
+    CHECK(!m->vic[2].input && !m->cpu.irq_line && !m->cpu.fiq_line,
+          "masked GPIO sample invented interrupt");
+    CHECK(s5l8920_reset(m),"reset sampled inputs");
+    for (unsigned pin=0;pin<368u;pin++) {
+        uint32_t address=0x83000000u+4u*pin;
+        (void)m->bus.read32(m,address);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,
+              "sample alone supplied reset control state");
+        s5l8920_clear_bus_failure(m); m->bus.write32(m,address,0x210u);
+        CHECK(m->bus.read32(m,address)==0x211u,"functional reset lost external sample");
+    }
+    CHECK(s5l8920_reset(m),"reset after GPIO input fixture");
+}
+
+static void test_gpio_checked_cpu(s5l8920_t *m) {
+    for (unsigned mapped=0;mapped<2u;mapped++) {
+        CHECK(s5l8920_reset(m),"reset GPIO CPU fixture");
+        uint32_t code=S5L8920_RAM_BASE+0x200u, pin=0x83000000u;
+        if (mapped) {
+            map_test_vectors(m); code=0x200u; pin=0xc5900000u;
+            put(m,0x4000u+(pin>>20)*4u,0x83000c02u); /* Device section. */
+        }
+        put(m,0x200u,0xe4912004u); /* LDR r2,[r1],#4 */
+        put(m,0x204u,0xe4812004u); /* STR r2,[r1],#4 */
+        m->cpu.r[15]=code; m->cpu.r[1]=pin; m->cpu.r[2]=0xabcdef01u;
+        CHECK(arm_step(&m->cpu)==ARM_HALT && m->cpu.r[15]==code && !m->cpu.cycles &&
+              m->cpu.r[1]==pin && m->cpu.r[2]==0xabcdef01u && !m->cpu.cp15.dfsr &&
+              m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+              m->bus_failure.address==0x83000000u && !m->bus_failure.write,
+              "unprepared GPIO load retired, wrote back or became guest abort");
+        CHECK(s5l8920_gpio_input(m,0u,false),"supply CPU input sample");
+        s5l8920_clear_bus_failure(m); m->bus.write32(m,0x83000000u,0x211u);
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[15]==code+4u && m->cpu.cycles==1u &&
+              m->cpu.r[2]==0x210u && m->cpu.r[1]==pin+4u,"GPIO checked load retry");
+        m->cpu.r[2]=0x202u; /* Interrupt-enabled form remains unsupported. */
+        CHECK(arm_step(&m->cpu)==ARM_HALT && m->cpu.r[15]==code+4u && m->cpu.cycles==1u &&
+              m->cpu.r[1]==pin+4u && !m->gpio[1].programmed && !m->cpu.cp15.dfsr &&
+              m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && m->bus_failure.write &&
+              m->bus_failure.address==0x83000004u && m->bus_failure.value==0x202u,
+              "unsupported GPIO store committed state/writeback");
+        s5l8920_clear_bus_failure(m); m->cpu.r[2]=0x313u;
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[15]==code+8u && m->cpu.cycles==2u &&
+              m->cpu.r[1]==pin+8u && m->bus.read32(m,0x83000004u)==0x313u,
+              "GPIO checked store retry");
+    }
+    CHECK(s5l8920_reset(m),"reset after GPIO CPU fixture");
+}
+
 static void test_fiq_and_reset(s5l8920_t *m) {
     CHECK(s5l8920_reset(m), "reset FIQ fixture");
     map_test_vectors(m); put(m,0x1cu,0xe25ef004u);
@@ -695,6 +838,9 @@ int main(void) {
     test_deadline_countdown(&m);
     test_deadline_interrupt_wiring(&m);
     test_guest_irq_handler(&m);
+    test_gpio_output_registers(&m);
+    test_gpio_input_samples(&m);
+    test_gpio_checked_cpu(&m);
     test_fiq_and_reset(&m);
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");

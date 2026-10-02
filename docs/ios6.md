@@ -2,9 +2,53 @@
 
 The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
 a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
-interrupt fabric, UART, timebase counter and deadline timer. A complete machine, kernel boot, and SpringBoard have not
+interrupt fabric, UART, timebase counter, deadline timer and GPIO polling.
+A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## Partial GPIO polling
+
+The matching device tree describes 46 ports of eight pins at `0x83000000`,
+inside a 4 KiB aperture. Aligned word accesses now support explicitly
+programmed digital input/output controls: `0x210`/`0x212`, data bit 0, and
+pull selections `0`, `0x80` or `0x100`. Matching iBoot helpers at
+`0x4ff02008..0x4ff02132` establish these polling forms;
+[the pinned S5L8920 OpeniBoot source](https://github.com/iDroid-Project/openiBoot/blob/866562fdb1cfd019bcd77885c80fbf0af65d5c15/plat-s5l8920/gpio.c)
+corroborates them. Its separate older interrupt-controller definitions are
+excluded because they conflict with the matching kernel's register layout.
+
+`s5l8920_gpio_input` supplies a digital sample for a selected pin. Input
+reads require a supplied sample; output reads reflect the programmed level.
+Input writes and pull settings do not fabricate external levels. Functional
+reset preserves samples but invalidates all pin programming. No power-on or
+bootloader pin configuration is assumed. Unsupported widths, alternate
+functions, unmasked interrupt modes and interrupt-status registers retain
+checked failures before mutating device state.
+
+The private firmware witness passes 14,352 original iBoot polling calls,
+including all pins, pull selections and both levels. With explicitly
+prepared pin state and a synthetic object/vtable, the original kernel
+initialization loop reads and writes all 368 controls and fills its shadow
+array. Its following interrupt-status clear at physical `0x83000800`
+remains refused. This is bounded driver execution, not an executed bootloader
+or complete GPIO controller.
+
+The separately prepared kernel diagnostic now reaches GPIO after its
+chip-revision, platform clocks, USB frequency, backlight calibration,
+product identifier and VIC geometry handoff checks. These retain explicit
+configuration assumptions, including an unmeasured B5 selection, generic
+CPU identity, nominal clock schedule and zero backlight calibration.
+Without prepared GPIO state, the current stop is still the first control
+read at Thumb `0x807887ba`, physical `0x83000000`, after 182,680,916 steps.
+Recognizing that address changes its diagnostic from unmapped to unprepared;
+this GPIO implementation does not advance that full trace or establish boot.
+
+All 79 strict and 74 shipping tests pass, including checked CPU load/store
+retries and all pin/pull/sample combinations. The existing 276 firmware cases
+pass and the canonical 61,650-step ECC-guard trace is unchanged. The full
+182,680,916-step trace matches its frozen predecessor except for the GPIO
+failure reason, including preserved post-stop bus diagnostics.
 
 ## Explicit generic CPU configuration
 

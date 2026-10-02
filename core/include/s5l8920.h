@@ -1,4 +1,4 @@
-/* Partial N88/S5L8920 memory, interrupt fabric, UART and timebase.
+/* Partial N88/S5L8920 memory, interrupt fabric, UART, timebase and GPIO.
  * No complete firmware boot.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #ifndef S5LBOX_S5L8920_H
@@ -26,6 +26,13 @@
 #define S5L8920_DEADLINE_CONTROL UINT32_C(0x220)
 #define S5L8920_DEADLINE_IRQ 6u
 #define S5L8920_NVRAM_PROXY_SIZE 8192u
+#define S5L8920_GPIO_BASE UINT32_C(0x83000000)
+#define S5L8920_GPIO_PIN_COUNT 368u
+
+typedef struct {
+    uint16_t control;
+    bool programmed, input_valid, input_high;
+} s5l8920_gpio_pin_t;
 
 typedef struct {
     uint32_t remaining;
@@ -57,6 +64,7 @@ typedef struct {
     s5l8920_bus_failure_t bus_failure;
     bool ram_boot_window;
     s5l8920_deadline_t deadline;
+    s5l8920_gpio_pin_t gpio[S5L8920_GPIO_PIN_COUNT];
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -68,7 +76,8 @@ bool s5l8920_init(s5l8920_t *m);
 void s5l8920_free(s5l8920_t *m);
 
 /* Reset CPU/controller/UART/timer state and clear diagnostics while preserving RAM
- * and externally driven interrupt levels. This is a functional reset, not a
+ * and externally supplied interrupt levels/GPIO samples. GPIO programming is
+ * invalidated. This is a functional reset, not a
  * model of power sequencing. The caller owns execution and device timing. */
 bool s5l8920_reset(s5l8920_t *m);
 bool s5l8920_set_irq(s5l8920_t *m, unsigned source, bool asserted);
@@ -93,6 +102,16 @@ bool s5l8920_set_ram_boot_window(s5l8920_t *m, bool enabled);
 bool s5l8920_uart0_clock(s5l8920_t *m, bool nclk, uint64_t ticks,
                         uint8_t *output, size_t capacity, size_t *count);
 bool s5l8920_uart0_receive(s5l8920_t *m, uint8_t byte);
+
+/* Supply a digital sample for an ordinary GPIO pin (port * 8 + bit). No pin
+ * configuration or interrupt is inferred. Samples persist across functional
+ * reset and preserve latched bus diagnostics. Call between CPU steps.
+ * Word MMIO supports explicitly programmed, interrupt-masked input/output
+ * controls only: 0x210/0x212, data bit0, pull selection 0/0x80/0x100. Input
+ * reads require a supplied sample; output reads return the programmed level.
+ * Pulls are retained without inventing analog/floating-pin behavior. Unknown
+ * configuration, alternate functions and interrupt registers remain refused. */
+bool s5l8920_gpio_input(s5l8920_t *m, unsigned pin, bool high);
 
 /* Supply timebase source ticks explicitly, modulo 2^64, and advance the enabled
  * deadline countdown. Reads and CPU steps do not advance time. A programmed

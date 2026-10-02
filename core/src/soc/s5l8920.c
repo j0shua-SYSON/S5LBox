@@ -1,4 +1,4 @@
-/* N88 RAM, PL192, UART and timebase, separate from the S5L8900 machine.
+/* N88 RAM, PL192, UART, timebase and GPIO, separate from the S5L8900 machine.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "s5l8920.h"
 #include "lzss.h"
@@ -74,6 +74,19 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         return value;
     }
     unsigned bank; uint32_t offset, value;
+    if (address>=S5L8920_GPIO_BASE && address-S5L8920_GPIO_BASE<0x1000u) {
+        offset=address-S5L8920_GPIO_BASE;
+        if (size!=4u || (offset&3u)) {
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
+        } else if (offset/4u<S5L8920_GPIO_PIN_COUNT) {
+            const s5l8920_gpio_pin_t *pin=&m->gpio[offset/4u];
+            if (pin->programmed && ((pin->control&2u) || pin->input_valid))
+                return (pin->control&2u) ? pin->control :
+                       (pin->control&~1u)|(pin->input_high ? 1u:0u);
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        } else fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        return 0u;
+    }
     if (address>=S5L8920_PMGR_BASE && address-S5L8920_PMGR_BASE<0x2000u) {
         offset=address-S5L8920_PMGR_BASE;
         if (size!=4u || (offset&3u))
@@ -117,6 +130,19 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         return;
     }
     unsigned bank; uint32_t offset;
+    if (address>=S5L8920_GPIO_BASE && address-S5L8920_GPIO_BASE<0x1000u) {
+        offset=address-S5L8920_GPIO_BASE;
+        if (size!=4u || (offset&3u)) {
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        } else if (offset/4u<S5L8920_GPIO_PIN_COUNT && !(value&~0x393u) &&
+                   (value&0x270u)==0x210u && (value&0x180u)!=0x180u) {
+            /* Matching iBoot polling forms only; no IRQ or alternate mode. */
+            s5l8920_gpio_pin_t *pin=&m->gpio[offset/4u];
+            pin->control=(uint16_t)value;
+            pin->programmed=true;
+        } else fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+        return;
+    }
     if (address>=S5L8920_PMGR_BASE && address-S5L8920_PMGR_BASE<0x2000u) {
         offset=address-S5L8920_PMGR_BASE;
         if (size!=4u || (offset&3u)) {
@@ -231,6 +257,13 @@ bool s5l8920_uart0_receive(s5l8920_t *m,uint8_t byte) {
     return true;
 }
 
+bool s5l8920_gpio_input(s5l8920_t *m,unsigned pin,bool high) {
+    if (!m || !m->ram || pin>=S5L8920_GPIO_PIN_COUNT) return false;
+    m->gpio[pin].input_high=high;
+    m->gpio[pin].input_valid=true;
+    return true;
+}
+
 bool s5l8920_timebase_clock(s5l8920_t *m,uint64_t ticks) {
     if (!m || !m->ram) return false;
     m->timebase_ticks+=ticks;
@@ -262,6 +295,10 @@ bool s5l8920_reset(s5l8920_t *m) {
     s5l8920_uart_reset(&m->uart0);
     m->timebase_ticks=0u;
     memset(&m->deadline,0,sizeof m->deadline);
+    for (unsigned pin=0;pin<S5L8920_GPIO_PIN_COUNT;pin++) {
+        m->gpio[pin].control=0u;
+        m->gpio[pin].programmed=false;
+    }
     for (unsigned bank = 0; bank < S5L8920_VIC_COUNT; bank++) {
         pl192_reset(&m->vic[bank]);
         for (unsigned line = 0; line < 32u; line++)
