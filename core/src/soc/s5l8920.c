@@ -1,4 +1,4 @@
-/* N88 RAM, PL192, UART, timebase and GPIO, separate from the S5L8900 machine.
+/* N88 RAM, PL192, UART, timebase, GPIO and I2C, separate from S5L8900.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "s5l8920.h"
 #include "lzss.h"
@@ -39,6 +39,14 @@ static void refresh_interrupts(s5l8920_t *m) {
                        pl192_fiq(&m->vic[bank]),pl192_vector(&m->vic[bank]));
     m->cpu.irq_line = pl192_irq(&m->vic[0]);
     m->cpu.fiq_line = pl192_fiq(&m->vic[0]);
+}
+
+static void refresh_i2c_interrupt(s5l8920_t *m,unsigned bus) {
+    unsigned source=S5L8920_I2C0_IRQ-bus;
+    (void)pl192_set_line(&m->vic[0],source,
+        (m->input_levels[0]&(1u<<source))!=0u ||
+        (m->i2c[bus].control!=0u && m->i2c[bus].status!=0u));
+    refresh_interrupts(m);
 }
 
 static bool gpio_control_supported(unsigned index,uint32_t control) {
@@ -103,6 +111,61 @@ static bool vic_access_supported(const pl192_t *v, uint32_t offset) {
     return offset != PL192_PROTECTION && !v->protection && offset < 0xfe0u;
 }
 
+static bool decode_i2c(uint32_t address,unsigned *bus,uint32_t *offset) {
+    if (address<S5L8920_I2C_BASE) return false;
+    uint32_t relative=address-S5L8920_I2C_BASE;
+    *bus=relative/S5L8920_I2C_STRIDE; *offset=relative%S5L8920_I2C_STRIDE;
+    return *bus<S5L8920_I2C_COUNT && *offset<0x1000u;
+}
+
+static bool i2c_read(s5l8920_i2c_t *i,uint32_t offset,uint32_t *value) {
+    if (offset==0xcu) { *value=i->status; return true; }
+    if (offset==0x20u && i->rx_cursor<i->rx_count) {
+        *value=i->rx[i->rx_cursor++]; return true;
+    }
+    return false;
+}
+
+static bool i2c_write(s5l8920_i2c_t *i,uint32_t offset,uint32_t value) {
+    if (value>255u) return false;
+    if (offset==0xcu) {
+        if (value&~0x37u) return false;
+        i->status&=(uint8_t)~value;
+        return true;
+    }
+    if (i->active) return false;
+    if (offset==8u) {
+        if (value!=0u && value!=0x30u && value!=0xf0u) return false;
+        i->control=(uint8_t)value; i->programmed|=16u;
+        return true;
+    }
+    if (i->status || i->rx_cursor<i->rx_count) return false;
+    switch (offset) {
+    case 0u:
+        if (value>0x7fu) return false;
+        i->address=(uint8_t)value; i->programmed|=1u; return true;
+    case 0x10u:
+        i->subaddress=(uint8_t)value; i->programmed|=2u; return true;
+    case 0x14u:
+        if (value) return false;
+        i->programmed|=4u; return true;
+    case 0x18u:
+        if (value>S5L8920_I2C_CAPACITY || value<i->tx_count) return false;
+        i->length=(uint8_t)value; i->programmed|=8u; return true;
+    case 0x20u:
+        if (!(i->programmed&8u) || i->tx_count>=i->length) return false;
+        i->tx[i->tx_count++]=(uint8_t)value; return true;
+    case 0x24u:
+        if ((value!=4u && value!=5u) || i->programmed!=31u || !i->control ||
+            i->sequence==UINT64_MAX ||
+            (value==4u ? (!i->length || i->tx_count!=0u) : i->tx_count!=i->length)) return false;
+        i->write=value==5u; i->active=true; i->sequence++;
+        i->rx_count=0u; i->rx_cursor=0u;
+        return true;
+    default: return false;
+    }
+}
+
 static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
     if (access_failed(m)) return 0u;
     uint32_t ram_at;
@@ -113,6 +176,14 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         return value;
     }
     unsigned bank; uint32_t offset, value;
+    if (decode_i2c(address,&bank,&offset)) {
+        if ((size!=1u && size!=4u) || (offset&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
+        else if (!i2c_read(&m->i2c[bank],offset,&value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        else return value;
+        return 0u;
+    }
     if (address>=S5L8920_GPIO_BASE && address-S5L8920_GPIO_BASE<0x1000u) {
         offset=address-S5L8920_GPIO_BASE;
         if (size!=4u || (offset&3u)) {
@@ -173,6 +244,14 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         return;
     }
     unsigned bank; uint32_t offset;
+    if (decode_i2c(address,&bank,&offset)) {
+        if ((size!=1u && size!=4u) || (offset&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        else if (!i2c_write(&m->i2c[bank],offset,value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+        else refresh_i2c_interrupt(m,bank);
+        return;
+    }
     if (address>=S5L8920_GPIO_BASE && address-S5L8920_GPIO_BASE<0x1000u) {
         offset=address-S5L8920_GPIO_BASE;
         if (size!=4u || (offset&3u)) {
@@ -340,7 +419,35 @@ bool s5l8920_set_irq(s5l8920_t *m, unsigned source, bool asserted) {
     if (asserted) m->input_levels[bank] |= 1u << line;
     else m->input_levels[bank] &= ~(1u << line);
     (void)pl192_set_line(&m->vic[bank],line,asserted);
-    refresh_interrupts(m);
+    if (source<=S5L8920_I2C0_IRQ && S5L8920_I2C0_IRQ-source<S5L8920_I2C_COUNT)
+        refresh_i2c_interrupt(m,S5L8920_I2C0_IRQ-source);
+    else refresh_interrupts(m);
+    return true;
+}
+
+bool s5l8920_i2c_request(const s5l8920_t *m,unsigned bus,s5l8920_i2c_request_t *request) {
+    if (!m || !m->ram || bus>=S5L8920_I2C_COUNT || !request || !m->i2c[bus].active) return false;
+    const s5l8920_i2c_t *i=&m->i2c[bus];
+    s5l8920_i2c_request_t result={0};
+    result.sequence=i->sequence; result.address=i->address;
+    result.subaddress=i->subaddress; result.length=i->length; result.write=i->write;
+    if (i->write) memcpy(result.data,i->tx,i->length);
+    *request=result;
+    return true;
+}
+
+bool s5l8920_i2c_complete(s5l8920_t *m,unsigned bus,uint64_t sequence,
+                         bool success,const uint8_t *data,size_t size) {
+    if (!m || !m->ram || bus>=S5L8920_I2C_COUNT) return false;
+    s5l8920_i2c_t *i=&m->i2c[bus];
+    if (!i->active || sequence!=i->sequence) return false;
+    if (success && !i->write) {
+        if (!data || size!=i->length) return false;
+    } else if (data || size) return false;
+    if (size) memmove(i->rx,data,size);
+    i->rx_count=(unsigned)size; i->rx_cursor=0u; i->tx_count=0u;
+    i->active=false; i->status=success ? 0x10u:0x20u;
+    refresh_i2c_interrupt(m,bus);
     return true;
 }
 
@@ -351,6 +458,11 @@ bool s5l8920_reset(s5l8920_t *m) {
     s5l8920_uart_reset(&m->uart0);
     m->timebase_ticks=0u;
     memset(&m->deadline,0,sizeof m->deadline);
+    for (unsigned bus=0;bus<S5L8920_I2C_COUNT;bus++) {
+        uint64_t sequence=m->i2c[bus].sequence;
+        memset(&m->i2c[bus],0,sizeof m->i2c[bus]);
+        m->i2c[bus].sequence=sequence;
+    }
     memset(m->gpio_pending,0,sizeof m->gpio_pending);
     m->gpio_irq=false;
     for (unsigned pin=0;pin<S5L8920_GPIO_PIN_COUNT;pin++) {

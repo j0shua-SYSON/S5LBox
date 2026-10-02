@@ -2,7 +2,7 @@
 
 The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
 a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
-interrupt fabric, UART, timebase counter, deadline timer and GPIO.
+interrupt fabric, UART, timebase counter, deadline timer, GPIO and I2C.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
@@ -92,6 +92,44 @@ retries and all pin/pull/sample combinations. The existing 276 firmware cases
 pass and the canonical 61,650-step ECC-guard trace is unchanged. The full
 182,680,916-step trace matches the GPIO polling checkpoint, including the
 unprepared-pin failure and preserved post-stop bus diagnostics.
+
+## Bounded I2C requests and explicit responses
+
+Three I2C apertures at `0x83200000`, `0x83300000` and `0x83400000` use
+interrupt sources 19, 18 and 17. The matching iBoot table describes all three;
+the device tree instantiates banks 0 and 2. The original bootloader uses
+byte accesses, while `AppleS5L8920XI2CController` uses aligned words at the
+same selectors. Both forms now share the checked controller. Halfwords,
+other byte lanes, unknown selectors and unverified readback remain refused.
+
+A transfer requires an explicit seven-bit address, one-byte subaddress,
+zero auxiliary register, length up to 128 bytes and an observed nonzero
+control value. Writes require all staged bytes. Starting a command exposes
+a stable request through `s5l8920_i2c_request`; it produces no automatic
+ACK, receive data or completion. `s5l8920_i2c_complete` accepts a response
+only for the matching active request. Successful reads require exactly the
+requested bytes. Errors and successful writes carry no receive bytes.
+Sequence numbers prevent delayed responses from completing a new request
+after a functional reset.
+
+The matching consumers treat status `0x10` as completion and `0x20` as an
+error, and acknowledge causes through offset `0xc`. Acknowledgement leaves
+unread receive bytes intact; FIFO reads do not acknowledge interrupts.
+The observed control values `0x30` and `0xf0` permit logical delivery, and
+zero suppresses it. Internal causes are combined with external VIC levels.
+These scheduling and delivery choices are an explicit model, not measured
+clock phase, arbitration, electrical ACK timing or a complete register
+specification. No PMU or sensor register values are supplied by this change.
+
+The private witness executes original initialization writes for all three
+banks, and 54 original request/response cases. These cover the iBoot request
+function, response fragment and return tail, plus kernel request, status,
+receive-loop and acknowledgement fragments. It supplies synthetic objects,
+page mappings, call frames and explicit endpoint responses. The kernel
+fixture explicitly prepares auxiliary register `0x14` as zero because the
+kernel does not write it; iBoot's request function does. Provider clocks,
+the delay/scheduler paths and complete driver initialization are not executed.
+The separate full kernel diagnostic still stops at unprepared GPIO state.
 
 ## Explicit generic CPU configuration
 

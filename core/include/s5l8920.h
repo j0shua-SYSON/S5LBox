@@ -1,4 +1,4 @@
-/* Partial N88/S5L8920 memory, interrupt fabric, UART, timebase and GPIO.
+/* Partial N88/S5L8920 memory, interrupts, UART, timebase, GPIO and I2C.
  * No complete firmware boot.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #ifndef S5LBOX_S5L8920_H
@@ -32,6 +32,26 @@
 #define S5L8920_GPIO_IRQ_PINS (32u * S5L8920_GPIO_IRQ_GROUPS)
 #define S5L8920_GPIO_IRQ_STATUS UINT32_C(0x800)
 #define S5L8920_GPIO_IRQ 94u
+#define S5L8920_I2C_BASE UINT32_C(0x83200000)
+#define S5L8920_I2C_STRIDE UINT32_C(0x100000)
+#define S5L8920_I2C_COUNT 3u
+#define S5L8920_I2C_CAPACITY 128u
+#define S5L8920_I2C0_IRQ 19u /* Consecutive banks use sources 19, 18, 17. */
+
+typedef struct {
+    uint64_t sequence;
+    uint8_t control, address, subaddress, length, programmed, status;
+    uint8_t tx[S5L8920_I2C_CAPACITY], rx[S5L8920_I2C_CAPACITY];
+    unsigned tx_count, rx_count, rx_cursor;
+    bool active, write;
+} s5l8920_i2c_t;
+
+typedef struct {
+    uint64_t sequence;
+    uint8_t address, subaddress, length;
+    bool write;
+    uint8_t data[S5L8920_I2C_CAPACITY];
+} s5l8920_i2c_request_t;
 
 typedef struct {
     uint16_t control;
@@ -71,6 +91,7 @@ typedef struct {
     s5l8920_gpio_pin_t gpio[S5L8920_GPIO_PIN_COUNT];
     uint32_t gpio_pending[S5L8920_GPIO_IRQ_GROUPS];
     bool gpio_irq;
+    s5l8920_i2c_t i2c[S5L8920_I2C_COUNT];
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -81,7 +102,7 @@ typedef struct {
 bool s5l8920_init(s5l8920_t *m);
 void s5l8920_free(s5l8920_t *m);
 
-/* Reset CPU/controller/UART/timer state and clear diagnostics while preserving RAM
+/* Reset CPU/controller/UART/timer/I2C state and clear diagnostics, preserving RAM
  * and externally supplied interrupt levels/GPIO samples. GPIO programming is
  * invalidated. This is a functional reset, not a
  * model of power sequencing. The caller owns execution and device timing. */
@@ -129,6 +150,28 @@ bool s5l8920_uart0_receive(s5l8920_t *m, uint8_t byte);
  * Functional reset clears pending. External source94 is ORed with GPIO.
  * This is logical sampling/latching, not measured phase or debounce timing. */
 bool s5l8920_gpio_input(s5l8920_t *m, unsigned pin, bool high);
+
+/* Bounded I2C host endpoint interface, called between CPU steps. Commands
+ * expose a stable request; no slave ACK, status or RX data is synthesized.
+ * Success reads require exactly length supplied bytes; writes and failures
+ * require NULL/zero data. Only a matching active sequence can complete.
+ * Functional reset discards requests while retaining the sequence counter,
+ * so a delayed event cannot complete a later request. Invalid calls preserve
+ * state and output; valid host events preserve a latched bus diagnostic.
+ *
+ * Byte and aligned word MMIO: target0, control8 (observed0/0x30/0xf0), W1C
+ * status0xc, subaddress0x10, explicitly zero auxiliary0x14, length0x18,
+ * byte FIFO0x20, start0x24 (4 read/5 write). Reads support status/FIFO only.
+ * Transfers require all fields programmed, at most128 bytes, complete TX
+ * data, no unread RX or pending status, and nonzero control. Staging/control
+ * writes while active are refused. Status0x10 completes,0x20 reports error;
+ * W1C mask0x37 clears modeled causes without discarding RX. Nonzero control
+ * permits delivery, zero suppresses it, ORed with external sources19/18/17.
+ * This is explicit logical scheduling, not physical clocks, arbitration,
+ * measured power-on state or emulation of an attached PMU/sensor. */
+bool s5l8920_i2c_request(const s5l8920_t *m, unsigned bus, s5l8920_i2c_request_t *request);
+bool s5l8920_i2c_complete(s5l8920_t *m, unsigned bus, uint64_t sequence,
+                         bool success, const uint8_t *data, size_t size);
 
 /* Supply timebase source ticks explicitly, modulo 2^64, and advance the enabled
  * deadline countdown. Reads and CPU steps do not advance time. A programmed

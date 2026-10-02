@@ -1076,6 +1076,261 @@ static bool test_gpio_configuration_fields(s5l8920_t *m) {
     return true;
 }
 
+static void test_i2c_staging_bus(s5l8920_t *m) {
+    for (unsigned bus=0;bus<3u;bus++) for (unsigned write=0;write<2u;write++)
+     for (unsigned width=0;width<2u;width++) {
+        CHECK(s5l8920_reset(m),"reset I2C staging fixture");
+        uint32_t base=0x83200000u+0x100000u*bus;
+        const uint32_t offsets[]={8u,12u,0u,16u,20u,24u,32u,36u};
+        const uint32_t values[]={0x30u,0x37u,0x55u,0xaau,0u,1u,0x5au,4u|write};
+        for (unsigned n=0;n<8u;n++) {
+            if (n==6u && !write) continue;
+            if (width) m->bus.write32(m,base+offsets[n],values[n]);
+            else m->bus.write8(m,base+offsets[n],(uint8_t)values[n]);
+            CHECK(!m->bus_failure.reason,"original I2C staging write refused");
+        }
+        CHECK(m->bus.read32(m,base+12u)==0u && !m->bus_failure.reason && !m->cpu.irq_line,
+              "I2C start invented completion or slave response");
+        m->bus.write32(m,base+36u,4u|write);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,
+              "active I2C request accepted another command");
+        s5l8920_clear_bus_failure(m);
+        (void)m->bus.read8(m,base+32u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,
+              "I2C FIFO fabricated bytes without endpoint completion");
+    }
+    CHECK(s5l8920_reset(m),"reset after I2C staging fixture");
+}
+
+static void i2c_program(s5l8920_t *m,unsigned bus,bool write,unsigned length,bool byte) {
+    uint32_t base=0x83200000u+bus*0x100000u;
+    const uint32_t offsets[]={8u,12u,0u,16u,20u,24u};
+    const uint32_t values[]={byte ? 0x30u:0xf0u,0x37u,0x74u+bus,0xc3u,0u,length};
+    for (unsigned n=0;n<6u;n++) {
+        if (byte) m->bus.write8(m,base+offsets[n],(uint8_t)values[n]);
+        else m->bus.write32(m,base+offsets[n],values[n]);
+    }
+    if (write) for (unsigned n=0;n<length;n++) {
+        uint8_t value=(uint8_t)(n*73u+bus);
+        if (byte) m->bus.write8(m,base+32u,value);
+        else m->bus.write32(m,base+32u,value);
+    }
+    if (byte) m->bus.write8(m,base+36u,write ? 5u:4u);
+    else m->bus.write32(m,base+36u,write ? 5u:4u);
+}
+
+static void test_i2c_endpoints(s5l8920_t *m) {
+    const unsigned lengths[]={0u,1u,128u};
+    for (unsigned bus=0;bus<3u;bus++) for (unsigned write=0;write<2u;write++)
+     for (unsigned success=0;success<2u;success++) for (unsigned byte=0;byte<2u;byte++)
+      for (unsigned n=0;n<3u;n++) {
+        unsigned length=lengths[n]; if (!write && !length) continue;
+        CHECK(s5l8920_reset(m),"reset I2C endpoint fixture");
+        uint32_t base=0x83200000u+bus*0x100000u,irq=1u<<(19u-bus);
+        vic_write(m,0u,PL192_INTENABLE,irq);
+        i2c_program(m,bus,write!=0u,length,byte!=0u);
+        s5l8920_i2c_request_t request={0},again={0};
+        CHECK(!m->bus_failure.reason && !m->cpu.irq_line &&
+              s5l8920_i2c_request(m,bus,&request) && request.sequence &&
+              request.address==0x74u+bus && request.subaddress==0xc3u &&
+              request.length==length && request.write==(write!=0u),"I2C request fields or start status");
+        for (unsigned j=0;j<128u;j++)
+            CHECK(request.data[j]==(write && j<length ? (uint8_t)(j*73u+bus):0u),
+                  "I2C request TX payload or stale unused bytes");
+        CHECK(s5l8920_i2c_request(m,bus,&again) && again.sequence==request.sequence &&
+              !memcmp(again.data,request.data,sizeof again.data),"I2C observation consumed request");
+        uint8_t response[128]; for (unsigned j=0;j<128u;j++) response[j]=(uint8_t)(255u-j*37u-bus);
+        s5l8920_i2c_t before=m->i2c[bus];
+        CHECK(!s5l8920_i2c_complete(m,bus,request.sequence-1u,success!=0u,NULL,0u) &&
+              !s5l8920_i2c_complete(m,bus,request.sequence,true,response,write ? length:129u) &&
+              !memcmp(&before,&m->i2c[bus],sizeof before),"invalid I2C response mutated active request");
+        m->bus.write32(m,base+36u,write ? 5u:4u);
+        s5l8920_bus_failure_t stopped=m->bus_failure;
+        CHECK(stopped.reason==S5L8920_BUS_REGISTER_REFUSED,"I2C busy diagnostic");
+        size_t size=success && !write ? length:0u;
+        CHECK(s5l8920_i2c_complete(m,bus,request.sequence,success!=0u,size ? response:NULL,size) &&
+              !memcmp(&stopped,&m->bus_failure,sizeof stopped) &&
+              s5l8920_set_irq(m,19u-bus,false) && m->cpu.irq_line,
+              "I2C completion lost diagnostic or interrupt");
+        before=m->i2c[bus]; again=request;
+        CHECK(!s5l8920_i2c_complete(m,bus,request.sequence,success!=0u,size ? response:NULL,size) &&
+              !s5l8920_i2c_request(m,bus,&again) && again.sequence==request.sequence &&
+              !memcmp(&before,&m->i2c[bus],sizeof before),"I2C duplicate completion or false request mutated state");
+        s5l8920_clear_bus_failure(m);
+        uint32_t status=success ? 0x10u:0x20u;
+        CHECK(m->bus.read8(m,base+12u)==status && m->bus.read32(m,base+12u)==status,
+              "I2C completion byte/word status differs");
+        m->bus.write32(m,base+12u,status^0x30u);
+        CHECK(m->bus.read32(m,base+12u)==status && m->cpu.irq_line,"unselected W1C lost completion");
+        m->bus.write32(m,base+8u,0u);
+        CHECK(!m->cpu.irq_line && m->bus.read32(m,base+12u)==status,"disable lost latched I2C status");
+        CHECK(s5l8920_set_irq(m,19u-bus,true) && m->cpu.irq_line,"external I2C source assertion");
+        m->bus.write8(m,base+12u,(uint8_t)status);
+        CHECK(m->cpu.irq_line && m->bus.read32(m,base+12u)==0u &&
+              s5l8920_set_irq(m,19u-bus,false) && !m->cpu.irq_line,
+              "I2C acknowledgement erased external source or retained cause");
+        if (size) {
+            m->bus.write32(m,base+8u,0x30u); m->bus.write32(m,base+36u,4u);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+                  !m->i2c[bus].active && !m->i2c[bus].rx_cursor,
+                  "new command discarded unread I2C bytes");
+            s5l8920_clear_bus_failure(m);
+        }
+        for (unsigned j=0;j<size;j++) {
+            uint32_t value=j&1u ? m->bus.read8(m,base+32u):m->bus.read32(m,base+32u);
+            CHECK(!m->bus_failure.reason && value==response[j],"ack discarded RX or FIFO byte order changed");
+        }
+        (void)m->bus.read32(m,base+32u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"empty I2C FIFO supplied data");
+        s5l8920_clear_bus_failure(m);
+    }
+    CHECK(s5l8920_reset(m),"reset I2C sequence fixture");
+    i2c_program(m,0u,false,1u,false);
+    s5l8920_i2c_request_t old={0},current={0};
+    CHECK(s5l8920_i2c_request(m,0u,&old) && s5l8920_reset(m),"reset active request");
+    i2c_program(m,0u,false,1u,false);
+    uint8_t value=0x96u;
+    CHECK(s5l8920_i2c_request(m,0u,&current) && current.sequence>old.sequence &&
+          !s5l8920_i2c_complete(m,0u,old.sequence,true,&value,1u) && m->i2c[0].active,
+          "stale pre-reset response completed a new request");
+    CHECK(s5l8920_i2c_complete(m,0u,current.sequence,true,&value,1u),"current response refused after reset");
+    vic_write(m,0u,PL192_INTENABLE,1u<<19);
+    CHECK(m->cpu.irq_line,"pending completion lost before VIC enable");
+    CHECK(s5l8920_set_irq(m,19u,true) && s5l8920_reset(m) && m->vic[0].input==(1u<<19) &&
+          !m->i2c[0].active && !m->i2c[0].status && !m->i2c[0].programmed &&
+          !m->i2c[0].rx_count && !m->i2c[0].tx_count && !m->cpu.irq_line,
+          "reset retained I2C state or lost external line");
+    CHECK(s5l8920_set_irq(m,19u,false),"withdraw reset I2C source");
+    s5l8920_t empty={0}; s5l8920_i2c_request_t sentinel;
+    memset(&sentinel,0xa5,sizeof sentinel); current=sentinel;
+    CHECK(!s5l8920_i2c_request(NULL,0u,&current) && !s5l8920_i2c_request(&empty,0u,&current) &&
+          !s5l8920_i2c_request(m,3u,&current) && !s5l8920_i2c_request(m,0u,NULL) &&
+          !memcmp(&current,&sentinel,sizeof current),"invalid request observation changed output");
+    CHECK(!s5l8920_i2c_complete(NULL,0u,0u,false,NULL,0u) &&
+          !s5l8920_i2c_complete(&empty,0u,0u,false,NULL,0u) &&
+          !s5l8920_i2c_complete(m,3u,0u,false,NULL,0u),"invalid completion accepted");
+}
+
+static void test_i2c_bounds(s5l8920_t *m) {
+    for (unsigned bus=0;bus<3u;bus++) {
+        CHECK(s5l8920_reset(m),"reset I2C bounds fixture");
+        uint32_t base=0x83200000u+bus*0x100000u;
+        const uint32_t bad[][2]={{0u,0x80u},{8u,0x10u},{8u,0x31u},{8u,0x10030u},
+            {12u,8u},{12u,0x40u},{16u,256u},{20u,1u},{24u,129u},{32u,1u},
+            {36u,4u},{36u,5u},{36u,0u},{36u,6u},{4u,0u},{28u,0u},{0xffcu,0u}};
+        for (unsigned n=0;n<sizeof bad/sizeof bad[0];n++) {
+            s5l8920_i2c_t before=m->i2c[bus];
+            m->cpu.r[15]=0x1234u; m->bus.write32(m,base+bad[n][0],bad[n][1]);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && m->bus_failure.write &&
+                  m->bus_failure.pc==0x1234u && m->bus_failure.address==base+bad[n][0] &&
+                  !memcmp(&before,&m->i2c[bus],sizeof before),"invalid I2C field mutated controller");
+            s5l8920_clear_bus_failure(m);
+        }
+        for (unsigned offset=0;offset<40u;offset+=4u) {
+            if (offset==12u) continue;
+            (void)m->bus.read32(m,base+offset);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"unverified I2C register read returned data");
+            s5l8920_clear_bus_failure(m);
+        }
+        for (unsigned kind=0;kind<8u;kind++) {
+            s5l8920_i2c_t before=m->i2c[bus];
+            if (kind==0u) (void)m->bus.read16(m,base+12u);
+            else if (kind==1u) m->bus.write16(m,base+8u,0x30u);
+            else if (kind<5u) m->bus.write8(m,base+7u+kind,0x30u);
+            else (void)m->bus.read32(m,base+8u+kind);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED &&
+                  !memcmp(&before,&m->i2c[bus],sizeof before),"I2C lane/width reached controller");
+            s5l8920_clear_bus_failure(m);
+        }
+        (void)m->bus.read32(m,base+0x1000u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_UNMAPPED,"I2C aperture leaked into bank gap");
+        s5l8920_clear_bus_failure(m);
+        CHECK(!m->bus.host_ram(m,base,4u) && !m->bus.host_ram_write(m,base,4u) &&
+              !s5l8920_load(m,base,m->ram,4u),"I2C exposed as host RAM");
+        const uint32_t fields[]={8u,0u,16u,20u,24u};
+        const uint32_t values[]={0x30u,0x74u,0xc3u,0u,1u};
+        for (unsigned omitted=0;omitted<5u;omitted++) {
+            CHECK(s5l8920_reset(m),"reset incomplete I2C fields");
+            for (unsigned n=0;n<5u;n++) if (n!=omitted) m->bus.write32(m,base+fields[n],values[n]);
+            s5l8920_i2c_t before=m->i2c[bus]; m->bus.write32(m,base+36u,4u);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+                  !memcmp(&before,&m->i2c[bus],sizeof before),"incomplete I2C request started");
+        }
+        CHECK(s5l8920_reset(m),"reset I2C FIFO fixture");
+        for (unsigned n=0;n<5u;n++) m->bus.write32(m,base+fields[n],values[n]);
+        m->bus.write32(m,base+24u,2u); m->bus.write32(m,base+32u,0x12u);
+        m->bus.write32(m,base+36u,5u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+              m->i2c[bus].tx_count==1u && !m->i2c[bus].active,"partial TX request started");
+        s5l8920_clear_bus_failure(m); m->bus.write32(m,base+32u,0x34u);
+        m->bus.write32(m,base+32u,0x56u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && m->i2c[bus].tx_count==2u,
+              "I2C TX overflow changed FIFO");
+        s5l8920_clear_bus_failure(m); m->bus.write32(m,base+36u,4u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !m->i2c[bus].active,
+              "RX command consumed staged TX data");
+        s5l8920_clear_bus_failure(m); m->bus.write32(m,base+36u,5u);
+        s5l8920_i2c_request_t request={0};
+        CHECK(s5l8920_i2c_request(m,bus,&request) && request.data[0]==0x12u && request.data[1]==0x34u,
+              "I2C TX retry lost committed FIFO prefix");
+        for (unsigned n=0;n<5u;n++) {
+            s5l8920_i2c_t before=m->i2c[bus]; m->bus.write32(m,base+fields[n],values[n]);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+                  !memcmp(&before,&m->i2c[bus],sizeof before),"active request fields changed");
+            s5l8920_clear_bus_failure(m);
+        }
+    }
+    CHECK(s5l8920_reset(m),"reset multibank I2C fixture");
+    uint32_t all=(1u<<19)|(1u<<18)|(1u<<17); vic_write(m,0u,PL192_INTENABLE,all);
+    for (unsigned bus=0;bus<3u;bus++) {
+        i2c_program(m,bus,true,0u,false); s5l8920_i2c_request_t request={0};
+        CHECK(s5l8920_i2c_request(m,bus,&request) &&
+              s5l8920_i2c_complete(m,bus,request.sequence,true,NULL,0u),"independent I2C bank completion");
+    }
+    CHECK((m->vic[0].input&all)==all && m->cpu.irq_line,"I2C banks lost simultaneous causes");
+    for (unsigned bus=0;bus<3u;bus++) {
+        m->bus.write32(m,0x8320000cu+bus*0x100000u,0x10u); all&=~(1u<<(19u-bus));
+        CHECK((m->vic[0].input&((1u<<19)|(1u<<18)|(1u<<17)))==all && m->cpu.irq_line==(all!=0u),
+              "I2C bank acknowledgement cleared a different source");
+    }
+    CHECK(s5l8920_reset(m),"reset after I2C bounds");
+}
+
+static void test_i2c_checked_cpu(s5l8920_t *m) {
+    for (unsigned mapped=0;mapped<2u;mapped++) for (unsigned byte=0;byte<2u;byte++) {
+        CHECK(s5l8920_reset(m),"reset I2C CPU fixture");
+        i2c_program(m,0u,false,1u,false);
+        s5l8920_i2c_request_t request={0}; CHECK(s5l8920_i2c_request(m,0u,&request),"CPU pending I2C request");
+        uint32_t code=S5L8920_RAM_BASE+0x200u,fifo=0x83200020u;
+        if (mapped) {
+            map_test_vectors(m);code=0x200u;fifo=0xc5900020u;
+            put(m,0x4000u+(fifo>>20)*4u,0x83200c02u);
+        }
+        put(m,0x200u,byte ? 0xe4d12004u:0xe4912004u); /* LDR[B] r2,[r1],#4 */
+        put(m,0x204u,byte ? 0xe4c12004u:0xe4812004u); /* STR[B] r2,[r1],#4 */
+        m->cpu.r[15]=code;m->cpu.r[1]=fifo;m->cpu.r[2]=0xabcdef01u;
+        CHECK(arm_step(&m->cpu)==ARM_HALT && m->cpu.r[15]==code && !m->cpu.cycles &&
+              m->cpu.r[1]==fifo && m->cpu.r[2]==0xabcdef01u && !m->cpu.cp15.dfsr &&
+              m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+              m->bus_failure.address==0x83200020u && m->bus_failure.size==(byte ? 1u:4u),
+              "empty I2C load retired or became guest data abort");
+        uint8_t response=0x96u;
+        CHECK(s5l8920_i2c_complete(m,0u,request.sequence,true,&response,1u),"supply CPU I2C response");
+        s5l8920_clear_bus_failure(m);
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[15]==code+4u && m->cpu.cycles==1u &&
+              m->cpu.r[1]==fifo+4u && m->cpu.r[2]==0x96u,"I2C receive retry did not consume exactly one byte");
+        m->cpu.r[2]=4u;
+        CHECK(arm_step(&m->cpu)==ARM_HALT && m->cpu.r[15]==code+4u && m->cpu.cycles==1u &&
+              m->cpu.r[1]==fifo+4u && !m->i2c[0].active && m->bus_failure.write,
+              "unacknowledged I2C completion allowed next CPU command");
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,0x8320000cu,0x10u);
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[15]==code+8u && m->cpu.cycles==2u &&
+              m->cpu.r[1]==fifo+8u && m->i2c[0].active && m->i2c[0].sequence>request.sequence,
+              "I2C command retry did not start exactly once");
+    }
+    CHECK(s5l8920_reset(m),"reset after I2C CPU fixture");
+}
+
 static void test_fiq_and_reset(s5l8920_t *m) {
     CHECK(s5l8920_reset(m), "reset FIQ fixture");
     map_test_vectors(m); put(m,0x1cu,0xe25ef004u);
@@ -1118,6 +1373,10 @@ int main(void) {
     if (!test_gpio_irq_first_samples(&m)) return 1;
     test_gpio_irq_cpu(&m);
     if (!test_gpio_configuration_fields(&m)) return 1;
+    test_i2c_staging_bus(&m);
+    test_i2c_endpoints(&m);
+    test_i2c_bounds(&m);
+    test_i2c_checked_cpu(&m);
     test_fiq_and_reset(&m);
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
