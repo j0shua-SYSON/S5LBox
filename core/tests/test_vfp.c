@@ -3654,6 +3654,171 @@ static void test_a8_neon_int_addsub_access_and_it(void) {
       }
 }
 
+/* Immediate shift mode: 0=left, 1=signed right, 2=unsigned right. */
+static uint32_t a8_neon_shift_imm(unsigned thumb, unsigned mode, unsigned size, unsigned quad,
+                                  unsigned d, unsigned m, unsigned amount) {
+    unsigned bits = 8u << size;
+    unsigned imm = mode ? (bits == 64u ? 64u : 2u * bits) - amount : (bits == 64u ? 0u : bits) + amount;
+    return (thumb ? 0xef800010u : 0xf2800010u) | ((mode == 2u) << (thumb ? 28u : 24u)) |
+        (mode ? 0u : 0x500u) | (imm << 16) | ((size == 3u) << 7) | (quad << 6) |
+        ((d & 15u) << 12) | ((d >> 4) << 22) | (m & 15u) | ((m >> 4) << 5);
+}
+
+static void a8_shift_imm_expected(uint64_t values[32], unsigned mode, unsigned size, unsigned quad,
+                                   unsigned d, unsigned m, unsigned amount) {
+    /* Independent bit mapping, with explicit source-lane boundaries and sign
+     * extension. This oracle never shifts by the encoded shift amount. */
+    uint64_t input[2] = {values[m], quad ? values[m + 1u] : 0u};
+    unsigned bits = 8u << size;
+    for (unsigned r = 0; r <= quad; r++) {
+        uint64_t result = 0u;
+        for (unsigned lane = 0; lane < 64u; lane += bits)
+         for (unsigned bit = 0; bit < bits; bit++) {
+            int source = mode ? (int)(bit + amount) : (int)bit - (int)amount;
+            unsigned value = 0u;
+            if (source >= 0 && source < (int)bits) value = (unsigned)(input[r] >> (lane + (unsigned)source)) & 1u;
+            else if (mode == 1u) value = (unsigned)(input[r] >> (lane + bits - 1u)) & 1u;
+            result |= (uint64_t)value << (lane + bit);
+         }
+        values[d + r] = result;
+    }
+}
+
+static void a8_shift_imm_case(unsigned thumb, unsigned mode, unsigned size, unsigned quad,
+                               unsigned d, unsigned m, unsigned amount, uint64_t input, bool host) {
+    arm_cpu_t c; a8_move_reset(&c,thumb);
+    arm_bus_t bus = g_bus; if (host) bus.host_ram = a8_reverse_host_ram; c.bus = &bus;
+    if ((d ^ m) & 2u) c.cpsr |= ARM_CPSR_E;
+    c.vfp_fpscr = 0xfff79f9fu; c.excl_valid = true; c.excl_addr = 0x2468u; c.a8_excl_size = 8u;
+    uint64_t expected[32];
+    for (unsigned r = 0; r < 32u; r++) expected[r] = UINT64_C(0x8877665544332211) ^ ((uint64_t)r * UINT64_C(0x010307090b0d0f11));
+    expected[m] = input; if (quad) expected[m + 1u] = ~input;
+    for (unsigned r = 0; r < 32u; r++) vfp_set_d(&c,r,expected[r]);
+    a8_shift_imm_expected(expected,mode,size,quad,d,m,amount);
+    uint32_t flags = c.cpsr, fpexc = c.vfp_fpexc;
+    CHECK(a8_move_step(&c,thumb,a8_neon_shift_imm(thumb,mode,size,quad,d,m,amount)) == ARM_OK &&
+        c.r[15] == 0x104u && c.cycles == 1u && c.cpsr == flags && c.vfp_fpscr == 0xfff79f9fu &&
+        c.vfp_fpexc == fpexc && c.cp15.cpacr == 0x00f00000u && c.excl_valid &&
+        c.excl_addr == 0x2468u && c.a8_excl_size == 8u,"immediate shift controls T=%u mode=%u size=%u Q=%u D=%u M=%u amount=%u",
+        thumb,mode,size,quad,d,m,amount);
+    bool same = true;
+    for (unsigned r = 0; r < 32u; r++) same &= vfp_get_d(&c,r) == expected[r];
+    for (unsigned r = 0; r < 15u; r++) same &= c.r[r] == 0u;
+    CHECK(same && (c.fetch_host != NULL) == host,"immediate shift lanes, aliases, bank or fetch path");
+}
+
+static void test_a8_neon_shift_imm_data(void) {
+    CHECK(a8_neon_shift_imm(0u,0u,2u,1u,24u,16u,1u) == 0xf2e18570u &&
+          a8_neon_shift_imm(1u,0u,2u,1u,24u,16u,1u) == 0xefe18570u &&
+          a8_neon_shift_imm(0u,2u,2u,1u,16u,16u,31u) == 0xf3e10070u &&
+          a8_neon_shift_imm(1u,2u,2u,1u,16u,16u,31u) == 0xffe10070u,"immediate shift encoding anchors");
+    static const uint64_t values[] = {0u,1u,UINT64_MAX,UINT64_C(0x8000000000000000),UINT64_C(0x7fffffffffffffff),
+        UINT64_C(0x8080808080808080),UINT64_C(0x7f7f7f7f7f7f7f7f),UINT64_C(0x8000800080008000),
+        UINT64_C(0x8000000080000000),UINT64_C(0x00ff0001ffff8000),UINT64_C(0x0123456789abcdef)};
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned mode = 0; mode < 3u; mode++)
+      for (unsigned size = 0; size < 4u; size++)
+       for (unsigned quad = 0; quad < 2u; quad++) {
+        unsigned bits = 8u << size;
+        for (unsigned shift = 0; shift < bits; shift++)
+         for (unsigned value = 0; value < sizeof values / sizeof values[0]; value++)
+            a8_shift_imm_case(thumb,mode,size,quad,30u,16u,shift + (mode != 0u),values[value],(value & 1u) != 0u);
+        for (unsigned reg = 0; reg < 32u; reg += quad + 1u)
+         for (unsigned role = 0; role < 3u; role++) {
+            unsigned d = role == 1u ? 30u : reg, m = role == 0u ? 16u : reg;
+            a8_shift_imm_case(thumb,mode,size,quad,d,m,(reg + role) % bits + (mode != 0u),
+                UINT64_C(0x80ff80017fffffff) ^ ((uint64_t)reg * UINT64_C(0x010307090b0d0f11)),(role & 1u) != 0u);
+         }
+       }
+    static const int rounds[] = {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
+    fenv_t saved; CHECK(fegetenv(&saved) == 0,"save immediate shift host FP state");
+    for (unsigned round = 0; round < 4u; round++)
+     for (unsigned thumb = 0; thumb < 2u; thumb++)
+      for (unsigned mode = 0; mode < 3u; mode++) {
+        CHECK(fesetround(rounds[round]) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 && feraiseexcept(FE_DIVBYZERO) == 0,
+            "prepare immediate shift host FP state");
+        int exceptions = fetestexcept(FE_ALL_EXCEPT);
+        a8_shift_imm_case(thumb,mode,3u,1u,30u,30u,mode ? 64u : 63u,UINT64_C(0x8000000000000001),true);
+        CHECK(fegetround() == rounds[round] && fetestexcept(FE_ALL_EXCEPT) == exceptions,"immediate shift host FP state changed");
+      }
+    CHECK(fesetenv(&saved) == 0,"restore immediate shift host FP state");
+}
+
+static void test_a8_neon_shift_imm_access_and_it(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned mode = 0; mode < 3u; mode++)
+      for (unsigned size = 0; size < 4u; size++)
+       for (unsigned quad = 0; quad < 2u; quad++)
+        for (unsigned user = 0; user < 2u; user++)
+         for (unsigned permission = 0; permission < 4u; permission++)
+          for (unsigned enabled = 0; enabled < 2u; enabled++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb);
+            c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | (user ? ARM_MODE_USR : ARM_MODE_SVC);
+            c.cp15.cpacr = permission * 0x00500000u; c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            uint64_t expected[32];
+            for (unsigned r = 0; r < 32u; r++) { expected[r] = UINT64_C(0x8001800180018001) + r; vfp_set_d(&c,r,expected[r]); }
+            bool allowed = enabled && (permission == 3u || (permission == 1u && !user));
+            unsigned amount = (8u << size) - (mode == 0u);
+            if (allowed) a8_shift_imm_expected(expected,mode,size,quad,30u,16u,amount);
+            uint32_t flags = c.cpsr, fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c,thumb,a8_neon_shift_imm(thumb,mode,size,quad,30u,16u,amount)) == ARM_OK && c.vfp_fpscr == fpscr,
+                "immediate shift access disposition");
+            CHECK(allowed ? c.r[15] == 0x104u && c.cpsr == flags : c.r[15] == ARM_VEC_UNDEFINED &&
+                c.r[14] == (thumb ? 0x102u : 0x104u) && c.spsr[ARM_BANK_UND] == flags,"immediate shift access exception");
+            for (unsigned r = 0; r < 32u; r++) CHECK(vfp_get_d(&c,r) == expected[r],"immediate shift access data");
+          }
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned mode = 0; mode < 3u; mode++)
+      for (unsigned size = 0; size < 4u; size++)
+       for (unsigned enabled = 0; enabled < 2u; enabled++)
+        for (unsigned skip = 0; skip < (thumb ? 2u : 1u); skip++)
+         for (unsigned shape = 0; shape < 5u; shape++) {
+            arm_cpu_t c; a8_move_reset(&c,thumb); c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+            if (skip) c.cp15.cpacr = 0u;
+            unsigned quad = shape != 0u, d = shape == 2u || shape == 4u ? 31u : 30u, m = shape >= 3u ? 17u : 16u;
+            uint64_t expected[32];
+            for (unsigned r = 0; r < 32u; r++) { expected[r] = UINT64_C(0xff00ff000000ffff) + r; vfp_set_d(&c,r,expected[r]); }
+            bool valid = shape < 2u;
+            if (valid && enabled && !skip) a8_shift_imm_expected(expected,mode,size,quad,d,m,1u);
+            if (thumb) { m_w16(NULL,0x100u,skip ? 0xbf08u : 0xbf18u); CHECK(arm_step(&c) == ARM_OK,"immediate shift IT setup"); }
+            uint32_t flags = c.cpsr, pc = c.r[15], fpscr = c.vfp_fpscr;
+            CHECK(a8_move_step(&c,thumb,a8_neon_shift_imm(thumb,mode,size,quad,d,m,1u)) == (skip || valid ? ARM_OK : ARM_UNDEFINED),
+                "immediate shift invalid/IT disposition");
+            if (skip || !valid) CHECK(c.r[15] == (skip ? pc + 4u : pc) && c.cpsr == (skip ? flags & ~0x0600fc00u : flags),
+                "immediate shift invalid/skipped state");
+            else if (!enabled) CHECK(c.r[15] == ARM_VEC_UNDEFINED && c.spsr[ARM_BANK_UND] == flags,"immediate shift lazy enable");
+            else CHECK(c.r[15] == pc + 4u && c.cpsr == (flags & ~0x0600fc00u),"immediate shift IT retirement");
+            CHECK(c.vfp_fpscr == fpscr,"immediate shift invalid/IT flags");
+            for (unsigned r = 0; r < 32u; r++) CHECK(vfp_get_d(&c,r) == expected[r],"immediate shift invalid/IT data");
+         }
+    const arm_arch_t legacy[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 2u; profile++)
+     for (unsigned mode = 0; mode < 3u; mode++)
+      for (unsigned size = 0; size < 4u; size++) {
+        arm_cpu_t c; CHECK(arm_reset_profile(&c,&g_bus,legacy[profile]),"legacy immediate shift reset");
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN;
+        CHECK(a8_move_step(&c,0u,a8_neon_shift_imm(0u,mode,size,0u,31u,16u,1u)) == ARM_UNDEFINED && c.r[15] == 0u,
+            "immediate shift changed legacy decoding");
+      }
+}
+
+static void test_a8_neon_shift_imm_related(void) {
+    /* L:imm6=0000xxx belongs to modified immediates. Both would otherwise
+     * resemble shift encodings; their existing immediate semantics must win. */
+    for (unsigned thumb = 0; thumb < 2u; thumb++)
+     for (unsigned high = 0; high < 2u; high++)
+      for (unsigned update = 0; update < 2u; update++) {
+        arm_cpu_t c; a8_move_reset(&c,thumb);
+        uint64_t input = UINT64_C(0x8102040810204080); vfp_set_d(&c,0u,input);
+        uint32_t word = (thumb ? 0xef800011u : 0xf2800011u) | (high << (thumb ? 28u : 24u)) | (update ? 0x500u : 0u);
+        uint64_t value = high ? 0x81u : 1u;
+        if (update) value <<= 16;
+        value |= value << 32;
+        CHECK(a8_move_step(&c,thumb,word) == ARM_OK && vfp_get_d(&c,0u) == (update ? input | value : value),
+            "immediate shift stole a modified immediate");
+      }
+}
+
 static uint32_t a8_neon_transpose(unsigned thumb, unsigned size, unsigned quad, unsigned d, unsigned m) {
     return (thumb ? 0xffb20080u : 0xf3b20080u) | (size << 18) | (quad << 6) |
         ((d & 15u) << 12) | ((d >> 4) << 22) | (m & 15u) | ((m >> 4) << 5);
@@ -3781,6 +3946,22 @@ static void test_a8_neon_transpose_invalid_and_it(void) {
         arm_cpu_t c; a8_move_reset(&c, thumb); c.vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
         uint32_t flags = c.cpsr;
         uint32_t insn = a8_neon_transpose(thumb, 2u, 0u, 31u, 16u) ^ (1u << fields[field]);
+        if (fields[field] == 4u) {
+            /* This neighbor is VSHR.U64 d31,d16,#6, not a bad transpose. */
+            CHECK(insn == (thumb ? 0xfffaf0b0u : 0xf3faf0b0u),"transpose/shift neighbor anchor");
+            uint32_t fpscr = c.vfp_fpscr;
+            vfp_set_d(&c,16u,UINT64_C(0xfedcba9876543210));
+            vfp_set_d(&c,31u,UINT64_C(0x0123456789abcdef));
+            CHECK(a8_move_step(&c,thumb,insn) == ARM_OK && c.vfp_fpscr == fpscr,"transpose/shift neighbor access");
+            CHECK(enabled ? c.r[15] == 0x104u && c.cpsr == flags : c.r[15] == ARM_VEC_UNDEFINED &&
+                c.r[14] == (thumb ? 0x102u : 0x104u) && c.spsr[ARM_BANK_UND] == flags,"transpose/shift neighbor disposition");
+            for (unsigned r = 0; r < 32u; r++) {
+                uint64_t expected = r == 16u ? UINT64_C(0xfedcba9876543210) : r == 31u ?
+                    (enabled ? UINT64_C(0x03fb72ea61d950c8) : UINT64_C(0x0123456789abcdef)) : 0u;
+                CHECK(vfp_get_d(&c,r) == expected,"transpose/shift neighbor bank");
+            }
+            continue;
+        }
         CHECK(a8_move_step(&c, thumb, insn) == ARM_UNDEFINED &&
               c.r[15] == 0x100u && c.cpsr == flags,
               "transpose claimed neighboring allocation T=%u EN=%u bit=%u", thumb, enabled, fields[field]);
@@ -8407,6 +8588,9 @@ int main(void) {
     test_a8_neon_reverse_invalid_and_it();
     test_a8_neon_int_addsub_registers();
     test_a8_neon_int_addsub_access_and_it();
+    test_a8_neon_shift_imm_data();
+    test_a8_neon_shift_imm_access_and_it();
+    test_a8_neon_shift_imm_related();
     test_a8_neon_transpose_registers();
     test_a8_neon_transpose_access_and_host_state();
     test_a8_neon_transpose_invalid_and_it();

@@ -806,6 +806,19 @@ both fetch paths and access controls. The test-only baseline recorded 17,280
 failures; the first implementation passed the full VFP suite. See
 [DDI0406C.b, A8.8.282/414](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 
+NEON VSHL immediate and signed/unsigned VSHR support 8-, 16-, 32- and
+64-bit lanes in ARM and Thumb. Left shifts truncate; right shifts either
+zero-fill or replicate the original sign bit, including shifts by the full
+lane width. Unsigned host arithmetic avoids signed-shift assumptions and
+explicitly handles the 64-bit boundary. All source reads precede register
+writes; status and host FP state are preserved. Odd Q operands stop before
+access checks, while related modified-immediate encodings retain their
+existing decoder. An independent bit-mapping oracle covers every legal shift
+amount, register roles and aliases, access control and IT execution/skips.
+The test-only baseline recorded 40,620 failures. Four older transpose-neighbor
+assertions now check the valid `VSHR.U64` result and access fault explicitly.
+See [DDI0406C.b, A8.8.395/398](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+
 NEON immediate VMOV, VMVN, VORR and VBIC also cover the full D/Q bank.
 The decoder expands the encoded integer or F32 constant as raw bits,
 including byte masks for VMOV.I64 and the trailing-one forms. It rejects
@@ -2278,6 +2291,21 @@ host allocation failure remains recorded above as a historical result.
 All 276 prepared firmware calls pass again, and the complete canonical
 61,650-step guarded trace remains byte-identical.
 
+With immediate shifts implemented, the unchanged prepared diagnostic advances
+48,767 further steps to `VLD1.32 {d24-d27},[r5]!` at `0x8063e168`, after
+94,338,541 steps. This later call supplies the byte-unaligned source address
+`0x80656815`; the existing vector-load implementation explicitly refuses
+that case. The old-library reference reproduces the entire previous bounded
+trace, and all handoff observers still pass. This is further instruction
+progress under the same assumptions, without a complete boot or validated
+cryptographic result.
+
+For the shift change, all 79 strict and 74 shipping tests pass, as do all
+276 prepared firmware calls. The canonical 61,650-step guarded trace remains
+byte-identical. The first completed focused run passed the new shift cases;
+updating four historical unsupported-neighbor expectations completed the
+full VFP suite without changing the implementation.
+
 The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates
 C only as prescribed by the immediate form, preserving V. Invalid zero
@@ -2344,6 +2372,7 @@ establish that result.
   32-bit VLD1 broadcasts to one or two D registers,
   register Boolean operations, VEXT, VREV16/32/64, 8/16/32-bit VTRN, D8/D16 and Q8/Q16/Q32 VZIP/VUZP, F32 VABS/VNEG,
   immediate constants, core-register VDUP, 8/16/32/64-bit integer VADD/VSUB,
+  immediate VSHL and signed/unsigned VSHR,
   register VMUL/VADD/VSUB/VMLA/VMLS.F32,
   F32 VMUL/VMLA/VMLS by scalar, VMAX/VMIN.F32, VCGE.F32 register comparisons,
   VRECPE/VRECPS/VRSQRTE/VRSQRTS.F32, VCEQ.F32 immediate zero,
