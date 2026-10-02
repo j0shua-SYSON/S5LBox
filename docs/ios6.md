@@ -475,11 +475,26 @@ guest Undefined handler. FPSCR preserves its Cortex-A8 fields, including QC,
 and refuses nonzero DNM/SBZP fields and unsupported exception trap enables.
 FPEXC supports EN; requests for EX or other extra-state controls stop before
 mutation. Privileged FPSID writes serialize the synchronous FP unit. FPSID
-and MVFR reads remain explicit capability stops until the target identity is
-established; MVFR writes and reserved selectors are refused. These rules use
+and MVFR reads remain explicit capability stops in the instruction-only A8
+profile. Explicit generic r3p2 configuration supplies FPSID `0x410330c3`,
+MVFR0 `0x11110222`, and MVFR1 `0x00011111` from DDI0344K Table 13-5.
+These identify the selected generic core, not a measured S5L8920 revision
+or complete instruction support. Privilege and CPACR checks apply with
+FPEXC.EN either set or clear. MVFR writes and reserved selectors remain
+refused. These rules use
 [DDI0344K, section 13.4](https://documentation-service.arm.com/static/5e8e1ac688295d1e18d35fde)
 and [DDI0406C.b, B9.3.21/22](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 The latter defines FPSID serialization but no valid MVFR VMSR selector.
+
+Configured identity regressions fail on the old implementation and pass with
+these reads; all 79 strict and 74 shipping tests pass. The original guarded
+61,650-step trace and 276 prepared peripheral calls retain their results.
+With the existing generic CPU and nominal clock assumptions, an explicitly
+prepared empty serial/NVRAM handoff and unchanged CPU cell-count metadata,
+the diagnostic previously stopped at `VMRS r0,MVFR1` (`0x80088d8c`) after
+154,636,539 instructions. The new reads advance it to 157,855,234 instructions,
+where Thumb `0x80787a60` reads the guarded `arm-io/chip-revision` property
+at physical `0x4110367c`. This remains a partial host initialization trace.
 
 Tests cover access modes, control bits, core-register restrictions, APSR
 NZCV-only transfers, and complete instruction fetch before effects. A guest

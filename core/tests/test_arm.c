@@ -7558,10 +7558,12 @@ static void put_vfp_system_transfer(unsigned thumb, uint32_t pc, unsigned load,
 
 static void test_cortex_a8_vfp_system_access(void) {
     /* DDI0344K 13.4; DDI0406C.b B9.3.21/22. Non-FPSCR accesses stay
-     * privileged even with EN=1. Unimplemented identity reads must stop,
+     * privileged even with EN=1. Unspecified identity reads must stop,
      * including with EN=0, instead of leaking VFP11's identity or repeatedly
      * entering a lazy-enable handler that cannot supply missing hardware. */
     static const unsigned permissions[] = {0,1,3};
+    const arm_a8_config_t config = {ARM_A8_R3P2,32u,32u,256u};
+    for (unsigned configured = 0; configured < 2u; configured++) {
     for (unsigned thumb = 0; thumb < 2u; thumb++) {
      for (unsigned user = 0; user < 2u; user++) {
       for (unsigned enabled = 0; enabled < 2u; enabled++) {
@@ -7569,7 +7571,8 @@ static void test_cortex_a8_vfp_system_access(void) {
         for (unsigned sysreg = 0; sysreg < 16u; sysreg++) {
          for (unsigned load = 0; load < 2u; load++) {
             arm_cpu_t c;
-            CHECK(arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
+            CHECK(configured ? arm_reset_cortex_a8(&c, &g_bus, &config) :
+                  arm_reset_profile(&c, &g_bus, ARM_ARCH_V7_CORTEX_A8), "reset");
             CHECK(c.vfp_fpexc == 0u && c.vfp_fpscr == 0u, "A8 FP reset");
             c.cpsr = (user ? ARM_MODE_USR : ARM_MODE_SVC) | ARM_CPSR_N |
                      ARM_CPSR_C | ARM_CPSR_Q | ARM_CPSR_F | (9u << 16) |
@@ -7590,13 +7593,15 @@ static void test_cortex_a8_vfp_system_access(void) {
             bool access = permissions[acc] == 3u || (permissions[acc] == 1u && !user);
             bool exception = legal && (!access || (user && sysreg != 1u) ||
                                        (!enabled && sysreg == 1u));
-            bool complete = legal && !exception && !(load && sysreg != 1u && sysreg != 8u);
+            bool complete = legal && !exception && (configured || !load || sysreg == 1u || sysreg == 8u);
             arm_status_t status = arm_step(&c);
             CHECK(status == (complete || exception ? ARM_OK : ARM_UNDEFINED),
                   "A8 FP disposition T=%u U=%u EN=%u acc=%u reg=%u L=%u status=%d",
                   thumb, user, enabled, permissions[acc], sysreg, load, status);
             uint32_t expected_r4 = complete && load ?
-                (sysreg == 1u ? 0x48000080u : enabled ? ARM_FPEXC_EN : 0u) : source;
+                (sysreg == 0u ? 0x410330c3u : sysreg == 6u ? 0x00011111u :
+                 sysreg == 7u ? 0x11110222u : sysreg == 1u ? 0x48000080u :
+                 enabled ? ARM_FPEXC_EN : 0u) : source;
             CHECK(c.r[4] == expected_r4 &&
                   c.vfp_fpscr == (complete && !load && sysreg == 1u ? source : 0x48000080u) &&
                   c.vfp_fpexc == (complete && !load && sysreg == 8u ? source : enabled ? ARM_FPEXC_EN : 0u) &&
@@ -7616,6 +7621,56 @@ static void test_cortex_a8_vfp_system_access(void) {
                       c.excl_valid && c.excl_addr == 0x8000u,
                       "A8 FP completion/refusal changed PC/IT/monitor T=%u reg=%u L=%u", thumb, sysreg, load);
             }
+         }
+        }
+       }
+      }
+     }
+    }
+    }
+}
+
+static void test_cortex_a8_fp_identity(void) {
+    /* DDI0344K Table13-5, independent literal identity oracle. The same
+     * values apply to every supported cache geometry of this revision. */
+    static const unsigned regs[] = {0u,6u,7u};
+    static const uint32_t values[] = {0x410330c3u,0x00011111u,0x11110222u};
+    for (unsigned host = 0; host < 2u; host++) {
+     for (unsigned thumb = 0; thumb < 2u; thumb++) {
+      for (unsigned skip = 0; skip < 2u; skip++) {
+       for (unsigned known = 0; known < 3u; known++) {
+        for (unsigned rt = 0; rt < 16u; rt++) {
+         for (unsigned n = 0; n < 3u; n++) {
+            arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
+            arm_cpu_t c;
+            arm_a8_config_t config = {ARM_A8_R3P2,host ? 16u : 32u,32u,host ? 0u : 1024u};
+            CHECK(arm_reset_cortex_a8(&c, &bus, &config), "FP identity configured reset");
+            if (known != 1u) c.a8_config.revision = known ? (arm_a8_revision_t)99 : ARM_A8_UNSPECIFIED;
+            config = c.a8_config;
+            c.cpsr = ARM_MODE_SYS | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_Q |
+                     (thumb ? ARM_CPSR_T | test_it_bits(skip ? 0x08u : 0x18u) : 0u);
+            c.cp15.cpacr = skip ? 0u : 0x00500000u; /* privileged-only */
+            c.vfp_fpexc = 0u; c.vfp_fpscr = 0x48000080u;
+            c.a8_vfp_hi[0] = UINT64_C(0x0123456789abcdef);
+            c.a8_vfp_hi[15] = UINT64_C(0xfff0000000000001);
+            for (unsigned i = 0; i < 15u; i++) c.r[i] = 0x12340000u + i;
+            c.r[15] = 0x100u; c.excl_valid = true; c.excl_addr = 0x8000u;
+            uint32_t expected[16]; memcpy(expected,c.r,sizeof expected);
+            uint32_t flags = c.cpsr;
+            put_vfp_system_transfer(thumb,0x100u,1u,regs[n],rt);
+            if (!thumb && skip) m_w32(NULL,0x100u,m_r32(NULL,0x100u) & 0x0fffffffu);
+            bool read = !skip && known == 1u && rt != 15u && !(thumb && rt == 13u);
+            if (read) expected[rt] = values[n];
+            if (read || skip) expected[15] = 0x104u;
+            CHECK(arm_step(&c) == (read || skip ? ARM_OK : ARM_UNDEFINED) &&
+                  memcmp(expected,c.r,sizeof expected) == 0 && c.cycles == 1u &&
+                  c.cpsr == (thumb && (read || skip) ? flags & ~TEST_IT_MASK : flags) &&
+                  !c.vfp_fpexc && c.vfp_fpscr == 0x48000080u &&
+                  c.a8_vfp_hi[0] == UINT64_C(0x0123456789abcdef) &&
+                  c.a8_vfp_hi[15] == UINT64_C(0xfff0000000000001) &&
+                  memcmp(&config,&c.a8_config,sizeof config) == 0 &&
+                  c.excl_valid && c.excl_addr == 0x8000u,
+                  "FP identity H=%u T=%u skip=%u known=%u rt=%u reg=%u",host,thumb,skip,known,rt,regs[n]);
          }
         }
        }
@@ -13166,6 +13221,7 @@ int main(void) {
     test_a8_exclusive_monitor_and_faults();
     test_a8_exclusive_invalid_and_conditions();
     test_cortex_a8_vfp_system_access();
+    test_cortex_a8_fp_identity();
     test_cortex_a8_vfp_control_fields();
     test_cortex_a8_vfp_core_registers();
     test_cortex_a8_vfp_undefined_retry();

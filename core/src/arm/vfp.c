@@ -1436,9 +1436,17 @@ static arm_status_t vfp_a8_system_transfer(arm_cpu_t *c, uint32_t pc, uint32_t i
         return vfp_guest_undefined("Cortex-A8 FPSCR requires FPEXC.EN");
 
     if (load) {
-        if (sysreg != 1u && sysreg != 8u)
-            return vfp_trap(pc, insn, "Cortex-A8 FP identity is not established for this target");
-        uint32_t value = sysreg == 1u ? c->vfp_fpscr : c->vfp_fpexc;
+        uint32_t value;
+        if (sysreg == 1u) value = c->vfp_fpscr;
+        else if (sysreg == 8u) value = c->vfp_fpexc;
+        else {
+            /* DDI0344K Table13-5: only an explicitly selected generic r3p2
+             * has this identity. The instruction-only profile stays unknown;
+             * this is not evidence of a particular board's CPU revision. */
+            if (c->a8_config.revision != ARM_A8_R3P2)
+                return vfp_trap(pc, insn, "Cortex-A8 FP identity is not established for this target");
+            value = sysreg == 0u ? 0x410330c3u : sysreg == 6u ? 0x00011111u : 0x11110222u;
+        }
         if (rt == 15u) c->cpsr = (c->cpsr & ~ARM_FPSCR_NZCV) | (value & ARM_FPSCR_NZCV);
         else c->r[rt] = value;
         return ARM_OK;
