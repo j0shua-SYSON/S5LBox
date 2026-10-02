@@ -115,8 +115,12 @@ bool s5l8920_uart0_receive(s5l8920_t *m, uint8_t byte);
  * Word MMIO supports explicitly programmed, interrupt-masked input/output
  * controls: 0x210/0x212, data bit0, pull selection 0/0x80/0x100. Input
  * reads require a supplied sample; output reads return the programmed level.
- * Pulls are retained without inventing analog/floating-pin behavior. Unknown
- * configuration, alternate functions and unknown register bits remain refused.
+ * Pulls and drive field0xc00 are retained without analog/floating-pin behavior.
+ * Peripheral selectors0x20/0x40/0x60 are stored only with masked input mode;
+ * reads use explicit samples, without simulating peripheral signal routing.
+ * Interrupt-off mode0xe requires mask0x10 and no peripheral selector. Input
+ * enable0x200 is optional for its writes; disabled-input reads remain refused
+ * even with a sample. Unknown combinations and register bits remain refused.
  * Pins0..223 also support input IRQ modes 0x204 high, 0x206 low, 0x208 rising,
  * 0x20a falling and 0x20c either edge; bit0x10 masks delivery to source94.
  * Seven pending words at0x800..0x818 are W1C. Masked events latch; initial

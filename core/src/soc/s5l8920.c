@@ -42,8 +42,14 @@ static void refresh_interrupts(s5l8920_t *m) {
 }
 
 static bool gpio_control_supported(unsigned index,uint32_t control) {
-    if ((control&~0x39fu) || !(control&0x200u) || (control&0x180u)==0x180u) return false;
+    /* Preserve drive and peripheral fields without synthesizing pad signals.
+     * The matching restore initializer also writes input-disabled/off pins;
+     * accepting that configuration does not establish their data readback. */
+    if ((control&~0xfffu) || (control&0x180u)==0x180u) return false;
     unsigned mode=control&0xeu;
+    if (mode==0xeu) return (control&0x70u)==0x10u;
+    if (!(control&0x200u)) return false;
+    if (control&0x60u) return mode==0u && (control&0x10u)!=0u;
     if (mode<=2u) return (control&0x10u)!=0u;
     return index<S5L8920_GPIO_IRQ_PINS && mode<=0xcu;
 }
@@ -114,7 +120,7 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         } else if (offset/4u<S5L8920_GPIO_PIN_COUNT) {
             const s5l8920_gpio_pin_t *pin=&m->gpio[offset/4u];
             bool output=(pin->control&0xeu)==2u;
-            if (pin->programmed && (output || pin->input_valid))
+            if (pin->programmed && (pin->control&0x200u) && (output || pin->input_valid))
                 return output ? pin->control :
                        (pin->control&~1u)|(pin->input_high ? 1u:0u);
             fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);

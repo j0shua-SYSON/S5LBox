@@ -7,7 +7,7 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
-## Partial GPIO polling and interrupts
+## Partial GPIO configuration, polling and interrupts
 
 The matching device tree describes 46 ports of eight pins at `0x83000000`,
 inside a 4 KiB aperture. Aligned word accesses now support explicitly
@@ -22,9 +22,18 @@ excluded because they conflict with the matching kernel's register layout.
 reads require a supplied sample; output reads reflect the programmed level.
 Input writes and pull settings do not fabricate external levels. Functional
 reset preserves samples but invalidates all pin programming. No power-on or
-bootloader pin configuration is assumed. Unsupported widths, alternate
-functions and unknown register bits retain checked failures before mutating
-device state.
+bootloader pin configuration is assumed. Unsupported widths, field
+combinations and unknown register bits retain checked failures before
+mutating device state.
+
+Drive field `0xc00` is retained with these controls. Peripheral selectors
+`0x20`, `0x40` and `0x60` can be stored with masked, input-enabled mode;
+their reads use explicitly supplied samples. This models configuration
+storage, without peripheral signal generation or routing. Interrupt-off
+mode `0xe` requires mask `0x10` and no peripheral selector. Its input enable
+bit `0x200` is optional for writes, but disabled-input reads remain refused
+even when a sample exists. Neither a pull setting nor a written data bit
+establishes the disabled sampler's readback value.
 
 The first 224 pins also support high/low level, rising/falling edge and
 either-edge interrupt modes (`0x204`, `0x206`, `0x208`, `0x20a`, `0x20c`).
@@ -33,7 +42,8 @@ Control bit `0x10` masks delivery; seven status words at offsets
 kernel's configuration, mask and dispatcher routines establish the mode
 fields, masking and acknowledgement order. A
 [later Apple GPIO driver](https://kernel.googlesource.com/pub/scm/linux/kernel/git/jikos/trivial/+/1ff2fc02862d52e18fd3daabcfe840ec27e920a8/drivers/pinctrl/pinctrl-apple-gpio.c)
-corroborates the trigger polarities; that is a cross-generation inference,
+corroborates the trigger polarities and drive/input-enable field names;
+that is a cross-generation inference,
 not a measurement of N88. Its different masking and parent-group layout
 are excluded.
 
@@ -57,6 +67,16 @@ and observes edge acknowledgement before dispatch and level acknowledgement
 after dispatch. This is bounded driver execution, not an executed bootloader
 or complete GPIO controller.
 
+The matching restore initializer at `0x84000ef4` writes 368 halfwords from
+its pin table as word controls. That table exactly matches iBoot's table.
+The original wrapper and initializer now complete all 368 writes on the
+checked board in 1,850 instructions; the earlier controller refused the
+first control, `0xd1e`. This witness inspects stored configuration without
+inventing input samples or reading disabled samplers. Another 26,496
+original iBoot selector calls preserve drive and pull fields while reads
+reflect explicit samples. Neither isolated witness establishes the normal
+bootloader handoff, and the table is not installed as a board default.
+
 The separately prepared kernel diagnostic now reaches GPIO after its
 chip-revision, platform clocks, USB frequency, backlight calibration,
 product identifier and VIC geometry handoff checks. These retain explicit
@@ -70,8 +90,8 @@ this GPIO implementation does not advance that full trace or establish boot.
 All 79 strict and 74 shipping tests pass, including checked CPU load/store
 retries and all pin/pull/sample combinations. The existing 276 firmware cases
 pass and the canonical 61,650-step ECC-guard trace is unchanged. The full
-182,680,916-step trace matches its frozen predecessor except for the GPIO
-failure reason, including preserved post-stop bus diagnostics.
+182,680,916-step trace matches the GPIO polling checkpoint, including the
+unprepared-pin failure and preserved post-stop bus diagnostics.
 
 ## Explicit generic CPU configuration
 

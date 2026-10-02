@@ -685,7 +685,7 @@ static void test_gpio_output_registers(s5l8920_t *m) {
           !m->bus.host_ram_write(m,0x83000000u,4u) &&
           !s5l8920_load(m,0x83000000u,m->ram,4u),"GPIO exposed as plain RAM");
     const uint32_t rejected[]={0u,1u,0x202u,0x014u,0x016u,0x018u,0x01au,
-        0x01cu,0x21eu,0x232u,0x252u,0x272u,0x392u,0x612u,0x1212u,
+        0x01cu,0x20eu,0x232u,0x252u,0x272u,0x392u,0x1612u,0x1212u,
         0x10000212u,UINT32_MAX};
     for (unsigned n=0;n<sizeof rejected/sizeof rejected[0];n++) {
         s5l8920_clear_bus_failure(m); m->bus.write32(m,0x83000000u,0x213u);
@@ -985,6 +985,97 @@ static void test_gpio_irq_cpu(s5l8920_t *m) {
     CHECK(s5l8920_reset(m),"reset after GPIO CPU IRQ fixture");
 }
 
+static bool test_gpio_configuration_fields(s5l8920_t *m) {
+    s5l8920_free(m);
+    bool ready=s5l8920_init(m);
+    CHECK(ready,"fresh GPIO configuration fixture");
+    if (!ready) return false;
+    const uint32_t unsampled[]={0xe30u,0x650u,0xb70u,0xe1eu,0xd1fu};
+    for (unsigned n=0;n<sizeof unsampled/sizeof unsampled[0];n++) {
+        uint32_t address=0x83000000u+4u*n;
+        m->bus.write32(m,address,unsampled[n]);
+        CHECK(!m->bus_failure.reason,"unsampled configuration write refused");
+        (void)m->bus.read32(m,address);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,
+              "configuration write synthesized an input sample");
+        s5l8920_clear_bus_failure(m);
+    }
+    const uint32_t pulls[]={0u,0x80u,0x100u};
+    for (unsigned pin=0;pin<368u;pin++) for (unsigned drive=0;drive<4u;drive++)
+     for (unsigned pull=0;pull<3u;pull++) {
+        uint32_t address=0x83000000u+4u*pin, fields=(drive<<10)|pulls[pull];
+        CHECK(s5l8920_gpio_input(m,pin,true),"configuration input sample");
+        for (unsigned mode=0;mode<2u;mode++) {
+            uint32_t control=fields|0x210u|(mode ? 2u:0u);
+            s5l8920_clear_bus_failure(m); m->bus.write32(m,address,control);
+            CHECK(!m->bus_failure.reason && m->bus.read32(m,address)==(control|(mode ? 0u:1u)),
+                  "GPIO drive/pull storage altered digital input/output behavior");
+        }
+        for (unsigned selector=1;selector<4u;selector++) {
+            uint32_t control=fields|0x210u|(selector<<5);
+            s5l8920_clear_bus_failure(m); m->bus.write32(m,address,control);
+            CHECK(!m->bus_failure.reason && m->bus.read32(m,address)==(control|1u),
+                  "peripheral configuration lost explicit sample or fields");
+        }
+        s5l8920_clear_bus_failure(m); m->bus.write32(m,address,fields|0x21eu);
+        CHECK(!m->bus_failure.reason && m->bus.read32(m,address)==(fields|0x21fu),
+              "interrupt-off input configuration readback");
+        s5l8920_clear_bus_failure(m); m->bus.write32(m,address,fields|0x1eu);
+        CHECK(!m->bus_failure.reason && m->gpio[pin].programmed && m->gpio[pin].control==(fields|0x1eu),
+              "disabled-input configuration write lost fields");
+        (void)m->bus.read32(m,address);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,
+              "disabled sampler fabricated bit0 from zero or external sample");
+        s5l8920_clear_bus_failure(m);
+    }
+    CHECK(!m->gpio_irq && !m->cpu.irq_line && !m->cpu.fiq_line,
+          "passive fields/off mode generated a GPIO interrupt");
+    vic_write(m,2u,PL192_INTENABLE,1u<<30);
+    const uint32_t passive[]={0xd1fu,0x61eu,0xa30u,0xe50u,0x670u};
+    for (unsigned n=0;n<sizeof passive/sizeof passive[0];n++) {
+        CHECK(s5l8920_gpio_input(m,0u,false),"transition initial sample");
+        m->bus.write32(m,0x83000000u,0xe08u);
+        CHECK(s5l8920_gpio_input(m,0u,true) && m->cpu.irq_line &&
+              m->bus.read32(m,0x83000800u)==1u,"drive field broke rising IRQ");
+        m->bus.write32(m,0x83000000u,passive[n]);
+        CHECK(!m->bus_failure.reason && !m->cpu.irq_line &&
+              m->bus.read32(m,0x83000800u)==1u,"passive mode lost pending or kept IRQ active");
+        m->bus.write32(m,0x83000000u,0xe08u);
+        CHECK(m->cpu.irq_line,"return to IRQ mode lost pending event");
+        m->bus.write32(m,0x83000000u,passive[n]);
+        m->bus.write32(m,0x83000800u,1u);
+        CHECK(s5l8920_gpio_input(m,0u,false) && s5l8920_gpio_input(m,0u,true) &&
+              !m->cpu.irq_line && m->bus.read32(m,0x83000800u)==0u,
+              "off/peripheral mode latched an input transition");
+        m->bus.write32(m,0x83000000u,0xe08u);
+        CHECK(!m->cpu.irq_line,"configuration synthesized an edge");
+        m->bus.write32(m,0x83000000u,0xe04u);
+        CHECK(m->cpu.irq_line,"drive field broke level IRQ");
+        m->bus.write32(m,0x83000000u,passive[n]);
+        m->bus.write32(m,0x83000800u,1u);
+        CHECK(!m->cpu.irq_line && m->bus.read32(m,0x83000800u)==0u,
+              "off/peripheral mode relatched an active level");
+    }
+    const uint32_t unsupported[]={0xd0eu,0xd3eu,0xd1cu,0xe20u,0xe32u,
+        0xe34u,0xe38u,0xe3eu,0x430u,0xff0u,0x1d1eu};
+    for (unsigned n=0;n<sizeof unsupported/sizeof unsupported[0];n++) {
+        m->bus.write32(m,0x83000000u,0xd1fu);
+        m->bus.write32(m,0x83000000u,unsupported[n]);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+              m->gpio[0].control==0xd1fu && !m->gpio_irq && !m->gpio_pending[0],
+              "invalid configuration mutated disabled control or IRQ state");
+        s5l8920_clear_bus_failure(m);
+    }
+    CHECK(s5l8920_reset(m),"reset GPIO field configurations");
+    for (unsigned pin=0;pin<368u;pin++) {
+        CHECK(!m->gpio[pin].programmed && !m->gpio[pin].control &&
+              m->gpio[pin].input_valid && m->gpio[pin].input_high,
+              "reset retained fields or lost explicit sample");
+    }
+    CHECK(!m->gpio_irq && !m->cpu.irq_line && !m->cpu.fiq_line,"reset retained configuration IRQ");
+    return true;
+}
+
 static void test_fiq_and_reset(s5l8920_t *m) {
     CHECK(s5l8920_reset(m), "reset FIQ fixture");
     map_test_vectors(m); put(m,0x1cu,0xe25ef004u);
@@ -1026,6 +1117,7 @@ int main(void) {
     test_gpio_irq_banks_and_bounds(&m);
     if (!test_gpio_irq_first_samples(&m)) return 1;
     test_gpio_irq_cpu(&m);
+    if (!test_gpio_configuration_fields(&m)) return 1;
     test_fiq_and_reset(&m);
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
