@@ -127,9 +127,25 @@ function, response fragment and return tail, plus kernel request, status,
 receive-loop and acknowledgement fragments. It supplies synthetic objects,
 page mappings, call frames and explicit endpoint responses. The kernel
 fixture explicitly prepares auxiliary register `0x14` as zero because the
-kernel does not write it; iBoot's request function does. Provider clocks,
-the delay/scheduler paths and complete driver initialization are not executed.
-The separate full kernel diagnostic still stops at unprepared GPIO state.
+kernel does not write it; iBoot's request function does.
+
+A further 102 cases execute the complete original kernel request method and
+polling path through its return, including the real status, receive,
+acknowledgement, statistics, interrupt-state and delay routines. The delay
+uses the original interval conversion and timebase callbacks. Explicit
+24 MHz configuration and one tick per 25 retired instructions supply time;
+this is the existing unmeasured nominal clock schedule. CPU interrupts are
+masked, and CPU-data context, zero wake offset and scheduler threshold are
+prepared explicitly. Access and code-range guards refuse unexpected paths.
+
+These cases cover all three banks, one- and 128-byte reads/writes, success
+and error, immediate and delayed responses, and enabled/disabled statistics.
+With no response, the original method remains busy after three polls. With
+the clock frozen, it stays in its original delay loop without reading I2C
+status. No instruction or function return is replaced. Provider clocks,
+scheduler waits, interrupt exception delivery and complete driver
+initialization remain unexecuted. The separate full kernel diagnostic still
+stops at unprepared GPIO state.
 
 ## Explicit generic CPU configuration
 
