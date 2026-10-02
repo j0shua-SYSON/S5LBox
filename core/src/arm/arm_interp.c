@@ -795,6 +795,62 @@ static arm_status_t exec_a8_neon_pairs(arm_cpu_t *c, uint32_t insn) {
     return ARM_OK;
 }
 
+/* Little-endian Cortex-A8 MemU for explicitly typed Normal-memory paths.
+ * Callers supply 2 or 4 bytes. Preserve aligned word accesses for a .64
+ * NEON element whose base is word-aligned but not doubleword-aligned.
+ * Other shared load/store paths have not adopted this type boundary. */
+static arm_status_t a8_normal_memu(arm_cpu_t *c, uint32_t address,
+        unsigned size, bool write, bool priv, uint32_t *value) {
+    if (c->cpsr & ARM_CPSR_E) return ARM_UNDEFINED;
+    if ((address & (size - 1u)) && (c->cp15.sctlr & ARM_SCTLR_A)) {
+        note_alignment_abort(c, address, write);
+        return ARM_OK;
+    }
+    if (c->arch != ARM_ARCH_V7_CORTEX_A8) return ARM_UNDEFINED;
+    /* A8's unaligned Device/SO case is UNPREDICTABLE, not the alignment
+     * fault required by virtualization extensions (DDI0406C.b A3.2.2).
+     * Stop before that byte's data access, retaining completed transfers.
+     * Direct data caches do not yet enforce memory types, so bypass them. */
+    if (!(address & (size - 1u))) {
+        uint32_t pa;
+        arm_memory_type_t type;
+        uint32_t fsr = arm_mmu_translate_type(c, address,
+            write ? ARM_ACCESS_WRITE : ARM_ACCESS_READ, priv, &pa, &type);
+        if (fsr) { note_abort(c, fsr, address); return ARM_OK; }
+        if (type != ARM_MEMORY_NORMAL) return ARM_UNDEFINED;
+        uint32_t result = 0u;
+        if (write) {
+            if (size == 4u) c->bus->write32(c->bus->ctx, pa, *value);
+            else c->bus->write16(c->bus->ctx, pa, (uint16_t)*value);
+        } else {
+            result = size == 4u ? c->bus->read32(c->bus->ctx, pa)
+                               : c->bus->read16(c->bus->ctx, pa);
+        }
+        if (note_bus_failure(c, address)) return ARM_OK;
+        if (!write) *value = result;
+        return ARM_OK;
+    }
+    uint32_t result = 0u;
+    for (unsigned i = 0; i < size; i++) {
+        uint32_t va = address + i, pa;
+        arm_memory_type_t type;
+        uint32_t fsr = arm_mmu_translate_type(c, va,
+            write ? ARM_ACCESS_WRITE : ARM_ACCESS_READ, priv, &pa, &type);
+        if (fsr) { note_abort(c, fsr, va); return ARM_OK; }
+        if (type != ARM_MEMORY_NORMAL) return ARM_UNDEFINED;
+        if (write) {
+            c->bus->write8(c->bus->ctx, pa, (uint8_t)(*value >> (8u * i)));
+            if (note_bus_failure(c, va)) return ARM_OK;
+        } else {
+            uint32_t byte = c->bus->read8(c->bus->ctx, pa);
+            if (note_bus_failure(c, va)) return ARM_OK;
+            result |= byte << (8u * i);
+        }
+    }
+    if (!write) *value = result;
+    return ARM_OK;
+}
+
 static arm_status_t exec_a8_neon_single_elements(arm_cpu_t *c, uint32_t insn) {
     unsigned type = (insn >> 8) & 15u, size = (insn >> 6) & 3u, align = (insn >> 4) & 3u;
     unsigned count = type == 7u ? 1u : type == 10u ? 2u : type == 6u ? 3u : 4u;
@@ -808,34 +864,44 @@ static arm_status_t exec_a8_neon_single_elements(arm_cpu_t *c, uint32_t insn) {
 
     uint32_t address = c->r[rn];
     unsigned alignment = align ? 4u << align : 1u << size;
-    if (address & (alignment - 1u)) {
+    bool unaligned = (address & (alignment - 1u)) != 0u;
+    if (unaligned) {
         if (align || (c->cp15.sctlr & ARM_SCTLR_A)) {
             note_alignment_abort(c, address, !load);
             return ARM_OK;
         }
-        /* Standard unaligned A=0 transfers remain separate work. In
-         * particular, naturally aligned 32-bit halves are insufficient to
-         * establish a naturally aligned 64-bit element (A3.2.1). */
-        return ARM_UNDEFINED;
+        /* A3.2: standard A=0 unaligned transfers require Normal memory.
+         * This includes .64 elements with naturally aligned word halves. */
     }
     uint32_t updated = address + (rm == 13u ? count * 8u : rm == 15u ? 0u : c->r[rm]);
     for (unsigned r = 0; r < count; r++, address += 8u) {
         if (load) {
-            uint32_t lo = mem_r32(c, address);
+            uint32_t lo = 0u, hi = 0u;
+            if (unaligned) {
+                arm_status_t status = a8_normal_memu(c, address, 4u, false, cpu_is_priv(c), &lo);
+                if (status != ARM_OK) return status;
+            } else lo = mem_r32(c, address);
             if (c->abort_pending) return ARM_OK;
             /* A .32 load publishes each complete element; a .64 load
              * publishes the D register only after both word accesses. */
             if (size == 2u) vfp_set_d(c, first + r,
                 (vfp_get_d(c, first + r) & UINT64_C(0xffffffff00000000)) | lo);
-            uint32_t hi = mem_r32(c, address + 4u);
+            if (unaligned) {
+                arm_status_t status = a8_normal_memu(c, address + 4u, 4u, false, cpu_is_priv(c), &hi);
+                if (status != ARM_OK) return status;
+            } else hi = mem_r32(c, address + 4u);
             if (c->abort_pending) return ARM_OK;
             vfp_set_d(c, first + r, (uint64_t)hi << 32 | lo);
         } else {
             uint64_t value = vfp_get_d(c, first + r);
-            mem_w32(c, address, (uint32_t)value);
-            if (c->abort_pending) return ARM_OK;
-            mem_w32(c, address + 4u, (uint32_t)(value >> 32));
-            if (c->abort_pending) return ARM_OK;
+            for (unsigned half = 0; half < 2u; half++) {
+                uint32_t word = (uint32_t)(value >> (32u * half));
+                if (unaligned) {
+                    arm_status_t status = a8_normal_memu(c, address + 4u * half, 4u, true, cpu_is_priv(c), &word);
+                    if (status != ARM_OK) return status;
+                } else mem_w32(c, address + 4u * half, word);
+                if (c->abort_pending) return ARM_OK;
+            }
         }
     }
     /* B1.9.8: synchronous aborts restore the base. Delayed publication also
@@ -3978,43 +4044,6 @@ static bool thumb_it_placement(unsigned state, uint16_t first, uint16_t second,
     return true;
 }
 
-/* Bounded unaligned MemU path for newly implemented Thumb forms. Each byte
- * must have a validated Normal-memory translation on Cortex-A8. Existing
- * shared load/store paths have not yet adopted this memory-type boundary.
- * Callers supply size 2 or 4; privilege does not change CPU register banks. */
-static arm_status_t thumb_unaligned_transfer(arm_cpu_t *c, uint32_t address,
-        unsigned size, bool write, bool priv, uint32_t *value) {
-    if (c->cpsr & ARM_CPSR_E) return ARM_UNDEFINED;
-    if (c->cp15.sctlr & ARM_SCTLR_A) {
-        note_alignment_abort(c, address, write);
-        return ARM_OK;
-    }
-    if (c->arch != ARM_ARCH_V7_CORTEX_A8) return ARM_UNDEFINED;
-    /* A8's unaligned Device/SO case is UNPREDICTABLE, not the alignment
-     * fault required by virtualization extensions (DDI0406C.b A3.2.2).
-     * Stop before that byte's data access, retaining completed transfers.
-     * Direct data caches do not yet enforce memory types, so bypass them. */
-    uint32_t result = 0u;
-    for (unsigned i = 0; i < size; i++) {
-        uint32_t va = address + i, pa;
-        arm_memory_type_t type;
-        uint32_t fsr = arm_mmu_translate_type(c, va,
-            write ? ARM_ACCESS_WRITE : ARM_ACCESS_READ, priv, &pa, &type);
-        if (fsr) { note_abort(c, fsr, va); return ARM_OK; }
-        if (type != ARM_MEMORY_NORMAL) return ARM_UNDEFINED;
-        if (write) {
-            c->bus->write8(c->bus->ctx, pa, (uint8_t)(*value >> (8u * i)));
-            if (note_bus_failure(c, va)) return ARM_OK;
-        } else {
-            uint32_t byte = c->bus->read8(c->bus->ctx, pa);
-            if (note_bus_failure(c, va)) return ARM_OK;
-            result |= byte << (8u * i);
-        }
-    }
-    if (!write) *value = result;
-    return ARM_OK;
-}
-
 static arm_status_t thumb_load_small(arm_cpu_t *c, uint32_t address, unsigned rt,
                                      bool half, bool sign) {
     if (half && (c->cpsr & ARM_CPSR_E)) return ARM_UNDEFINED;
@@ -4198,7 +4227,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         uint32_t address = base + (c->r[rm] << (half ? 1u : 0u));
         uint32_t entry = 0u;
         if (half && (address & 1u)) {
-            arm_status_t status = thumb_unaligned_transfer(c, address, 2u, false, cpu_is_priv(c), &entry);
+            arm_status_t status = a8_normal_memu(c, address, 2u, false, cpu_is_priv(c), &entry);
             if (status != ARM_OK) return status;
         } else entry = half ? mem_r16(c, address) : mem_r8(c, address);
         if (!c->abort_pending) *next = pc + 4u + 2u * entry;
@@ -4289,7 +4318,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
             return ARM_UNDEFINED;
         uint32_t address = c->r[rn] + (second & 0xffu), value = c->r[rt];
         if (address & (size - 1u)) {
-            arm_status_t status = thumb_unaligned_transfer(c, address, size, !load, false, &value);
+            arm_status_t status = a8_normal_memu(c, address, size, !load, false, &value);
             if (status != ARM_OK || c->abort_pending) return status;
         } else if (load) {
             value = size == 4u ? mem_r32_as(c, address, false) :
@@ -4318,7 +4347,7 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
         uint32_t address = c->r[rn] + (c->r[rm] << ((second >> 4) & 3u));
         if (half && (address & 1u)) {
             uint32_t value = 0u;
-            arm_status_t status = thumb_unaligned_transfer(c, address, 2u, false, cpu_is_priv(c), &value);
+            arm_status_t status = a8_normal_memu(c, address, 2u, false, cpu_is_priv(c), &value);
             if (status == ARM_OK && !c->abort_pending)
                 c->r[rt] = sign ? (uint32_t)(int32_t)(int16_t)value : value;
             return status;

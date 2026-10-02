@@ -564,14 +564,25 @@ one to four consecutive D registers with 32-bit or 64-bit elements. They
 support naturally aligned little-endian accesses, optional 8/16/32-byte
 alignment assertions, and immediate or register post-index writeback.
 An assertion failure, or a standard alignment failure with SCTLR.A set,
-enters the guest Data Abort handler. Standard unaligned accesses with A=0,
-8/16-bit elements and big-endian accesses remain
-unsupported. See [DDI0406C.b, A3.2.1, A7.7.1 and A8.8.320/404](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+enters the guest Data Abort handler. Standard unaligned accesses with A=0
+additionally support Normal memory, including transfers across nonadjacent
+physical pages. Each access checks the current permissions and memory type;
+Device and Strongly-ordered memory stop before the rejected data access.
+Unaligned words use ascending byte accesses; word-aligned halves of a
+misaligned 64-bit element retain word accesses. The original base survives
+an abort or checked host-bus failure. Completed store bytes remain in memory,
+while a load publishes only completed elements. This retained register prefix
+is an implementation choice within the architecture's UNKNOWN abort state.
+Tests cover every unaligned page split, partial data and page-walk failures,
+retry, access controls, aliases, both instruction states and host RAM paths.
+8/16-bit elements and big-endian accesses remain unsupported. See
+[DDI0406C.b, A3.2.1, A7.7.1, A8.8.320/404 and B1.9.8](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
 
 VLD2/VST2 multiple-structure forms additionally interleave or deinterleave
 32-bit elements into adjacent or spaced pairs of D registers, or four
-consecutive D registers. They use the same alignment and writeback rules;
-two-register forms reject a 32-byte alignment assertion. Each completed
+consecutive D registers. They retain naturally aligned accesses and the same
+writeback rules; standard unaligned VLD2/VST2 is not implemented.
+Two-register forms reject a 32-byte alignment assertion. Each completed
 word publishes to its own interleaved register lane. Other element widths,
 VLD2/VST2 single-lane/replicate forms and the remaining structure families are not
 implemented. See
@@ -2294,8 +2305,8 @@ All 276 prepared firmware calls pass again, and the complete canonical
 With immediate shifts implemented, the unchanged prepared diagnostic advances
 48,767 further steps to `VLD1.32 {d24-d27},[r5]!` at `0x8063e168`, after
 94,338,541 steps. This later call supplies the byte-unaligned source address
-`0x80656815`; the existing vector-load implementation explicitly refuses
-that case. The old-library reference reproduces the entire previous bounded
+`0x80656815`; the vector-load implementation at that checkpoint explicitly
+refused that case. The old-library reference reproduces the entire previous bounded
 trace, and all handoff observers still pass. This is further instruction
 progress under the same assumptions, without a complete boot or validated
 cryptographic result.
@@ -2305,6 +2316,23 @@ For the shift change, all 79 strict and 74 shipping tests pass, as do all
 byte-identical. The first completed focused run passed the new shift cases;
 updating four historical unsupported-neighbor expectations completed the
 full VFP suite without changing the implementation.
+
+With standard unaligned VLD1/VST1 implemented, the old-library reference
+reproduces the entire preceding bounded trace. The new library passes that
+load and reaches the diagnostic's configured 100-million-step limit at
+`0x8009706e` after 99,999,999 steps, without another interpreter refusal.
+All seven handoff observers and the seed consumption/wipe observer pass.
+The firmware, metadata, CPU assumptions and guards are unchanged. This is
+kernel execution progress, without a completed boot or cryptographic result.
+All 79 strict tests, 74 shipping tests and 276 prepared firmware calls pass;
+the canonical 61,650-step guarded trace remains byte-identical.
+
+Extending only that probe's budget to 200 million steps reaches the next
+budget boundary at `0x80089790`, after 199,999,999 steps. The same library
+and handoff observers pass, with no new interpreter or bus refusal. The
+last trace is in a memory-copy routine; the earlier budget boundary was
+in a hash-related finalization routine. These samples do not establish
+forward boot progress or rule out a repeated guest loop.
 
 The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates

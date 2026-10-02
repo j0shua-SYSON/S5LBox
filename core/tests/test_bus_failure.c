@@ -750,6 +750,63 @@ static void map_pages(fixture_t *f, arm_cpu_t *c) {
     put32(f,0x4000u,0x6001u); put32(f,0x6000u,0x803eu);
     put32(f,0x6004u,0xa03eu); put32(f,0x6008u,0xc03eu);
 }
+static void test_neon_unaligned_bus_retry(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++) for (unsigned host = 0; host < 2u; host++)
+     for (unsigned load = 0; load < 2u; load++) for (unsigned shape = 0; shape < 3u; shape++)
+      for (unsigned stop = 0; stop <= 32u; stop++) {
+        unsigned size = shape ? 3u : 2u, width = shape == 2u ? 4u : 1u;
+        if (stop % width) continue;
+        fixture_t f; arm_bus_t bus; arm_cpu_t c;
+        setup(&f, &bus, &c, thumb != 0u, host != 0u); map_pages(&f, &c);
+        if (thumb) c.cpsr |= 0x1800u;
+        c.cp15.cpacr = 0x00f00000u; c.vfp_fpexc = ARM_FPEXC_EN; c.vfp_fpscr = 0x0bc00080u;
+        uint32_t base = shape == 2u ? 0x1ff4u : 0x1ff5u; c.r[1] = base;
+        c.excl_valid = true; c.excl_addr = 0x2468u; c.a8_excl_size = 8u;
+        uint32_t insn = (thumb ? 0xf941c20du : 0xf441c20du) | (load << 21) | (size << 6);
+        if (thumb) { put16(&f, 0x8000u, (uint16_t)(insn >> 16)); put16(&f, 0x8002u, (uint16_t)insn); }
+        else put32(&f, 0x8000u, insn);
+        uint64_t original[32], expected[32];
+        for (unsigned d = 0; d < 32u; d++) {
+            original[d] = expected[d] = UINT64_C(0x89abcdef01234567) ^ (UINT64_C(0x0102030405060708) * d);
+            vfp_set_d(&c, d, original[d]);
+        }
+        uint32_t physical[32];
+        for (unsigned i = 0; i < 32u; i++) {
+            uint32_t va = base + i; physical[i] = (va < 0x2000u ? 0xa000u : 0xc000u) + (va & 0xfffu);
+            f.ram[physical[i]] = (uint8_t)(0xf1u - 29u * i);
+        }
+        /* The extra case fails the second page's descriptor read. */
+        unsigned completed = stop == 32u ? 0x2000u - base : stop;
+        unsigned published = completed & ~((1u << size) - 1u);
+        f.fail_address = stop == 32u ? 0x6008u : physical[stop];
+        f.fail_size = stop == 32u ? 4u : width; f.fail_write = stop != 32u && !load;
+        uint8_t memory[sizeof f.ram]; memcpy(memory, f.ram, sizeof memory);
+        for (unsigned i = 0; i < completed; i++) {
+            unsigned d = 28u + i / 8u, shift = 8u * (i % 8u);
+            if (load && i < published) expected[d] = (expected[d] & ~(UINT64_C(255) << shift)) | (uint64_t)f.ram[physical[i]] << shift;
+            else if (!load) memory[physical[i]] = (uint8_t)(original[d] >> shift);
+        }
+        uint32_t flags = c.cpsr;
+        CHECK(arm_step(&c) == ARM_HALT, "unaligned NEON failed callback did not halt");
+        check_stop(&f, &c, 0u, flags);
+        bool match = !memcmp(memory, f.ram, sizeof memory);
+        for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c, d) == expected[d];
+        CHECK(match && c.r[1] == base && c.vfp_fpscr == 0x0bc00080u && c.excl_valid && c.excl_addr == 0x2468u,
+              "unaligned NEON failed element/base/byte prefix");
+        f.failed = false; f.fail_size = 0u;
+        for (unsigned i = 0; i < 32u; i++) {
+            unsigned d = 28u + i / 8u, shift = 8u * (i % 8u);
+            if (load) expected[d] = (expected[d] & ~(UINT64_C(255) << shift)) | (uint64_t)f.ram[physical[i]] << shift;
+            else memory[physical[i]] = (uint8_t)(original[d] >> shift);
+        }
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u && c.r[1] == base + 32u &&
+              c.cpsr == (flags & ~0x0600fc00u), "unaligned NEON retry retirement");
+        match = !memcmp(memory, f.ram, sizeof memory);
+        for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c, d) == expected[d];
+        CHECK(match, "unaligned NEON retry exact result");
+      }
+}
+
 static void test_unaligned_table_branch_and_retry(void) {
     for (unsigned host=0;host<2u;host++)
      for (unsigned phase=0;phase<3u;phase++) {
@@ -1157,6 +1214,7 @@ int main(void) {
     test_neon_pairs_and_retry();
     test_neon_sign_fetch_and_retry();
     test_neon_memory_and_retry();
+    test_neon_unaligned_bus_retry();
     test_neon_lane_replicate_fetch_data_and_retry();
     test_data_and_retry();
     test_table_branch_and_retry();

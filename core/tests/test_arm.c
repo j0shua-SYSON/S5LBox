@@ -8,6 +8,7 @@
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
 #include "arm.h"
+#include "vfp.h"
 #include "neon_zip_cases.h"
 #include <stdio.h>
 #include <string.h>
@@ -8011,6 +8012,163 @@ static void test_cortex_a8_neon_memory_faults(void) {
      }
 }
 
+/* Nonadjacent physical pages make a byte-address or translation shortcut
+ * visible. Expected data is assembled from bytes independently of MemU. */
+static uint32_t neon_unaligned_pa(uint32_t va) {
+    return (va < 0x2000u ? 0xa000u : 0xc000u) + (va & 0xfffu);
+}
+
+static void neon_unaligned_setup(arm_cpu_t *c, arm_bus_t *bus, unsigned thumb,
+        unsigned host, unsigned load, unsigned size, unsigned count,
+        unsigned first, unsigned rn, unsigned rm, uint32_t base) {
+    static const unsigned types[] = {7u,10u,6u,2u};
+    memset(g_ram, 0xee, 0xe000u);
+    *bus = g_bus;
+    if (host) { bus->host_ram = m_host_ram; bus->host_ram_write = m_host_ram_write; }
+    CHECK(arm_reset_profile(c, bus, ARM_ARCH_V7_CORTEX_A8), "unaligned NEON reset");
+    c->cp15.sctlr = ARM_SCTLR_M | ARM_SCTLR_XP;
+    c->cp15.ttbr0 = 0x4000u; c->cp15.dacr = 1u; c->cp15.cpacr = 0x00f00000u;
+    c->vfp_fpexc = ARM_FPEXC_EN; c->vfp_fpscr = 0x0bc00080u;
+    c->cpsr = ARM_MODE_USR | ARM_CPSR_N | ARM_CPSR_C | ARM_CPSR_Q | (3u << 16) |
+        (thumb ? ARM_CPSR_T | test_it_bits(0x18u) : 0u);
+    c->excl_valid = true; c->excl_addr = 0x2468u; c->a8_excl_size = 8u;
+    for (unsigned r = 0; r < 15u; r++) c->r[r] = 0xffffe000u + r;
+    c->r[rn] = base;
+    for (unsigned d = 0; d < 32u; d++) vfp_set_d(c, d,
+        UINT64_C(0x89abcdef01234567) ^ (UINT64_C(0x0102030405060708) * d));
+    m_w32(NULL, 0x4000u, 0x6001u); m_w32(NULL, 0x6000u, 0x803eu);
+    m_w32(NULL, 0x6004u, 0xa03eu); m_w32(NULL, 0x6008u, 0xc03eu);
+    uint32_t insn = (thumb ? 0xf9000000u : 0xf4000000u) | (load << 21) |
+        ((first & 16u) << 18) | ((first & 15u) << 12) | (rn << 16) |
+        (types[count - 1u] << 8) | (size << 6) | rm;
+    if (thumb) { m_w16(NULL, 0x8000u, (uint16_t)(insn >> 16)); m_w16(NULL, 0x8002u, (uint16_t)insn); }
+    else m_w32(NULL, 0x8000u, insn);
+    for (unsigned i = 0; i < count * 8u; i++)
+        g_ram[neon_unaligned_pa(base + i)] = (uint8_t)(0xf1u - 29u * i);
+}
+
+static void test_cortex_a8_neon_unaligned_memory(void) {
+    static const unsigned starts[] = {0u,13u,16u,28u}, bases[] = {0u,5u,13u,14u};
+    for (unsigned thumb = 0; thumb < 2u; thumb++) for (unsigned host = 0; host < 2u; host++)
+     for (unsigned load = 0; load < 2u; load++) for (unsigned size = 2u; size <= 3u; size++)
+      for (unsigned offset = 1u; offset < 8u; offset++) for (unsigned count = 1u; count <= 4u; count++)
+       for (unsigned role = 0; role < 4u; role++) for (unsigned post = 0; post < 4u; post++) {
+        if (!(offset & ((1u << size) - 1u))) continue;
+        unsigned first = starts[role], rn = bases[role], rm = post == 0u ? 15u : post == 1u ? 13u : post == 2u ? rn : 2u;
+        uint32_t base = 0x1fe0u + offset; arm_cpu_t c; arm_bus_t bus;
+        neon_unaligned_setup(&c, &bus, thumb, host, load, size, count, first, rn, rm, base);
+        if (post & 1u) { c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | ARM_MODE_SVC; c.cp15.sctlr |= ARM_SCTLR_U; }
+        uint32_t flags = c.cpsr, regs[15]; memcpy(regs, c.r, sizeof regs);
+        regs[rn] += rm == 15u ? 0u : rm == 13u ? 8u * count : c.r[rm];
+        uint64_t expected[32]; for (unsigned d = 0; d < 32u; d++) expected[d] = vfp_get_d(&c, d);
+        uint8_t memory[0x3000]; memcpy(memory, g_ram + 0xa000u, sizeof memory);
+        for (unsigned i = 0; i < count * 8u; i++) {
+            unsigned d = first + i / 8u, shift = 8u * (i % 8u);
+            if (load) expected[d] = (expected[d] & ~(UINT64_C(255) << shift)) |
+                (uint64_t)g_ram[neon_unaligned_pa(base + i)] << shift;
+            else memory[neon_unaligned_pa(base + i) - 0xa000u] = (uint8_t)(expected[d] >> shift);
+        }
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u && c.cycles == 1u && c.cpsr == (flags & ~TEST_IT_MASK),
+              "unaligned NEON result/IT size=%u offset=%u", size, offset);
+        bool match = !memcmp(regs, c.r, sizeof regs) && !memcmp(memory, g_ram + 0xa000u, sizeof memory);
+        for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c, d) == expected[d];
+        CHECK(match && c.vfp_fpscr == 0x0bc00080u && c.vfp_fpexc == ARM_FPEXC_EN &&
+              c.excl_valid && c.excl_addr == 0x2468u && c.a8_excl_size == 8u,
+              "unaligned NEON exact bytes/registers/writeback/guards");
+       }
+}
+
+static void test_cortex_a8_neon_unaligned_faults(void) {
+    /* Stop at every possible byte of a four-register transfer. Aligned
+     * controls are already covered by test_cortex_a8_neon_memory_faults. */
+    for (unsigned thumb = 0; thumb < 2u; thumb++) for (unsigned host = 0; host < 2u; host++)
+     for (unsigned load = 0; load < 2u; load++) for (unsigned size = 2u; size <= 3u; size++)
+      for (unsigned prefix = 1u; prefix < 32u; prefix++) for (unsigned fault = 0; fault < 5u; fault++) {
+        uint32_t base = 0x2000u - prefix;
+        if (!(base & ((1u << size) - 1u))) continue;
+        arm_cpu_t c; arm_bus_t bus;
+        neon_unaligned_setup(&c, &bus, thumb, host, load, size, 4u, 28u, 4u, 13u, base);
+        /* Translation fault, User permission fault, read-only, Device, SO. */
+        static const uint32_t desc[] = {0u,0xc01eu,0xc23eu,0xc036u,0xc032u};
+        m_w32(NULL, 0x6008u, desc[fault]);
+        bool success = fault == 2u && load, refused = fault >= 3u;
+        unsigned completed = success ? 32u : prefix, published = completed & ~((1u << size) - 1u);
+        uint64_t expected[32]; for (unsigned d = 0; d < 32u; d++) expected[d] = vfp_get_d(&c, d);
+        uint8_t memory[0x3000]; memcpy(memory, g_ram + 0xa000u, sizeof memory);
+        for (unsigned i = 0; i < completed; i++) {
+            unsigned d = 28u + i / 8u, shift = 8u * (i % 8u);
+            if (load && i < published) expected[d] = (expected[d] & ~(UINT64_C(255) << shift)) |
+                (uint64_t)g_ram[neon_unaligned_pa(base + i)] << shift;
+            else if (!load) memory[neon_unaligned_pa(base + i) - 0xa000u] = (uint8_t)(expected[d] >> shift);
+        }
+        uint32_t flags = c.cpsr;
+        g_watch_addr = 0xc000u; g_watch_reads8 = g_watch_writes8 = g_watch_reads32 = g_watch_writes32 = 0u;
+        arm_status_t status = arm_step(&c);
+        if (success) CHECK(status == ARM_OK && c.r[15] == 4u && c.r[4] == base + 32u && c.cpsr == (flags & ~TEST_IT_MASK),
+            "unaligned NEON read-only load failed");
+        else if (refused) CHECK(status == ARM_UNDEFINED && c.r[15] == 0u && c.r[4] == base && c.cpsr == flags,
+            "unaligned NEON Device/SO not refused");
+        else CHECK(status == ARM_OK && c.r[15] == ARM_VEC_DATA_ABORT && c.r[14] == 8u && c.r[4] == base &&
+            c.spsr[ARM_BANK_ABT] == flags && c.cp15.dfar == 0x2000u &&
+            c.cp15.dfsr == ((fault == 0u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_PAGE_PERMISSION) | (load ? 0u : 0x800u)),
+            "unaligned NEON first fault/base/IT");
+        if (!success) CHECK(!g_watch_reads8 && !g_watch_writes8 && !g_watch_reads32 && !g_watch_writes32,
+            "unaligned NEON touched rejected page");
+        bool match = !memcmp(memory, g_ram + 0xa000u, sizeof memory);
+        for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c, d) == expected[d];
+        CHECK(match && c.vfp_fpscr == 0x0bc00080u, "unaligned NEON completed element/byte prefix");
+        g_watch_addr = UINT32_MAX;
+      }
+}
+
+static void test_cortex_a8_neon_unaligned_guards(void) {
+    for (unsigned thumb = 0; thumb < 2u; thumb++) for (unsigned host = 0; host < 2u; host++)
+     for (unsigned load = 0; load < 2u; load++) for (unsigned size = 2u; size <= 3u; size++)
+      for (unsigned guard = 0; guard < 11u; guard++) {
+        arm_cpu_t c; arm_bus_t bus;
+        uint32_t base = size == 3u && (guard == 0u || guard == 7u || guard == 8u) ? 0x1ffcu : 0x1ffdu;
+        neon_unaligned_setup(&c, &bus, thumb, host, load, size, 4u, 28u, 4u, 13u, base);
+        if (guard == 0u) c.cp15.sctlr |= ARM_SCTLR_A;
+        if (guard == 1u) { /* Explicit :256 alignment faults even with A=0. */
+            if (thumb) m_w16(NULL, 0x8002u, m_r16(NULL, 0x8002u) | 0x30u);
+            else m_w32(NULL, 0x8000u, m_r32(NULL, 0x8000u) | 0x30u);
+        }
+        if (guard == 2u) c.vfp_fpexc = 0u;
+        if (guard == 3u) c.cp15.cpacr = 0x00500000u; /* Privileged only. */
+        if (guard == 4u) c.cpsr |= ARM_CPSR_E;
+        if (guard == 5u && thumb) { c.cpsr |= ARM_CPSR_Z; c.vfp_fpexc = 0u; }
+        if (guard == 6u) { c.cp15.sctlr &= ~ARM_SCTLR_M; memcpy(g_ram, g_ram + 0x8000u, 4u); }
+        if (guard == 7u) m_w32(NULL, 0x6004u, 0xa036u);
+        if (guard == 8u) m_w32(NULL, 0x6004u, 0xa032u);
+        if (guard == 9u) { c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | ARM_MODE_SVC; m_w32(NULL, 0x6004u, 0xa01eu); }
+        if (guard == 10u) m_w32(NULL, 0x6004u, 0u);
+        uint32_t flags = c.cpsr; uint64_t expected[32];
+        for (unsigned d = 0; d < 32u; d++) expected[d] = vfp_get_d(&c, d);
+        uint8_t memory[0x3000]; memcpy(memory, g_ram + 0xa000u, sizeof memory);
+        bool success = guard == 9u || (guard == 5u && !thumb);
+        if (success) for (unsigned i = 0; i < 32u; i++) {
+            unsigned d = 28u + i / 8u, shift = 8u * (i % 8u);
+            if (load) expected[d] = (expected[d] & ~(UINT64_C(255) << shift)) |
+                (uint64_t)g_ram[neon_unaligned_pa(base + i)] << shift;
+            else memory[neon_unaligned_pa(base + i) - 0xa000u] = (uint8_t)(expected[d] >> shift);
+        }
+        arm_status_t status = arm_step(&c);
+        if (guard <= 1u || guard == 10u) CHECK(status == ARM_OK && c.r[15] == ARM_VEC_DATA_ABORT &&
+            c.r[4] == base && c.spsr[ARM_BANK_ABT] == flags && c.cp15.dfar == base &&
+            c.cp15.dfsr == ((guard == 10u ? ARM_FSR_PAGE_TRANSLATION : ARM_FSR_ALIGNMENT) | (load ? 0u : 0x800u)),
+            "unaligned NEON alignment/translation guard");
+        else if (guard == 2u || guard == 3u) CHECK(status == ARM_OK && c.r[15] == ARM_VEC_UNDEFINED &&
+            c.r[4] == base && c.spsr[ARM_BANK_UND] == flags, "unaligned NEON access denial");
+        else if (guard == 5u || success) CHECK(status == ARM_OK && c.r[15] == 4u &&
+            c.r[4] == base + (success ? 32u : 0u) && c.cpsr == (flags & ~TEST_IT_MASK), "unaligned NEON privilege/IT");
+        else CHECK(status == ARM_UNDEFINED && c.r[15] == 0u && c.r[4] == base && c.cpsr == flags,
+            "unaligned NEON unsupported memory/endian guard");
+        bool match = !memcmp(memory, g_ram + 0xa000u, sizeof memory);
+        for (unsigned d = 0; d < 32u; d++) match &= vfp_get_d(&c, d) == expected[d];
+        CHECK(match, "unaligned NEON guard changed data");
+      }
+}
+
 static void test_cortex_a8_neon_pair_faults(void) {
     static const unsigned types[] = {8u,9u,3u};
     static const unsigned slots[3][8] = {{0u,2u,1u,3u},{0u,4u,1u,5u},{0u,4u,1u,5u,2u,6u,3u,7u}};
@@ -12933,6 +13091,9 @@ int main(void) {
     test_cortex_a8_vfp_undefined_retry();
     test_cortex_a8_vfp_data_fetch_and_retry();
     test_cortex_a8_neon_memory_faults();
+    test_cortex_a8_neon_unaligned_memory();
+    test_cortex_a8_neon_unaligned_faults();
+    test_cortex_a8_neon_unaligned_guards();
     test_cortex_a8_neon_lane_replicate_faults();
     test_cortex_a8_neon_lane_replicate_guest_retry();
     test_cortex_a8_neon_pair_faults();
