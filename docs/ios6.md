@@ -2,7 +2,8 @@
 
 The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
 a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
-interrupt fabric, UART, timebase counter, deadline timer, GPIO and I2C.
+interrupt fabric, UART, timebase counter, deadline timer, GPIO, I2C and a
+bounded PMU clock endpoint.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
@@ -146,6 +147,34 @@ status. No instruction or function return is replaced. Provider clocks,
 scheduler waits, interrupt exception delivery and complete driver
 initialization remain unexecuted. The separate full kernel diagnostic still
 stops at unprepared GPIO state.
+
+## Explicit D1755 clock endpoint
+
+The optional PMU endpoint handles only I2C0 address `0x74`, with exact
+four-byte little-endian reads at `0x4c` (raw counter) and `0x64` (offset),
+and four-byte offset writes at `0x64`. The matching `AppleD1755PMU` and
+`AppleD1755PMURTC` consumers establish these transfers. Older PMU layouts
+are excluded. No chip revision, battery, charger, regulator, alarm or
+interrupt register values are supplied.
+
+`s5l8920_pmu_rtc_configure` requires explicit counter and offset values.
+`s5l8920_pmu_rtc_advance` adds raw units modulo 32 bits; no physical rate
+or epoch is inferred. Neither CPU execution nor the board timebase advances
+this counter. `s5l8920_pmu_rtc_service` completes only the specified active
+request and samples the counter at that call. Unsupported requests remain
+pending. Reconfiguration is refused while I2C0 has an active request,
+pending status or unread data. Functional reset preserves this configured
+clock domain while cancelling the I2C request; free/init invalidates it.
+This is an explicit logical reset policy, not measured backup-power behavior.
+
+The private witness runs 72 original PMU/RTC calls through the original
+ARMIIC device/controller wrappers and complete N88 I2C polling path.
+It verifies repeated reads until the counter agrees, rollover, adjusted
+time, offset writes and cached no-op setters. The fixture prepares objects,
+MMU/CPU context, already-owned locks, masked interrupts and the nominal
+clock schedule; complete driver initialization is not executed. Before the
+endpoint was implemented, the first register `0x4c` request remained pending
+after 5,000 instructions. The full kernel GPIO boundary is unchanged.
 
 ## Explicit generic CPU configuration
 

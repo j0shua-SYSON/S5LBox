@@ -92,6 +92,8 @@ typedef struct {
     uint32_t gpio_pending[S5L8920_GPIO_IRQ_GROUPS];
     bool gpio_irq;
     s5l8920_i2c_t i2c[S5L8920_I2C_COUNT];
+    bool pmu_rtc_configured;
+    uint32_t pmu_rtc_counter, pmu_rtc_offset;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -103,7 +105,8 @@ bool s5l8920_init(s5l8920_t *m);
 void s5l8920_free(s5l8920_t *m);
 
 /* Reset CPU/controller/UART/timer/I2C state and clear diagnostics, preserving RAM
- * and externally supplied interrupt levels/GPIO samples. GPIO programming is
+ * and externally supplied interrupt levels/GPIO samples and configured PMU
+ * clock/offset state. GPIO programming is
  * invalidated. This is a functional reset, not a
  * model of power sequencing. The caller owns execution and device timing. */
 bool s5l8920_reset(s5l8920_t *m);
@@ -172,6 +175,22 @@ bool s5l8920_gpio_input(s5l8920_t *m, unsigned pin, bool high);
 bool s5l8920_i2c_request(const s5l8920_t *m, unsigned bus, s5l8920_i2c_request_t *request);
 bool s5l8920_i2c_complete(s5l8920_t *m, unsigned bus, uint64_t sequence,
                          bool success, const uint8_t *data, size_t size);
+
+/* Bounded D1755 clock endpoint at I2C0 address0x74. Explicit configuration
+ * supplies a raw32-bit counter and offset; it is refused while bus0 has an
+ * active request, pending status or unread RX. No revision, battery, power,
+ * alarm or other PMU register is inferred. Exact4-byte little-endian reads
+ * at0x4c/0x64 and writes at0x64 are supported. Other requests remain pending.
+ * Service completes only the specified active sequence, sampling the counter
+ * at that host call. Advance adds caller-supplied raw units modulo2^32;
+ * CPU execution, I2C reads and board timebase ticks do not advance this clock.
+ * No physical rate or epoch is assumed. Calls run between CPU steps, preserve
+ * bus diagnostics and reject invalid inputs without mutation. Functional
+ * reset retains this explicitly configured domain; free/init invalidates it.
+ * This is a logical reset policy, not measured backup-power behavior. */
+bool s5l8920_pmu_rtc_configure(s5l8920_t *m, uint32_t counter, uint32_t offset);
+bool s5l8920_pmu_rtc_advance(s5l8920_t *m, uint32_t units);
+bool s5l8920_pmu_rtc_service(s5l8920_t *m, uint64_t sequence);
 
 /* Supply timebase source ticks explicitly, modulo 2^64, and advance the enabled
  * deadline countdown. Reads and CPU steps do not advance time. A programmed

@@ -451,6 +451,40 @@ bool s5l8920_i2c_complete(s5l8920_t *m,unsigned bus,uint64_t sequence,
     return true;
 }
 
+bool s5l8920_pmu_rtc_configure(s5l8920_t *m,uint32_t counter,uint32_t offset) {
+    if (!m || !m->ram || m->i2c[0].active || m->i2c[0].status ||
+        m->i2c[0].rx_cursor<m->i2c[0].rx_count) return false;
+    m->pmu_rtc_counter=counter; m->pmu_rtc_offset=offset;
+    m->pmu_rtc_configured=true;
+    return true;
+}
+
+bool s5l8920_pmu_rtc_advance(s5l8920_t *m,uint32_t units) {
+    if (!m || !m->ram || !m->pmu_rtc_configured) return false;
+    m->pmu_rtc_counter+=units;
+    return true;
+}
+
+bool s5l8920_pmu_rtc_service(s5l8920_t *m,uint64_t sequence) {
+    if (!m || !m->ram || !m->pmu_rtc_configured) return false;
+    const s5l8920_i2c_t *i=&m->i2c[0];
+    if (!i->active || i->sequence!=sequence || i->address!=0x74u || i->length!=4u ||
+        (i->subaddress!=0x64u && (i->subaddress!=0x4cu || i->write))) return false;
+    uint32_t value;
+    if (i->write) {
+        value=(uint32_t)i->tx[0]|((uint32_t)i->tx[1]<<8)|
+              ((uint32_t)i->tx[2]<<16)|((uint32_t)i->tx[3]<<24);
+        if (!s5l8920_i2c_complete(m,0u,sequence,true,NULL,0u)) return false;
+        m->pmu_rtc_offset=value;
+    } else {
+        uint8_t response[4];
+        value=i->subaddress==0x4cu ? m->pmu_rtc_counter:m->pmu_rtc_offset;
+        for (unsigned n=0;n<4u;n++) response[n]=(uint8_t)(value>>(n*8u));
+        if (!s5l8920_i2c_complete(m,0u,sequence,true,response,sizeof response)) return false;
+    }
+    return true;
+}
+
 bool s5l8920_reset(s5l8920_t *m) {
     if (!m || !m->ram) return false;
     if (!arm_reset_profile(&m->cpu,&m->bus,ARM_ARCH_V7_CORTEX_A8)) return false;

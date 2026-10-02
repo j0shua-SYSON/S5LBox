@@ -1350,6 +1350,97 @@ static void test_fiq_and_reset(s5l8920_t *m) {
     CHECK(s5l8920_set_irq(m,95u,false), "clear reset input");
 }
 
+static uint64_t pmu_request(s5l8920_t *m,unsigned address,unsigned reg,bool write,unsigned length,uint32_t data) {
+    uint32_t base=S5L8920_I2C_BASE;
+    const uint32_t offsets[]={8u,12u,0u,16u,20u,24u};
+    const uint32_t values[]={0xf0u,0x37u,address,reg,0u,length};
+    for (unsigned n=0;n<6u;n++) m->bus.write32(m,base+offsets[n],values[n]);
+    if (write) for (unsigned n=0;n<length;n++) m->bus.write32(m,base+32u,(data>>((n%4u)*8u))&255u);
+    m->bus.write32(m,base+36u,write ? 5u:4u);
+    CHECK(!m->bus_failure.reason && m->i2c[0].active,"PMU request staging");
+    return m->i2c[0].sequence;
+}
+
+static uint32_t pmu_read_result(s5l8920_t *m) {
+    uint32_t result=0u;
+    for (unsigned n=0;n<4u;n++) result|=m->bus.read32(m,S5L8920_I2C_BASE+32u)<<(n*8u);
+    CHECK(m->i2c[0].status==0x10u,"FIFO consumption acknowledged PMU status");
+    m->bus.write32(m,S5L8920_I2C_BASE+12u,0x10u);
+    return result;
+}
+
+static void test_pmu_rtc(s5l8920_t *m) {
+    s5l8920_t empty={0};
+    CHECK(!s5l8920_pmu_rtc_configure(NULL,0u,0u) && !s5l8920_pmu_rtc_configure(&empty,0u,0u) &&
+          !s5l8920_pmu_rtc_advance(NULL,1u) && !s5l8920_pmu_rtc_advance(&empty,1u) &&
+          !s5l8920_pmu_rtc_service(NULL,0u) && !s5l8920_pmu_rtc_service(&empty,0u),"invalid PMU object");
+    CHECK(s5l8920_reset(m) && !m->pmu_rtc_configured &&
+          !s5l8920_pmu_rtc_advance(m,1u) && !s5l8920_pmu_rtc_service(m,0u),"unconfigured PMU supplied state");
+    uint64_t seq=pmu_request(m,0x74u,0x4cu,false,4u,0u);
+    s5l8920_i2c_t before=m->i2c[0];
+    CHECK(!s5l8920_pmu_rtc_service(m,seq) && !memcmp(&before,&m->i2c[0],sizeof before) &&
+          !s5l8920_pmu_rtc_configure(m,0u,0u),"unconfigured pending request changed");
+    CHECK(s5l8920_reset(m),"PMU reset");
+    const uint32_t values[]={0u,1u,0x12345678u,0x89abcdefu,UINT32_MAX};
+    for (unsigned c=0;c<5u;c++) for (unsigned o=0;o<5u;o++) {
+        uint32_t counter=values[c],offset=values[o];
+        CHECK(s5l8920_reset(m) && s5l8920_pmu_rtc_configure(m,counter,offset),"explicit PMU configuration");
+        for (unsigned reg=0;reg<2u;reg++) {
+            seq=pmu_request(m,0x74u,reg ? 0x64u:0x4cu,false,4u,0u);
+            before=m->i2c[0];
+            CHECK(!s5l8920_pmu_rtc_configure(m,0u,0u) && !s5l8920_pmu_rtc_service(m,seq-1u) &&
+                  !memcmp(&before,&m->i2c[0],sizeof before),"active configuration or stale completion");
+            vic_write(m,0u,PL192_INTENABLE,1u<<19);
+            CHECK(s5l8920_pmu_rtc_service(m,seq) && m->cpu.irq_line,"PMU completion IRQ");
+            CHECK(!s5l8920_pmu_rtc_service(m,seq) && !s5l8920_pmu_rtc_configure(m,0u,0u),"pending PMU response replaced");
+            CHECK(pmu_read_result(m)==(reg ? offset:counter) && !m->cpu.irq_line,"little endian PMU read/ack");
+        }
+        uint32_t written=counter^offset^0xa55a3cc3u;
+        seq=pmu_request(m,0x74u,0x64u,true,4u,written);
+        CHECK(s5l8920_pmu_rtc_service(m,seq) && m->pmu_rtc_offset==written && m->pmu_rtc_counter==counter,"offset write atomicity");
+        m->bus.write32(m,S5L8920_I2C_BASE+12u,0x10u);
+        seq=pmu_request(m,0x74u,0x64u,false,4u,0u);
+        CHECK(s5l8920_pmu_rtc_service(m,seq) && pmu_read_result(m)==written,"offset read after write");
+        CHECK(s5l8920_timebase_clock(m,UINT64_MAX) && m->pmu_rtc_counter==counter &&
+              s5l8920_pmu_rtc_advance(m,1u) && m->pmu_rtc_counter==counter+1u &&
+              s5l8920_pmu_rtc_advance(m,UINT32_MAX) && m->pmu_rtc_counter==counter &&
+              s5l8920_pmu_rtc_advance(m,0u) && m->pmu_rtc_counter==counter,"independent modulo raw clock");
+    }
+    for (unsigned kind=0;kind<3u;kind++) for (unsigned n=0;n<(kind==1u ? 129u:(kind==2u ? 128u:256u));n++) for (unsigned write=0;write<2u;write++) {
+        unsigned reg=kind ? 0x64u:n,address=kind==2u ? n:0x74u,length=kind==1u ? n:4u;
+        if (!write && !length) continue;
+        CHECK(s5l8920_reset(m) && s5l8920_pmu_rtc_configure(m,0x12345678u,0x89abcdefu),"PMU negative setup");
+        seq=pmu_request(m,address,reg,write!=0u,length,0x01020304u);before=m->i2c[0];
+        bool supported=address==0x74u && length==4u && (reg==0x64u || (reg==0x4cu && !write));
+        CHECK(s5l8920_pmu_rtc_service(m,seq)==supported,"PMU register/address/length boundary");
+        if (!supported) CHECK(!memcmp(&before,&m->i2c[0],sizeof before) &&
+            m->pmu_rtc_counter==0x12345678u && m->pmu_rtc_offset==0x89abcdefu &&
+            !m->bus_failure.reason,"unsupported request supplied data/status or mutated RTC");
+    }
+    CHECK(s5l8920_reset(m) && s5l8920_pmu_rtc_configure(m,UINT32_MAX,0x89abcdefu),"PMU reset setup");
+    seq=pmu_request(m,0x74u,0x4cu,false,4u,0u);
+    CHECK(s5l8920_pmu_rtc_advance(m,1u) && s5l8920_pmu_rtc_service(m,seq),"sample counter at service boundary");
+    m->bus.write32(m,S5L8920_I2C_BASE+12u,0x10u);
+    CHECK(!s5l8920_pmu_rtc_configure(m,1u,2u),"unread response replaced after ack");
+    for (unsigned n=0;n<4u;n++) CHECK(!m->bus.read32(m,S5L8920_I2C_BASE+32u),"wrapped response bytes");
+    uint64_t old=pmu_request(m,0x74u,0x64u,true,4u,0xdeadbeefu);
+    CHECK(s5l8920_reset(m) && m->pmu_rtc_configured && m->pmu_rtc_counter==0u &&
+          m->pmu_rtc_offset==0x89abcdefu && !s5l8920_pmu_rtc_service(m,old),"functional reset changed RTC or completed stale write");
+    seq=pmu_request(m,0x74u,0x64u,false,4u,0u);
+    CHECK(seq>old && !s5l8920_pmu_rtc_service(m,old),"reset request sequence reused");
+    (void)m->bus.read32(m,0u);s5l8920_bus_failure_t diagnostic=m->bus_failure;
+    CHECK(s5l8920_pmu_rtc_advance(m,1u) && s5l8920_pmu_rtc_service(m,seq) &&
+          !memcmp(&diagnostic,&m->bus_failure,sizeof diagnostic),"PMU host event cleared bus diagnostic");
+    s5l8920_clear_bus_failure(m);
+    CHECK(pmu_read_result(m)==0x89abcdefu,"retained offset after reset");
+    (void)m->bus.read32(m,0u);diagnostic=m->bus_failure;
+    CHECK(s5l8920_pmu_rtc_configure(m,7u,8u) && !memcmp(&diagnostic,&m->bus_failure,sizeof diagnostic),"PMU configuration cleared bus diagnostic");
+    CHECK(s5l8920_reset(m),"PMU other bus setup");
+    i2c_program(m,1u,false,4u,false);before=m->i2c[1];
+    CHECK(!s5l8920_pmu_rtc_service(m,before.sequence) && !memcmp(&before,&m->i2c[1],sizeof before),"PMU consumed another I2C bus");
+    CHECK(s5l8920_reset(m),"PMU final reset");
+}
+
 int main(void) {
     test_empty_nvram_proxy();
     s5l8920_t m = {0};
@@ -1377,10 +1468,14 @@ int main(void) {
     test_i2c_endpoints(&m);
     test_i2c_bounds(&m);
     test_i2c_checked_cpu(&m);
+    test_pmu_rtc(&m);
     test_fiq_and_reset(&m);
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
     CHECK(!s5l8920_timebase_clock(&m,1u) && !m.timebase_ticks, "freed board accepted timebase input");
+    CHECK(!m.pmu_rtc_configured && !m.pmu_rtc_counter && !m.pmu_rtc_offset &&
+          !s5l8920_pmu_rtc_configure(&m,1u,2u) && !s5l8920_pmu_rtc_advance(&m,1u) &&
+          !s5l8920_pmu_rtc_service(&m,1u),"freed board retained PMU state or accepted an event");
     size_t count=999u;
     CHECK(!s5l8920_uart0_clock(&m,true,1u,NULL,0u,&count) && count==999u && !s5l8920_uart0_receive(&m,0u),
           "freed board accepted a UART event");
