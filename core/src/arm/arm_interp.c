@@ -2483,6 +2483,15 @@ static arm_status_t exec_data_processing(arm_cpu_t *c, uint32_t pc, uint32_t ins
     }
 
     if (writes) {
+        /* ARMv7 ALUWritePC interworks for ordinary A32 result writes. Keep
+         * ARM1176's BranchWritePC behavior and SPSR-based exception returns.
+         * BXWritePC's low bits 10 are UNPREDICTABLE: refuse them before
+         * publishing the destination or changing the instruction set. */
+        if (rd == 15u && !S &&
+            (c->arch == ARM_ARCH_V7_CORTEX_A8 || c->arch == ARM_ARCH_V7_SWIFT)) {
+            if ((res & 3u) == 2u) return ARM_UNDEFINED;
+            c->cpsr = (c->cpsr & ~ARM_CPSR_T) | ((res & 1u) ? ARM_CPSR_T : 0u);
+        }
         c->r[rd] = res;
         if (rd == 15) {
             /* Writing PC with S set is an exception return (the classic
@@ -2506,8 +2515,8 @@ static arm_status_t exec_data_processing(arm_cpu_t *c, uint32_t pc, uint32_t ins
              * instruction — which is how a zone free ended up unlocking a
              * mutex at address 1.
              *
-             * Safe for the ordinary S==0 case: in ARM state T is clear, so the
-             * mask stays ~3u and MOV pc,Rm correctly does not interwork.
+             * Ordinary ARMv7 writes use the state selected above. ARM1176
+             * keeps T clear and word-aligns the result without interworking.
              */
             *next = res & ((c->cpsr & ARM_CPSR_T) ? ~1u : ~3u);
         }

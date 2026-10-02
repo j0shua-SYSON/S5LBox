@@ -2334,6 +2334,46 @@ last trace is in a memory-copy routine; the earlier budget boundary was
 in a hash-related finalization routine. These samples do not establish
 forward boot progress or rule out a repeated guest loop.
 
+Read-only observations subsequently identify a timed reseeding loop: all
+1,174 checks return zero time and all 1,174 take the backedge while the
+board's source clock is frozen. A separate diagnostic supplies one existing
+timebase tick per 25 successful abstract instruction cycles. This explicitly
+assumes the nominal 24 MHz / 600 MHz ratio and one instruction per cycle;
+it does not measure hardware timing or add a public machine scheduler.
+The guest then exits both observed timed loops. Zero supplied ticks reproduce
+the complete earlier 100-million-step trace, including its bounded state and
+access counters after removing the read-only observer lines.
+
+The clocked diagnostic exposes an A32 return bug: `MOV pc,lr` at `0x8063ca8c`
+returns to `0x8063a3cd`, but the old interpreter keeps ARM state. It decodes
+the subsequent Thumb bytes as ARM, including a spurious SVC at `0x8063a3d8`,
+and the guest panics with `fleh_swi: took SWI from kernel mode`.
+Cortex-A8 and Swift now apply ARMv7's `ALUWritePC` interworking to ordinary
+A32 data-processing results written to PC. Odd targets select Thumb; word
+aligned targets select ARM; the unpredictable low-bit pattern `10` is
+refused before changing PC or state. ARM1176 keeps its existing alignment,
+and exception returns still select state from SPSR. See
+[DDI0406C.b, A2.3.1](https://documentation-service.arm.com/static/5f8daeb7f86e16515cdb8c4e).
+Regressions cover all result-producing operations, conditions, immediate and
+register operands, carry inputs, both fetch paths, real Thumb-to-ARM calls
+and returns, shifted aliases, invalid register shifts and SPSR returns.
+
+All 79 strict and 74 shipping tests pass, along with the 276 prepared firmware
+calls and the unchanged canonical guarded trace. Frozen references reproduce
+both previous unclocked and clocked results exactly. The fixed unclocked
+probe retains its complete earlier trace; the fixed clocked probe passes
+the bad-return path and reaches Thumb `0x8063961a` in multiword arithmetic
+at its 100-million-step limit. Its handoff and seed observers still pass.
+This establishes execution beyond the former panic under the explicit
+clock and CPU assumptions, without a completed boot or cryptographic result.
+
+Extending only the fixed clocked probe's budget to 200 million steps reaches
+a concrete device-tree guard after 146,879,806 steps: ARM `0x80089b54`
+reads the unprepared zero-valued property at physical `0x4110030c`.
+The same handoff and seed observers pass. This later stop requires evidence
+for that property's handoff value before lifting its guard; it is neither
+a completed kernel boot nor a reason to remove the remaining guards.
+
 The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates
 C only as prescribed by the immediate form, preserving V. Invalid zero

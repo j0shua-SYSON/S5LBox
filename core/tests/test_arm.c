@@ -594,6 +594,86 @@ static void test_orr_bic_mvn(void) {
     CHECK(c.r[1] == 0xffffffffu, "r1=%08x expect ffffffff", c.r[1]);
 }
 
+static void test_armv7_alu_pc_interworking(void) {
+    static const unsigned ops[] = {0u,1u,2u,3u,4u,5u,6u,7u,12u,13u,14u,15u};
+    static const arm_arch_t profiles[] = {ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_CORTEX_A8,ARM_ARCH_V7_SWIFT};
+    for (unsigned profile = 0; profile < 3u; profile++) for (unsigned host = 0; host < 2u; host++)
+     for (unsigned immediate = 0; immediate < 2u; immediate++) for (unsigned carry = 0; carry < 2u; carry++)
+      for (unsigned execute = 0; execute < 2u; execute++) for (unsigned k = 0; k < sizeof ops / sizeof ops[0]; k++)
+       for (unsigned low = 0; low < 4u; low++) {
+        unsigned op = ops[k]; uint32_t b = 0x20u + low, a = 0x13fu, result;
+        switch (op) {
+        case 0: result = b; break;
+        case 1: result = 0x11fu - low; break;
+        case 2: result = 0x11fu - low; break;
+        case 3: result = 0xfffffee1u + low; break;
+        case 4: result = 0x15fu + low; break;
+        case 5: result = 0x15fu + low + carry; break;
+        case 6: result = 0x11eu - low + carry; break;
+        case 7: result = 0xfffffee0u + low + carry; break;
+        case 12: result = a; break;
+        case 13: result = b; break;
+        case 14: result = 0x11fu - low; break;
+        default: result = 0xffffffdfu - low; break;
+        }
+        uint32_t insn = (execute ? 0xe0000000u : 0u) | (immediate << 25) | (op << 21) |
+            ((op == 13u || op == 15u ? 0u : 1u) << 16) | 0xf000u | (immediate ? b : 2u);
+        memset(g_ram, 0, 0x1000u); m_w32(NULL, 0u, insn);
+        arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c; CHECK(arm_reset_profile(&c, &bus, profiles[profile]), "ALU PC reset");
+        c.cpsr = ARM_MODE_SYS | ARM_CPSR_N | ARM_CPSR_Q | (5u << 16) | (carry ? ARM_CPSR_C : 0u);
+        c.r[1] = a; c.r[2] = b; c.r[13] = 0x333u; c.r[14] = 0x555u;
+        c.excl_valid = true; c.excl_addr = 0x2468u; c.vfp_fpscr = 0x0bc00080u;
+        uint32_t regs[15], flags = c.cpsr; memcpy(regs, c.r, sizeof regs);
+        bool invalid = execute && profile && (result & 3u) == 2u;
+        bool thumb = execute && profile && (result & 1u);
+        uint32_t target = !execute ? 4u : invalid ? 0u : result & (thumb ? ~1u : ~3u);
+        CHECK(arm_step(&c) == (invalid ? ARM_UNDEFINED : ARM_OK) && c.r[15] == target &&
+              c.cpsr == (flags | (thumb ? ARM_CPSR_T : 0u)),
+              "ALU PC profile=%u op=%u imm=%u low=%u C=%u execute=%u", profile, op, immediate, low, carry, execute);
+        CHECK(!memcmp(regs, c.r, sizeof regs) && c.vfp_fpscr == 0x0bc00080u && c.excl_valid && c.excl_addr == 0x2468u,
+              "ALU PC changed operands/flags/monitor");
+       }
+    /* A real Thumb call followed by either conditional or unconditional
+     * ARM MOV pc,lr must resume Thumb at its original halfword address. */
+    for (unsigned profile = 1; profile < 3u; profile++) for (unsigned host = 0; host < 2u; host++)
+     for (unsigned nonzero = 0; nonzero < 2u; nonzero++) {
+        memset(g_ram, 0, 0x1000u);
+        m_w16(NULL, 0x100u, 0x24ffu); m_w16(NULL, 0x102u, 0x4798u); m_w16(NULL, 0x104u, 0x2409u);
+        m_w32(NULL, 0x200u, 0xe3500000u); m_w32(NULL, 0x204u, 0x01a0f00eu); m_w32(NULL, 0x208u, 0xe1a0f00eu);
+        arm_bus_t bus = g_bus; if (host) bus.host_ram = m_host_ram;
+        arm_cpu_t c; CHECK(arm_reset_profile(&c, &bus, profiles[profile]), "ALU PC call reset");
+        c.cpsr = ARM_MODE_SVC | ARM_CPSR_T; c.r[15] = 0x102u; c.r[3] = 0x200u; c.r[0] = nonzero;
+        CHECK(arm_step(&c) == ARM_OK && c.r[15] == 0x200u && !(c.cpsr & ARM_CPSR_T) && c.r[14] == 0x105u,
+              "ALU PC Thumb BLX setup");
+        CHECK(arm_step(&c) == ARM_OK && arm_step(&c) == ARM_OK, "ALU PC compare/conditional return");
+        if (nonzero) CHECK(arm_step(&c) == ARM_OK, "ALU PC unconditional return");
+        CHECK(c.r[15] == 0x104u && (c.cpsr & ARM_CPSR_T) && arm_step(&c) == ARM_OK && c.r[4] == 9u && c.r[15] == 0x106u,
+              "ALU PC return decoded Thumb as ARM");
+     }
+    for (unsigned profile = 0; profile < 3u; profile++) for (unsigned low = 0; low < 4u; low++) {
+        /* Immediate-shift MOV aliases and SPSR-based returns have distinct
+         * PC rules; register-specified shifts still cannot write PC. */
+        arm_cpu_t c; uint32_t insn = 0xe1a0f0a2u; /* MOV pc,r2,LSR #1 */
+        load_and_run(&c, &insn, 1u, 0); c.arch = profiles[profile]; c.r[2] = (0x100u + low) * 2u;
+        uint32_t flags = c.cpsr; bool invalid = profile && low == 2u, thumb = profile && (low & 1u);
+        CHECK(arm_step(&c) == (invalid ? ARM_UNDEFINED : ARM_OK) &&
+              c.r[15] == (invalid ? 0u : (0x100u + low) & (thumb ? ~1u : ~3u)) &&
+              c.cpsr == (flags | (thumb ? ARM_CPSR_T : 0u)), "ALU PC shifted alias");
+        insn = 0xe1a0f112u; load_and_run(&c, &insn, 1u, 0); c.arch = profiles[profile];
+        c.r[1] = 1u; c.r[2] = 0x101u;
+        CHECK(arm_step(&c) == ARM_UNDEFINED && c.r[15] == 0u, "ALU PC register-shift restriction");
+        for (unsigned restored_thumb = 0; restored_thumb < 2u; restored_thumb++) {
+            insn = 0xe1b0f00eu; load_and_run(&c, &insn, 1u, 0); c.arch = profiles[profile];
+            arm_set_mode(&c, ARM_MODE_FIQ); c.r[14] = 0x100u + low;
+            uint32_t restored = ARM_MODE_SVC | ARM_CPSR_N | (restored_thumb ? ARM_CPSR_T : 0u);
+            c.spsr[ARM_BANK_FIQ] = restored;
+            CHECK(arm_step(&c) == ARM_OK && c.cpsr == restored &&
+                  c.r[15] == ((0x100u + low) & (restored_thumb ? ~1u : ~3u)), "ALU PC exception return must use SPSR.T");
+        }
+    }
+}
+
 static void test_bx_branches(void) {
     /* MOV r1,#0x100 ; BX r1  -> PC = 0x100 (regression: BX must actually branch,
      * not silently execute as a TEQ comparison). */
@@ -13221,6 +13301,7 @@ int main(void) {
     test_dsp_multiply_unpredictable_and_reserved_forms_trap();
     test_orr_bic_mvn();
     test_bx_branches();
+    test_armv7_alu_pc_interworking();
     test_exception_return_to_thumb_keeps_halfword();
     test_exception_return_to_arm_stays_word_aligned();
     test_ldm_exception_return_takes_state_from_spsr();
