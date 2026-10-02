@@ -8,6 +8,43 @@
 static unsigned passed, failed;
 #define CHECK(c, msg) do { if (c) passed++; else { failed++; printf("FAIL %s:%d: %s\n",__func__,__LINE__,msg); } } while (0)
 
+static void test_empty_nvram_proxy(void) {
+    /* Independent 8 KiB image accepted by the matching kernel's real proxy
+     * copy/parser: common offset 0x30, length 0x7f0, Adler-32 0x34b80b21.
+     * All unspecified bytes are zero, including the complete variable area. */
+    static const uint8_t expected[8192]={
+        [0x00]=0x5a,[0x01]=0x82,[0x02]=0x02,
+        [0x04]='n',[0x05]='v',[0x06]='r',[0x07]='a',[0x08]='m',
+        [0x10]=0x21,[0x11]=0x0b,[0x12]=0xb8,[0x13]=0x34,[0x14]=1,
+        [0x20]=0x70,[0x21]=0x7c,[0x22]=0x80,
+        [0x24]='c',[0x25]='o',[0x26]='m',[0x27]='m',[0x28]='o',[0x29]='n',
+        [0x820]=0x7f,[0x821]=0x98,[0x822]=0x7e,[0x823]=0x01,
+        [0x824]='w',[0x825]='w',[0x826]='w',[0x827]='w',[0x828]='w',[0x829]='w',
+        [0x82a]='w',[0x82b]='w',[0x82c]='w',[0x82d]='w',[0x82e]='w',[0x82f]='w'
+    };
+    uint8_t buffer[8192+16], before[sizeof buffer];
+    CHECK(S5L8920_NVRAM_PROXY_SIZE==sizeof expected,"N88 proxy geometry");
+    CHECK(!s5l8920_build_empty_nvram_proxy(NULL,0u) &&
+          !s5l8920_build_empty_nvram_proxy(NULL,sizeof expected),"NULL proxy accepted");
+    const size_t invalid[]={0u,1u,15u,8191u,8193u,SIZE_MAX};
+    memset(buffer,0xa5,sizeof buffer); memcpy(before,buffer,sizeof buffer);
+    for (unsigned n=0;n<sizeof invalid/sizeof invalid[0];n++)
+        CHECK(!s5l8920_build_empty_nvram_proxy(buffer+4,invalid[n]) &&
+              !memcmp(buffer,before,sizeof buffer),"rejected size changed proxy buffer");
+    for (unsigned alignment=0;alignment<4u;alignment++) {
+        size_t start=4u+alignment;
+        memset(buffer,0xa5,sizeof buffer); memcpy(before,buffer,sizeof buffer);
+        CHECK(s5l8920_build_empty_nvram_proxy(buffer+start,sizeof expected) &&
+              !memcmp(buffer+start,expected,sizeof expected),"whole N88 proxy image differs");
+        CHECK(!memcmp(buffer,before,start) &&
+              !memcmp(buffer+start+sizeof expected,before+start+sizeof expected,sizeof buffer-start-sizeof expected),
+              "proxy construction crossed caller buffer");
+        memset(buffer+start+0x30,0x5a,0x7f0);
+        CHECK(s5l8920_build_empty_nvram_proxy(buffer+start,sizeof expected) &&
+              !memcmp(buffer+start,expected,sizeof expected),"explicit reinitialization retained variables");
+    }
+}
+
 static void put(s5l8920_t *m, uint32_t offset, uint32_t value) {
     m->bus.write32(m->bus.ctx,S5L8920_RAM_BASE + offset,value);
 }
@@ -644,6 +681,7 @@ static void test_fiq_and_reset(s5l8920_t *m) {
 }
 
 int main(void) {
+    test_empty_nvram_proxy();
     s5l8920_t m = {0};
     CHECK(s5l8920_init(&m), "initialization");
     if (!m.ram) return 1;

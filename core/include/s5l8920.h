@@ -25,6 +25,7 @@
 #define S5L8920_DEADLINE_COUNT UINT32_C(0x208)
 #define S5L8920_DEADLINE_CONTROL UINT32_C(0x220)
 #define S5L8920_DEADLINE_IRQ 6u
+#define S5L8920_NVRAM_PROXY_SIZE 8192u
 
 typedef struct {
     uint32_t remaining;
@@ -112,5 +113,14 @@ bool s5l8920_timebase_clock(s5l8920_t *m, uint64_t ticks);
  * leave RAM and existing bus diagnostics untouched. No firmware is patched. */
 bool s5l8920_load(s5l8920_t *m, uint32_t address, const void *data, size_t size);
 void s5l8920_clear_bus_failure(s5l8920_t *m);
+
+/* Build an explicitly selected empty-variable N88 NVRAM handoff image using
+ * the matching iBoot-1537.9.55 layout: generation 1, empty common partition,
+ * header checksums and body Adler-32. Size must be S5L8920_NVRAM_PROXY_SIZE;
+ * NULL or wrong sizes fail without writing. Unaligned buffers are supported.
+ * No allocation, board mutation, device-tree installation or default selection.
+ * This constructs fresh emulated configuration, not NOR hardware, persistence,
+ * physical provisioning or a complete bootloader result. */
+bool s5l8920_build_empty_nvram_proxy(void *data, size_t size);
 
 #endif

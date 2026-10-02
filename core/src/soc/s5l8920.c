@@ -1,6 +1,7 @@
 /* N88 RAM, PL192, UART and timebase, separate from the S5L8900 machine.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "s5l8920.h"
+#include "lzss.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -188,6 +189,33 @@ bool s5l8920_set_ram_boot_window(s5l8920_t *m, bool enabled) {
 
 void s5l8920_clear_bus_failure(s5l8920_t *m) {
     if (m) memset(&m->bus_failure,0,sizeof m->bus_failure);
+}
+
+static void nvram_header(uint8_t *p, uint8_t signature, uint16_t blocks,
+                         const char *name, size_t name_size) {
+    p[0]=signature;
+    p[2]=(uint8_t)blocks; p[3]=(uint8_t)(blocks>>8);
+    memcpy(p+4,name,name_size);
+    unsigned sum=p[0];
+    for (unsigned n=2u;n<16u;n++) sum+=p[n];
+    while (sum>255u) sum=(sum&255u)+(sum>>8);
+    p[1]=(uint8_t)sum;
+}
+
+bool s5l8920_build_empty_nvram_proxy(void *data, size_t size) {
+    if (!data || size!=S5L8920_NVRAM_PROXY_SIZE) return false;
+    uint8_t *p=data;
+    memset(p,0,size);
+    /* Original serializer: 32-byte bank header, 16-byte common header with
+     * 0x7f0 variable bytes, then a free partition covering the remainder.
+     * The proxy starts zeroed; an empty variable list leaves its payload zero. */
+    nvram_header(p,0x5au,2u,"nvram",6u);
+    p[0x14u]=1u;
+    nvram_header(p+0x20u,0x70u,0x80u,"common",7u);
+    nvram_header(p+0x820u,0x7fu,0x17eu,"wwwwwwwwwwww",12u);
+    uint32_t sum=lzss_adler32(p+0x14u,size-0x14u);
+    for (unsigned n=0;n<4u;n++) p[0x10u+n]=(uint8_t)(sum>>(8u*n));
+    return true;
 }
 
 bool s5l8920_uart0_clock(s5l8920_t *m,bool nclk,uint64_t ticks,

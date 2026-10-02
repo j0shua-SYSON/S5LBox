@@ -2374,6 +2374,44 @@ The same handoff and seed observers pass. This later stop requires evidence
 for that property's handoff value before lifting its guard; it is neither
 a completed kernel boot nor a reason to remove the remaining guards.
 
+That property is the root `serial-number`, containing 32 zero bytes in the
+supplied tree. Matching iBoot looks up `SrNm` in its configuration records;
+an absent record leaves the property untouched. Executing its original writer,
+lookup and copy code verifies absent, unrelated, inline and external-record
+cases. An explicitly labelled missing-record diagnostic retains those 32
+zero bytes. The real guest string routine returns length zero, and execution
+reaches the next guard after 147,011,967 steps: the 8 KiB
+`/chosen/nvram-proxy-data` property at physical `0x4110052c`.
+
+`s5l8920_build_empty_nvram_proxy` provides an opt-in empty-variable handoff
+image for this target. It writes exactly 8 KiB, with generation 1, the matching
+iBoot bank header, a `common` partition with `0x7f0` empty variable bytes, and
+the remaining free partition. It computes each header checksum and the body
+Adler-32 using portable byte accesses. Null pointers or incorrect lengths fail
+without writing. The function allocates no memory, installs no device-tree
+property and changes no board state or defaults; it does not implement NOR
+hardware or persistent variable updates.
+
+The format follows iBoot-1537.9.55's serializer at `0x4ff11994`, header checksum
+at `0x4ff11aa4`, body checksum at `0x4ff183d0` and common-partition allocation
+path at `0x4ff11496`. This is an explicit empty emulated configuration, not
+measured physical provisioning. The entire iBoot serializer has not been
+executed. A separate host construction agrees with an independent Adler-32
+calculation; the matching guest copies all 8 KiB exactly and its real parser
+returns common offset `0x30`, length `0x7f0`. Under the same generic CPU,
+clock and other handoff assumptions, that diagnostic advances to 154,432,660
+steps, where Thumb `0x8024207c` reads guarded `/cpus/#size-cells` at physical
+`0x41102fa4`. These results establish handoff consumption, without a complete
+kernel boot, SpringBoard or physical-device result.
+
+For the C NVRAM builder, focused tests compare the entire independently
+constructed image and check alignment, canaries, repeated initialization and
+unchanged buffers on rejection. All 79 strict and 74 shipping tests pass, as
+do the 276 prepared firmware calls and the canonical 61,650-step trace.
+Frozen old-library and new-builder runs both reproduce the complete
+154,432,660-step diagnostic trace, including the copy/parser observations,
+bounded register state and guarded-access counters.
+
 The wide MOV/MOVS immediate form implements Thumb's byte replication and
 rotation rules from A6.3.2. MOV preserves flags; MOVS updates N/Z and updates
 C only as prescribed by the immediate form, preserving V. Invalid zero
