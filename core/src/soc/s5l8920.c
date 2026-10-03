@@ -52,7 +52,7 @@ static void refresh_i2c_interrupt(s5l8920_t *m,unsigned bus) {
 static bool gpio_control_supported(unsigned index,uint32_t control) {
     /* Preserve drive and peripheral fields without synthesizing pad signals.
      * The matching restore initializer also writes input-disabled/off pins;
-     * accepting that configuration does not establish their data readback. */
+     * inactive data readback requires a separate explicit observation. */
     if ((control&~0xfffu) || (control&0x180u)==0x180u) return false;
     unsigned mode=control&0xeu;
     if (mode==0xeu) return (control&0x70u)==0x10u;
@@ -194,6 +194,8 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
             if (pin->programmed && (pin->control&0x200u) && (output || pin->input_valid))
                 return output ? pin->control :
                        (pin->control&~1u)|(pin->input_high ? 1u:0u);
+            if (pin->programmed && !(pin->control&0x200u) && pin->inactive_valid)
+                return (pin->control&~1u)|(pin->inactive_high ? 1u:0u);
             fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
         } else if (offset>=S5L8920_GPIO_IRQ_STATUS &&
                    offset-S5L8920_GPIO_IRQ_STATUS<4u*S5L8920_GPIO_IRQ_GROUPS)
@@ -284,6 +286,7 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
             s5l8920_gpio_pin_t *pin=&m->gpio[offset/4u];
             pin->control=(uint16_t)value;
             pin->programmed=true;
+            pin->inactive_valid=pin->inactive_high=false;
             gpio_latch_level(m,offset/4u);
             gpio_refresh_irq(m);
         } else if (offset>=S5L8920_GPIO_IRQ_STATUS &&
@@ -453,8 +456,17 @@ bool s5l8920_gpio_input(s5l8920_t *m,unsigned pin,bool high) {
         m->gpio_pending[pin/32u]|=1u<<(pin%32u);
     m->gpio[pin].input_high=high;
     m->gpio[pin].input_valid=true;
+    m->gpio[pin].inactive_valid=m->gpio[pin].inactive_high=false;
     gpio_latch_level(m,pin);
     gpio_refresh_irq(m);
+    return true;
+}
+
+bool s5l8920_gpio_inactive_readback(s5l8920_t *m,unsigned pin,bool high) {
+    if (!m || !m->ram || pin>=S5L8920_GPIO_PIN_COUNT || !m->gpio[pin].programmed ||
+        (m->gpio[pin].control&0x20eu)!=0xeu) return false;
+    m->gpio[pin].inactive_high=high;
+    m->gpio[pin].inactive_valid=true;
     return true;
 }
 
@@ -633,6 +645,7 @@ bool s5l8920_reset(s5l8920_t *m) {
     for (unsigned pin=0;pin<S5L8920_GPIO_PIN_COUNT;pin++) {
         m->gpio[pin].control=0u;
         m->gpio[pin].programmed=false;
+        m->gpio[pin].inactive_valid=m->gpio[pin].inactive_high=false;
     }
     for (unsigned bank = 0; bank < S5L8920_VIC_COUNT; bank++) {
         pl192_reset(&m->vic[bank]);

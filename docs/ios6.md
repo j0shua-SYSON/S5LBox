@@ -5,10 +5,45 @@ a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
 interrupt fabric, UART, timebase counter, deadline timer, GPIO, I2C and a
 bounded PMU clock endpoint, explicitly configured identification words and
 partial clock-gate/selector programming, a PLL model with explicit clock inputs,
-and bounded POWERID software-cache fields.
+and bounded POWERID software-cache fields. Inactive GPIO data readback can
+be supplied explicitly, separately from live pin samples.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## Inactive GPIO readback and board identification
+
+Matching LLB, iBoot and iBSS GPIO helpers read a pin's configuration before
+enabling input. The original table programs pin 15 to `0x0d1e`, with input
+enable clear. These consumers establish control-field readback, but do not
+establish the inactive data bit's physical behavior.
+
+`s5l8920_gpio_inactive_readback` supplies that bit explicitly for an already
+programmed interrupt-off pin whose input enable is clear. Word reads combine
+the retained control fields and the supplied bit. No value is inferred from
+a live pin sample or a guest data-bit write. Accepted configuration writes,
+live sample events and functional reset invalidate the observation; repeated
+reads retain it. Invalid calls and refused accesses preserve state. This is
+a bounded logical input policy, not a physical disabled-sampler or latch model.
+
+The original three-image helpers pass 17,664 complete calls across all 368
+pins, eight modes and both inactive-data values, with opposing live samples
+and guest-written data bits. Missing inactive data remains a checked failure.
+The unchanged LLB also completes its board-identification routine under five
+explicit input variants. It enables eight pins, waits using supplied timebase
+ticks, reads the straps, restores the original configurations and publishes
+the independently checked POWERID cache. Inactive readback values do not
+determine the sampled board identity.
+
+With one explicit timebase tick per retired instruction, these LLB runs stop
+after 213,980 steps at Thumb `0x8400860a`, reading `0xbf100000`. Missing
+inactive observations retain the earlier 212,219-step stop; missing live
+samples stop at 213,616 steps on pin 12. A frozen timebase stays in the
+original delay at the one-million-step limit. These are diagnostic inputs,
+not measured strap levels or hardware timing. The next register's low two
+bits are accessed by the original `miu_init` routine after an epoch check;
+its physical effect, including any RAM-remap relationship, remains unverified.
+The separate kernel GPIO stop and the missing complete boot remain unchanged.
 
 ## Explicit POWERID state
 
@@ -27,7 +62,7 @@ bits 16 through 23, store two GPIO-derived cache bytes with flag 0, and set
 flag 1 after accessing separate nonce-cache words. Those separate words and
 nonce production remain unmodeled. Their epoch guards retain the original
 mismatch path and still encounter a checked refusal on the unimplemented
-`0xbf100000` RAM-remap register when the epoch matches.
+`0xbf100000` control register when the epoch matches.
 
 The private original-code witness passes 8,704 cases across 128 epochs and
 four raw initial-word patterns: complete epoch initializers and byte getters,
@@ -35,7 +70,8 @@ bounded cache/flag fragments with explicit register inputs, and both guard
 paths. This includes 384 refused attempts to clear unknown low bits. Fragment
 checks do not establish GPIO sampling, nonce production or fatal-handler execution.
 
-With an explicit POWERID input and the existing clock/SRAM assumptions, the
+With an explicit POWERID input, no inactive GPIO observations, and the existing
+clock/SRAM assumptions, the
 unchanged LLB entry advances to 212,219 steps, then stops at Thumb `0x84001030`
 reading GPIO pin 15 at `0x8300003c`. The original initialization table has
 already programmed all 368 pins; the refused read is in a later GPIO
@@ -206,9 +242,10 @@ Drive field `0xc00` is retained with these controls. Peripheral selectors
 their reads use explicitly supplied samples. This models configuration
 storage, without peripheral signal generation or routing. Interrupt-off
 mode `0xe` requires mask `0x10` and no peripheral selector. Its input enable
-bit `0x200` is optional for writes, but disabled-input reads remain refused
-even when a sample exists. Neither a pull setting nor a written data bit
-establishes the disabled sampler's readback value.
+bit `0x200` is optional for writes. Disabled-input reads require the separate
+explicit inactive-data observation described above, even when a live sample
+exists. Neither a pull setting nor a written data bit establishes the
+disabled sampler's readback value.
 
 The first 224 pins also support high/low level, rising/falling edge and
 either-edge interrupt modes (`0x204`, `0x206`, `0x208`, `0x20a`, `0x20c`).

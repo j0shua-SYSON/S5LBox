@@ -64,6 +64,7 @@ typedef struct {
 typedef struct {
     uint16_t control;
     bool programmed, input_valid, input_high;
+    bool inactive_valid, inactive_high;
 } s5l8920_gpio_pin_t;
 
 typedef struct {
@@ -178,7 +179,8 @@ bool s5l8920_uart0_clock(s5l8920_t *m, bool nclk, uint64_t ticks,
 bool s5l8920_uart0_receive(s5l8920_t *m, uint8_t byte);
 
 /* Supply a digital sample for an ordinary GPIO pin (port * 8 + bit). No pin
- * configuration is inferred. Samples persist across functional
+ * configuration is inferred. Each sample invalidates any inactive readback
+ * observation for that pin. Samples persist across functional
  * reset and preserve latched bus diagnostics. Call between CPU steps.
  * Word MMIO supports explicitly programmed, interrupt-masked input/output
  * controls: 0x210/0x212, data bit0, pull selection 0/0x80/0x100. Input
@@ -187,8 +189,9 @@ bool s5l8920_uart0_receive(s5l8920_t *m, uint8_t byte);
  * Peripheral selectors0x20/0x40/0x60 are stored only with masked input mode;
  * reads use explicit samples, without simulating peripheral signal routing.
  * Interrupt-off mode0xe requires mask0x10 and no peripheral selector. Input
- * enable0x200 is optional for its writes; disabled-input reads remain refused
- * even with a sample. Unknown combinations and register bits remain refused.
+ * enable0x200 is optional for its writes; disabled-input reads require the
+ * separate observation below, even with a sample. Unknown combinations and
+ * register bits remain refused.
  * Pins0..223 also support input IRQ modes 0x204 high, 0x206 low, 0x208 rising,
  * 0x20a falling and 0x20c either edge; bit0x10 masks delivery to source94.
  * Seven pending words at0x800..0x818 are W1C. Masked events latch; initial
@@ -197,6 +200,18 @@ bool s5l8920_uart0_receive(s5l8920_t *m, uint8_t byte);
  * Functional reset clears pending. External source94 is ORed with GPIO.
  * This is logical sampling/latching, not measured phase or debounce timing. */
 bool s5l8920_gpio_input(s5l8920_t *m, unsigned pin, bool high);
+
+/* Supply bit0 readback for a programmed interrupt-off pin whose input enable
+ * is clear. The firmware reads its control word before enabling input, but
+ * the inactive data bit is not inferred from live samples or guest writes.
+ * Aligned word reads retain the programmed control fields and this supplied
+ * bit. This is an explicit logical observation, not a physical sampler/latch
+ * transfer model. Repeated reads retain it; every accepted configuration
+ * write, gpio_input event and functional reset invalidates it. Free clears it.
+ * Missing observations refuse. Calls for unprogrammed/active pins refuse
+ * without mutation. Valid calls replace only this observation, preserving
+ * CPU, interrupt state and latched diagnostics. Call between CPU steps. */
+bool s5l8920_gpio_inactive_readback(s5l8920_t *m, unsigned pin, bool high);
 
 /* Bounded I2C host endpoint interface, called between CPU steps. Commands
  * expose a stable request; no slave ACK, status or RX data is synthesized.

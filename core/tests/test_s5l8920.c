@@ -1441,6 +1441,77 @@ static void test_pmu_rtc(s5l8920_t *m) {
     CHECK(s5l8920_reset(m),"PMU final reset");
 }
 
+static bool test_gpio_inactive_readback(s5l8920_t *m) {
+    static s5l8920_t empty,before;
+    CHECK(s5l8920_reset(m),"inactive GPIO reset");
+    CHECK(!s5l8920_gpio_inactive_readback(NULL,0u,false) &&
+          !s5l8920_gpio_inactive_readback(&empty,0u,false) &&
+          !s5l8920_gpio_inactive_readback(m,368u,false) &&
+          !s5l8920_gpio_inactive_readback(m,UINT32_MAX,false) &&
+          !s5l8920_gpio_inactive_readback(m,0u,false),"inactive readback accepted invalid pin/state");
+    for (unsigned pin=0;pin<368u;pin++) for (unsigned high=0;high<2u;high++) {
+        uint32_t address=S5L8920_GPIO_BASE+4u*pin;
+        uint32_t control=0x1eu|((pin%4u)<<10)|((pin%3u)<<7)|(high^1u);
+        m->bus.write32(m,address,control);
+        CHECK(s5l8920_gpio_input(m,pin,high==0u),"inactive opposing live sample");
+        (void)m->bus.read32(m,address);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !m->gpio[pin].inactive_valid,
+              "inactive data inferred from sample or guest bit");
+        memcpy(&before,m,sizeof before);
+        before.gpio[pin].inactive_valid=true;before.gpio[pin].inactive_high=high!=0u;
+        CHECK(s5l8920_gpio_inactive_readback(m,pin,high!=0u) && !memcmp(&before,m,sizeof before),
+              "inactive event changed unrelated state or latched diagnostic");
+        s5l8920_clear_bus_failure(m);
+        for (unsigned n=0;n<3u;n++) CHECK(m->bus.read32(m,address)==((control&~1u)|high) &&
+            !m->bus_failure.reason && m->gpio[pin].control==control,"inactive observation read consumed data or changed control");
+        m->bus.write32(m,address,control|0x1000u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && m->gpio[pin].inactive_valid &&
+              m->gpio[pin].inactive_high==(high!=0u) && m->gpio[pin].control==control,"refused write invalidated observation");
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,address,control);
+        CHECK(!m->gpio[pin].inactive_valid && !m->gpio[pin].inactive_high,"identical write retained stale observation");
+        CHECK(s5l8920_gpio_inactive_readback(m,pin,high!=0u) && s5l8920_gpio_input(m,pin,high==0u) &&
+              !m->gpio[pin].inactive_valid,"live event retained inactive observation");
+        CHECK(s5l8920_gpio_inactive_readback(m,pin,high!=0u),"resupply inactive observation");
+        m->bus.write32(m,address,(control&~0xeu)|0x200u);
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_gpio_inactive_readback(m,pin,high!=0u) && !memcmp(&before,m,sizeof before) &&
+              m->bus.read32(m,address)==(((control&~0xfu)|0x200u)|(high^1u)),"inactive event changed active sample behavior");
+        m->bus.write32(m,address,control);
+    }
+    const uint32_t address=S5L8920_GPIO_BASE+60u;
+    CHECK(s5l8920_gpio_inactive_readback(m,15u,true),"width fixture observation");
+    for (unsigned offset=0;offset<4u;offset++) for (unsigned kind=0;kind<6u;kind++) {
+        s5l8920_clear_bus_failure(m);uint32_t at=address+offset;
+        if (kind==0u) (void)m->bus.read8(m,at);
+        else if (kind==1u) (void)m->bus.read16(m,at);
+        else if (kind==2u) (void)m->bus.read32(m,at);
+        else if (kind==3u) m->bus.write8(m,at,0u);
+        else if (kind==4u) m->bus.write16(m,at,0u);
+        else m->bus.write32(m,at,0u);
+        CHECK(m->bus_failure.reason==(kind==2u && !offset?S5L8920_BUS_OK:
+              (kind==5u && !offset?S5L8920_BUS_REGISTER_REFUSED:S5L8920_BUS_ACCESS_UNIMPLEMENTED)) &&
+              m->gpio[15].inactive_valid && m->gpio[15].inactive_high,"inactive access width/alignment changed observation");
+    }
+    for (unsigned thumb=0;thumb<2u;thumb++) {
+        CHECK(s5l8920_reset(m),"inactive CPU reset");m->bus.write32(m,address,0xd1fu);
+        put(m,0x100u,thumb?0x0000f8d1u:0xe5910000u);
+        m->cpu.r[0]=0xa5a5u;m->cpu.r[1]=address;m->cpu.r[15]=S5L8920_RAM_BASE+0x100u;
+        m->cpu.cpsr=ARM_MODE_SVC|ARM_CPSR_I|ARM_CPSR_F|ARM_CPSR_C|(thumb?ARM_CPSR_T:0u);
+        uint32_t pc=m->cpu.r[15],flags=m->cpu.cpsr;
+        CHECK(arm_step(&m->cpu)==ARM_HALT && !m->cpu.cycles && m->cpu.r[15]==pc && m->cpu.r[0]==0xa5a5u &&
+              m->cpu.cpsr==flags && m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"missing inactive CPU load retired");
+        CHECK(s5l8920_gpio_inactive_readback(m,15u,false) && m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,
+              "inactive event cleared CPU diagnostic");
+        s5l8920_clear_bus_failure(m);
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.cycles==1u && m->cpu.r[15]==pc+4u && m->cpu.r[0]==0xd1eu &&
+              m->cpu.cpsr==flags,"inactive CPU retry failed");
+    }
+    CHECK(s5l8920_reset(m),"inactive final reset");
+    for (unsigned pin=0;pin<368u;pin++) CHECK(!m->gpio[pin].inactive_valid && !m->gpio[pin].inactive_high &&
+        !m->gpio[pin].programmed,"reset retained inactive observation");
+    return true;
+}
+
 static bool test_powerid(s5l8920_t *m) {
     static s5l8920_t empty, before;
     const uint32_t initial=0xa5c369fcu;
@@ -1930,6 +2001,7 @@ int main(void) {
     if (!test_gpio_irq_first_samples(&m)) return 1;
     test_gpio_irq_cpu(&m);
     if (!test_gpio_configuration_fields(&m)) return 1;
+    if (!test_gpio_inactive_readback(&m)) return 1;
     test_i2c_staging_bus(&m);
     test_i2c_endpoints(&m);
     test_i2c_bounds(&m);
@@ -1943,6 +2015,8 @@ int main(void) {
     if (!test_powerid(&m)) return 1;
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
+    CHECK(!m.gpio[15].inactive_valid && !m.gpio[15].inactive_high &&
+          !s5l8920_gpio_inactive_readback(&m,15u,false),"free retained inactive observation");
     CHECK(!m.clock_selector[0].programmed && !m.clock_selector[24].programmed,
           "free retained selector programming");
     CHECK(!m.powerid.configured && !m.powerid.initial && !m.powerid.value &&
