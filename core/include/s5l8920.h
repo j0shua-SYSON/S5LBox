@@ -45,6 +45,7 @@
 #define S5L8920_PLL_BASE UINT32_C(0xbf100004)
 #define S5L8920_PLL_COUNT 3u
 #define S5L8920_POWERID UINT32_C(0xbf100158)
+#define S5L8920_MIU_CONTROL S5L8920_PMGR_BASE
 
 typedef struct {
     uint64_t sequence;
@@ -99,6 +100,11 @@ typedef struct {
     bool configured;
 } s5l8920_powerid_t;
 
+typedef struct {
+    uint32_t initial, value;
+    bool configured;
+} s5l8920_miu_t;
+
 typedef enum {
     S5L8920_BUS_OK = 0,
     S5L8920_BUS_UNMAPPED,
@@ -136,6 +142,7 @@ typedef struct {
     s5l8920_clock_selector_t clock_selector[S5L8920_CLOCK_SELECT_COUNT];
     s5l8920_pll_t pll[S5L8920_PLL_COUNT];
     s5l8920_powerid_t powerid;
+    s5l8920_miu_t miu;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -149,7 +156,8 @@ void s5l8920_free(s5l8920_t *m);
 /* Reset CPU/controller/UART/timer/I2C state and clear diagnostics, preserving RAM
  * and externally supplied interrupt levels/GPIO samples and configured PMU
  * clock/offset state and explicitly configured identification words. Gate controls
- * and POWERID return to their supplied initial words. PLL controls return to
+ * and POWERID return to their supplied initial words. Configured MIU control
+ * restores its supplied initial word and supported mapping. PLL controls return to
  * their supplied disabled words, cancelling settling. GPIO and clock-selector programming
  * are invalidated.
  * This is a functional reset, not a
@@ -160,12 +168,14 @@ bool s5l8920_set_irq(s5l8920_t *m, unsigned source, bool asserted);
 /* Prepare the inherited RAM boot mapping selected by BF100000[1:0]=2 in
  * matching iBoot. Enabled low addresses cover the installed RAM and share
  * its storage at RAM_BASE. This models the RAM selection only, not the full
- * remap register, ROM/SRAM selections, or physical reset sequencing. The
+ * ROM/SRAM selections or physical reset sequencing. The
  * implemented extent is bounded to RAM_SIZE; larger hardware decode ranges
- * are not established. A functional reset removes this explicit preparation.
+ * are not established. Without MIU configuration, a functional reset removes
+ * this preparation. Configured MIU control owns the selection: a conflicting
+ * request here refuses without changing state.
  * A mapping change invalidates CPU translation/host-pointer caches and the
  * exclusive monitor, preserving registers, RAM and latched bus diagnostics.
- * Call between CPU steps; BF100000 MMIO remains unavailable. */
+ * Call between CPU steps; this API does not configure BF100000 readback. */
 bool s5l8920_set_ram_boot_window(s5l8920_t *m, bool enabled);
 
 /* Board-owned UART input advances refresh the real interrupt fabric before
@@ -307,6 +317,20 @@ bool s5l8920_pll_rate(const s5l8920_t *m, unsigned pll,
  * power reset behavior. Free/init invalidates it. Call between CPU steps;
  * CPU state and latched diagnostics are preserved. */
 bool s5l8920_powerid_configure(s5l8920_t *m, uint32_t initial);
+
+/* Supply the MIU control word explicitly; no hardware reset word is assumed.
+ * Aligned word writes may select field1 or field2 in bits0..1, preserving all
+ * supplied upper bits. Field2 aliases installed RAM at physical zero; other
+ * selections remove that RAM window. Their boot sources remain unimplemented,
+ * so low accesses refuse instead of using invented ROM/SRAM contents. Unknown
+ * upper-bit changes, other written modes, widths and unconfigured accesses
+ * refuse atomically. No readiness, power sequencing or transition delay is
+ * synthesized. Identical configuration preserves guest writes; a different
+ * initial word refuses. Functional reset restores the supplied word and its
+ * supported mapping. Free/init invalidates it. Call between CPU steps; mapping
+ * changes invalidate translation/host caches and the exclusive monitor while
+ * preserving registers, RAM and latched diagnostics. */
+bool s5l8920_miu_configure(s5l8920_t *m, uint32_t initial);
 
 /* Supply timebase source ticks explicitly, modulo 2^64, and advance the enabled
  * deadline countdown. Reads and CPU steps do not advance time. A programmed

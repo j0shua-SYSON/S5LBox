@@ -6,10 +6,50 @@ interrupt fabric, UART, timebase counter, deadline timer, GPIO, I2C and a
 bounded PMU clock endpoint, explicitly configured identification words and
 partial clock-gate/selector programming, a PLL model with explicit clock inputs,
 and bounded POWERID software-cache fields. Inactive GPIO data readback can
-be supplied explicitly, separately from live pin samples.
+be supplied explicitly, separately from live pin samples. MIU control can
+select the existing physical RAM boot window from original firmware.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## Firmware-selected RAM boot mapping
+
+The word at `0xbf100000` now requires an explicit initial value through
+`s5l8920_miu_configure`. Matching LLB, iBoot and iBSS routines preserve its
+upper 30 bits and write selection 1 or 2 into the low two bits. Their epoch
+checks and mismatch paths execute unchanged. Selection 2 maps installed RAM
+at physical zero, as independently identified by
+[OpeniBoot's S5L8920 entry sequence](https://github.com/iDroid-Project/openiBoot/blob/866562fdb1cfd019bcd77885c80fbf0af65d5c15/arch-arm/entry.sx)
+and the matching iBoot kernel handoff described below.
+
+Guest writes select the real shared RAM window, invalidating translation and
+host-pointer caches and the exclusive monitor when the mapping changes.
+Other selections remove the RAM window; their low boot sources remain
+unimplemented and accesses stop explicitly. Upper-bit changes, written modes
+0 and 3, incorrect widths and unconfigured accesses refuse. No reset value,
+readiness status, transition delay or ROM/SRAM contents are invented.
+Functional reset restores the supplied initial word and its supported mapping.
+Once configured, MIU control owns the selection; the direct-handoff API cannot
+override it. Repeating the same initial configuration preserves guest writes.
+
+The private original-code witness passes 2,304 cases across all initial modes,
+each upper bit, selector arguments and matched/mismatched epoch checks. The
+old core has 1,920 expected register refusals. Successful original calls also
+verify RAM alias coherence and refusal of unimplemented low boot sources.
+Unit checks cover reset, invalid writes, instruction retry, and cached data
+and instruction accesses across a guest mapping change.
+
+With the earlier explicit clock, GPIO and POWERID inputs plus MIU initial
+words 0, 1, 2, 3 or `0xfffffffc`, the unchanged LLB passes its original MIU
+initialization. Each run next
+stops after 214,677 steps at Thumb `0x84004ba0`, reading `0x86100e00`.
+The MIU routine performs two reads and one write, selecting 1. This is a
+host diagnostic with bounded SRAM supplied by the fixture; it does not prove
+the non-RAM boot alias or a complete bootloader-to-kernel handoff.
+
+All 79 strict and 74 shipping tests pass. Inherited firmware checks retain
+their earlier stops without new MIU input. The separately prepared kernel
+trace remains byte-identical at its 182,680,916-step GPIO refusal.
 
 ## Inactive GPIO readback and board identification
 
@@ -35,14 +75,15 @@ ticks, reads the straps, restores the original configurations and publishes
 the independently checked POWERID cache. Inactive readback values do not
 determine the sampled board identity.
 
-With one explicit timebase tick per retired instruction, these LLB runs stop
+Without MIU configuration, with one explicit timebase tick per retired
+instruction, these LLB runs stop
 after 213,980 steps at Thumb `0x8400860a`, reading `0xbf100000`. Missing
 inactive observations retain the earlier 212,219-step stop; missing live
 samples stop at 213,616 steps on pin 12. A frozen timebase stays in the
 original delay at the one-million-step limit. These are diagnostic inputs,
 not measured strap levels or hardware timing. The next register's low two
 bits are accessed by the original `miu_init` routine after an epoch check;
-its physical effect, including any RAM-remap relationship, remains unverified.
+its supported RAM selection is described above.
 The separate kernel GPIO stop and the missing complete boot remain unchanged.
 
 ## Explicit POWERID state
@@ -498,9 +539,12 @@ it is not a measurement of the complete hardware remap aperture. All bus
 widths, host pointers and host loads use the same checked decoder. Changing
 the selection invalidates translation and host-pointer caches and clears the
 exclusive monitor, while preserving registers, RAM and latched bus failures.
-Initialization and functional reset remove the explicit preparation.
-The full remap register, ROM/SRAM selections and physical reset sequencing
-remain unmodeled, so accesses to `0xbf100000` still stop explicitly.
+Without MIU configuration, initialization and functional reset remove the
+explicit preparation.
+The newer explicitly configured MIU control described above connects guest
+selection 2 to this window. Unknown upper-bit changes, ROM/SRAM backing and
+physical reset sequencing remain unmodeled; without initial MIU input,
+accesses to `0xbf100000` still stop explicitly.
 
 A frozen private witness executes the original kernel vector-copy routine
 twice, copying `0x90` and `0xf60` bytes while preserving the 16-byte sleep-token

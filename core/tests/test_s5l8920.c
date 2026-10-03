@@ -1585,6 +1585,110 @@ static bool test_powerid(s5l8920_t *m) {
     return true;
 }
 
+static void test_miu(s5l8920_t *m) {
+    static s5l8920_t empty, before;
+    const uint32_t initial=0xa5c369fcu, control=S5L8920_MIU_CONTROL;
+    CHECK(!s5l8920_miu_configure(NULL,0u) && !s5l8920_miu_configure(&empty,0u),"invalid MIU object");
+    CHECK(s5l8920_reset(m),"MIU initial reset");
+    (void)m->bus.read32(m,control);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !m->miu.configured,"invented MIU initial read");
+    s5l8920_clear_bus_failure(m);m->bus.write32(m,control,2u);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !m->ram_boot_window,"unconfigured MIU write");
+    memcpy(&before,m,sizeof before);
+    CHECK(s5l8920_miu_configure(m,initial) && m->miu.value==initial &&
+          !memcmp(&before.cpu,&m->cpu,sizeof m->cpu) &&
+          !memcmp(&before.bus_failure,&m->bus_failure,sizeof m->bus_failure),"MIU input changed CPU/diagnostic");
+    m->bus.write32(m,control,initial|2u);
+    CHECK(m->miu.value==initial && !m->ram_boot_window,"latched fault allowed remap");
+    for (unsigned bit=2u;bit<32u;bit++) {
+        s5l8920_clear_bus_failure(m);uint32_t generation=m->cpu.tlb_gen;
+        m->bus.write32(m,control,(initial^(1u<<bit))|2u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && m->miu.value==initial &&
+              !m->ram_boot_window && m->cpu.tlb_gen==generation,"unknown MIU bit changed state");
+    }
+    for (unsigned mode=0;mode<4u;mode+=3u) {
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,control,initial|mode);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && m->miu.value==initial,"unsupported written boot selection");
+    }
+    s5l8920_clear_bus_failure(m);m->cpu.excl_valid=true;m->cpu.a8_excl_size=4u;
+    uint32_t generation=m->cpu.tlb_gen;
+    m->bus.write32(m,control,initial|2u);
+    CHECK(!m->bus_failure.reason && m->ram_boot_window && m->miu.value==(initial|2u) &&
+          m->cpu.tlb_gen!=generation && !m->cpu.excl_valid && !m->cpu.a8_excl_size,"MIU RAM selection/invalidation");
+    generation=m->cpu.tlb_gen;m->cpu.excl_valid=true;
+    m->bus.write32(m,control,initial|2u);
+    memcpy(&before,m,sizeof before);
+    CHECK(m->cpu.tlb_gen==generation && m->cpu.excl_valid && s5l8920_miu_configure(m,initial) &&
+          !s5l8920_miu_configure(m,initial^1u) && !s5l8920_set_ram_boot_window(m,false) &&
+          s5l8920_set_ram_boot_window(m,true) && !memcmp(&before,m,sizeof before),"MIU reconfiguration/host override");
+    for (unsigned offset=0;offset<4u;offset++) for (unsigned kind=0;kind<6u;kind++) {
+        s5l8920_clear_bus_failure(m);uint32_t address=control+offset;
+        if (kind==0u) (void)m->bus.read8(m,address);
+        else if (kind==1u) (void)m->bus.read16(m,address);
+        else if (kind==2u) (void)m->bus.read32(m,address);
+        else if (kind==3u) m->bus.write8(m,address,0u);
+        else if (kind==4u) m->bus.write16(m,address,0u);
+        else m->bus.write32(m,address,initial|2u);
+        CHECK(m->bus_failure.reason==((kind%3u==2u && !offset)?S5L8920_BUS_OK:S5L8920_BUS_ACCESS_UNIMPLEMENTED) &&
+              m->miu.value==(initial|2u) && m->ram_boot_window && m->cpu.tlb_gen==generation,"MIU width/alignment mutation");
+    }
+    CHECK(!m->bus.host_ram(m,control,4u) && !m->bus.host_ram_write(m,control,4u),"MIU exposed as RAM");
+    for (unsigned thumb=0;thumb<2u;thumb++) {
+        CHECK(s5l8920_reset(m) && !m->ram_boot_window && m->miu.value==initial,"MIU reset restores initial mapping");
+        put(m,0x100u,thumb?0x0000f8c1u:0xe5810000u); /* STR r0,[r1] */
+        m->cpu.r[0]=initial|3u;m->cpu.r[1]=control;m->cpu.r[15]=S5L8920_RAM_BASE+0x100u;
+        m->cpu.cpsr=ARM_MODE_SVC|ARM_CPSR_I|ARM_CPSR_F|ARM_CPSR_C|(thumb?ARM_CPSR_T:0u);
+        uint32_t flags=m->cpu.cpsr,pc=m->cpu.r[15];
+        CHECK(arm_step(&m->cpu)==ARM_HALT && !m->cpu.cycles && m->cpu.r[15]==pc &&
+              m->cpu.cpsr==flags && m->miu.value==initial && !m->ram_boot_window,"refused MIU instruction retired");
+        s5l8920_clear_bus_failure(m);m->cpu.r[0]=initial|2u;
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.cycles==1u && m->cpu.r[15]==pc+4u &&
+              m->cpu.cpsr==flags && m->ram_boot_window,"MIU instruction retry");
+        /* Execute the store through the alias it removes. The next fetch must
+         * stop even though the preceding instruction warmed the code pointer. */
+        m->cpu.r[15]=0x100u;m->cpu.r[0]=initial|1u;
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.r[15]==0x104u && !m->ram_boot_window,"guest self-remap");
+        CHECK(arm_step(&m->cpu)==ARM_HALT && m->cpu.cycles==2u && m->cpu.r[15]==0x104u &&
+              m->bus_failure.reason==S5L8920_BUS_UNMAPPED,"stale instruction pointer survived MIU write");
+    }
+    arm_bus_t original=m->bus;
+    for (unsigned host=0;host<2u;host++) for (unsigned mmu=0;mmu<2u;mmu++) for (unsigned store=0;store<2u;store++) {
+        CHECK(s5l8920_reset(m),"MIU cached data reset");
+        m->bus.host_ram=host?original.host_ram:NULL;m->bus.host_ram_write=host?original.host_ram_write:NULL;
+        m->bus.write32(m,control,initial|2u);
+        put(m,0x300u,store?0xe5812000u:0xe5912000u);put(m,0x1000u,0x12345678u);
+        uint32_t code=S5L8920_RAM_BASE+0x300u,target=0x1000u;
+        if (mmu) {
+            put(m,0x6000u,S5L8920_RAM_BASE|0xc0eu);put(m,0x6400u,0xc0eu);
+            m->cpu.cp15.ttbr0=S5L8920_RAM_BASE+0x4000u;m->cpu.cp15.dacr=1u;
+            m->cpu.cp15.sctlr|=ARM_SCTLR_M|ARM_SCTLR_XP;code=0x80000300u;target=0x90001000u;
+        }
+        m->cpu.r[15]=code;m->cpu.r[1]=target;m->cpu.r[2]=0x12345678u;
+        CHECK(arm_step(&m->cpu)==ARM_OK,"warm MIU alias data access");
+        m->bus.write32(m,control,initial|1u);m->cpu.r[15]=code;m->cpu.r[2]=0xabcdef01u;
+        CHECK(arm_step(&m->cpu)==ARM_HALT && m->cpu.cycles==1u && m->cpu.r[15]==code &&
+              m->cpu.r[2]==0xabcdef01u && m->bus_failure.address==0x1000u && m->ram[0x1000u]==0x78u,
+              "stale data pointer survived MIU write");
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,control,initial|2u);
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.cycles==2u &&
+              (store?m->ram[0x1000u]==1u:m->cpu.r[2]==0x12345678u),"MIU data access retry");
+    }
+    m->bus=original;
+    CHECK(s5l8920_reset(m) && m->miu.value==initial && !m->ram_boot_window,"MIU final reset");
+    /* Other initial selections and RAM-selected reset use independent boards. */
+    for (unsigned mode=0;mode<4u;mode++) {
+        CHECK(s5l8920_init(&empty),"MIU reset fixture");
+        if (!empty.ram) break;
+        CHECK(s5l8920_set_ram_boot_window(&empty,mode!=2u) && s5l8920_miu_configure(&empty,mode) &&
+              empty.ram_boot_window==(mode==2u),"explicit MIU input owns prior host mapping");
+        empty.bus.write32(&empty,control,mode==2u?1u:2u);
+        CHECK(s5l8920_reset(&empty) && empty.miu.value==mode && empty.ram_boot_window==(mode==2u),"MIU initial-mode reset");
+        s5l8920_free(&empty);
+        CHECK(!empty.miu.configured && !empty.miu.value && !empty.miu.initial &&
+              !s5l8920_miu_configure(&empty,mode),"free retained MIU state");
+    }
+}
+
 static bool test_pll(s5l8920_t *m) {
     static s5l8920_t empty, before;
     uint64_t numerator=123u;uint32_t denominator=456u;
@@ -2013,6 +2117,7 @@ int main(void) {
     if (!test_chipid(&m)) return 1;
     if (!test_pll(&m)) return 1;
     if (!test_powerid(&m)) return 1;
+    test_miu(&m);
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
     CHECK(!m.gpio[15].inactive_valid && !m.gpio[15].inactive_high &&

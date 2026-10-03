@@ -5,6 +5,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+static void ram_boot_window(s5l8920_t *m, bool enabled) {
+    if (m->ram_boot_window != enabled) {
+        m->ram_boot_window = enabled;
+        arm_mmu_tlb_flush(&m->cpu);
+        m->cpu.excl_valid = false;
+        m->cpu.a8_excl_size = 0u;
+    }
+}
+
 static bool ram_offset(const s5l8920_t *m, uint32_t address, size_t size,
                         uint32_t *offset) {
     if (!m || !m->ram || size > S5L8920_RAM_SIZE) return false;
@@ -221,6 +230,7 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         else if (offset==S5L8920_DEADLINE_COUNT && m->deadline.programmed && !m->deadline.expired)
             return m->deadline.remaining;
         else if (address==S5L8920_POWERID && m->powerid.configured) return m->powerid.value;
+        else if (address==S5L8920_MIU_CONTROL && m->miu.configured) return m->miu.value;
         else if (address>=S5L8920_PLL_BASE &&
                  address-S5L8920_PLL_BASE<4u*S5L8920_PLL_COUNT &&
                  m->pll[(address-S5L8920_PLL_BASE)/4u].configured) {
@@ -307,6 +317,13 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         offset=address-S5L8920_PMGR_BASE;
         if (size!=4u || (offset&3u)) {
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        } else if (address==S5L8920_MIU_CONTROL) {
+            unsigned selection=value&3u;
+            if (m->miu.configured && !((value^m->miu.value)&~3u) &&
+                (selection==1u || selection==2u)) {
+                m->miu.value=value;
+                ram_boot_window(m,selection==2u);
+            } else fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
         } else if (address==S5L8920_POWERID) {
             if (m->powerid.configured && !((value^m->powerid.value)&0xfcu)) m->powerid.value=value;
             else fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
@@ -394,12 +411,8 @@ bool s5l8920_load(s5l8920_t *m, uint32_t address, const void *data, size_t size)
 
 bool s5l8920_set_ram_boot_window(s5l8920_t *m, bool enabled) {
     if (!m || !m->ram) return false;
-    if (m->ram_boot_window != enabled) {
-        m->ram_boot_window = enabled;
-        arm_mmu_tlb_flush(&m->cpu);
-        m->cpu.excl_valid = false;
-        m->cpu.a8_excl_size = 0u;
-    }
+    if (m->miu.configured && enabled!=((m->miu.value&3u)==2u)) return false;
+    ram_boot_window(m,enabled);
     return true;
 }
 
@@ -620,10 +633,20 @@ bool s5l8920_powerid_configure(s5l8920_t *m, uint32_t initial) {
     return true;
 }
 
+bool s5l8920_miu_configure(s5l8920_t *m, uint32_t initial) {
+    if (!m || !m->ram) return false;
+    if (m->miu.configured) return m->miu.initial==initial;
+    m->miu.initial=m->miu.value=initial;
+    m->miu.configured=true;
+    ram_boot_window(m,(initial&3u)==2u);
+    return true;
+}
+
 bool s5l8920_reset(s5l8920_t *m) {
     if (!m || !m->ram) return false;
     if (!arm_reset_profile(&m->cpu,&m->bus,ARM_ARCH_V7_CORTEX_A8)) return false;
-    m->ram_boot_window = false;
+    m->miu.value=m->miu.initial;
+    m->ram_boot_window=m->miu.configured && (m->miu.value&3u)==2u;
     s5l8920_uart_reset(&m->uart0);
     m->timebase_ticks=0u;
     memset(&m->deadline,0,sizeof m->deadline);
