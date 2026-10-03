@@ -1441,6 +1441,147 @@ static void test_pmu_rtc(s5l8920_t *m) {
     CHECK(s5l8920_reset(m),"PMU final reset");
 }
 
+static bool test_pll(s5l8920_t *m) {
+    static s5l8920_t empty, before;
+    uint64_t numerator=123u;uint32_t denominator=456u;
+    CHECK(!s5l8920_pll_configure(NULL,0u,0u,1u,1u) &&
+          !s5l8920_pll_configure(&empty,0u,0u,1u,1u) &&
+          !s5l8920_pll_reference_clock(NULL,0u,1u) &&
+          !s5l8920_pll_reference_clock(&empty,0u,1u) &&
+          !s5l8920_pll_rate(NULL,0u,&numerator,&denominator) &&
+          !s5l8920_pll_rate(&empty,0u,&numerator,&denominator),"invalid PLL host object");
+    CHECK(s5l8920_reset(m),"PLL initial reset");
+    memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pll_configure(m,3u,0u,1u,1u) &&
+          !s5l8920_pll_configure(m,0u,0u,1u,0u) &&
+          !s5l8920_pll_configure(m,0u,1u,1u,1u) &&
+          !s5l8920_pll_configure(m,0u,0x20000u,1u,1u) &&
+          !s5l8920_pll_configure(m,0u,0x80000000u,1u,1u) &&
+          !s5l8920_pll_reference_clock(m,0u,1u) &&
+          !s5l8920_pll_rate(m,0u,&numerator,&denominator) && numerator==123u && denominator==456u &&
+          !memcmp(&before,m,sizeof before),"invalid PLL configuration mutated state");
+    for (unsigned index=0;index<3u;index++) {
+        uint32_t address=S5L8920_PLL_BASE+4u*index;
+        s5l8920_clear_bus_failure(m);(void)m->bus.read32(m,address);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"invented PLL initial word");
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,address,0u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !m->pll[index].configured,
+              "unconfigured PLL write accepted");
+        uint32_t hz=index==0u?24000000u:(index==1u?UINT32_MAX:0u);
+        uint64_t interval=index==1u?UINT64_MAX:8u;
+        CHECK(s5l8920_pll_configure(m,index,0u,hz,interval),"explicit PLL inputs");
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"configuration cleared diagnostic");
+        m->bus.write32(m,address,0x40609601u);
+        CHECK(!m->pll[index].value,"latched failure allowed PLL write");
+        s5l8920_clear_bus_failure(m);
+        CHECK(m->bus.read32(m,address)==0u && !m->bus_failure.reason &&
+              s5l8920_pll_rate(m,index,&numerator,&denominator) && !numerator && denominator==1u,
+              "explicit disabled PLL state");
+        m->bus.write32(m,address,0x40629601u); /* A written status bit cannot complete settling. */
+        CHECK(!m->bus_failure.reason && m->pll[index].remaining==interval &&
+              m->bus.read32(m,address)==0x40609601u,"PLL write forged readiness");
+        memcpy(&before,m,sizeof before);
+        CHECK(s5l8920_pll_configure(m,index,0u,hz,interval) &&
+              !s5l8920_pll_configure(m,index,2u,hz,interval) &&
+              !s5l8920_pll_configure(m,index,0u,hz^1u,interval) &&
+              !s5l8920_pll_configure(m,index,0u,hz,interval-1u) &&
+              !memcmp(&before,m,sizeof before),"PLL reconfiguration changed guest state");
+        numerator=123u;denominator=456u;
+        CHECK(!s5l8920_pll_rate(m,index,&numerator,&denominator) && numerator==123u && denominator==456u,
+              "pending PLL exposed a stable rate");
+        CHECK(s5l8920_pll_reference_clock(m,index,0u) && m->pll[index].remaining==interval,"zero cycles advanced PLL");
+        CHECK(s5l8920_timebase_clock(m,UINT64_MAX) && m->pll[index].remaining==interval,"timebase advanced PLL");
+        for (unsigned i=0;i<10u;i++) CHECK(!(m->bus.read32(m,address)&0x20000u),"polling advanced PLL");
+        if (!hz) {
+            CHECK(!s5l8920_pll_reference_clock(m,index,UINT64_MAX) && m->pll[index].remaining==interval &&
+                  !(m->bus.read32(m,address)&0x20000u),"absent source produced readiness");
+        } else {
+            CHECK(s5l8920_pll_reference_clock(m,index,interval-1u) && m->pll[index].remaining==1u &&
+                  !(m->bus.read32(m,address)&0x20000u),"PLL settled before interval");
+            CHECK(s5l8920_pll_reference_clock(m,index,1u) && m->bus.read32(m,address)==0x40629601u &&
+                  s5l8920_pll_rate(m,index,&numerator,&denominator) &&
+                  numerator==(uint64_t)hz*150u && denominator==6u,"PLL source/rate at interval");
+            CHECK(s5l8920_pll_reference_clock(m,index,UINT64_MAX) && !m->pll[index].remaining,"PLL clock overflow");
+        }
+        for (unsigned bit=0;bit<32u;bit++) if (!((1u<<bit)&0x43f2ff0fu)) {
+            s5l8920_pll_t prior=m->pll[index];
+            s5l8920_clear_bus_failure(m);m->bus.write32(m,address,0x40609601u|(1u<<bit));
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+                  !memcmp(&prior,&m->pll[index],sizeof prior),"unknown PLL bit mutated state");
+        }
+        static const uint32_t invalid[]={1u,0x00609601u,0x40009601u,0x40600001u};
+        for (unsigned i=0;i<sizeof invalid/sizeof invalid[0];i++) {
+            s5l8920_pll_t prior=m->pll[index];
+            s5l8920_clear_bus_failure(m);m->bus.write32(m,address,invalid[i]);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+                  !memcmp(&prior,&m->pll[index],sizeof prior),"unsupported enabled PLL program");
+        }
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,address,0x43f2ff0eu);
+        CHECK(!m->bus_failure.reason && m->bus.read32(m,address)==0x43f0ff0eu && !m->pll[index].remaining &&
+              s5l8920_pll_rate(m,index,&numerator,&denominator) && !numerator && denominator==1u,
+              "disable retained PLL status/output");
+        for (unsigned later=index+1u;later<3u;later++) CHECK(!m->pll[later].configured,"PLL neighbor configured");
+    }
+    CHECK(!s5l8920_pll_rate(m,3u,&numerator,&denominator) &&
+          !s5l8920_pll_rate(m,0u,NULL,&denominator) && !s5l8920_pll_rate(m,0u,&numerator,NULL) &&
+          !s5l8920_pll_reference_clock(m,3u,1u),"invalid PLL query/clock");
+    for (unsigned offset=0;offset<12u;offset++) for (unsigned kind=0;kind<6u;kind++) {
+        uint32_t address=S5L8920_PLL_BASE+offset;
+        s5l8920_clear_bus_failure(m);
+        s5l8920_pll_t prior[3];memcpy(prior,m->pll,sizeof prior);
+        if (kind==0u) (void)m->bus.read8(m,address);
+        else if (kind==1u) (void)m->bus.read16(m,address);
+        else if (kind==2u) (void)m->bus.read32(m,address);
+        else if (kind==3u) m->bus.write8(m,address,0u);
+        else if (kind==4u) m->bus.write16(m,address,0u);
+        else m->bus.write32(m,address,0x43f0ff0eu);
+        CHECK(m->bus_failure.reason==((kind%3u==2u && !(offset&3u))?S5L8920_BUS_OK:S5L8920_BUS_ACCESS_UNIMPLEMENTED) &&
+              !memcmp(prior,m->pll,sizeof prior),"PLL width/alignment changed state");
+    }
+    CHECK(!m->bus.host_ram(m,S5L8920_PLL_BASE,12u) && !m->bus.host_ram_write(m,S5L8920_PLL_BASE,12u),"PLL exposed as RAM");
+    static const unsigned divisors[]={1u,31u,32u,63u}, multipliers[]={1u,81u,150u,255u};
+    for (unsigned index=0;index<2u;index++) for (unsigned p=0;p<4u;p++)
+    for (unsigned v=0;v<4u;v++) for (unsigned shift=0;shift<8u;shift++) {
+        uint32_t value=0x40000001u|(divisors[p]<<20)|(multipliers[v]<<8)|(shift<<1);
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,S5L8920_PLL_BASE+4u*index,value);
+        CHECK(!m->bus_failure.reason && !s5l8920_pll_rate(m,index,&numerator,&denominator),"rewritten PLL stayed ready");
+        CHECK(s5l8920_pll_reference_clock(m,index,UINT64_MAX) &&
+              s5l8920_pll_rate(m,index,&numerator,&denominator) &&
+              numerator==(uint64_t)m->pll[index].reference_hz*multipliers[v] &&
+              denominator==divisors[p]*(1u<<shift),"six-bit divisor/three-bit shift rational rate");
+    }
+    CHECK(s5l8920_reset(m),"PLL functional reset");
+    for (unsigned index=0;index<3u;index++) CHECK(m->pll[index].configured && !m->pll[index].value &&
+        !m->pll[index].remaining && m->bus.read32(m,S5L8920_PLL_BASE+4u*index)==0u,"PLL reset lost input or retained program");
+    for (unsigned thumb=0;thumb<2u;thumb++) {
+        CHECK(s5l8920_reset(m),"PLL CPU reset");
+        put(m,0x100u,thumb?0x0000f8c1u:0xe5810000u);
+        m->cpu.r[0]=0x10000u;m->cpu.r[1]=S5L8920_PLL_BASE;m->cpu.r[15]=S5L8920_RAM_BASE+0x100u;
+        m->cpu.cpsr=ARM_MODE_SVC|ARM_CPSR_I|ARM_CPSR_F|ARM_CPSR_C|(thumb?ARM_CPSR_T:0u);
+        uint32_t flags=m->cpu.cpsr,pc=m->cpu.r[15];
+        CHECK(arm_step(&m->cpu)==ARM_HALT && !m->cpu.cycles && m->cpu.r[15]==pc &&
+              m->cpu.r[0]==0x10000u && m->cpu.cpsr==flags && !m->pll[0].value &&
+              m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"invalid PLL CPU store retired");
+        memcpy(&before,m,sizeof before);
+        CHECK(s5l8920_pll_reference_clock(m,0u,1u) && !memcmp(&before,m,sizeof before),"host PLL clock changed stopped CPU/diagnostic");
+        s5l8920_clear_bus_failure(m);m->cpu.r[0]=0x40609601u;
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.cycles==1u && m->cpu.r[15]==pc+4u &&
+              m->cpu.cpsr==flags && m->pll[0].remaining==8u && m->bus.read32(m,S5L8920_PLL_BASE)==0x40609601u,
+              "PLL CPU retry/implicit reference cycles");
+        s5l8920_pll_t prior=m->pll[1];
+        CHECK(s5l8920_pll_reference_clock(m,0u,3u),"first PLL clock chunk");
+        (void)m->bus.read8(m,S5L8920_PLL_BASE);memcpy(&before,m,sizeof before);
+        CHECK(s5l8920_pll_reference_clock(m,0u,5u) && !m->pll[0].remaining &&
+              !memcmp(&before.cpu,&m->cpu,sizeof m->cpu) &&
+              !memcmp(&before.bus_failure,&m->bus_failure,sizeof m->bus_failure) &&
+              !memcmp(&prior,&m->pll[1],sizeof prior),"active PLL event changed CPU/diagnostic/neighbor");
+        s5l8920_clear_bus_failure(m);
+        CHECK(m->bus.read32(m,S5L8920_PLL_BASE)==0x40629601u,"chunked reference cycles");
+    }
+    CHECK(s5l8920_reset(m),"PLL final reset");
+    return true;
+}
+
 static void test_clock_selectors(s5l8920_t *m) {
     CHECK(s5l8920_reset(m),"selector initial reset");
     for (unsigned index=0;index<S5L8920_CLOCK_SELECT_COUNT;index++) {
@@ -1725,10 +1866,14 @@ int main(void) {
     test_clock_selectors(&m);
     if (!test_clock_gates(&m)) return 1;
     if (!test_chipid(&m)) return 1;
+    if (!test_pll(&m)) return 1;
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
     CHECK(!m.clock_selector[0].programmed && !m.clock_selector[24].programmed,
           "free retained selector programming");
+    CHECK(!m.pll[0].configured && !m.pll[2].configured && !m.pll[0].reference_hz &&
+          !s5l8920_pll_configure(&m,0u,0u,24000000u,8u) &&
+          !s5l8920_pll_reference_clock(&m,0u,1u),"freed PLL retained state or accepted input");
     CHECK(!m.chipid_configured && !m.chipid_words[0] && !m.chipid_words[3] &&
           !s5l8920_chipid_configure(&m,0u,1u),"freed board retained identification");
     CHECK(!s5l8920_timebase_clock(&m,1u) && !m.timebase_ticks, "freed board accepted timebase input");

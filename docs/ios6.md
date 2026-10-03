@@ -4,10 +4,58 @@ The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
 a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
 interrupt fabric, UART, timebase counter, deadline timer, GPIO, I2C and a
 bounded PMU clock endpoint, explicitly configured identification words and
-partial clock-gate and clock-selector programming.
+partial clock-gate/selector programming and a PLL model with explicit clock inputs.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## PLL programming with explicit reference clocks
+
+The three PLL words at `0xbf100004..0xbf10000c` require independent disabled
+initial values, reference frequencies and nonzero settling intervals through
+`s5l8920_pll_configure`. No initial configuration is installed by default.
+Programming supports enable bit 0, shift bits 1 through 3, multiplier bits
+8 through 15, divisor bits 20 through 25 and the observed bit-30 control.
+An enabled word requires bit 30 and nonzero multiplier/divisor fields.
+Bit 17 is read-only status; guest writes cannot set it. Unsupported fields,
+widths, alignment and unconfigured accesses remain checked failures.
+
+The matching LLB disables all three PLLs, programs `0x40609601`,
+`0x40605103` and `0x40606403`, then polls bit 17 for each. Matching iBoot's
+reader at `0x4ff13c48` establishes the wider six-bit divisor and three-bit
+shift fields. The pinned S5L8920 source corroborates the programming and
+polling sequence but uses narrower masks; those masks are not imported.
+
+Settling is an explicit logical timing assumption, not measured acquisition
+time: every accepted enabled write starts the supplied interval, and only
+`s5l8920_pll_reference_clock` with a nonzero configured reference frequency
+can finish it. CPU steps, reads and board timebase ticks do not advance it.
+Disabling cancels settling. Identical configuration preserves guest state;
+conflicting inputs refuse. Functional reset restores the supplied disabled
+words and free/init invalidates them. Host events preserve CPU state and
+latched diagnostics.
+
+`s5l8920_pll_rate` exposes the settled rational output rate, using a 64-bit
+numerator and 32-bit denominator; disabled output is zero, and pending or
+absent output refuses without modifying the caller's outputs. This does
+not model analog lock, jitter or waveforms, and PLL outputs are not yet
+connected to CPU/peripheral scheduling.
+
+The unchanged original LLB now completes clock setup, publishes the expected
+28 frequencies and executes all 368 GPIO initialization writes. Four input
+variants, using explicit 24 MHz reference clocks, 32-cycle settling and one
+reference cycle per retired instruction, stop after 83,532 steps at Thumb
+`0x840085d4`, reading the next unimplemented register `0xbf100158`. Increasing
+settling to 97 cycles produces more original polling and reaches the same
+stop after 83,721 steps. With frozen or absent reference clocks, the original
+first PLL poll remains busy at the 100,000-step observation limit.
+These schedules are diagnostic assumptions, not physical timing measurements.
+
+The 12 original iBoot reader/math/device-tree-copy cases now use actual
+board reads for all three PLLs and 25 selectors, retaining the independent
+frequency oracle. No firmware instructions are changed. The separate kernel
+diagnostic still stops at unprepared GPIO; a connected bootloader/kernel
+handoff and complete boot remain unproven.
 
 ## Bounded clock-selector programming
 
@@ -25,19 +73,18 @@ fields. The matching kernel performance controller saves all 25 words at
 `0x80788e3c..0x80788e8a` and restores them with selected low-byte changes
 at `0x8078a006..0x8078a056`. This supports retaining a bounded configuration
 image. Firmware-written bits 11 and 19 are retained without interpreting
-them as ready, busy or lock indicators. Physical update timing, output
-clocks and PLL state remain unmodeled; the three PLL words still refuse.
+them as ready, busy or lock indicators. Physical selector update timing
+and output waveforms remain unmodeled; PLL behavior is described above.
 
 With the same explicit chip-ID and gate inputs described below, all four
-original LLB entry runs now complete 52 gate writes and 25 selector writes.
-They stop at the first PLL read, `0xbf100004` at Thumb `0x84008916`, after
+original LLB entry runs initially completed 52 gate writes and 25 selector writes.
+Before PLL support, they stopped at `0xbf100004` at Thumb `0x84008916`, after
 19,099 steps and 19,098 retired instructions. Code bytes remain unchanged.
-The private iBoot witness also passes 12 reader/math/device-tree-copy cases
+The selector checkpoint's private iBoot witness passed 12 reader/math/device-tree-copy cases
 using actual board selector reads, two initial-memory patterns and six copy
-bounds. Its three PLL values remain explicit diagnostic inputs; its 28-word
-frequency oracle is unchanged. These checks establish neither PLL operation
-nor a connected bootloader handoff. The separate full kernel GPIO stop
-remains unchanged.
+bounds, with three explicit private PLL register inputs. The PLL model above
+replaces those inputs with actual board reads and preserves the 28-word oracle.
+The separate full kernel GPIO stop remains unchanged.
 
 ## Bounded clock-gate programming
 

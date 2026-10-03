@@ -218,7 +218,13 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         else if (offset==S5L8920_TIMEBASE_HIGH) return (uint32_t)(m->timebase_ticks>>32);
         else if (offset==S5L8920_DEADLINE_COUNT && m->deadline.programmed && !m->deadline.expired)
             return m->deadline.remaining;
-        else if (address>=S5L8920_CLOCK_SELECT_BASE &&
+        else if (address>=S5L8920_PLL_BASE &&
+                 address-S5L8920_PLL_BASE<4u*S5L8920_PLL_COUNT &&
+                 m->pll[(address-S5L8920_PLL_BASE)/4u].configured) {
+            const s5l8920_pll_t *pll=&m->pll[(address-S5L8920_PLL_BASE)/4u];
+            bool ready=(pll->value&1u) && pll->reference_hz && !pll->remaining;
+            return pll->value|(ready ? 0x20000u : 0u);
+        } else if (address>=S5L8920_CLOCK_SELECT_BASE &&
                  address-S5L8920_CLOCK_SELECT_BASE<4u*S5L8920_CLOCK_SELECT_COUNT &&
                  m->clock_selector[(address-S5L8920_CLOCK_SELECT_BASE)/4u].programmed)
             return m->clock_selector[(address-S5L8920_CLOCK_SELECT_BASE)/4u].value;
@@ -297,6 +303,18 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         offset=address-S5L8920_PMGR_BASE;
         if (size!=4u || (offset&3u)) {
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        } else if (address>=S5L8920_PLL_BASE &&
+                   address-S5L8920_PLL_BASE<4u*S5L8920_PLL_COUNT) {
+            s5l8920_pll_t *pll=&m->pll[(address-S5L8920_PLL_BASE)/4u];
+            uint32_t control=value&~0x20000u;
+            bool valid=!(control&~0x43f0ff0fu) && (!(control&1u) ||
+                ((control&0x40000000u) && (control&0xff00u) && (control&0x3f00000u)));
+            if (!pll->configured || !valid)
+                fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+            else {
+                pll->value=control;
+                pll->remaining=(control&1u) ? pll->settling_cycles : 0u;
+            }
         } else if (address>=S5L8920_CLOCK_SELECT_BASE &&
                    address-S5L8920_CLOCK_SELECT_BASE<4u*S5L8920_CLOCK_SELECT_COUNT) {
             unsigned index=(address-S5L8920_CLOCK_SELECT_BASE)/4u;
@@ -540,6 +558,44 @@ bool s5l8920_clock_gate_configure(s5l8920_t *m, unsigned gate, uint32_t initial)
     return true;
 }
 
+bool s5l8920_pll_configure(s5l8920_t *m, unsigned index, uint32_t initial,
+                          uint32_t reference_hz, uint64_t settling_cycles) {
+    if (!m || !m->ram || index>=S5L8920_PLL_COUNT || !settling_cycles ||
+        (initial&~0x43f0ff0eu)) return false;
+    s5l8920_pll_t *pll=&m->pll[index];
+    if (pll->configured) return pll->initial==initial && pll->reference_hz==reference_hz &&
+                               pll->settling_cycles==settling_cycles;
+    pll->initial=pll->value=initial;
+    pll->reference_hz=reference_hz;
+    pll->settling_cycles=settling_cycles;
+    pll->remaining=0u;
+    pll->configured=true;
+    return true;
+}
+
+bool s5l8920_pll_reference_clock(s5l8920_t *m, unsigned index, uint64_t cycles) {
+    if (!m || !m->ram || index>=S5L8920_PLL_COUNT || !m->pll[index].configured) return false;
+    s5l8920_pll_t *pll=&m->pll[index];
+    if (cycles && !pll->reference_hz) return false;
+    pll->remaining=cycles>=pll->remaining ? 0u : pll->remaining-cycles;
+    return true;
+}
+
+bool s5l8920_pll_rate(const s5l8920_t *m, unsigned index,
+                     uint64_t *numerator, uint32_t *denominator) {
+    if (!m || !m->ram || index>=S5L8920_PLL_COUNT || !numerator || !denominator ||
+        !m->pll[index].configured) return false;
+    const s5l8920_pll_t *pll=&m->pll[index];
+    if ((pll->value&1u) && (pll->remaining || !pll->reference_hz)) return false;
+    uint64_t n=0u;uint32_t d=1u;
+    if (pll->value&1u) {
+        n=(uint64_t)pll->reference_hz*((pll->value>>8)&255u);
+        d=((pll->value>>20)&63u)<<((pll->value>>1)&7u);
+    }
+    *numerator=n;*denominator=d;
+    return true;
+}
+
 bool s5l8920_reset(s5l8920_t *m) {
     if (!m || !m->ram) return false;
     if (!arm_reset_profile(&m->cpu,&m->bus,ARM_ARCH_V7_CORTEX_A8)) return false;
@@ -550,6 +606,10 @@ bool s5l8920_reset(s5l8920_t *m) {
     for (unsigned gate=0;gate<S5L8920_CLOCK_GATE_COUNT;gate++)
         m->clock_gate[gate].value=m->clock_gate[gate].initial;
     memset(m->clock_selector,0,sizeof m->clock_selector);
+    for (unsigned index=0;index<S5L8920_PLL_COUNT;index++) {
+        m->pll[index].value=m->pll[index].initial;
+        m->pll[index].remaining=0u;
+    }
     for (unsigned bus=0;bus<S5L8920_I2C_COUNT;bus++) {
         uint64_t sequence=m->i2c[bus].sequence;
         memset(&m->i2c[bus],0,sizeof m->i2c[bus]);

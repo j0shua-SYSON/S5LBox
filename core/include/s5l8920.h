@@ -42,6 +42,8 @@
 #define S5L8920_CLOCK_GATE_COUNT 52u
 #define S5L8920_CLOCK_SELECT_BASE UINT32_C(0xbf100010)
 #define S5L8920_CLOCK_SELECT_COUNT 25u
+#define S5L8920_PLL_BASE UINT32_C(0xbf100004)
+#define S5L8920_PLL_COUNT 3u
 
 typedef struct {
     uint64_t sequence;
@@ -84,6 +86,12 @@ typedef struct {
     bool programmed;
 } s5l8920_clock_selector_t;
 
+typedef struct {
+    uint64_t settling_cycles, remaining;
+    uint32_t initial, value, reference_hz;
+    bool configured;
+} s5l8920_pll_t;
+
 typedef enum {
     S5L8920_BUS_OK = 0,
     S5L8920_BUS_UNMAPPED,
@@ -119,6 +127,7 @@ typedef struct {
     uint8_t chipid_configured;
     s5l8920_clock_gate_t clock_gate[S5L8920_CLOCK_GATE_COUNT];
     s5l8920_clock_selector_t clock_selector[S5L8920_CLOCK_SELECT_COUNT];
+    s5l8920_pll_t pll[S5L8920_PLL_COUNT];
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -132,7 +141,8 @@ void s5l8920_free(s5l8920_t *m);
 /* Reset CPU/controller/UART/timer/I2C state and clear diagnostics, preserving RAM
  * and externally supplied interrupt levels/GPIO samples and configured PMU
  * clock/offset state and explicitly configured identification words. Gate controls
- * return to their supplied initial words. GPIO and clock-selector programming
+ * return to their supplied initial words. PLL controls return to their supplied
+ * disabled words, cancelling settling. GPIO and clock-selector programming
  * are invalidated.
  * This is a functional reset, not a
  * model of power sequencing. The caller owns execution and device timing. */
@@ -240,6 +250,30 @@ bool s5l8920_chipid_configure(s5l8920_t *m, unsigned offset, uint32_t value);
  * This models bounded programming state, not clock signal generation, source
  * readiness, connected-device reset effects or physical power-on values. */
 bool s5l8920_clock_gate_configure(s5l8920_t *m, unsigned gate, uint32_t initial);
+
+/* Three independently configured PLL words. Supply a disabled initial word,
+ * reference frequency (zero means absent), and nonzero settling interval in
+ * reference cycles. These are explicit model inputs, not measured reset values
+ * or acquisition timing. Supported programming is bit30, multiplier8..15,
+ * divisor20..25, shift1..3 and enable0. Enabled programming requires bit30 and
+ * nonzero multiplier/divisor. Bit17 is read-only status; writes cannot set it.
+ * Unknown bits, widths, alignment and unconfigured accesses refuse atomically.
+ * Every accepted enabled write restarts settling; disabling cancels it.
+ * Only supplied reference cycles with a nonzero reference rate can complete
+ * settling. Reads, CPU steps and timebase ticks do not advance this state.
+ * Identical configuration preserves guest state; conflicting input refuses.
+ * Functional reset restores disabled inputs; free/init invalidates them.
+ * Host calls preserve CPU/latched diagnostics and run between CPU steps.
+ *
+ * Rate query returns numerator/denominator Hz after settling, 0/1 if disabled,
+ * and refuses absent/pending/unconfigured output without changing outputs.
+ * This is a logical timing/rational-rate model, not analog lock, VCO waveforms,
+ * jitter or physical timing. Outputs do not drive other board clocks yet. */
+bool s5l8920_pll_configure(s5l8920_t *m, unsigned pll, uint32_t initial,
+                          uint32_t reference_hz, uint64_t settling_cycles);
+bool s5l8920_pll_reference_clock(s5l8920_t *m, unsigned pll, uint64_t cycles);
+bool s5l8920_pll_rate(const s5l8920_t *m, unsigned pll,
+                     uint64_t *numerator, uint32_t *denominator);
 
 /* Supply timebase source ticks explicitly, modulo 2^64, and advance the enabled
  * deadline countdown. Reads and CPU steps do not advance time. A programmed
