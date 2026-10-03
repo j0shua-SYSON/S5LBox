@@ -14,6 +14,23 @@ static void ram_boot_window(s5l8920_t *m, bool enabled) {
     }
 }
 
+static bool usb_address(uint32_t address) {
+    return (address>=S5L8920_USB_PHY_BASE && address-S5L8920_USB_PHY_BASE<0x1000u) ||
+           (address>=S5L8920_USB_BASE && address-S5L8920_USB_BASE<0x10000u);
+}
+
+static int usb_control_index(uint32_t address) {
+    switch (address) {
+    case S5L8920_USB_BASE+0xe00u: return 0;
+    case S5L8920_USB_PHY_BASE: return 1;
+    case S5L8920_USB_PHY_BASE+4u: return 2;
+    case S5L8920_USB_PHY_BASE+8u: return 3;
+    case S5L8920_USB_PHY_BASE+0x1cu: return 4;
+    case S5L8920_USB_PHY_BASE+0x44u: return 5;
+    default: return -1;
+    }
+}
+
 static bool ram_offset(const s5l8920_t *m, uint32_t address, size_t size,
                         uint32_t *offset) {
     if (!m || !m->ram || size > S5L8920_RAM_SIZE) return false;
@@ -184,6 +201,15 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         for (unsigned n = 0; n < size; n++) value |= (uint32_t)p[n] << (8u * n);
         return value;
     }
+    if (usb_address(address)) {
+        int index=usb_control_index(address);
+        if (size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
+        else if (index<0 || !m->usb_control[index].configured)
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        else return m->usb_control[index].value;
+        return 0u;
+    }
     unsigned bank; uint32_t offset, value;
     if (decode_i2c(address,&bank,&offset)) {
         if ((size!=1u && size!=4u) || (offset&3u))
@@ -277,6 +303,18 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
     if (ram_offset(m,address,size,&ram_at)) {
         uint8_t *p = m->ram + ram_at;
         for (unsigned n = 0; n < size; n++) p[n] = (uint8_t)(value >> (8u * n));
+        return;
+    }
+    if (usb_address(address)) {
+        static const uint32_t masks[S5L8920_USB_CONTROL_COUNT]={3u,0x1fu,3u,1u,6u,0xe3fu};
+        int index=usb_control_index(address);
+        if (size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        else if (index<0 || !m->usb_control[index].configured ||
+                 ((value^m->usb_control[index].value)&~masks[index]) ||
+                 (index==5 && value!=m->usb_control[index].value && (value&0xe3fu)!=0xe3fu))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+        else m->usb_control[index].value=value;
         return;
     }
     unsigned bank; uint32_t offset;
@@ -642,6 +680,17 @@ bool s5l8920_miu_configure(s5l8920_t *m, uint32_t initial) {
     return true;
 }
 
+bool s5l8920_usb_control_configure(s5l8920_t *m, uint32_t address, uint32_t initial) {
+    if (!m || !m->ram) return false;
+    int index=usb_control_index(address);
+    if (index<0) return false;
+    s5l8920_usb_control_t *control=&m->usb_control[index];
+    if (control->configured) return control->initial==initial;
+    control->initial=control->value=initial;
+    control->configured=true;
+    return true;
+}
+
 bool s5l8920_reset(s5l8920_t *m) {
     if (!m || !m->ram) return false;
     if (!arm_reset_profile(&m->cpu,&m->bus,ARM_ARCH_V7_CORTEX_A8)) return false;
@@ -654,6 +703,8 @@ bool s5l8920_reset(s5l8920_t *m) {
         m->clock_gate[gate].value=m->clock_gate[gate].initial;
     memset(m->clock_selector,0,sizeof m->clock_selector);
     m->powerid.value=m->powerid.initial;
+    for (unsigned index=0;index<S5L8920_USB_CONTROL_COUNT;index++)
+        m->usb_control[index].value=m->usb_control[index].initial;
     for (unsigned index=0;index<S5L8920_PLL_COUNT;index++) {
         m->pll[index].value=m->pll[index].initial;
         m->pll[index].remaining=0u;

@@ -1689,6 +1689,93 @@ static void test_miu(s5l8920_t *m) {
     }
 }
 
+static void test_usb_controls(s5l8920_t *m) {
+    static s5l8920_t empty, before;
+    const uint32_t addresses[]={0x86100e00u,0x86000000u,0x86000004u,0x86000008u,0x8600001cu,0x86000044u};
+    const uint32_t masks[]={3u,0x1fu,3u,1u,6u,0xe3fu};
+    CHECK(!s5l8920_usb_control_configure(NULL,addresses[0],0u) &&
+          !s5l8920_usb_control_configure(&empty,addresses[0],0u),"invalid USB control object");
+    CHECK(s5l8920_reset(m),"USB controls initial reset");
+    const uint32_t unsupported[]={0u,UINT32_MAX,0x8600000cu,0x86000028u,0x86000048u,
+        0x86001000u,0x86100000u,0x86100010u,0x86100014u,0x86100800u,0x86101000u,0x86100e04u};
+    memcpy(&before,m,sizeof before);
+    for (unsigned i=0;i<sizeof unsupported/sizeof unsupported[0];i++)
+        CHECK(!s5l8920_usb_control_configure(m,unsupported[i],0u) && !memcmp(&before,m,sizeof before),"unsupported USB configuration mutated board");
+    for (unsigned i=0;i<6u;i++) {
+        uint32_t address=addresses[i],initial=0xa5a5f0e0u&~masks[i];
+        s5l8920_clear_bus_failure(m);(void)m->bus.read32(m,address);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !m->usb_control[i].configured,"invented USB reset word");
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,address,0u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !m->usb_control[i].configured,"unconfigured USB write");
+        memcpy(&before,m,sizeof before);
+        before.usb_control[i].configured=true;before.usb_control[i].initial=before.usb_control[i].value=initial;
+        CHECK(s5l8920_usb_control_configure(m,address,initial) && !memcmp(&before,m,sizeof before),"USB input changed CPU/IRQ/diagnostic");
+        m->bus.write32(m,address,initial|masks[i]);
+        CHECK(m->usb_control[i].value==initial,"latched fault allowed USB write");
+        s5l8920_clear_bus_failure(m);
+        for (unsigned bit=0;bit<32u;bit++) {
+            uint32_t value=initial^(1u<<bit);
+            s5l8920_clear_bus_failure(m);
+            if (i!=5u) m->bus.write32(m,address,initial);
+            m->bus.write32(m,address,value);
+            bool accepted=(masks[i]&(1u<<bit)) && i!=5u;
+            CHECK(m->bus_failure.reason==(accepted?S5L8920_BUS_OK:S5L8920_BUS_REGISTER_REFUSED) &&
+                  m->usb_control[i].value==(accepted?value:initial),"USB unsupported field changed or known field refused");
+        }
+        s5l8920_clear_bus_failure(m);
+        memcpy(&before,m,sizeof before);before.usb_control[i].value=initial|masks[i];
+        m->bus.write32(m,address,initial|masks[i]);
+        CHECK(!memcmp(&before,m,sizeof before) && m->bus.read32(m,address)==(initial|masks[i]),"USB control changed unrelated board state");
+        CHECK(s5l8920_usb_control_configure(m,address,initial) && !s5l8920_usb_control_configure(m,address,initial^1u) &&
+              !memcmp(&before,m,sizeof before),"USB reconfiguration replaced guest state");
+        for (unsigned offset=0;offset<4u;offset++) for (unsigned kind=0;kind<6u;kind++) {
+            s5l8920_clear_bus_failure(m);uint32_t at=address+offset,value=m->usb_control[i].value;
+            if (kind==0u) (void)m->bus.read8(m,at);
+            else if (kind==1u) (void)m->bus.read16(m,at);
+            else if (kind==2u) (void)m->bus.read32(m,at);
+            else if (kind==3u) m->bus.write8(m,at,0u);
+            else if (kind==4u) m->bus.write16(m,at,0u);
+            else m->bus.write32(m,at,value);
+            CHECK(m->bus_failure.reason==((kind%3u==2u&&!offset)?S5L8920_BUS_OK:S5L8920_BUS_ACCESS_UNIMPLEMENTED) &&
+                  m->usb_control[i].value==value,"USB width/alignment mutation");
+            CHECK(!s5l8920_usb_control_configure(m,address+1u,0u),"misaligned USB input");
+        }
+        CHECK(!m->bus.host_ram(m,address,4u) && !m->bus.host_ram_write(m,address,4u),"USB MMIO exposed as RAM");
+    }
+    /* Status/FIFO/endpoint accesses never become successful because the
+     * firmware has enabled clocks, released reset or set a software flag. */
+    for (unsigned state=0;state<2u;state++) {
+        CHECK(s5l8920_reset(m),"USB unsupported transfer fixture");
+        for (unsigned i=0;i<6u;i++)m->bus.write32(m,addresses[i],m->usb_control[i].initial|(state?masks[i]:0u));
+        for (unsigned i=2u;i<sizeof unsupported/sizeof unsupported[0];i++) {
+            if (unsupported[i]==0x86001000u) continue;
+            s5l8920_clear_bus_failure(m);(void)m->bus.read32(m,unsupported[i]);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"invented USB status/transfer read");
+            s5l8920_clear_bus_failure(m);m->bus.write32(m,unsupported[i],0u);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"invented USB transfer write");
+        }
+    }
+    for (unsigned thumb=0;thumb<2u;thumb++) {
+        CHECK(s5l8920_reset(m),"USB CPU reset");
+        uint32_t initial=m->usb_control[0].initial;
+        put(m,0x100u,thumb?0x0000f8c1u:0xe5810000u);put(m,0x104u,thumb?0x0000f8d1u:0xe5910000u);
+        m->cpu.r[0]=initial^4u;m->cpu.r[1]=addresses[0];m->cpu.r[15]=S5L8920_RAM_BASE+0x100u;
+        m->cpu.cpsr=ARM_MODE_SVC|ARM_CPSR_I|ARM_CPSR_F|ARM_CPSR_C|(thumb?ARM_CPSR_T:0u);
+        uint32_t flags=m->cpu.cpsr,pc=m->cpu.r[15];
+        CHECK(arm_step(&m->cpu)==ARM_HALT && !m->cpu.cycles && m->cpu.r[15]==pc && m->cpu.cpsr==flags &&
+              m->usb_control[0].value==initial,"unknown USB CPU write retired");
+        s5l8920_clear_bus_failure(m);m->cpu.r[0]=initial|3u;
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.cycles==1u && m->cpu.r[15]==pc+4u &&
+              m->usb_control[0].value==(initial|3u),"USB CPU retry");
+        m->cpu.r[0]=0u;
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.cycles==2u && m->cpu.r[0]==(initial|3u) &&
+              m->cpu.cpsr==flags && !m->timebase_ticks,"USB readback generated time or changed flags");
+    }
+    CHECK(s5l8920_reset(m),"USB final reset");
+    for (unsigned i=0;i<6u;i++)CHECK(m->usb_control[i].configured &&
+        m->usb_control[i].value==m->usb_control[i].initial,"USB reset lost input or retained writes");
+}
+
 static bool test_pll(s5l8920_t *m) {
     static s5l8920_t empty, before;
     uint64_t numerator=123u;uint32_t denominator=456u;
@@ -2118,8 +2205,12 @@ int main(void) {
     if (!test_pll(&m)) return 1;
     if (!test_powerid(&m)) return 1;
     test_miu(&m);
+    test_usb_controls(&m);
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
+    for (unsigned i=0;i<S5L8920_USB_CONTROL_COUNT;i++)CHECK(!m.usb_control[i].configured &&
+        !m.usb_control[i].initial && !m.usb_control[i].value,"free retained USB input");
+    CHECK(!s5l8920_usb_control_configure(&m,S5L8920_USB_PHY_BASE,0u),"freed board accepted USB input");
     CHECK(!m.gpio[15].inactive_valid && !m.gpio[15].inactive_high &&
           !s5l8920_gpio_inactive_readback(&m,15u,false),"free retained inactive observation");
     CHECK(!m.clock_selector[0].programmed && !m.clock_selector[24].programmed,

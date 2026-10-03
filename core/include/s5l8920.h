@@ -46,6 +46,9 @@
 #define S5L8920_PLL_COUNT 3u
 #define S5L8920_POWERID UINT32_C(0xbf100158)
 #define S5L8920_MIU_CONTROL S5L8920_PMGR_BASE
+#define S5L8920_USB_PHY_BASE UINT32_C(0x86000000)
+#define S5L8920_USB_BASE UINT32_C(0x86100000)
+#define S5L8920_USB_CONTROL_COUNT 6u
 
 typedef struct {
     uint64_t sequence;
@@ -105,6 +108,11 @@ typedef struct {
     bool configured;
 } s5l8920_miu_t;
 
+typedef struct {
+    uint32_t initial, value;
+    bool configured;
+} s5l8920_usb_control_t;
+
 typedef enum {
     S5L8920_BUS_OK = 0,
     S5L8920_BUS_UNMAPPED,
@@ -143,6 +151,7 @@ typedef struct {
     s5l8920_pll_t pll[S5L8920_PLL_COUNT];
     s5l8920_powerid_t powerid;
     s5l8920_miu_t miu;
+    s5l8920_usb_control_t usb_control[S5L8920_USB_CONTROL_COUNT];
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -157,7 +166,8 @@ void s5l8920_free(s5l8920_t *m);
  * and externally supplied interrupt levels/GPIO samples and configured PMU
  * clock/offset state and explicitly configured identification words. Gate controls
  * and POWERID return to their supplied initial words. Configured MIU control
- * restores its supplied initial word and supported mapping. PLL controls return to
+ * restores its supplied initial word and supported mapping. USB controls restore
+ * their supplied words. PLL controls return to
  * their supplied disabled words, cancelling settling. GPIO and clock-selector programming
  * are invalidated.
  * This is a functional reset, not a
@@ -167,8 +177,8 @@ bool s5l8920_set_irq(s5l8920_t *m, unsigned source, bool asserted);
 
 /* Prepare the inherited RAM boot mapping selected by BF100000[1:0]=2 in
  * matching iBoot. Enabled low addresses cover the installed RAM and share
- * its storage at RAM_BASE. This models the RAM selection only, not the full
- * ROM/SRAM selections or physical reset sequencing. The
+ * its storage at RAM_BASE. This models the RAM selection only, without
+ * ROM/SRAM backing or physical reset sequencing. The
  * implemented extent is bounded to RAM_SIZE; larger hardware decode ranges
  * are not established. Without MIU configuration, a functional reset removes
  * this preparation. Configured MIU control owns the selection: a conflicting
@@ -331,6 +341,21 @@ bool s5l8920_powerid_configure(s5l8920_t *m, uint32_t initial);
  * changes invalidate translation/host caches and the exclusive monitor while
  * preserving registers, RAM and latched diagnostics. */
 bool s5l8920_miu_configure(s5l8920_t *m, uint32_t initial);
+
+/* Supply one aligned USB clock/PHY control word at its physical address.
+ * Supported words: controller+E00 clock gates (bits0..1), PHY+0 power (0..4),
+ * PHY+4 reference-clock selection (0..1), PHY+8 reset request (0), PHY+1C
+ * configuration (1..2), and PHY+44 tuning. Writes preserve all unknown bits;
+ * tuning changes accept only the matching E3F field pattern. Identical writes
+ * preserve state. Unconfigured words, other widths/registers and unsupported
+ * bit changes refuse. Configuration is idempotent only for the same initial
+ * word; functional reset restores supplied words and free/init invalidates them.
+ * These are logical control requests, not analog power/reset completion or
+ * readiness. No cable, lock, FIFO, endpoint, transfer, interrupt or clock
+ * progress is synthesized; those controller accesses remain refused in every
+ * power/clock state. Call between CPU steps; CPU/IRQ and latched diagnostics
+ * are preserved. */
+bool s5l8920_usb_control_configure(s5l8920_t *m, uint32_t address, uint32_t initial);
 
 /* Supply timebase source ticks explicitly, modulo 2^64, and advance the enabled
  * deadline countdown. Reads and CPU steps do not advance time. A programmed

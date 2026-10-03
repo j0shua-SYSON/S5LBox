@@ -8,9 +8,49 @@ partial clock-gate/selector programming, a PLL model with explicit clock inputs,
 and bounded POWERID software-cache fields. Inactive GPIO data readback can
 be supplied explicitly, separately from live pin samples. MIU control can
 select the existing physical RAM boot window from original firmware.
+Six USB clock/PHY control words accept explicit initial values and bounded
+guest programming. USB status and transfers remain unavailable.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## USB control requests and original bootloader shutdown
+
+`s5l8920_usb_control_configure` supplies each supported control word explicitly:
+controller clock gates at `0x86100e00`, and PHY power, clock selection, reset
+request, configuration and tuning at `0x86000000` plus offsets 0, 4, 8,
+`0x1c` and `0x44`. The matching device tree identifies both register ranges.
+[OpeniBoot's S5L8920 PHY definitions](https://github.com/iDroid-Project/openiBoot/blob/866562fdb1cfd019bcd77885c80fbf0af65d5c15/plat-s5l8920/includes/hardware/usbphy.h)
+and its initialization/shutdown sequence corroborate the original firmware
+accesses. The matching kernel's PHY driver uses the same control words;
+its software power states do not establish hardware readiness.
+
+Reads require explicit configuration. Aligned word writes preserve unknown
+bits; tuning changes accept only the observed `0xe3f` field pattern.
+Functional reset restores supplied words. These are logical control requests:
+no analog lock, power transition completion, cable state or transfer engine
+is modeled. Status, FIFO and endpoint accesses refuse in every control state.
+
+Unchanged LLB, iBoot and iBSS functions pass 72 complete initialization,
+repeated-initialization, shutdown and reinitialization calls across six clock
+frequencies. Their original time conversion and delay loops execute using an
+explicit source-clock schedule. Thirty negative calls verify that each missing
+control, frozen time and unsupported power-field change prevents completion.
+The old core has 36 expected register refusals. Unit checks also cover widths,
+unknown bits, functional reset, instruction retry and state preservation.
+
+With the earlier explicit board inputs and six zero initial USB control words,
+the connected original LLB completes its shutdown sequence and stops after
+243,328 steps at Thumb `0x84004478`, reading UART0's unprogrammed divisor word
+at `0x82500028`. Its executable bytes remain unchanged. Without USB inputs,
+the earlier 214,677-step stop remains; the diagnostic now identifies a refused
+register in the recognized USB range instead of an unmapped address.
+This is a host execution witness, not a complete bootloader/kernel handoff
+or proof of working USB transfers.
+
+All 79 strict and 74 shipping tests pass. Earlier firmware checks preserve
+their input boundaries, and the separate prepared kernel trace remains
+byte-identical at its 182,680,916-step GPIO refusal.
 
 ## Firmware-selected RAM boot mapping
 
