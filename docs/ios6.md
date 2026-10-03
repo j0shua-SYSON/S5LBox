@@ -3,10 +3,41 @@
 The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
 a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
 interrupt fabric, UART, timebase counter, deadline timer, GPIO, I2C and a
-bounded PMU clock endpoint.
+bounded PMU clock endpoint, plus explicitly configured identification words.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## Explicit identification inputs
+
+Four aligned words at `0xbf500000..0xbf50000c` can each be supplied through
+`s5l8920_chipid_configure`. An unconfigured word refuses reads. Identical
+configuration is idempotent; changing a configured value fails. Functional
+reset retains these fixed inputs, while free/init invalidates them. Guest
+writes, byte/halfword accesses and misaligned words remain checked failures.
+No revision, unique identifier, reserved-bit value, CPU identity or device-tree
+property is inferred from configuring another word.
+
+Matching LLB and iBoot consume offsets 0, 8 and 12. The pinned
+[S5L8920 chip-ID definitions](https://github.com/iDroid-Project/openiBoot/blob/866562fdb1cfd019bcd77885c80fbf0af65d5c15/plat-s5l8920/includes/hardware/chipid.h)
+also identify offset 4 as the SPI clock-selection input. These observations
+establish read locations and consumers, not measured fuse values or fuse
+programming behavior. The private witness passes 2,176 original LLB/iBoot
+getter calls over 128 explicit input sets, including all 64 revision pairs
+with and without unrelated bits, epoch fields, the permuted identifier and
+the raw two-word pair.
+
+The unchanged LLB entry still stops at `0x840084ca` when word 0 is absent.
+Supplying either `0` or `0x100` exercises both alternatives of its first bit-8
+consumer. The original code selects ACTLR.WFINOP and disables ACTLR.L2EN;
+neither input is asserted to be a physical sample. After extending only the
+private SRAM fixture for the LLB's explicit 4,096-entry page table at
+`0x84034000`, both runs build the table, enable the MMU and reach the next
+checked read: clock-gate register `0xbf100078` at Thumb `0x84008868`, after
+17,032 steps and 17,031 retired instructions. The fixture ends at `0x84038000`;
+this does not establish physical SRAM capacity or complete LLB execution.
+Other identification words stay unconfigured in these entry runs. The full
+kernel's separate unprepared-GPIO stop remains unchanged.
 
 ## Partial GPIO configuration, polling and interrupts
 

@@ -1441,6 +1441,89 @@ static void test_pmu_rtc(s5l8920_t *m) {
     CHECK(s5l8920_reset(m),"PMU final reset");
 }
 
+static bool test_chipid(s5l8920_t *m) {
+    static s5l8920_t empty, before;
+    const uint32_t words[]={0xfedcba98u,0x01234567u,0u,UINT32_MAX};
+    CHECK(!s5l8920_chipid_configure(NULL,0u,1u) &&
+          !s5l8920_chipid_configure(&empty,0u,1u) && !empty.chipid_configured,
+          "uninitialized board accepted identification");
+    CHECK(s5l8920_reset(m) && !m->chipid_configured,"invented identification defaults");
+    for (unsigned i=0;i<4u;i++) {
+        uint32_t address=S5L8920_CHIPID_BASE+4u*i;
+        s5l8920_clear_bus_failure(m);
+        (void)m->bus.read32(m,address);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+              m->bus_failure.address==address,"unconfigured word did not refuse");
+        s5l8920_bus_failure_t stopped=m->bus_failure;
+        CHECK(s5l8920_chipid_configure(m,4u*i,words[i]) &&
+              !memcmp(&stopped,&m->bus_failure,sizeof stopped),"configuration lost stopped access");
+        CHECK(m->chipid_configured==(1u<<(i+1u))-1u,"configuration invented neighboring words");
+        s5l8920_clear_bus_failure(m);
+        CHECK(m->bus.read32(m,address)==words[i] && !m->bus_failure.reason,
+              "explicit identification word changed");
+        before=*m;
+        CHECK(s5l8920_chipid_configure(m,4u*i,words[i]) && !memcmp(m,&before,sizeof before),
+              "identical configuration was not idempotent");
+        CHECK(!s5l8920_chipid_configure(m,4u*i,words[i]^1u) && !memcmp(m,&before,sizeof before),
+              "immutable identification changed");
+    }
+    CHECK(!m->bus.host_ram(m,S5L8920_CHIPID_BASE,4u) &&
+          !m->bus.host_ram_write(m,S5L8920_CHIPID_BASE,4u) &&
+          !s5l8920_load(m,S5L8920_CHIPID_BASE,words,sizeof words),"RAM shortcut exposed identification");
+    for (unsigned offset=0;offset<32u;offset++) {
+        if (offset<16u && !(offset&3u)) continue;
+        before=*m;
+        CHECK(!s5l8920_chipid_configure(m,offset,0u) && !memcmp(m,&before,sizeof before),
+              "invalid selector changed board");
+    }
+    before=*m;
+    CHECK(!s5l8920_chipid_configure(m,UINT32_MAX,0u) && !memcmp(m,&before,sizeof before),
+          "wrapped selector changed board");
+    for (unsigned offset=0;offset<16u;offset++) for (unsigned kind=0;kind<6u;kind++) {
+        uint32_t address=S5L8920_CHIPID_BASE+offset;
+        s5l8920_clear_bus_failure(m);
+        if (kind==0u) (void)m->bus.read8(m,address);
+        else if (kind==1u) (void)m->bus.read16(m,address);
+        else if (kind==2u) (void)m->bus.read32(m,address);
+        else if (kind==3u) m->bus.write8(m,address,0x5au);
+        else if (kind==4u) m->bus.write16(m,address,0x5a5au);
+        else m->bus.write32(m,address,0x5a5a5a5au);
+        s5l8920_bus_reason_t expected=kind%3u!=2u || (offset&3u) ?
+            S5L8920_BUS_ACCESS_UNIMPLEMENTED : (kind==2u ? S5L8920_BUS_OK:S5L8920_BUS_REGISTER_REFUSED);
+        CHECK(m->bus_failure.reason==expected && m->chipid_configured==15u &&
+              !memcmp(m->chipid_words,words,sizeof words),"unsupported access changed identification");
+    }
+    const uint32_t outside[]={S5L8920_CHIPID_BASE-4u,S5L8920_CHIPID_BASE+16u,S5L8920_CHIPID_BASE+0x1000u};
+    for (unsigned i=0;i<sizeof outside/sizeof *outside;i++) {
+        s5l8920_clear_bus_failure(m);(void)m->bus.read32(m,outside[i]);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_UNMAPPED,"identification aperture widened");
+    }
+    CHECK(s5l8920_reset(m) && m->chipid_configured==15u &&
+          !memcmp(m->chipid_words,words,sizeof words),"reset changed fixed identification");
+    for (unsigned thumb=0;thumb<2u;thumb++) {
+        s5l8920_free(m);
+        bool ready=s5l8920_init(m);CHECK(ready && !m->chipid_configured,"new board retained identification");
+        if (!ready) return false;
+        put(m,0x100u,thumb ? 0x0000f8d1u:0xe5910000u);
+        m->cpu.r[0]=0xabcdef01u;m->cpu.r[1]=S5L8920_CHIPID_BASE+12u*thumb;
+        m->cpu.r[15]=S5L8920_RAM_BASE+0x100u;
+        m->cpu.cpsr=ARM_MODE_SVC|ARM_CPSR_I|ARM_CPSR_F|ARM_CPSR_C|(thumb ? ARM_CPSR_T:0u);
+        uint32_t flags=m->cpu.cpsr,pc=m->cpu.r[15];
+        CHECK(arm_step(&m->cpu)==ARM_HALT && !m->cpu.cycles && m->cpu.r[15]==pc &&
+              m->cpu.r[0]==0xabcdef01u && m->cpu.cpsr==flags &&
+              m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"unprepared CPU read retired");
+        before=*m;
+        CHECK(s5l8920_chipid_configure(m,12u*thumb,words[thumb]) &&
+              !memcmp(&before.cpu,&m->cpu,sizeof m->cpu) &&
+              !memcmp(&before.bus_failure,&m->bus_failure,sizeof m->bus_failure),"host preparation changed stopped CPU");
+        s5l8920_clear_bus_failure(m);
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.cycles==1u && m->cpu.r[15]==pc+4u &&
+              m->cpu.r[0]==words[thumb] && m->cpu.cpsr==flags && !m->bus_failure.reason,
+              "checked CPU retry did not load supplied word");
+    }
+    return true;
+}
+
 int main(void) {
     test_empty_nvram_proxy();
     s5l8920_t m = {0};
@@ -1470,8 +1553,11 @@ int main(void) {
     test_i2c_checked_cpu(&m);
     test_pmu_rtc(&m);
     test_fiq_and_reset(&m);
+    if (!test_chipid(&m)) return 1;
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
+    CHECK(!m.chipid_configured && !m.chipid_words[0] && !m.chipid_words[3] &&
+          !s5l8920_chipid_configure(&m,0u,1u),"freed board retained identification");
     CHECK(!s5l8920_timebase_clock(&m,1u) && !m.timebase_ticks, "freed board accepted timebase input");
     CHECK(!m.pmu_rtc_configured && !m.pmu_rtc_counter && !m.pmu_rtc_offset &&
           !s5l8920_pmu_rtc_configure(&m,1u,2u) && !s5l8920_pmu_rtc_advance(&m,1u) &&

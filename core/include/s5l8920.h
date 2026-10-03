@@ -37,6 +37,7 @@
 #define S5L8920_I2C_COUNT 3u
 #define S5L8920_I2C_CAPACITY 128u
 #define S5L8920_I2C0_IRQ 19u /* Consecutive banks use sources 19, 18, 17. */
+#define S5L8920_CHIPID_BASE UINT32_C(0xbf500000)
 
 typedef struct {
     uint64_t sequence;
@@ -94,6 +95,8 @@ typedef struct {
     s5l8920_i2c_t i2c[S5L8920_I2C_COUNT];
     bool pmu_rtc_configured;
     uint32_t pmu_rtc_counter, pmu_rtc_offset;
+    uint32_t chipid_words[4];
+    uint8_t chipid_configured;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -106,7 +109,7 @@ void s5l8920_free(s5l8920_t *m);
 
 /* Reset CPU/controller/UART/timer/I2C state and clear diagnostics, preserving RAM
  * and externally supplied interrupt levels/GPIO samples and configured PMU
- * clock/offset state. GPIO programming is
+ * clock/offset state and explicitly configured identification words. GPIO programming is
  * invalidated. This is a functional reset, not a
  * model of power sequencing. The caller owns execution and device timing. */
 bool s5l8920_reset(s5l8920_t *m);
@@ -191,6 +194,17 @@ bool s5l8920_i2c_complete(s5l8920_t *m, unsigned bus, uint64_t sequence,
 bool s5l8920_pmu_rtc_configure(s5l8920_t *m, uint32_t counter, uint32_t offset);
 bool s5l8920_pmu_rtc_advance(s5l8920_t *m, uint32_t units);
 bool s5l8920_pmu_rtc_service(s5l8920_t *m, uint64_t sequence);
+
+/* Supply one immutable identification word at offset0/4/8/12. Only aligned
+ * word reads in this 16-byte span are modeled; each requires its own explicit
+ * value. No fuse defaults, unique identifier, revision or reserved-bit values
+ * are inferred, and no CPU identity or device-tree property is changed.
+ * Reapplying an identical value succeeds; replacing it fails. Guest writes,
+ * other widths and unconfigured reads remain checked failures. Call between
+ * CPU steps; configuration preserves CPU state and latched bus diagnostics.
+ * Functional reset retains these inputs; free/init invalidates them. This
+ * models fixed emulated inputs, not fuse programming or physical reset state. */
+bool s5l8920_chipid_configure(s5l8920_t *m, unsigned offset, uint32_t value);
 
 /* Supply timebase source ticks explicitly, modulo 2^64, and advance the enabled
  * deadline countdown. Reads and CPU steps do not advance time. A programmed

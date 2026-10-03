@@ -201,6 +201,15 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         else fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
         return 0u;
     }
+    if (address>=S5L8920_CHIPID_BASE && address-S5L8920_CHIPID_BASE<16u) {
+        offset=address-S5L8920_CHIPID_BASE;
+        if (size!=4u || (offset&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
+        else if (!(m->chipid_configured&(1u<<(offset/4u))))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        else return m->chipid_words[offset/4u];
+        return 0u;
+    }
     if (address>=S5L8920_PMGR_BASE && address-S5L8920_PMGR_BASE<0x2000u) {
         offset=address-S5L8920_PMGR_BASE;
         if (size!=4u || (offset&3u))
@@ -269,6 +278,11 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
             for (unsigned index=32u*group;index<32u*(group+1u);index++) gpio_latch_level(m,index);
             gpio_refresh_irq(m);
         } else fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+        return;
+    }
+    if (address>=S5L8920_CHIPID_BASE && address-S5L8920_CHIPID_BASE<16u) {
+        fail(m,(size!=4u || (address&3u)) ? S5L8920_BUS_ACCESS_UNIMPLEMENTED :
+             S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
         return;
     }
     if (address>=S5L8920_PMGR_BASE && address-S5L8920_PMGR_BASE<0x2000u) {
@@ -482,6 +496,15 @@ bool s5l8920_pmu_rtc_service(s5l8920_t *m,uint64_t sequence) {
         for (unsigned n=0;n<4u;n++) response[n]=(uint8_t)(value>>(n*8u));
         if (!s5l8920_i2c_complete(m,0u,sequence,true,response,sizeof response)) return false;
     }
+    return true;
+}
+
+bool s5l8920_chipid_configure(s5l8920_t *m, unsigned offset, uint32_t value) {
+    if (!m || !m->ram || offset>=16u || (offset&3u)) return false;
+    unsigned index=offset/4u;
+    if (m->chipid_configured&(1u<<index)) return m->chipid_words[index]==value;
+    m->chipid_words[index]=value;
+    m->chipid_configured|=(uint8_t)(1u<<index);
     return true;
 }
 
