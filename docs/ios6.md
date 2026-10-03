@@ -75,8 +75,13 @@ checked board in 1,850 instructions; the earlier controller refused the
 first control, `0xd1e`. This witness inspects stored configuration without
 inventing input samples or reading disabled samplers. Another 26,496
 original iBoot selector calls preserve drive and pull fields while reads
-reflect explicit samples. Neither isolated witness establishes the normal
-bootloader handoff, and the table is not installed as a board default.
+reflect explicit samples. The matching normal LLB contains the same table
+at `0x840112b0`. Its early startup calls wrapper `0x84008194`, which invokes
+initializer `0x84001078`. That original wrapper and initializer also complete
+all 368 writes on the checked board in 1,850 instructions. This establishes
+the table and its initialization consumer in normal-boot firmware; the
+isolated call does not establish the later iBoot/kernel handoff or disabled
+input readback. The table is not installed as a board default.
 
 The separately prepared kernel diagnostic now reaches GPIO after its
 chip-revision, platform clocks, USB frequency, backlight calibration,
@@ -2707,6 +2712,26 @@ size or checksum mismatch before opening their output file.
 
 ## Bounded entry diagnostic
 
+The matching 10B500 LLB is now independently available for startup analysis.
+A fresh bounded read of the manifest-selected Apple IPSW member matches the
+retained 84,420-byte encrypted component, SHA-256
+`130160fc58689e98b9bf9a636db1834913f4ce7795a346282fe869813862f597`.
+The matching published key produces 81,920 bytes, SHA-256
+`98c53b339223e38c5bc07003c531d84c0bfc2fa3319920591175d07270c430a5`.
+ARM vectors, relocation base `0x84000000`, the `n88ap` and `1537.9.55`
+identifiers, and the matching GPIO table validate its plaintext structure.
+The earlier candidate key from 10B329 failed plaintext validation and remains
+excluded. Firmware and key material are kept outside source control.
+
+A separate private diagnostic executes the unchanged LLB from its reset
+entry. Its explicit SRAM fixture covers the image and the data/BSS/stack
+envelope through `0x84034000`; that bound is not a measured SRAM capacity.
+The first unsupported access is a word read at physical `0xbf500000`,
+Thumb `0x840084ca`, after 1,473 steps and 1,472 retired instructions.
+Executable bytes remain unchanged. This identifies the chip-ID interface
+as the next LLB dependency without supplying a revision value, skipping
+instructions or claiming execution of BootROM or a complete bootloader.
+
 A private RAM-only harness loads the verified kernel at physical base
 `0x40000000`, places partial early-entry arguments at `0x41000000`, and
 starts at physical entry `0x40086084`. It has no device models or patches;
@@ -2761,9 +2786,11 @@ iBoot's clock-state reader and getter index 3 propagate the resulting
 100 MHz into `bus-frequency`. iBSS SHA-256 is
 `30095f39be26acbb13677c7705de7bb9cbd2e3d04b90eb9d6380e1c1c413aa5d`.
 The constants, M/P/S calculations and getter branch-table destinations were
-cross-checked against both firmware files. This selects a matching firmware
-clock configuration; it does not establish physical PLL behavior or measure
-the normal LLB boot path.
+cross-checked against both firmware files. The matching normal LLB's
+initializer at `0x840086a8` programs the same PLL constants; its 25-word
+selector table at `0x84011a18` exactly matches the restore table. This
+corroborates the selected configuration in normal-boot firmware, without
+establishing physical PLL behavior or execution past its lock polling.
 
 Preparing those two properties in the private RAM copy advances the trace
 to 71,289 steps at `0x8027af1e`, halfwords `e9c4 010c`
