@@ -44,6 +44,7 @@
 #define S5L8920_CLOCK_SELECT_COUNT 25u
 #define S5L8920_PLL_BASE UINT32_C(0xbf100004)
 #define S5L8920_PLL_COUNT 3u
+#define S5L8920_POWERID UINT32_C(0xbf100158)
 
 typedef struct {
     uint64_t sequence;
@@ -92,6 +93,11 @@ typedef struct {
     bool configured;
 } s5l8920_pll_t;
 
+typedef struct {
+    uint32_t initial, value;
+    bool configured;
+} s5l8920_powerid_t;
+
 typedef enum {
     S5L8920_BUS_OK = 0,
     S5L8920_BUS_UNMAPPED,
@@ -128,6 +134,7 @@ typedef struct {
     s5l8920_clock_gate_t clock_gate[S5L8920_CLOCK_GATE_COUNT];
     s5l8920_clock_selector_t clock_selector[S5L8920_CLOCK_SELECT_COUNT];
     s5l8920_pll_t pll[S5L8920_PLL_COUNT];
+    s5l8920_powerid_t powerid;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -141,8 +148,8 @@ void s5l8920_free(s5l8920_t *m);
 /* Reset CPU/controller/UART/timer/I2C state and clear diagnostics, preserving RAM
  * and externally supplied interrupt levels/GPIO samples and configured PMU
  * clock/offset state and explicitly configured identification words. Gate controls
- * return to their supplied initial words. PLL controls return to their supplied
- * disabled words, cancelling settling. GPIO and clock-selector programming
+ * and POWERID return to their supplied initial words. PLL controls return to
+ * their supplied disabled words, cancelling settling. GPIO and clock-selector programming
  * are invalidated.
  * This is a functional reset, not a
  * model of power sequencing. The caller owns execution and device timing. */
@@ -274,6 +281,17 @@ bool s5l8920_pll_configure(s5l8920_t *m, unsigned pll, uint32_t initial,
 bool s5l8920_pll_reference_clock(s5l8920_t *m, unsigned pll, uint64_t cycles);
 bool s5l8920_pll_rate(const s5l8920_t *m, unsigned pll,
                      uint64_t *numerator, uint32_t *denominator);
+
+/* Supply the initial POWERID word explicitly. Aligned word accesses retain
+ * the upper three software cache bytes and flags0/1; guest changes to bits2..7
+ * refuse atomically, preserving these supplied unknown fields. Other widths,
+ * misalignment and unconfigured accesses refuse. No identity, GPIO samples,
+ * entropy, power behavior or field relationships are generated. Identical
+ * configuration preserves guest writes; conflicting initial input refuses.
+ * Functional reset restores the supplied initial word, not measured warm or
+ * power reset behavior. Free/init invalidates it. Call between CPU steps;
+ * CPU state and latched diagnostics are preserved. */
+bool s5l8920_powerid_configure(s5l8920_t *m, uint32_t initial);
 
 /* Supply timebase source ticks explicitly, modulo 2^64, and advance the enabled
  * deadline countdown. Reads and CPU steps do not advance time. A programmed

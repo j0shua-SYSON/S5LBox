@@ -1441,6 +1441,79 @@ static void test_pmu_rtc(s5l8920_t *m) {
     CHECK(s5l8920_reset(m),"PMU final reset");
 }
 
+static bool test_powerid(s5l8920_t *m) {
+    static s5l8920_t empty, before;
+    const uint32_t initial=0xa5c369fcu;
+    CHECK(!s5l8920_powerid_configure(NULL,0u) && !s5l8920_powerid_configure(&empty,0u),"invalid POWERID object");
+    CHECK(s5l8920_reset(m),"POWERID initial reset");
+    (void)m->bus.read32(m,S5L8920_POWERID);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !m->powerid.configured,"invented POWERID initial read");
+    s5l8920_clear_bus_failure(m);m->bus.write32(m,S5L8920_POWERID,0u);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !m->powerid.configured,"unconfigured POWERID write");
+    memcpy(&before,m,sizeof before);
+    CHECK(s5l8920_powerid_configure(m,initial) && m->powerid.configured && m->powerid.value==initial &&
+          !memcmp(&before.cpu,&m->cpu,sizeof m->cpu) &&
+          !memcmp(&before.bus_failure,&m->bus_failure,sizeof m->bus_failure),"POWERID configuration changed CPU/diagnostic");
+    m->bus.write32(m,S5L8920_POWERID,initial^1u);
+    CHECK(m->powerid.value==initial,"latched failure allowed POWERID mutation");
+    s5l8920_clear_bus_failure(m);
+    for (unsigned bit=0;bit<32u;bit++) {
+        uint32_t value=initial^(1u<<bit);
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,S5L8920_POWERID,initial);
+        m->bus.write32(m,S5L8920_POWERID,value);
+        if ((1u<<bit)&0xfcu) CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+            m->powerid.value==initial,"unknown POWERID bit changed");
+        else CHECK(!m->bus_failure.reason && m->bus.read32(m,S5L8920_POWERID)==value,"POWERID writable field");
+    }
+    s5l8920_clear_bus_failure(m);
+    for (unsigned value=0;value<256u;value++) for (unsigned byte=1;byte<4u;byte++) {
+        uint32_t word=(initial&~(255u<<(8u*byte)))|((uint32_t)value<<(8u*byte))|(value&3u);
+        m->bus.write32(m,S5L8920_POWERID,word);
+        CHECK(!m->bus_failure.reason && m->bus.read32(m,S5L8920_POWERID)==word,"POWERID bytes/flags or preserved unknown bits");
+    }
+    memcpy(&before,m,sizeof before);
+    CHECK(s5l8920_powerid_configure(m,initial) && !s5l8920_powerid_configure(m,initial^1u) &&
+          !memcmp(&before,m,sizeof before),"POWERID reconfiguration changed guest state");
+    for (unsigned offset=0;offset<4u;offset++) for (unsigned kind=0;kind<6u;kind++) {
+        s5l8920_clear_bus_failure(m);
+        uint32_t address=S5L8920_POWERID+offset,value=m->powerid.value;
+        if (kind==0u) (void)m->bus.read8(m,address);
+        else if (kind==1u) (void)m->bus.read16(m,address);
+        else if (kind==2u) (void)m->bus.read32(m,address);
+        else if (kind==3u) m->bus.write8(m,address,0u);
+        else if (kind==4u) m->bus.write16(m,address,0u);
+        else m->bus.write32(m,address,value);
+        CHECK(m->bus_failure.reason==((kind%3u==2u && !offset)?S5L8920_BUS_OK:S5L8920_BUS_ACCESS_UNIMPLEMENTED) &&
+              m->powerid.value==value,"POWERID width/alignment mutation");
+    }
+    for (unsigned side=0;side<2u;side++) {
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,side?S5L8920_POWERID+4u:S5L8920_POWERID-4u,0u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"POWERID invaded adjacent register");
+    }
+    CHECK(!m->bus.host_ram(m,S5L8920_POWERID,4u) && !m->bus.host_ram_write(m,S5L8920_POWERID,4u),"POWERID exposed as RAM");
+    CHECK(s5l8920_reset(m) && m->powerid.configured && m->powerid.value==initial &&
+          m->powerid.initial==initial && m->bus.read32(m,S5L8920_POWERID)==initial,"POWERID reset lost input or retained writes");
+    for (unsigned thumb=0;thumb<2u;thumb++) {
+        CHECK(s5l8920_reset(m),"POWERID CPU reset");
+        put(m,0x100u,thumb?0x0000f8c1u:0xe5810000u);
+        put(m,0x104u,thumb?0x0000f8d1u:0xe5910000u);
+        m->cpu.r[0]=initial^4u;m->cpu.r[1]=S5L8920_POWERID;m->cpu.r[15]=S5L8920_RAM_BASE+0x100u;
+        m->cpu.cpsr=ARM_MODE_SVC|ARM_CPSR_I|ARM_CPSR_F|ARM_CPSR_C|(thumb?ARM_CPSR_T:0u);
+        uint32_t flags=m->cpu.cpsr,pc=m->cpu.r[15];
+        CHECK(arm_step(&m->cpu)==ARM_HALT && !m->cpu.cycles && m->cpu.r[15]==pc &&
+              m->cpu.r[0]==(initial^4u) && m->cpu.cpsr==flags && m->powerid.value==initial &&
+              m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"unknown POWERID CPU store retired");
+        s5l8920_clear_bus_failure(m);m->cpu.r[0]=0x041234fdu;
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.cycles==1u && m->cpu.r[15]==pc+4u &&
+              m->cpu.cpsr==flags && m->powerid.value==0x041234fdu,"POWERID CPU store retry");
+        m->cpu.r[0]=0u;
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.cycles==2u && m->cpu.r[15]==pc+8u &&
+              m->cpu.r[0]==0x041234fdu && m->cpu.cpsr==flags,"POWERID CPU readback");
+    }
+    CHECK(s5l8920_reset(m) && m->powerid.value==initial,"POWERID final reset");
+    return true;
+}
+
 static bool test_pll(s5l8920_t *m) {
     static s5l8920_t empty, before;
     uint64_t numerator=123u;uint32_t denominator=456u;
@@ -1867,10 +1940,13 @@ int main(void) {
     if (!test_clock_gates(&m)) return 1;
     if (!test_chipid(&m)) return 1;
     if (!test_pll(&m)) return 1;
+    if (!test_powerid(&m)) return 1;
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
     CHECK(!m.clock_selector[0].programmed && !m.clock_selector[24].programmed,
           "free retained selector programming");
+    CHECK(!m.powerid.configured && !m.powerid.initial && !m.powerid.value &&
+          !s5l8920_powerid_configure(&m,0u),"freed POWERID retained state or accepted configuration");
     CHECK(!m.pll[0].configured && !m.pll[2].configured && !m.pll[0].reference_hz &&
           !s5l8920_pll_configure(&m,0u,0u,24000000u,8u) &&
           !s5l8920_pll_reference_clock(&m,0u,1u),"freed PLL retained state or accepted input");

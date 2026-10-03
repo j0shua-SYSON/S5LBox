@@ -218,6 +218,7 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         else if (offset==S5L8920_TIMEBASE_HIGH) return (uint32_t)(m->timebase_ticks>>32);
         else if (offset==S5L8920_DEADLINE_COUNT && m->deadline.programmed && !m->deadline.expired)
             return m->deadline.remaining;
+        else if (address==S5L8920_POWERID && m->powerid.configured) return m->powerid.value;
         else if (address>=S5L8920_PLL_BASE &&
                  address-S5L8920_PLL_BASE<4u*S5L8920_PLL_COUNT &&
                  m->pll[(address-S5L8920_PLL_BASE)/4u].configured) {
@@ -303,6 +304,9 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         offset=address-S5L8920_PMGR_BASE;
         if (size!=4u || (offset&3u)) {
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        } else if (address==S5L8920_POWERID) {
+            if (m->powerid.configured && !((value^m->powerid.value)&0xfcu)) m->powerid.value=value;
+            else fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
         } else if (address>=S5L8920_PLL_BASE &&
                    address-S5L8920_PLL_BASE<4u*S5L8920_PLL_COUNT) {
             s5l8920_pll_t *pll=&m->pll[(address-S5L8920_PLL_BASE)/4u];
@@ -596,6 +600,14 @@ bool s5l8920_pll_rate(const s5l8920_t *m, unsigned index,
     return true;
 }
 
+bool s5l8920_powerid_configure(s5l8920_t *m, uint32_t initial) {
+    if (!m || !m->ram) return false;
+    if (m->powerid.configured) return m->powerid.initial==initial;
+    m->powerid.initial=m->powerid.value=initial;
+    m->powerid.configured=true;
+    return true;
+}
+
 bool s5l8920_reset(s5l8920_t *m) {
     if (!m || !m->ram) return false;
     if (!arm_reset_profile(&m->cpu,&m->bus,ARM_ARCH_V7_CORTEX_A8)) return false;
@@ -606,6 +618,7 @@ bool s5l8920_reset(s5l8920_t *m) {
     for (unsigned gate=0;gate<S5L8920_CLOCK_GATE_COUNT;gate++)
         m->clock_gate[gate].value=m->clock_gate[gate].initial;
     memset(m->clock_selector,0,sizeof m->clock_selector);
+    m->powerid.value=m->powerid.initial;
     for (unsigned index=0;index<S5L8920_PLL_COUNT;index++) {
         m->pll[index].value=m->pll[index].initial;
         m->pll[index].remaining=0u;

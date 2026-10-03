@@ -4,10 +4,44 @@ The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
 a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
 interrupt fabric, UART, timebase counter, deadline timer, GPIO, I2C and a
 bounded PMU clock endpoint, explicitly configured identification words and
-partial clock-gate/selector programming and a PLL model with explicit clock inputs.
+partial clock-gate/selector programming, a PLL model with explicit clock inputs,
+and bounded POWERID software-cache fields.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## Explicit POWERID state
+
+The aligned word at `0xbf100158` requires an explicit initial value through
+`s5l8920_powerid_configure`. Guest writes retain the upper three cache bytes
+and flags 0 and 1. Changes to unknown bits 2 through 7 refuse atomically;
+unconfigured accesses, other widths and misalignment also refuse. Identical
+configuration preserves guest writes, while conflicting host input refuses.
+Functional reset restores the supplied initial word and free/init clears it.
+These are logical policies, not measured silicon reset behavior. No identity,
+GPIO samples, entropy, power behavior or relationships between fields are generated.
+
+The matching LLB and iBSS initialize the high byte to the larger of four and
+the seven-bit epoch field in CHIPID0. The matching LLB, iBoot and iBSS read
+bits 16 through 23, store two GPIO-derived cache bytes with flag 0, and set
+flag 1 after accessing separate nonce-cache words. Those separate words and
+nonce production remain unmodeled. Their epoch guards retain the original
+mismatch path and still encounter a checked refusal on the unimplemented
+`0xbf100000` RAM-remap register when the epoch matches.
+
+The private original-code witness passes 8,704 cases across 128 epochs and
+four raw initial-word patterns: complete epoch initializers and byte getters,
+bounded cache/flag fragments with explicit register inputs, and both guard
+paths. This includes 384 refused attempts to clear unknown low bits. Fragment
+checks do not establish GPIO sampling, nonce production or fatal-handler execution.
+
+With an explicit POWERID input and the existing clock/SRAM assumptions, the
+unchanged LLB entry advances to 212,219 steps, then stops at Thumb `0x84001030`
+reading GPIO pin 15 at `0x8300003c`. The original initialization table has
+already programmed all 368 pins; the refused read is in a later GPIO
+configuration helper's read-modify-write operation. No external samples
+are supplied. The separate kernel GPIO diagnostic and the missing connected
+bootloader/kernel handoff remain unchanged.
 
 ## PLL programming with explicit reference clocks
 
@@ -41,11 +75,11 @@ absent output refuses without modifying the caller's outputs. This does
 not model analog lock, jitter or waveforms, and PLL outputs are not yet
 connected to CPU/peripheral scheduling.
 
-The unchanged original LLB now completes clock setup, publishes the expected
+The unchanged original LLB completes clock setup, publishes the expected
 28 frequencies and executes all 368 GPIO initialization writes. Four input
 variants, using explicit 24 MHz reference clocks, 32-cycle settling and one
-reference cycle per retired instruction, stop after 83,532 steps at Thumb
-`0x840085d4`, reading the next unimplemented register `0xbf100158`. Increasing
+reference cycle per retired instruction and no POWERID input, stop after
+83,532 steps at Thumb `0x840085d4`, reading `0xbf100158`. Increasing
 settling to 97 cycles produces more original polling and reaches the same
 stop after 83,721 steps. With frozen or absent reference clocks, the original
 first PLL poll remains busy at the 100,000-step observation limit.
