@@ -39,6 +39,7 @@
 #define S5L8920_I2C_COUNT 3u
 #define S5L8920_I2C_CAPACITY 128u
 #define S5L8920_I2C0_IRQ 19u /* Consecutive banks use sources 19, 18, 17. */
+#define S5L8920_PMU_CONTROL_REGISTER 0x0du
 #define S5L8920_CHIPID_BASE UINT32_C(0xbf500000)
 #define S5L8920_CLOCK_GATE_BASE UINT32_C(0xbf100078)
 #define S5L8920_CLOCK_GATE_COUNT 52u
@@ -157,6 +158,8 @@ typedef struct {
     s5l8920_uart_t uart_extra[S5L8920_UART_COUNT-1u];
     uint32_t uart_divisor_initial[S5L8920_UART_COUNT];
     bool uart_divisor_configured[S5L8920_UART_COUNT];
+    bool pmu_control_configured;
+    uint8_t pmu_control_initial, pmu_control_value;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -295,6 +298,21 @@ bool s5l8920_i2c_complete(s5l8920_t *m, unsigned bus, uint64_t sequence,
 bool s5l8920_pmu_rtc_configure(s5l8920_t *m, uint32_t counter, uint32_t offset);
 bool s5l8920_pmu_rtc_advance(s5l8920_t *m, uint32_t units);
 bool s5l8920_pmu_rtc_service(s5l8920_t *m, uint64_t sequence);
+
+/* Explicit D1755 control byte at I2C0/0x74 register0x0d. Matching firmware
+ * writes/reads this byte and changes bit4 while preserving the other bits.
+ * Only that change is supported; power-transition and unknown-bit changes
+ * remain pending, without ACK. No physical power effect/readiness is inferred.
+ * Configure once with an observed initial byte before active/pending/unread
+ * I2C0 traffic. Identical repeated configuration is an idempotent no-op that
+ * preserves guest programming. Exact one-byte requests require explicit service
+ * with their current sequence; all other requests are untouched. Functional
+ * SoC reset preserves this external PMU domain, like the RTC, and cancels I2C
+ * traffic. This is a logical policy, not measured backup-power behavior.
+ * Free/init invalidates it. Calls occur between CPU steps and preserve CPU
+ * registers and latched diagnostics; service may change the I2C IRQ level. */
+bool s5l8920_pmu_control_configure(s5l8920_t *m, uint8_t initial);
+bool s5l8920_pmu_control_service(s5l8920_t *m, uint64_t sequence);
 
 /* Supply one immutable identification word at offset0/4/8/12. Only aligned
  * word reads in this 16-byte span are modeled; each requires its own explicit

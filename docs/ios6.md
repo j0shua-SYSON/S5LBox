@@ -2,8 +2,8 @@
 
 The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
 a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
-interrupt fabric, UART, timebase counter, deadline timer, GPIO, I2C and a
-bounded PMU clock endpoint, explicitly configured identification words and
+interrupt fabric, UART, timebase counter, deadline timer, GPIO, I2C and
+bounded PMU clock/control endpoints, explicitly configured identification words and
 partial clock-gate/selector programming, a PLL model with explicit clock inputs,
 and bounded POWERID software-cache fields. Inactive GPIO data readback can
 be supplied explicitly, separately from live pin samples. MIU control can
@@ -16,6 +16,48 @@ events. Automatic transmit flow control requires an explicit CTS observation.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## I2C pin initialization and D1755 control readback
+
+With explicit live levels on GPIO pins 32, 33, 36 and 37, the unchanged LLB
+completes I2C initialization after 852,802 instructions. Its original sequence
+configures buses 0 and 2, alternates each clock pin between input and low output
+over 19 writes, selects peripheral mode and enables interrupts 19 and 17.
+The matching device tree confirms
+these pin assignments. These pins start with input enabled: an inactive GPIO
+observation cannot replace the missing live level. Both supplied levels pass;
+no pull-up, electrical bus timing or attached slave is inferred.
+
+The next request reads one byte from D1755 register `0x02`. A private witness
+supplies that response explicitly and runs the actual CPU interrupt vector,
+original I2C callback and return. The byte reaches the bootloader's cache;
+a supplied NACK produces the original failure return. Register `0x02` event
+and power-on behavior remain unmodeled.
+
+The control endpoint implements exact one-byte accesses to I2C0 address
+`0x74`, register `0x0d`. `s5l8920_pmu_control_configure` requires an explicit
+initial byte. `s5l8920_pmu_control_service` completes only the specified active
+request. Writes may change bit 4, as used by the matching kernel, while every
+other supplied bit is preserved. Unsupported field changes, lengths, registers
+and targets remain pending. Power-transition bits, analog effects and readiness
+are unavailable. Identical repeated configuration preserves guest programming;
+functional SoC reset preserves the external PMU state and cancels I2C traffic.
+This reset policy is explicit, not a measurement of backup-power behavior.
+
+The original LLB writes zero, separately reads it back and verifies equality
+at instruction 870,290. Three actual CPU interrupts handle the initial observed
+byte and two modeled control transactions. The next request writes `0x80` to
+PMU register `0x30` and remains pending. Withheld control input or an unsupported
+change retains the earlier request. A separate 16-case kernel witness executes
+the original bit-4 update with eight initial bytes, including repeated calls
+after SoC reset, through the complete PMU/ARMIIC/N88 polling transport. It uses
+prepared mid-function context and already-owned locks; it does not execute
+complete kernel driver initialization. All firmware code remains unchanged.
+
+All 79 strict and 74 shipping tests pass. Inherited firmware checks retain
+their earlier input boundaries. The separate prepared kernel trace is byte
+identical at its 182,680,916-step GPIO stop. A connected bootloader-to-kernel
+handoff and SpringBoard remain unproven.
 
 ## Five UART ports and original interrupt delivery
 
@@ -495,7 +537,7 @@ stops at unprepared GPIO state.
 
 ## Explicit D1755 clock endpoint
 
-The optional PMU endpoint handles only I2C0 address `0x74`, with exact
+The optional PMU RTC endpoint handles only I2C0 address `0x74`, with exact
 four-byte little-endian reads at `0x4c` (raw counter) and `0x64` (offset),
 and four-byte offset writes at `0x64`. The matching `AppleD1755PMU` and
 `AppleD1755PMURTC` consumers establish these transfers. Older PMU layouts

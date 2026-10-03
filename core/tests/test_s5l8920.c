@@ -1370,6 +1370,70 @@ static uint32_t pmu_read_result(s5l8920_t *m) {
     return result;
 }
 
+static void test_pmu_control(s5l8920_t *m) {
+    s5l8920_t empty={0};static s5l8920_t before;
+    CHECK(!s5l8920_pmu_control_configure(NULL,0u) && !s5l8920_pmu_control_configure(&empty,0u) &&
+          !s5l8920_pmu_control_service(NULL,0u) && !s5l8920_pmu_control_service(&empty,0u),"invalid PMU control object");
+    CHECK(s5l8920_reset(m) && !m->pmu_control_configured,"unconfigured PMU control reset");
+    uint64_t seq=pmu_request(m,0x74u,0x0du,false,1u,0u);
+    memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_control_configure(m,0xa5u) && !s5l8920_pmu_control_service(m,seq) &&
+          !memcmp(&before,m,sizeof before),"missing input or busy configure changed state");
+    uint8_t sample=0x53u;
+    CHECK(s5l8920_i2c_complete(m,0u,seq,true,&sample,1u) &&
+          !s5l8920_pmu_control_configure(m,0xa5u),"pending status allowed first configuration");
+    m->bus.write32(m,S5L8920_I2C_BASE+12u,0x10u);
+    CHECK(!s5l8920_pmu_control_configure(m,0xa5u),"unread data allowed first configuration");
+    CHECK(m->bus.read32(m,S5L8920_I2C_BASE+32u)==sample,"explicit response consumed");
+    (void)m->bus.read32(m,0u);
+    s5l8920_bus_failure_t diagnostic=m->bus_failure;arm_cpu_t cpu=m->cpu;
+    CHECK(s5l8920_pmu_control_configure(m,0xa5u) && m->pmu_control_value==0xa5u &&
+          !memcmp(&cpu,&m->cpu,sizeof cpu) && !memcmp(&diagnostic,&m->bus_failure,sizeof diagnostic),
+          "configure changed CPU/diagnostic or supplied wrong byte");
+    s5l8920_clear_bus_failure(m);
+    for (unsigned n=0;n<3u;n++) {
+        uint8_t value=n==2u?0xa5u:0xb5u;
+        seq=pmu_request(m,0x74u,0x0du,true,1u,value);
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_control_service(m,seq-1u) && !s5l8920_pmu_control_service(m,seq+1u) &&
+              s5l8920_pmu_control_configure(m,0xa5u) && !s5l8920_pmu_control_configure(m,0xb5u) &&
+              !memcmp(&before,m,sizeof before),"stale sequence/reconfiguration changed pending control write");
+        vic_write(m,0u,PL192_INTENABLE,1u<<19);
+        cpu=m->cpu;cpu.irq_line=true;
+        CHECK(s5l8920_pmu_control_service(m,seq) && m->pmu_control_value==value &&
+              m->i2c[0].status==0x10u && !memcmp(&cpu,&m->cpu,sizeof cpu),"control write/IRQ/CPU state");
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_control_service(m,seq) && !memcmp(&before,m,sizeof before),"duplicate service mutated state");
+        m->bus.write32(m,S5L8920_I2C_BASE+12u,0x10u);
+        CHECK(!m->cpu.irq_line,"control write IRQ acknowledgement");
+        seq=pmu_request(m,0x74u,0x0du,false,1u,0u);
+        CHECK(!s5l8920_pmu_rtc_service(m,seq) && s5l8920_pmu_control_service(m,seq),"endpoint isolation/readback");
+        CHECK(m->bus.read8(m,S5L8920_I2C_BASE+32u)==value && m->cpu.irq_line,"exact one-byte readback/status held");
+        m->bus.write32(m,S5L8920_I2C_BASE+12u,0x10u);
+        CHECK(s5l8920_reset(m) && m->pmu_control_value==value && m->pmu_control_initial==0xa5u &&
+              m->pmu_control_configured && !s5l8920_pmu_control_service(m,seq),"SoC reset changed external PMU or replayed request");
+    }
+    for (unsigned bit=0;bit<8u;bit++) if (bit!=4u) {
+        seq=pmu_request(m,0x74u,0x0du,true,1u,m->pmu_control_value^(1u<<bit));
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_control_service(m,seq) && !memcmp(&before,m,sizeof before),"unknown/power-transition bit acknowledged");
+        CHECK(s5l8920_reset(m),"discard unsupported request");
+    }
+    const unsigned requests[][3]={{0x74u,2u,1u},{0x74u,0x30u,1u},{0x74u,0x4cu,4u},
+        {0x73u,0x0du,1u},{0x74u,0x0du,2u},{0x74u,0x0cu,2u}};
+    for (unsigned n=0;n<sizeof requests/sizeof *requests;n++) for (unsigned write=0;write<2u;write++) {
+        seq=pmu_request(m,requests[n][0],requests[n][1],write!=0u,requests[n][2],0xa5a5a5a5u);
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_control_service(m,seq) && !memcmp(&before,m,sizeof before),"unsupported target/register/length acknowledged");
+        CHECK(s5l8920_reset(m),"discard unsupported transfer");
+    }
+    seq=pmu_request(m,0x74u,0x0du,true,1u,0xb5u);
+    (void)m->bus.read32(m,0u);diagnostic=m->bus_failure;
+    CHECK(s5l8920_pmu_control_service(m,seq) && m->pmu_control_value==0xb5u &&
+          !memcmp(&diagnostic,&m->bus_failure,sizeof diagnostic),"service cleared diagnostic");
+    CHECK(s5l8920_reset(m) && m->pmu_control_value==0xb5u,"final control reset");
+}
+
 static void test_pmu_rtc(s5l8920_t *m) {
     s5l8920_t empty={0};
     CHECK(!s5l8920_pmu_rtc_configure(NULL,0u,0u) && !s5l8920_pmu_rtc_configure(&empty,0u,0u) &&
@@ -2281,6 +2345,7 @@ int main(void) {
     test_i2c_bounds(&m);
     test_i2c_checked_cpu(&m);
     test_pmu_rtc(&m);
+    test_pmu_control(&m);
     test_fiq_and_reset(&m);
     test_clock_selectors(&m);
     if (!test_clock_gates(&m)) return 1;
@@ -2292,6 +2357,8 @@ int main(void) {
     test_uart_banks(&m);
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
+    CHECK(!m.pmu_control_configured && !m.pmu_control_initial && !m.pmu_control_value &&
+          !s5l8920_pmu_control_configure(&m,0u) && !s5l8920_pmu_control_service(&m,1u),"free retained PMU control");
     for (unsigned bank=0;bank<S5L8920_UART_COUNT;bank++)CHECK(!m.uart_divisor_configured[bank] &&
         !m.uart_divisor_initial[bank] && !s5l8920_uart_divisor_configure(&m,bank,0u),"free retained UART input");
     for (unsigned i=0;i<S5L8920_USB_CONTROL_COUNT;i++)CHECK(!m.usb_control[i].configured &&

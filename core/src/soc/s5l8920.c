@@ -650,6 +650,31 @@ bool s5l8920_pmu_rtc_service(s5l8920_t *m,uint64_t sequence) {
     return true;
 }
 
+bool s5l8920_pmu_control_configure(s5l8920_t *m,uint8_t initial) {
+    if (!m || !m->ram) return false;
+    if (m->pmu_control_configured) return m->pmu_control_initial==initial;
+    if (m->i2c[0].active || m->i2c[0].status || m->i2c[0].rx_cursor<m->i2c[0].rx_count)
+        return false;
+    m->pmu_control_initial=m->pmu_control_value=initial;
+    m->pmu_control_configured=true;
+    return true;
+}
+
+bool s5l8920_pmu_control_service(s5l8920_t *m,uint64_t sequence) {
+    if (!m || !m->ram || !m->pmu_control_configured) return false;
+    const s5l8920_i2c_t *i=&m->i2c[0];
+    if (!i->active || i->sequence!=sequence || i->address!=0x74u ||
+        i->subaddress!=S5L8920_PMU_CONTROL_REGISTER || i->length!=1u) return false;
+    if (i->write) {
+        uint8_t value=i->tx[0];
+        if ((value^m->pmu_control_value)&~0x10u) return false;
+        if (!s5l8920_i2c_complete(m,0u,sequence,true,NULL,0u)) return false;
+        m->pmu_control_value=value;
+        return true;
+    }
+    return s5l8920_i2c_complete(m,0u,sequence,true,&m->pmu_control_value,1u);
+}
+
 bool s5l8920_chipid_configure(s5l8920_t *m, unsigned offset, uint32_t value) {
     if (!m || !m->ram || offset>=16u || (offset&3u)) return false;
     unsigned index=offset/4u;
