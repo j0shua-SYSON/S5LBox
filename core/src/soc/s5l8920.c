@@ -675,6 +675,45 @@ bool s5l8920_pmu_control_service(s5l8920_t *m,uint64_t sequence) {
     return s5l8920_i2c_complete(m,0u,sequence,true,&m->pmu_control_value,1u);
 }
 
+bool s5l8920_pmu_adc_request(const s5l8920_t *m,s5l8920_pmu_adc_request_t *request) {
+    if (!m || !m->ram || !request || !m->pmu_adc.programmed || !(m->pmu_adc.control&0x10u))
+        return false;
+    s5l8920_pmu_adc_request_t result={0};
+    result.sequence=m->pmu_adc.sequence;result.control=m->pmu_adc.control;
+    *request=result;
+    return true;
+}
+
+bool s5l8920_pmu_adc_complete(s5l8920_t *m,uint64_t sequence,uint8_t low,uint8_t high) {
+    if (!m || !m->ram) return false;
+    s5l8920_pmu_adc_t *a=&m->pmu_adc;
+    if (!a->programmed || !(a->control&0x10u) || a->sequence!=sequence) return false;
+    a->result[0]=low;a->result[1]=high;a->result_valid=true;
+    a->control&=(uint8_t)~0x10u;
+    return true;
+}
+
+bool s5l8920_pmu_adc_service(s5l8920_t *m,uint64_t sequence) {
+    if (!m || !m->ram) return false;
+    const s5l8920_i2c_t *i=&m->i2c[0];
+    s5l8920_pmu_adc_t *a=&m->pmu_adc;
+    if (!i->active || i->sequence!=sequence || i->address!=0x74u) return false;
+    if (i->subaddress==S5L8920_PMU_ADC_CONTROL && i->length==1u) {
+        if (!i->write) return a->programmed &&
+            s5l8920_i2c_complete(m,0u,sequence,true,&a->control,1u);
+        uint8_t value=i->tx[0];
+        bool start=(value&0x10u)!=0u;
+        if ((value&0x40u) || (start && ((a->control&0x10u) || a->sequence==UINT64_MAX))) return false;
+        if (!s5l8920_i2c_complete(m,0u,sequence,true,NULL,0u)) return false;
+        a->control=value;a->programmed=true;a->result_valid=false;
+        if (start) a->sequence++;
+        return true;
+    }
+    if (i->subaddress==0x31u && i->length==2u && !i->write && a->result_valid)
+        return s5l8920_i2c_complete(m,0u,sequence,true,a->result,2u);
+    return false;
+}
+
 bool s5l8920_chipid_configure(s5l8920_t *m, unsigned offset, uint32_t value) {
     if (!m || !m->ram || offset>=16u || (offset&3u)) return false;
     unsigned index=offset/4u;

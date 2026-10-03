@@ -40,6 +40,7 @@
 #define S5L8920_I2C_CAPACITY 128u
 #define S5L8920_I2C0_IRQ 19u /* Consecutive banks use sources 19, 18, 17. */
 #define S5L8920_PMU_CONTROL_REGISTER 0x0du
+#define S5L8920_PMU_ADC_CONTROL 0x30u
 #define S5L8920_CHIPID_BASE UINT32_C(0xbf500000)
 #define S5L8920_CLOCK_GATE_BASE UINT32_C(0xbf100078)
 #define S5L8920_CLOCK_GATE_COUNT 52u
@@ -116,6 +117,17 @@ typedef struct {
     bool configured;
 } s5l8920_usb_control_t;
 
+typedef struct {
+    uint64_t sequence;
+    uint8_t control, result[2];
+    bool programmed, result_valid;
+} s5l8920_pmu_adc_t;
+
+typedef struct {
+    uint64_t sequence;
+    uint8_t control; /* Channel bits0..3, start bit4, mode bit5, config bit7. */
+} s5l8920_pmu_adc_request_t;
+
 typedef enum {
     S5L8920_BUS_OK = 0,
     S5L8920_BUS_UNMAPPED,
@@ -160,6 +172,7 @@ typedef struct {
     bool uart_divisor_configured[S5L8920_UART_COUNT];
     bool pmu_control_configured;
     uint8_t pmu_control_initial, pmu_control_value;
+    s5l8920_pmu_adc_t pmu_adc;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -313,6 +326,23 @@ bool s5l8920_pmu_rtc_service(s5l8920_t *m, uint64_t sequence);
  * registers and latched diagnostics; service may change the I2C IRQ level. */
 bool s5l8920_pmu_control_configure(s5l8920_t *m, uint8_t initial);
 bool s5l8920_pmu_control_service(s5l8920_t *m, uint64_t sequence);
+
+/* D1755 ADC endpoint on I2C0/74: exact byte control30 read/write and two-byte
+ * result31/32 read. Guest programming establishes control; bit6 is unsupported.
+ * A start write creates a conversion token; another start while busy refuses.
+ * A write without start cancels it. Every accepted control write invalidates
+ * the old result. Reads never advance a conversion. Only explicit completion
+ * with the current token supplies both raw bytes and clears busy. Consumers
+ * decode (low & 3) | (high << 2); upper low-byte bits are supplied, not invented.
+ * No analog values, calibration, timing or PMU event-register/IRQ delivery are
+ * inferred. The latter remains necessary for the kernel's interrupt wait.
+ * Functional SoC reset retains the external PMU state/token, cancelling only
+ * controller transactions. Free/init invalidates it. Tokens never wrap.
+ * Call between CPU steps. Failures preserve state and request output. Valid
+ * events preserve CPU/diagnostics; servicing I2C can change its IRQ level. */
+bool s5l8920_pmu_adc_service(s5l8920_t *m, uint64_t sequence);
+bool s5l8920_pmu_adc_request(const s5l8920_t *m, s5l8920_pmu_adc_request_t *request);
+bool s5l8920_pmu_adc_complete(s5l8920_t *m, uint64_t sequence, uint8_t low, uint8_t high);
 
 /* Supply one immutable identification word at offset0/4/8/12. Only aligned
  * word reads in this 16-byte span are modeled; each requires its own explicit

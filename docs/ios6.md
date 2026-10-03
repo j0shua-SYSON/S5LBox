@@ -3,7 +3,7 @@
 The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
 a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
 interrupt fabric, UART, timebase counter, deadline timer, GPIO, I2C and
-bounded PMU clock/control endpoints, explicitly configured identification words and
+bounded PMU clock/control/ADC endpoints, explicitly configured identification words and
 partial clock-gate/selector programming, a PLL model with explicit clock inputs,
 and bounded POWERID software-cache fields. Inactive GPIO data readback can
 be supplied explicitly, separately from live pin samples. MIU control can
@@ -16,6 +16,43 @@ events. Automatic transmit flow control requires an explicit CTS observation.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## D1755 ADC requests and supplied conversion results
+
+The ADC endpoint accepts exact one-byte control accesses at I2C0 address
+`0x74`, register `0x30`, and two-byte result reads at `0x31`. Guest programming
+establishes control; there is no assumed initial value or analog input. Bit 4
+starts a conversion and stays busy until a matching explicit completion supplies
+both raw result bytes. The original consumers decode `(low & 3) | (high << 2)`;
+the unused upper bits of the low byte are retained exactly as supplied.
+The request exposes the channel and mode through the original control byte.
+Bit 6 and unrelated registers remain unsupported.
+
+Busy conversions cannot be replaced by another start. Clearing start cancels
+the request; accepted control programming invalidates the previous result.
+Tokens reject stale/duplicate completions and never wrap. Functional SoC reset
+preserves this external PMU domain while cancelling I2C traffic. This is an
+explicit reset policy, not measured power sequencing. No conversion duration,
+voltage, calibration or PMU event interrupt is inferred.
+
+The unchanged connected LLB now completes control write/read verification at
+instruction 881,952, using five actual CPU interrupts across the initial PMU
+observation and modeled transactions. Its next pending request is a one-byte
+write to register `0x24`. No conversion result is supplied in this trace.
+
+A separate witness calls the complete original ADC routine at `0x84001e10`
+from prepared context after the real bootloader setup. All 16 channel values
+return the supplied results through the original I2C interrupt path, including
+zero, maximum and arbitrary raw result bits. Channel 3 executes its original
+`0xa3` preparation, delay and `0xb3` start. Completion follows zero, one or two
+busy polls. Withheld completion reaches the original timeout formatter and
+failure return, preserving the output canary; withheld time never returns.
+Firmware code is unchanged. The witness supplies a logical clock schedule,
+not measured timing, and does not represent connected boot continuation.
+
+The matching kernel uses the same result format but waits on a PMU interrupt
+instead of polling the control byte. That event-register and interrupt path,
+the subsequent PMU initialization registers and complete boot remain missing.
 
 ## I2C pin initialization and D1755 control readback
 
@@ -47,7 +84,8 @@ This reset policy is explicit, not a measurement of backup-power behavior.
 The original LLB writes zero, separately reads it back and verifies equality
 at instruction 870,290. Three actual CPU interrupts handle the initial observed
 byte and two modeled control transactions. The next request writes `0x80` to
-PMU register `0x30` and remains pending. Withheld control input or an unsupported
+PMU register `0x30` and remains pending when ADC service is withheld.
+Withheld control input or an unsupported
 change retains the earlier request. A separate 16-case kernel witness executes
 the original bit-4 update with eight initial bytes, including repeated calls
 after SoC reset, through the complete PMU/ARMIIC/N88 polling transport. It uses

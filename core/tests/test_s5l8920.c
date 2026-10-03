@@ -1370,6 +1370,109 @@ static uint32_t pmu_read_result(s5l8920_t *m) {
     return result;
 }
 
+static unsigned adc_read_result(s5l8920_t *m,unsigned length) {
+    unsigned value=0u;
+    for (unsigned n=0;n<length;n++) value|=m->bus.read32(m,S5L8920_I2C_BASE+32u)<<(8u*n);
+    CHECK(m->i2c[0].status==0x10u,"ADC response lost completion status");
+    m->bus.write32(m,S5L8920_I2C_BASE+12u,0x10u);
+    return value;
+}
+
+static void test_pmu_adc(s5l8920_t *m) {
+    static s5l8920_t before;
+    s5l8920_t empty={0};s5l8920_pmu_adc_request_t request,canary;
+    memset(&request,0xa5,sizeof request);memcpy(&canary,&request,sizeof canary);
+    CHECK(!s5l8920_pmu_adc_request(NULL,&request) && !s5l8920_pmu_adc_request(&empty,&request) &&
+          !s5l8920_pmu_adc_request(m,NULL) && !s5l8920_pmu_adc_complete(NULL,0u,0u,0u) &&
+          !s5l8920_pmu_adc_complete(&empty,0u,0u,0u) && !s5l8920_pmu_adc_service(NULL,0u) &&
+          !s5l8920_pmu_adc_service(&empty,0u) && !memcmp(&request,&canary,sizeof request),"invalid ADC objects/output");
+    CHECK(s5l8920_reset(m) && !m->pmu_adc.programmed && !m->pmu_adc.result_valid,"invented ADC initial state");
+    uint64_t seq=pmu_request(m,0x74u,0x30u,false,1u,0u);
+    memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_adc_service(m,seq) && !s5l8920_pmu_adc_request(m,&request) &&
+          !s5l8920_pmu_adc_complete(m,0u,1u,2u) && !memcmp(&before,m,sizeof before) &&
+          !memcmp(&request,&canary,sizeof request),"unprogrammed ADC supplied state");
+    CHECK(s5l8920_reset(m),"discard unprogrammed control read");
+    uint64_t previous=0u;
+    for (unsigned mode=0;mode<4u;mode++) for (unsigned ch=0;ch<16u;ch++) {
+        unsigned control=ch|((mode&1u)?0x20u:0u)|((mode&2u)?0x80u:0u);
+        seq=pmu_request(m,0x74u,0x30u,true,1u,control);
+        CHECK(s5l8920_pmu_adc_service(m,seq) && m->pmu_adc.control==control &&
+              !m->pmu_adc.result_valid && !s5l8920_pmu_adc_request(m,&request),"ADC nonbusy programming");
+        seq=pmu_request(m,0x74u,0x30u,false,1u,0u);
+        CHECK(s5l8920_pmu_adc_service(m,seq) && adc_read_result(m,1u)==control,"ADC control readback");
+        seq=pmu_request(m,0x74u,0x30u,true,1u,control|0x10u);
+        vic_write(m,0u,PL192_INTENABLE,1u<<19);
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_adc_service(m,seq-1u) && !s5l8920_pmu_adc_service(m,seq+1u) &&
+              !s5l8920_pmu_control_service(m,seq) && !s5l8920_pmu_rtc_service(m,seq) &&
+              !memcmp(&before,m,sizeof before),"ADC transaction identity/endpoint isolation");
+        CHECK(s5l8920_pmu_adc_service(m,seq) && m->cpu.irq_line &&
+              s5l8920_pmu_adc_request(m,&request) && request.control==(control|0x10u) &&
+              request.sequence>previous,"ADC start/token/IRQ");
+        uint64_t token=request.sequence;previous=token;
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_adc_service(m,seq) && !s5l8920_pmu_adc_complete(m,token-1u,0u,0u) &&
+              !s5l8920_pmu_adc_complete(m,token+1u,0u,0u) && !memcmp(&before,m,sizeof before),"ADC stale/duplicate changed state");
+        for (unsigned poll=0;poll<3u;poll++) {
+            CHECK(s5l8920_timebase_clock(m,1000000u),"advance unrelated clock");
+            seq=pmu_request(m,0x74u,0x30u,false,1u,0u);
+            CHECK(s5l8920_pmu_adc_service(m,seq) && adc_read_result(m,1u)==(control|0x10u) &&
+                  !m->pmu_adc.result_valid && s5l8920_pmu_adc_request(m,&request) &&
+                  request.sequence==token,"poll/time invented conversion completion");
+        }
+        seq=pmu_request(m,0x74u,0x30u,true,1u,control|0x10u);
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_adc_service(m,seq) && !memcmp(&before,m,sizeof before),"busy conversion overwritten");
+        CHECK(s5l8920_reset(m) && s5l8920_pmu_adc_request(m,&request) && request.sequence==token &&
+              !s5l8920_pmu_adc_service(m,seq),"SoC reset lost external conversion or replayed I2C");
+        seq=pmu_request(m,0x74u,0x31u,false,2u,0u);
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_adc_service(m,seq) && !memcmp(&before,m,sizeof before),"result supplied before completion");
+        uint8_t low=(uint8_t)(0xbcu|ch),high=(uint8_t)(mode*64u+ch*3u);
+        arm_cpu_t cpu=m->cpu;s5l8920_bus_failure_t diagnostic=m->bus_failure;
+        CHECK(s5l8920_pmu_adc_complete(m,token,low,high) && m->pmu_adc.control==control &&
+              m->pmu_adc.result_valid && !memcmp(&cpu,&m->cpu,sizeof cpu) &&
+              !memcmp(&diagnostic,&m->bus_failure,sizeof diagnostic),"conversion completion/CPU preservation");
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_adc_complete(m,token,0u,0u) && !s5l8920_pmu_adc_request(m,&request) &&
+              !memcmp(&before,m,sizeof before),"duplicate conversion accepted");
+        CHECK(s5l8920_pmu_adc_service(m,seq) && adc_read_result(m,2u)==(unsigned)(low|((unsigned)high<<8)),"raw result bits/order");
+        CHECK(s5l8920_reset(m) && m->pmu_adc.result_valid,"SoC reset lost external result");
+        seq=pmu_request(m,0x74u,0x31u,false,2u,0u);
+        CHECK(s5l8920_pmu_adc_service(m,seq) && adc_read_result(m,2u)==(unsigned)(low|((unsigned)high<<8)),"result retention/read consumed latch");
+    }
+    seq=pmu_request(m,0x74u,0x30u,true,1u,0x93u);
+    CHECK(s5l8920_pmu_adc_service(m,seq) && s5l8920_pmu_adc_request(m,&request),"cancellation start");
+    uint64_t cancelled=request.sequence;
+    seq=pmu_request(m,0x74u,0x30u,true,1u,0x83u);
+    CHECK(s5l8920_pmu_adc_service(m,seq) && !s5l8920_pmu_adc_request(m,&request) &&
+          !m->pmu_adc.result_valid,"cancellation did not invalidate conversion/result");
+    memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_adc_complete(m,cancelled,0u,0u) && !memcmp(&before,m,sizeof before),"cancelled result accepted");
+    seq=pmu_request(m,0x74u,0x30u,true,1u,0xb3u);
+    CHECK(s5l8920_pmu_adc_service(m,seq) && s5l8920_pmu_adc_request(m,&request) && request.sequence>cancelled,"cancelled token reused");
+    (void)m->bus.read32(m,0u);s5l8920_bus_failure_t diagnostic=m->bus_failure;
+    CHECK(diagnostic.reason && s5l8920_pmu_adc_complete(m,request.sequence,255u,255u) &&
+          !memcmp(&diagnostic,&m->bus_failure,sizeof diagnostic),"completion repaired latched bus diagnostic");
+    CHECK(s5l8920_reset(m),"clear diagnostic for refusal tests");
+    const unsigned unsupported[][4]={{0x75u,0x30u,1u,0u},{0x74u,0x2fu,1u,0u},{0x74u,0x32u,1u,0u},
+        {0x74u,0x30u,2u,0u},{0x74u,0x31u,1u,0u},{0x74u,0x31u,3u,0u},
+        {0x74u,0x31u,2u,1u},{0x74u,0x30u,1u,1u}};
+    for (unsigned n=0;n<sizeof unsupported/sizeof unsupported[0];n++) {
+        seq=pmu_request(m,unsupported[n][0],unsupported[n][1],unsupported[n][3]!=0u,unsupported[n][2],0x40u);
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_adc_service(m,seq) && !memcmp(&before,m,sizeof before),"unsupported ADC request acknowledged");
+        CHECK(s5l8920_reset(m),"cancel unsupported transfer");
+    }
+    seq=pmu_request(m,0x74u,0x30u,true,1u,0x80u);
+    CHECK(s5l8920_pmu_adc_service(m,seq) && !m->pmu_adc.result_valid,"configuration retained stale result observation");
+    m->pmu_adc.sequence=UINT64_MAX;
+    seq=pmu_request(m,0x74u,0x30u,true,1u,0x90u);memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_adc_service(m,seq) && !memcmp(&before,m,sizeof before),"conversion token wrapped");
+    CHECK(s5l8920_reset(m) && m->pmu_adc.sequence==UINT64_MAX,"reset reused exhausted token");
+}
+
 static void test_pmu_control(s5l8920_t *m) {
     s5l8920_t empty={0};static s5l8920_t before;
     CHECK(!s5l8920_pmu_control_configure(NULL,0u) && !s5l8920_pmu_control_configure(&empty,0u) &&
@@ -2345,6 +2448,7 @@ int main(void) {
     test_i2c_bounds(&m);
     test_i2c_checked_cpu(&m);
     test_pmu_rtc(&m);
+    test_pmu_adc(&m);
     test_pmu_control(&m);
     test_fiq_and_reset(&m);
     test_clock_selectors(&m);
@@ -2357,6 +2461,8 @@ int main(void) {
     test_uart_banks(&m);
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
+    CHECK(!m.pmu_adc.programmed && !m.pmu_adc.result_valid && !m.pmu_adc.sequence &&
+          !s5l8920_pmu_adc_service(&m,1u) && !s5l8920_pmu_adc_complete(&m,1u,0u,0u),"free retained ADC state");
     CHECK(!m.pmu_control_configured && !m.pmu_control_initial && !m.pmu_control_value &&
           !s5l8920_pmu_control_configure(&m,0u) && !s5l8920_pmu_control_service(&m,1u),"free retained PMU control");
     for (unsigned bank=0;bank<S5L8920_UART_COUNT;bank++)CHECK(!m.uart_divisor_configured[bank] &&
