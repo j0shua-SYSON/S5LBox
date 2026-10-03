@@ -4,10 +4,40 @@ The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
 a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
 interrupt fabric, UART, timebase counter, deadline timer, GPIO, I2C and a
 bounded PMU clock endpoint, explicitly configured identification words and
-partial clock-gate programming.
+partial clock-gate and clock-selector programming.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## Bounded clock-selector programming
+
+The 25 aligned selector words at `0xbf100010..0xbf100070` retain accepted
+guest programming. Reads before a guest write remain checked failures.
+Ordinary selectors accept bits 0 through 11; selector 10 also accepts
+bits 16 through 23, and selector 15 accepts bits 0 through 19. Unknown
+bits, other widths and misalignment refuse atomically. Functional reset
+invalidates all selector programming, and free/init clears it.
+
+The matching LLB writes the initial table at `0x84011a7c`, which agrees
+with the pinned S5L8920 source, and later selects final divisors from
+`0x84011a18`. The original iBoot reader at `0x4ff13b40` consumes these
+fields. The matching kernel performance controller saves all 25 words at
+`0x80788e3c..0x80788e8a` and restores them with selected low-byte changes
+at `0x8078a006..0x8078a056`. This supports retaining a bounded configuration
+image. Firmware-written bits 11 and 19 are retained without interpreting
+them as ready, busy or lock indicators. Physical update timing, output
+clocks and PLL state remain unmodeled; the three PLL words still refuse.
+
+With the same explicit chip-ID and gate inputs described below, all four
+original LLB entry runs now complete 52 gate writes and 25 selector writes.
+They stop at the first PLL read, `0xbf100004` at Thumb `0x84008916`, after
+19,099 steps and 19,098 retired instructions. Code bytes remain unchanged.
+The private iBoot witness also passes 12 reader/math/device-tree-copy cases
+using actual board selector reads, two initial-memory patterns and six copy
+bounds. Its three PLL values remain explicit diagnostic inputs; its 28-word
+frequency oracle is unchanged. These checks establish neither PLL operation
+nor a connected bootloader handoff. The separate full kernel GPIO stop
+remains unchanged.
 
 ## Bounded clock-gate programming
 
@@ -33,8 +63,9 @@ across all gates, four raw input patterns and four on/off arguments, plus
 With explicit initial gate words of either `0` or `0xf`, and either tested
 chip-ID bit-8 input, the unchanged original LLB completes all 52 gate writes.
 It selects gates 0, 24, 36, 37, 44 and 49 and clears the others. All four runs
-then stop at the first dynamic-clock selector write: `0xb00` to `0xbf100070`
+initially stopped at the first dynamic-clock selector write: `0xb00` to `0xbf100070`
 at Thumb `0x84008904`, after 18,756 steps and 18,755 retired instructions.
+The selector implementation above advances these runs to the first PLL read.
 The initial inputs remain diagnostic configurations, not measured reset
 state. Leaving gate inputs absent preserves the earlier 17,032-step stop;
 the full kernel's separate GPIO stop also remains unchanged.

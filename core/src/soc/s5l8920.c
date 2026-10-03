@@ -218,6 +218,10 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         else if (offset==S5L8920_TIMEBASE_HIGH) return (uint32_t)(m->timebase_ticks>>32);
         else if (offset==S5L8920_DEADLINE_COUNT && m->deadline.programmed && !m->deadline.expired)
             return m->deadline.remaining;
+        else if (address>=S5L8920_CLOCK_SELECT_BASE &&
+                 address-S5L8920_CLOCK_SELECT_BASE<4u*S5L8920_CLOCK_SELECT_COUNT &&
+                 m->clock_selector[(address-S5L8920_CLOCK_SELECT_BASE)/4u].programmed)
+            return m->clock_selector[(address-S5L8920_CLOCK_SELECT_BASE)/4u].value;
         else if (address>=S5L8920_CLOCK_GATE_BASE &&
                  address-S5L8920_CLOCK_GATE_BASE<4u*S5L8920_CLOCK_GATE_COUNT &&
                  m->clock_gate[(address-S5L8920_CLOCK_GATE_BASE)/4u].configured)
@@ -293,6 +297,15 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         offset=address-S5L8920_PMGR_BASE;
         if (size!=4u || (offset&3u)) {
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        } else if (address>=S5L8920_CLOCK_SELECT_BASE &&
+                   address-S5L8920_CLOCK_SELECT_BASE<4u*S5L8920_CLOCK_SELECT_COUNT) {
+            unsigned index=(address-S5L8920_CLOCK_SELECT_BASE)/4u;
+            uint32_t mask=index==15u ? 0xfffffu : (index==10u ? 0xff0fffu : 0xfffu);
+            if (value&~mask) fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+            else {
+                m->clock_selector[index].value=value;
+                m->clock_selector[index].programmed=true;
+            }
         } else if (address>=S5L8920_CLOCK_GATE_BASE &&
                    address-S5L8920_CLOCK_GATE_BASE<4u*S5L8920_CLOCK_GATE_COUNT) {
             s5l8920_clock_gate_t *gate=&m->clock_gate[(address-S5L8920_CLOCK_GATE_BASE)/4u];
@@ -536,6 +549,7 @@ bool s5l8920_reset(s5l8920_t *m) {
     memset(&m->deadline,0,sizeof m->deadline);
     for (unsigned gate=0;gate<S5L8920_CLOCK_GATE_COUNT;gate++)
         m->clock_gate[gate].value=m->clock_gate[gate].initial;
+    memset(m->clock_selector,0,sizeof m->clock_selector);
     for (unsigned bus=0;bus<S5L8920_I2C_COUNT;bus++) {
         uint64_t sequence=m->i2c[bus].sequence;
         memset(&m->i2c[bus],0,sizeof m->i2c[bus]);

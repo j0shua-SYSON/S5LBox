@@ -40,6 +40,8 @@
 #define S5L8920_CHIPID_BASE UINT32_C(0xbf500000)
 #define S5L8920_CLOCK_GATE_BASE UINT32_C(0xbf100078)
 #define S5L8920_CLOCK_GATE_COUNT 52u
+#define S5L8920_CLOCK_SELECT_BASE UINT32_C(0xbf100010)
+#define S5L8920_CLOCK_SELECT_COUNT 25u
 
 typedef struct {
     uint64_t sequence;
@@ -70,6 +72,17 @@ typedef struct {
     uint32_t initial, value;
     bool configured;
 } s5l8920_clock_gate_t;
+
+/* The 25 clock selectors accept aligned word programming before readback.
+ * Ordinary configuration fields occupy bits0..11; index10 also uses16..23,
+ * and index15 uses0..19. Other bits/access widths refuse atomically. The
+ * firmware-written fields are retained as a logical configuration image,
+ * not ready/busy/lock status. No reset values, output clocks, transient
+ * update timing or PLL state are inferred. Reset invalidates programming. */
+typedef struct {
+    uint32_t value;
+    bool programmed;
+} s5l8920_clock_selector_t;
 
 typedef enum {
     S5L8920_BUS_OK = 0,
@@ -105,6 +118,7 @@ typedef struct {
     uint32_t chipid_words[4];
     uint8_t chipid_configured;
     s5l8920_clock_gate_t clock_gate[S5L8920_CLOCK_GATE_COUNT];
+    s5l8920_clock_selector_t clock_selector[S5L8920_CLOCK_SELECT_COUNT];
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -118,7 +132,8 @@ void s5l8920_free(s5l8920_t *m);
 /* Reset CPU/controller/UART/timer/I2C state and clear diagnostics, preserving RAM
  * and externally supplied interrupt levels/GPIO samples and configured PMU
  * clock/offset state and explicitly configured identification words. Gate controls
- * return to their supplied initial words. GPIO programming is invalidated.
+ * return to their supplied initial words. GPIO and clock-selector programming
+ * are invalidated.
  * This is a functional reset, not a
  * model of power sequencing. The caller owns execution and device timing. */
 bool s5l8920_reset(s5l8920_t *m);

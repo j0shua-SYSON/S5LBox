@@ -1441,6 +1441,81 @@ static void test_pmu_rtc(s5l8920_t *m) {
     CHECK(s5l8920_reset(m),"PMU final reset");
 }
 
+static void test_clock_selectors(s5l8920_t *m) {
+    CHECK(s5l8920_reset(m),"selector initial reset");
+    for (unsigned index=0;index<S5L8920_CLOCK_SELECT_COUNT;index++) {
+        uint32_t address=S5L8920_CLOCK_SELECT_BASE+4u*index;
+        uint32_t mask=index==15u?0xfffffu:(index==10u?0xff0fffu:0xfffu);
+        s5l8920_clear_bus_failure(m);(void)m->bus.read32(m,address);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+              !m->clock_selector[index].programmed,"invented selector reset value");
+        m->bus.write32(m,address,mask);
+        CHECK(!m->clock_selector[index].programmed,"latched access allowed selector mutation");
+        for (unsigned bit=0;bit<32u;bit++) {
+            uint32_t value=1u<<bit,previous=m->clock_selector[index].value;
+            bool programmed=m->clock_selector[index].programmed;
+            s5l8920_clear_bus_failure(m);m->bus.write32(m,address,value);
+            if (value&mask) {
+                CHECK(!m->bus_failure.reason && m->clock_selector[index].programmed &&
+                      m->bus.read32(m,address)==value,"supported selector field not retained");
+            } else CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+                         m->clock_selector[index].value==previous &&
+                         m->clock_selector[index].programmed==programmed,"unknown selector bit changed state");
+        }
+        for (unsigned zero=0;zero<2u;zero++) {
+            uint32_t value=zero?0u:mask;
+            s5l8920_clear_bus_failure(m);m->bus.write32(m,address,value);
+            CHECK(!m->bus_failure.reason && m->bus.read32(m,address)==value &&
+                  m->clock_selector[index].programmed,"explicit selector zero/full fields");
+        }
+        for (unsigned later=index+1u;later<S5L8920_CLOCK_SELECT_COUNT;later++)
+            CHECK(!m->clock_selector[later].programmed,"selector write invented neighboring state");
+    }
+    for (unsigned offset=0;offset<4u*S5L8920_CLOCK_SELECT_COUNT;offset++) for (unsigned kind=0;kind<6u;kind++) {
+        uint32_t address=S5L8920_CLOCK_SELECT_BASE+offset;
+        s5l8920_clock_selector_t before[S5L8920_CLOCK_SELECT_COUNT];
+        memcpy(before,m->clock_selector,sizeof before);s5l8920_clear_bus_failure(m);
+        if (kind==0u) (void)m->bus.read8(m,address);
+        else if (kind==1u) (void)m->bus.read16(m,address);
+        else if (kind==2u) (void)m->bus.read32(m,address);
+        else if (kind==3u) m->bus.write8(m,address,0u);
+        else if (kind==4u) m->bus.write16(m,address,0u);
+        else m->bus.write32(m,address,0u);
+        CHECK(m->bus_failure.reason==((kind%3u==2u && !(offset&3u))?S5L8920_BUS_OK:S5L8920_BUS_ACCESS_UNIMPLEMENTED) &&
+              !memcmp(before,m->clock_selector,sizeof before),"selector width/alignment changed state");
+    }
+    for (unsigned side=0;side<2u;side++) {
+        uint32_t address=side?S5L8920_CLOCK_SELECT_BASE+100u:S5L8920_CLOCK_SELECT_BASE-4u;
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,address,0u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"selector span invaded unknown PMGR");
+    }
+    CHECK(!m->bus.host_ram(m,S5L8920_CLOCK_SELECT_BASE,4u) &&
+          !m->bus.host_ram_write(m,S5L8920_CLOCK_SELECT_BASE,4u),"selector exposed as RAM");
+    CHECK(s5l8920_reset(m),"selector reset");
+    for (unsigned index=0;index<S5L8920_CLOCK_SELECT_COUNT;index++) {
+        CHECK(!m->clock_selector[index].programmed,"reset retained selector programming");
+        s5l8920_clear_bus_failure(m);(void)m->bus.read32(m,S5L8920_CLOCK_SELECT_BASE+4u*index);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"reset selector read supplied a value");
+    }
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned write=0;write<2u;write++) {
+        CHECK(s5l8920_reset(m),"selector CPU reset");
+        put(m,0x100u,thumb?(write?0x0000f8c1u:0x0000f8d1u):(write?0xe5810000u:0xe5910000u));
+        m->cpu.r[0]=0x1000u;m->cpu.r[1]=S5L8920_CLOCK_SELECT_BASE;
+        m->cpu.r[15]=S5L8920_RAM_BASE+0x100u;
+        m->cpu.cpsr=ARM_MODE_SVC|ARM_CPSR_I|ARM_CPSR_F|ARM_CPSR_C|(thumb?ARM_CPSR_T:0u);
+        uint32_t flags=m->cpu.cpsr,pc=m->cpu.r[15];
+        CHECK(arm_step(&m->cpu)==ARM_HALT && !m->cpu.cycles && m->cpu.r[15]==pc &&
+              m->cpu.r[0]==0x1000u && m->cpu.cpsr==flags &&
+              m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !m->clock_selector[0].programmed,
+              "refused selector CPU access retired");
+        s5l8920_clear_bus_failure(m);
+        if (write) m->cpu.r[0]=0xb03u;else m->bus.write32(m,S5L8920_CLOCK_SELECT_BASE,0xb03u);
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.cycles==1u && m->cpu.r[15]==pc+4u &&
+              m->cpu.r[0]==0xb03u && m->cpu.cpsr==flags && !m->bus_failure.reason &&
+              m->clock_selector[0].programmed && m->clock_selector[0].value==0xb03u,"selector CPU retry");
+    }
+}
+
 static bool test_clock_gates(s5l8920_t *m) {
     static s5l8920_t empty, before;
     CHECK(!s5l8920_clock_gate_configure(NULL,0u,0u) &&
@@ -1647,10 +1722,13 @@ int main(void) {
     test_i2c_checked_cpu(&m);
     test_pmu_rtc(&m);
     test_fiq_and_reset(&m);
+    test_clock_selectors(&m);
     if (!test_clock_gates(&m)) return 1;
     if (!test_chipid(&m)) return 1;
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
+    CHECK(!m.clock_selector[0].programmed && !m.clock_selector[24].programmed,
+          "free retained selector programming");
     CHECK(!m.chipid_configured && !m.chipid_words[0] && !m.chipid_words[3] &&
           !s5l8920_chipid_configure(&m,0u,1u),"freed board retained identification");
     CHECK(!s5l8920_timebase_clock(&m,1u) && !m.timebase_ticks, "freed board accepted timebase input");
