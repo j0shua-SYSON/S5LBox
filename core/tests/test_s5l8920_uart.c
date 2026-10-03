@@ -46,13 +46,13 @@ static void test_configuration(void) {
     CHECK(read_reg(&u,16u)==6u && read_reg(&u,24u)==0u,"functional empty UART status");
     for (uint32_t off=0;off<0x1000u;off++) {
         bool config=off==0u || off==4u || off==8u || off==12u || off==40u;
-        bool readable=config || off==16u || off==24u;
+        bool readable=config || off==16u || off==20u || off==24u;
         if (!readable) rejected_read(&u,off);
-        if (!config && off!=16u && off!=32u) rejected_write(&u,off,0u);
+        if (!config && off!=16u && off!=20u && off!=32u) rejected_write(&u,off,0u);
     }
-    const uint32_t bad[][2]={{0u,2u},{0u,7u},{0u,0x23u},{4u,2u},{4u,3u},{4u,8u},{4u,12u},
-        {4u,0x1005u},{4u,0x4405u},{4u,0x485u},{8u,0x1c1u},{8u,8u},{12u,0x10u},
-        {40u,0x90000u},{40u,0x100000u},{16u,1u},{16u,4u},{16u,0x40u},{32u,0x100u}};
+    const uint32_t bad[][2]={{0u,2u},{0u,0xbu},{0u,0x23u},{4u,2u},{4u,3u},{4u,8u},{4u,12u},
+        {4u,0x8005u},{4u,0x10005u},{4u,0x605u},{8u,0x1c1u},{8u,8u},{12u,0x20u},
+        {40u,0x90000u},{40u,0x100000u},{16u,0x80u},{16u,0x100u},{20u,1u},{32u,0x100u}};
     for (unsigned n=0;n<sizeof bad/sizeof bad[0];n++) rejected_write(&u,bad[n][0],bad[n][1]);
     for (unsigned field=0;field<=8u;field++) {
         CHECK(s5l8920_uart_write(&u,40u,(field<<16)|0xffffu),"supported sample rate/divider limit");
@@ -126,8 +126,9 @@ static void test_channel_gates_and_partition(void) {
         CHECK(s5l8920_uart_write(&u,32u,0xffu)==((c&2u)!=0u),"transmit gate");
         if (!(c&2u)) {
             CHECK(s5l8920_uart_write(&u,8u,0u),"disable idle FIFO");
-            rejected_read(&u,16u); rejected_write(&u,32u,0u);
-            CHECK(!s5l8920_uart_receive(&u,0u),"unsupported non-FIFO receive");
+            CHECK((read_reg(&u,16u)&6u)==6u,"idle non-FIFO live status");
+            rejected_read(&u,24u); rejected_write(&u,32u,0u);
+            CHECK(!s5l8920_uart_receive(&u,0u),"disabled or full non-FIFO receive accepted");
         }
     }
     s5l8920_uart_t whole,parts; configure(&whole,0x405u,0x80019u);
@@ -159,7 +160,7 @@ static void test_transmit_interrupt(void) {
           (u.pending&0x20u) && u.tx_remaining==remaining,"active masking cleared cause or changed frame");
     CHECK(s5l8920_uart_write(&u,4u,0x2405u) && s5l8920_uart_irq(&u) && u.tx_remaining==remaining,
           "pending cause did not reassert on active enable");
-    rejected_write(&u,4u,0x2401u); rejected_write(&u,4u,0x2005u); rejected_write(&u,4u,0x3405u);
+    rejected_write(&u,4u,0x2401u); rejected_write(&u,4u,0x2005u); rejected_write(&u,4u,0xa405u);
     CHECK(s5l8920_uart_write(&u,16u,0x20u) && !s5l8920_uart_irq(&u) && (read_reg(&u,16u)&6u)==2u,
           "TX acknowledge changed live shifter/buffer state");
     CHECK(s5l8920_uart_write(&u,32u,0x42u) && !s5l8920_uart_irq(&u),"nonempty FIFO invented empty transition");
@@ -182,9 +183,69 @@ static void test_transmit_interrupt(void) {
     s5l8920_uart_reset(&u);
     CHECK(!s5l8920_uart_irq(&u) && !u.pending && !u.ucon && !u.tx_busy,"reset retained interrupt source");
 }
+static void test_receive_events_and_holding_registers(void) {
+    for (unsigned fifo=0;fifo<2u;fifo++) for (unsigned two_stop=0;two_stop<2u;two_stop++) {
+        s5l8920_uart_t u;configure(&u,0x405u,12u);
+        CHECK(s5l8920_uart_write(&u,0u,two_stop?7u:3u) && s5l8920_uart_write(&u,8u,fifo),"line/FIFO selection");
+        CHECK(!s5l8920_uart_receive_timeout(&u),"empty/disabled receive timeout accepted");
+        CHECK(s5l8920_uart_receive(&u,0x81u) && !s5l8920_uart_irq(&u),"masked RX event");
+        CHECK(s5l8920_uart_write(&u,4u,0x5c85u) && s5l8920_uart_irq(&u),"pending RX enable did not assert");
+        uint32_t status=read_reg(&u,16u);
+        CHECK(status==0x17u && s5l8920_uart_write(&u,16u,status) && read_reg(&u,16u)==7u && !s5l8920_uart_irq(&u),"original RMW ack consumed data or left event");
+        CHECK(read_reg(&u,20u)==0u && s5l8920_uart_write(&u,20u,0u),"error-free receive backend invented error");
+        CHECK(s5l8920_uart_receive_timeout(&u) && s5l8920_uart_receive_timeout(&u) && s5l8920_uart_irq(&u) && read_reg(&u,16u)==15u,"explicit timeout did not latch/coalesce");
+        CHECK(s5l8920_uart_write(&u,4u,0x5485u) && !s5l8920_uart_irq(&u) && (u.pending&8u),"timeout mask lost cause");
+        CHECK(s5l8920_uart_write(&u,4u,0x5c85u) && s5l8920_uart_irq(&u),"timeout unmask lost cause");
+        CHECK(s5l8920_uart_write(&u,16u,read_reg(&u,16u)) && !s5l8920_uart_irq(&u),"timeout W1C");
+        unsigned limit=fifo?16u:1u;
+        for (unsigned i=1u;i<limit;i++)CHECK(s5l8920_uart_receive(&u,(uint8_t)(0x81u+i)),"fill selected RX capacity");
+        s5l8920_uart_t before=u;
+        CHECK(!s5l8920_uart_receive(&u,0xffu) && !memcmp(&u,&before,sizeof u),"full RX invented overrun or overwrote bytes");
+        if (fifo) rejected_write(&u,8u,0u);
+        for (unsigned i=0u;i<limit;i++)CHECK(read_reg(&u,36u)==0x81u+i,"RX order/capacity");
+        CHECK(!s5l8920_uart_receive_timeout(&u),"empty receiver generated timeout");
+        CHECK(s5l8920_uart_write(&u,16u,0x78u),"ack events and absent error");
+        uint8_t output[17];size_t count=99u;
+        CHECK(s5l8920_uart_clock(&u,true,UINT64_MAX,output,sizeof output,&count) && !count && !u.pending,"TX clocks invented RX timeout");
+        CHECK(s5l8920_uart_write(&u,32u,0x40u),"start first frame");
+        for (unsigned i=0;i<limit;i++)CHECK(s5l8920_uart_write(&u,32u,0x50u+i),"fill selected TX capacity");
+        rejected_write(&u,32u,0xffu);
+        uint32_t cycles=(two_stop?11u:10u)*13u*16u;
+        CHECK(s5l8920_uart_clock(&u,true,cycles-1u,output,sizeof output,&count) && !count && u.tx_remaining==1u,"second stop bit timing");
+        before=u;count=99u;
+        CHECK(!s5l8920_uart_clock(&u,true,1u,output,0u,&count) && count==99u && !memcmp(&u,&before,sizeof u),"holding-register output failure changed state");
+        CHECK(s5l8920_uart_clock(&u,true,1u,output,sizeof output,&count) && count==1u && output[0]==0x40u,"first frame completion");
+        CHECK(s5l8920_uart_clock(&u,true,(uint64_t)cycles*limit,output,sizeof output,&count) && count==limit,"queued frame completion");
+        for (unsigned i=0;i<limit;i++)CHECK(output[i]==0x50u+i,"TX ordering");
+    }
+    CHECK(!s5l8920_uart_receive_timeout(NULL) && !s5l8920_uart_cts(NULL,true),"invalid receiver input");
+}
+static void test_cts_flow_control(void) {
+    s5l8920_uart_t u;configure(&u,0x2405u,12u);
+    CHECK(s5l8920_uart_write(&u,12u,0x10u),"enable automatic CTS");
+    CHECK(s5l8920_uart_write(&u,32u,0x11u) && !u.tx_busy && u.tx_count==1u && !u.pending,"unknown CTS allowed output");
+    uint8_t output[17];size_t count=99u;s5l8920_uart_t before=u;
+    CHECK(s5l8920_uart_clock(&u,true,UINT64_MAX,output,sizeof output,&count) && !count && !memcmp(&u,&before,sizeof u),"unknown CTS banked clocks or sent data");
+    CHECK(s5l8920_uart_cts(&u,false) && !u.tx_busy && !u.pending,"inactive CTS started frame");
+    CHECK(s5l8920_uart_cts(&u,true) && u.tx_busy && !u.tx_count && u.tx_remaining==2080u && s5l8920_uart_irq(&u),"asserted CTS did not start queued frame");
+    CHECK(s5l8920_uart_write(&u,16u,0x20u) && s5l8920_uart_write(&u,32u,0x22u) && s5l8920_uart_cts(&u,false),"withdraw CTS during frame");
+    CHECK(s5l8920_uart_clock(&u,true,UINT64_MAX,output,sizeof output,&count) && count==1u && output[0]==0x11u && !u.tx_busy && u.tx_count==1u && !s5l8920_uart_irq(&u),"withdrawal cut current frame or started next");
+    CHECK(s5l8920_uart_cts(&u,true) && u.tx_remaining==2080u,"waiting time credited to next frame");
+    CHECK(s5l8920_uart_clock(&u,true,2080u,output,sizeof output,&count) && count==1u && output[0]==0x22u,"CTS resumed wrong byte");
+    s5l8920_uart_reset(&u);u.no_modem=true;
+    CHECK(!s5l8920_uart_cts(&u,true),"no-modem port accepted CTS");
+    CHECK(s5l8920_uart_write(&u,0u,3u) && s5l8920_uart_write(&u,4u,5u) &&
+          s5l8920_uart_write(&u,8u,0u) && s5l8920_uart_write(&u,40u,12u) &&
+          read_reg(&u,16u)==6u,"no-modem port required unwritten modem word");
+    rejected_read(&u,12u);rejected_write(&u,12u,0x10u);
+    CHECK(s5l8920_uart_receive(&u,0x99u) && read_reg(&u,36u)==0x99u,"no-modem RX");
+    s5l8920_uart_reset(&u);
+    CHECK(!u.no_modem && !u.cts_valid && !u.cts_asserted,"component reset retained board capability/input");
+}
 int main(void) {
     test_configuration(); test_clock_and_frame_boundaries(); test_fifo_and_reset_commands(); test_channel_gates_and_partition();
     test_transmit_interrupt();
+    test_receive_events_and_holding_registers();test_cts_flow_control();
     printf("%u passed, %u failed\n",passed,failed);
     return failed?1:0;
 }

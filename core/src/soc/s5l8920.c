@@ -46,6 +46,16 @@ static bool ram_offset(const s5l8920_t *m, uint32_t address, size_t size,
     return false;
 }
 
+static s5l8920_uart_t *uart_bank(s5l8920_t *m,unsigned bank) {
+    return bank?&m->uart_extra[bank-1u]:&m->uart0;
+}
+static bool decode_uart(uint32_t address,unsigned *bank,uint32_t *offset) {
+    if (address<S5L8920_UART0_BASE) return false;
+    uint32_t relative=address-S5L8920_UART0_BASE;
+    *bank=relative/S5L8920_UART_STRIDE;*offset=relative%S5L8920_UART_STRIDE;
+    return *bank<S5L8920_UART_COUNT && *offset<0x1000u;
+}
+
 /* Matching DT: three banks, 64 KiB stride, each with a 4 KiB PL192 aperture.
  * DDI0273A 2.3.2 blocking wiring: no acknowledgement is forwarded downstream.
  * Logical levels are propagated without asserting physical timing accuracy. */
@@ -53,9 +63,12 @@ static void refresh_interrupts(s5l8920_t *m) {
     (void)pl192_set_line(&m->vic[S5L8920_GPIO_IRQ/32u],S5L8920_GPIO_IRQ%32u,
                         (m->input_levels[S5L8920_GPIO_IRQ/32u]&(1u<<(S5L8920_GPIO_IRQ%32u)))!=0u ||
                         m->gpio_irq);
-    (void)pl192_set_line(&m->vic[0],S5L8920_UART0_IRQ,
-                        (m->input_levels[0]&(1u<<S5L8920_UART0_IRQ))!=0u ||
-                        s5l8920_uart_irq(&m->uart0));
+    for (unsigned bank=0;bank<S5L8920_UART_COUNT;bank++) {
+        unsigned source=S5L8920_UART0_IRQ-bank;
+        (void)pl192_set_line(&m->vic[0],source,
+                            (m->input_levels[0]&(1u<<source))!=0u ||
+                            s5l8920_uart_irq(uart_bank(m,bank)));
+    }
     (void)pl192_set_line(&m->vic[0],S5L8920_DEADLINE_IRQ,
                         (m->input_levels[0]&(1u<<S5L8920_DEADLINE_IRQ))!=0u ||
                         m->deadline.pending);
@@ -274,11 +287,10 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         else fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
         return 0u;
     }
-    if (address>=S5L8920_UART0_BASE && address-S5L8920_UART0_BASE<0x1000u) {
-        offset=address-S5L8920_UART0_BASE;
+    if (decode_uart(address,&bank,&offset)) {
         if (size!=4u || (offset&3u))
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
-        else if (!s5l8920_uart_read(&m->uart0,offset,&value))
+        else if (!s5l8920_uart_read(uart_bank(m,bank),offset,&value))
             fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
         else { refresh_interrupts(m); return value; }
         return 0u;
@@ -404,11 +416,10 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         } else fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
         return;
     }
-    if (address>=S5L8920_UART0_BASE && address-S5L8920_UART0_BASE<0x1000u) {
-        offset=address-S5L8920_UART0_BASE;
+    if (decode_uart(address,&bank,&offset)) {
         if (size!=4u || (offset&3u))
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
-        else if (!s5l8920_uart_write(&m->uart0,offset,value))
+        else if (!s5l8920_uart_write(uart_bank(m,bank),offset,value))
             fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
         else refresh_interrupts(m);
         return;
@@ -487,14 +498,46 @@ bool s5l8920_build_empty_nvram_proxy(void *data, size_t size) {
 
 bool s5l8920_uart0_clock(s5l8920_t *m,bool nclk,uint64_t ticks,
                         uint8_t *output,size_t capacity,size_t *count) {
-    if (!m || !m->ram || !s5l8920_uart_clock(&m->uart0,nclk,ticks,output,capacity,count)) return false;
+    return s5l8920_uart_bank_clock(m,0u,nclk,ticks,output,capacity,count);
+}
+
+bool s5l8920_uart_bank_clock(s5l8920_t *m,unsigned bank,bool nclk,uint64_t ticks,
+                            uint8_t *output,size_t capacity,size_t *count) {
+    if (!m || !m->ram || bank>=S5L8920_UART_COUNT ||
+        !s5l8920_uart_clock(uart_bank(m,bank),nclk,ticks,output,capacity,count)) return false;
     refresh_interrupts(m);
     return true;
 }
 
 bool s5l8920_uart0_receive(s5l8920_t *m,uint8_t byte) {
-    if (!m || !m->ram || !s5l8920_uart_receive(&m->uart0,byte)) return false;
+    return s5l8920_uart_bank_receive(m,0u,byte);
+}
+
+bool s5l8920_uart_bank_receive(s5l8920_t *m,unsigned bank,uint8_t byte) {
+    if (!m || !m->ram || bank>=S5L8920_UART_COUNT || !s5l8920_uart_receive(uart_bank(m,bank),byte)) return false;
     refresh_interrupts(m);
+    return true;
+}
+
+bool s5l8920_uart_bank_cts(s5l8920_t *m,unsigned bank,bool asserted) {
+    if (!m || !m->ram || bank>=S5L8920_UART_COUNT || !s5l8920_uart_cts(uart_bank(m,bank),asserted)) return false;
+    refresh_interrupts(m);
+    return true;
+}
+
+bool s5l8920_uart_bank_receive_timeout(s5l8920_t *m,unsigned bank) {
+    if (!m || !m->ram || bank>=S5L8920_UART_COUNT || !s5l8920_uart_receive_timeout(uart_bank(m,bank))) return false;
+    refresh_interrupts(m);
+    return true;
+}
+
+bool s5l8920_uart_divisor_configure(s5l8920_t *m,unsigned bank,uint32_t initial) {
+    if (!m || !m->ram || bank>=S5L8920_UART_COUNT || (initial&~0xfffffu) || ((initial>>16)&15u)>8u) return false;
+    if (m->uart_divisor_configured[bank]) return m->uart_divisor_initial[bank]==initial;
+    s5l8920_uart_t *u=uart_bank(m,bank);
+    if (u->programmed&16u) return false;
+    u->ubrdiv=initial;u->programmed|=16u;
+    m->uart_divisor_initial[bank]=initial;m->uart_divisor_configured[bank]=true;
     return true;
 }
 
@@ -696,7 +739,13 @@ bool s5l8920_reset(s5l8920_t *m) {
     if (!arm_reset_profile(&m->cpu,&m->bus,ARM_ARCH_V7_CORTEX_A8)) return false;
     m->miu.value=m->miu.initial;
     m->ram_boot_window=m->miu.configured && (m->miu.value&3u)==2u;
-    s5l8920_uart_reset(&m->uart0);
+    for (unsigned bank=0;bank<S5L8920_UART_COUNT;bank++) {
+        s5l8920_uart_t *u=uart_bank(m,bank);
+        s5l8920_uart_reset(u);u->no_modem=bank==0u;
+        if (m->uart_divisor_configured[bank]) {
+            u->ubrdiv=m->uart_divisor_initial[bank];u->programmed=16u;
+        }
+    }
     m->timebase_ticks=0u;
     memset(&m->deadline,0,sizeof m->deadline);
     for (unsigned gate=0;gate<S5L8920_CLOCK_GATE_COUNT;gate++)

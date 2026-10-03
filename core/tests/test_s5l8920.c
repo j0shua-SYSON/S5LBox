@@ -324,8 +324,9 @@ static void test_uart_checked_bus(s5l8920_t *m) {
     CHECK(!m->cpu.irq_line && !m->cpu.fiq_line && m->input_levels[0]==0u,
           "polled UART asserted an unimplemented interrupt");
     s5l8920_clear_bus_failure(m); m->bus.write32(m,uart+4u,0x1405u);
-    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && m->uart0.ucon==0x405u,
-          "unsupported receive interrupt mode silently enabled");
+    CHECK(m->bus_failure.reason==S5L8920_BUS_OK && m->uart0.ucon==0x1405u &&
+          m->uart0.tx_busy && !m->cpu.irq_line && !m->cpu.fiq_line,
+          "receive interrupt enable invented an event or changed active TX");
     s5l8920_clear_bus_failure(m); (void)m->bus.read32(m,uart+0xfffu);
     CHECK(m->bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED, "aperture end alignment");
     CHECK(s5l8920_reset(m) && !m->uart0.tx_busy && !m->uart0.programmed &&
@@ -2169,6 +2170,88 @@ static bool test_chipid(s5l8920_t *m) {
     return true;
 }
 
+static void test_uart_banks(s5l8920_t *m) {
+    static s5l8920_t before,empty;
+    CHECK(s5l8920_reset(m),"UART bank fixture reset");
+    CHECK(!s5l8920_uart_divisor_configure(NULL,0u,0u) &&
+          !s5l8920_uart_divisor_configure(&empty,0u,0u),"invalid UART divisor object");
+    m->bus.write32(m,S5L8920_UART0_BASE+40u,12u);
+    memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_uart_divisor_configure(m,0u,12u) && !memcmp(&before,m,sizeof before),
+          "initial input overwrote an already guest-programmed divisor");
+    CHECK(s5l8920_reset(m),"clear guest-only divisor before input cases");
+    size_t count=111u;uint8_t output[17]={0};
+    memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_uart_bank_clock(m,5u,true,1u,output,sizeof output,&count) && count==111u &&
+          !s5l8920_uart_bank_receive(m,5u,0u) && !s5l8920_uart_bank_cts(m,5u,true) &&
+          !s5l8920_uart_bank_receive_timeout(m,5u) && !s5l8920_uart_divisor_configure(m,5u,0u) &&
+          !memcmp(&before,m,sizeof before),"invalid bank changed state/output");
+    for (unsigned bank=0;bank<S5L8920_UART_COUNT;bank++) {
+        uint32_t base=S5L8920_UART0_BASE+bank*S5L8920_UART_STRIDE,initial=(bank<<16)|(12u+bank);
+        s5l8920_uart_t *u=bank?&m->uart_extra[bank-1u]:&m->uart0;
+        s5l8920_clear_bus_failure(m);(void)m->bus.read32(m,base+40u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"invented UART initial divisor");
+        memcpy(&before,m,sizeof before);
+        s5l8920_uart_t *expected=bank?&before.uart_extra[bank-1u]:&before.uart0;
+        expected->ubrdiv=initial;expected->programmed|=16u;
+        before.uart_divisor_initial[bank]=initial;before.uart_divisor_configured[bank]=true;
+        CHECK(s5l8920_uart_divisor_configure(m,bank,initial) && !memcmp(&before,m,sizeof before),"divisor input disturbed CPU/IRQ/failure/other port");
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,base+40u,12u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_OK && m->bus.read32(m,base+40u)==12u,"bank divisor programming");
+        memcpy(&before,m,sizeof before);
+        CHECK(s5l8920_uart_divisor_configure(m,bank,initial) &&
+              !s5l8920_uart_divisor_configure(m,bank,initial^1u) &&
+              !s5l8920_uart_divisor_configure(m,bank,0x90000u) &&
+              !s5l8920_uart_divisor_configure(m,bank,0x100000u) &&
+              !memcmp(&before,m,sizeof before),"divisor reconfiguration replaced guest state");
+        for (unsigned off=0;off<4u;off++) {
+            s5l8920_clear_bus_failure(m);m->bus.write16(m,base+40u+off,0u);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED && u->ubrdiv==12u,"bank width changed divisor");
+        }
+        s5l8920_clear_bus_failure(m);
+        m->bus.write32(m,base,bank==4u?7u:3u);m->bus.write32(m,base+4u,0x5c85u);
+        m->bus.write32(m,base+8u,bank?1u:0u);
+        if (bank)m->bus.write32(m,base+12u,1u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_OK && m->bus.read32(m,base+16u)==6u &&
+              u->no_modem==(bank==0u),"bank initialization/capability");
+        CHECK(!m->bus.host_ram(m,base,4u) && !m->bus.host_ram_write(m,base,4u),"UART bank exposed as RAM");
+    }
+    uint32_t all=0x1f00000u;
+    vic_write(m,0u,PL192_INTENABLE,all);
+    for (unsigned bank=0;bank<S5L8920_UART_COUNT;bank++) {
+        uint32_t bit=1u<<(S5L8920_UART0_IRQ-bank);
+        CHECK(s5l8920_uart_bank_receive(m,bank,(uint8_t)(0xa0u+bank)) &&
+              (m->vic[0].input&bit) && m->cpu.irq_line,"bank RX did not reach own IRQ");
+    }
+    CHECK((m->vic[0].input&all)==all,"simultaneous UART IRQs lost a port");
+    for (unsigned bank=0;bank<S5L8920_UART_COUNT;bank++) {
+        uint32_t base=S5L8920_UART0_BASE+bank*S5L8920_UART_STRIDE,bit=1u<<(S5L8920_UART0_IRQ-bank);
+        CHECK(s5l8920_set_irq(m,S5L8920_UART0_IRQ-bank,true),"external shared line");
+        uint32_t status=m->bus.read32(m,base+16u);m->bus.write32(m,base+16u,status);
+        CHECK((m->vic[0].input&bit)!=0u,"UART ack erased external level");
+        CHECK(s5l8920_set_irq(m,S5L8920_UART0_IRQ-bank,false) && !(m->vic[0].input&bit),"external withdrawal left false UART event");
+        CHECK(s5l8920_uart_bank_receive_timeout(m,bank) && (m->vic[0].input&bit),"bank timeout did not reach IRQ");
+        m->bus.write32(m,base+16u,m->bus.read32(m,base+16u));
+        CHECK(m->bus.read32(m,base+36u)==0xa0u+bank && !s5l8920_uart_bank_receive_timeout(m,bank),"RX data crossed banks or empty timeout accepted");
+    }
+    CHECK(!m->cpu.irq_line && !m->cpu.fiq_line && !(m->vic[0].input&all),"cleared bank events retained IRQ");
+    CHECK(!s5l8920_uart_bank_cts(m,0u,true) && s5l8920_uart_bank_cts(m,3u,true),"board CTS capability routing");
+    for (unsigned bank=0;bank<S5L8920_UART_COUNT;bank++) {
+        uint32_t base=S5L8920_UART0_BASE+bank*S5L8920_UART_STRIDE;
+        m->bus.write32(m,base+32u,0x30u+bank);
+        uint32_t cycles=(bank==4u?11u:10u)*13u*16u;
+        CHECK(s5l8920_uart_bank_clock(m,bank,true,cycles,output,sizeof output,&count) &&
+              count==1u && output[0]==0x30u+bank && !m->timebase_ticks,"bank clock/output/timing");
+    }
+    CHECK(s5l8920_reset(m),"reset UART banks");
+    for (unsigned bank=0;bank<S5L8920_UART_COUNT;bank++) {
+        s5l8920_uart_t *u=bank?&m->uart_extra[bank-1u]:&m->uart0;
+        CHECK(u->ubrdiv==m->uart_divisor_initial[bank] && u->programmed==16u &&
+              !u->tx_busy && !u->tx_count && !u->rx_count && !u->pending && !u->cts_valid &&
+              u->no_modem==(bank==0u),"reset did not restore explicit input or clear traffic");
+    }
+}
+
 int main(void) {
     test_empty_nvram_proxy();
     s5l8920_t m = {0};
@@ -2206,8 +2289,11 @@ int main(void) {
     if (!test_powerid(&m)) return 1;
     test_miu(&m);
     test_usb_controls(&m);
+    test_uart_banks(&m);
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
+    for (unsigned bank=0;bank<S5L8920_UART_COUNT;bank++)CHECK(!m.uart_divisor_configured[bank] &&
+        !m.uart_divisor_initial[bank] && !s5l8920_uart_divisor_configure(&m,bank,0u),"free retained UART input");
     for (unsigned i=0;i<S5L8920_USB_CONTROL_COUNT;i++)CHECK(!m.usb_control[i].configured &&
         !m.usb_control[i].initial && !m.usb_control[i].value,"free retained USB input");
     CHECK(!s5l8920_usb_control_configure(&m,S5L8920_USB_PHY_BASE,0u),"freed board accepted USB input");

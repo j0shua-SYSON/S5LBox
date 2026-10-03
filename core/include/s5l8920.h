@@ -19,6 +19,8 @@
 #define S5L8920_IRQ_COUNT (32u * S5L8920_VIC_COUNT)
 #define S5L8920_UART0_BASE UINT32_C(0x82500000)
 #define S5L8920_UART0_IRQ 24u
+#define S5L8920_UART_COUNT 5u
+#define S5L8920_UART_STRIDE UINT32_C(0x100000)
 #define S5L8920_PMGR_BASE UINT32_C(0xbf100000)
 #define S5L8920_TIMEBASE_LOW UINT32_C(0x200)
 #define S5L8920_TIMEBASE_HIGH UINT32_C(0x204)
@@ -152,6 +154,9 @@ typedef struct {
     s5l8920_powerid_t powerid;
     s5l8920_miu_t miu;
     s5l8920_usb_control_t usb_control[S5L8920_USB_CONTROL_COUNT];
+    s5l8920_uart_t uart_extra[S5L8920_UART_COUNT-1u];
+    uint32_t uart_divisor_initial[S5L8920_UART_COUNT];
+    bool uart_divisor_configured[S5L8920_UART_COUNT];
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -197,6 +202,26 @@ bool s5l8920_set_ram_boot_window(s5l8920_t *m, bool enabled);
 bool s5l8920_uart0_clock(s5l8920_t *m, bool nclk, uint64_t ticks,
                         uint8_t *output, size_t capacity, size_t *count);
 bool s5l8920_uart0_receive(s5l8920_t *m, uint8_t byte);
+
+/* Five independent banks at UART0_BASE + bank*UART_STRIDE, IRQ24-bank.
+ * UART0 has no modem flow-control pins; its traffic does not require UMCON
+ * programming. Other ports require that word and explicit CTS for automatic
+ * flow control. The uart0 wrappers above retain their bank0 behavior.
+ * Clock inputs remain external: no clock-gate index or frequency is inferred.
+ * CTS and receive-timeout inputs have the component contracts above; reset
+ * clears observations/traffic, restores only explicit initial divisors, and
+ * free/init invalidates initial inputs. CPU registers and diagnostics remain
+ * unchanged by successful events; IRQ/FIQ reflect resulting device causes. */
+bool s5l8920_uart_bank_clock(s5l8920_t *m, unsigned bank, bool nclk, uint64_t ticks,
+                            uint8_t *output, size_t capacity, size_t *count);
+bool s5l8920_uart_bank_receive(s5l8920_t *m, unsigned bank, uint8_t byte);
+bool s5l8920_uart_bank_cts(s5l8920_t *m, unsigned bank, bool asserted);
+bool s5l8920_uart_bank_receive_timeout(s5l8920_t *m, unsigned bank);
+/* Supply an initial divisor before its first guest write. Known divider and
+ * sample fields only (rates8..16); no reset value is inferred. Repeating the
+ * same input preserves guest programming; changing it refuses. Call between
+ * CPU steps. Other UART configuration/traffic and latched failures persist. */
+bool s5l8920_uart_divisor_configure(s5l8920_t *m, unsigned bank, uint32_t initial);
 
 /* Supply a digital sample for an ordinary GPIO pin (port * 8 + bit). No pin
  * configuration is inferred. Each sample invalidates any inactive readback

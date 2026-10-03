@@ -10,9 +10,57 @@ be supplied explicitly, separately from live pin samples. MIU control can
 select the existing physical RAM boot window from original firmware.
 Six USB clock/PHY control words accept explicit initial values and bounded
 guest programming. USB status and transfers remain unavailable.
+All five UART banks now support the bootloader's line/FIFO configuration,
+explicit initial divisors, receive interrupts and supplied receive-timeout
+events. Automatic transmit flow control requires an explicit CTS observation.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## Five UART ports and original interrupt delivery
+
+The matching device tree and LLB register table identify five UART banks at
+`0x82500000` through `0x82900000`, each with a 4 KiB aperture and interrupt
+sources 24 through 20. Each bank has independent state and host input APIs;
+the existing UART0 APIs remain wrappers for bank 0. Initial divisor values
+must be supplied explicitly before a read or written by the guest. Functional
+reset restores only supplied divisors and clears traffic and CTS observations.
+
+The UART model supports the firmware's 8N1 and 8N2 frames, 16-byte FIFOs and
+single-byte holding registers when FIFO mode is disabled. A second stop bit
+takes an additional bit period. CTS gates the start of each frame; withdrawing
+it preserves the frame already transmitting. Missing CTS cannot start an
+automatic-flow-control transmission. UART0's no-modem capability permits its
+original initializer to leave modem control unwritten.
+
+Completed error-free receive frames and explicit receiver idle-timeout events
+latch separate interrupt causes. Enables and write-one-to-clear acknowledgements
+control delivery without consuming held bytes. The original interrupt handler's
+status writeback ignores live read-only bits. Error status is zero under the
+error-free input contract; erroneous frames remain unsupported. Timeout duration,
+receive-line sampling, DMA and modem-status registers are not modeled.
+
+With explicit divisor inputs, the unchanged LLB initializes all five ports,
+then stops after 637,176 steps at Thumb `0x84001030`, reading GPIO pin 33 at
+`0x83000084` while preparing I2C pins. The console ends in non-FIFO mode with
+receive interrupts enabled. The UART4 frame uses two stop bits and a different
+divisor. Withheld divisor input preserves the earlier UART read failure.
+
+A host diagnostic supplies 70 UART0 frames after this initialization. Each
+causes an actual emulated CPU interrupt through the original page tables,
+vector, wrapper, dispatcher and registered callback, then restores the
+interrupted general registers, status and VFP state. The original firmware
+stores 64 bytes and drops six when its software buffer is full. A separate
+30-call witness checks receive and timeout dispatch, ring storage, semaphore
+updates and acknowledgement on all five ports. No firmware code is patched.
+
+The firmware's clock-gate indices differ from the device tree's indices.
+Source cycles continue to come explicitly from the caller after external
+gating; no physical clock hookup or receive-timeout threshold is inferred.
+These UART witnesses establish bounded host execution, not a complete iOS boot.
+All 79 strict and 74 shipping tests pass. Earlier firmware checks preserve
+their input boundaries; the separate prepared kernel trace remains unchanged
+at its 182,680,916-step GPIO read failure.
 
 ## USB control requests and original bootloader shutdown
 
@@ -735,10 +783,10 @@ no source clocks, completed kernel boot or physical result are claimed.
 ## Early UART and transmit interrupts
 
 UART0 has a separate checked word-access model at `0x82500000`, within the
-matching device tree's 4 KiB aperture. It supports 8N1, disabled or polled
-channels, PCLK/NCLK selection, manual RTS, the divider and sample fields,
-and FIFO enable/reset commands with zero trigger fields. Unsupported
-registers, widths, modes, receive/timeout/error interrupts, DMA and fractional offsets stop without
+matching device tree's 4 KiB aperture. Its initial 8N1 polled model has been
+extended to the five-port bootloader behavior described above, including
+8N2, non-FIFO holding registers, CTS and receive-event interrupts. Unsupported
+registers, widths, modes, DMA and fractional offsets still stop without
 committing the access. The iPhone OS 3 UART remains separate.
 
 The matching kernel's original ARM initializer at `0x8027c3c0` writes ULCON
@@ -766,14 +814,15 @@ not model receive-line sampling or overrun errors.
 
 Functional reset empties this component, but does not claim N88 hardware
 register defaults or the state handed over by iBoot. Configuration reads
-fail until the corresponding register is programmed; status/data require
-all five configuration registers. FIFO reset commands self-clear and affect
+fail until the corresponding register is programmed or its supported initial
+input is supplied. Status/data require all configuration words except modem
+control on UART0, which has no modem pins. FIFO reset commands self-clear and affect
 queued bytes, while a transmitting frame continues. Live status follows FIFO
 and shift state; receive and zero-threshold transmit events stay latched until
 W1C. Those transition/timing rules are the explicit component abstraction,
-not a physical N88 timing measurement. Receive/timeout/error interrupts, clock gating,
-the scheduler's source-clock conversion, other formats and complete driver
-configuration remain unfinished.
+not a physical N88 timing measurement. Receive-line timing, automatic timeout
+duration, erroneous frames, clock gating, scheduler source-clock conversion,
+other formats and complete driver configuration remain unfinished.
 
 A private pre-implementation oracle executed the unchanged 260-byte
 initializer/baud pair, its original 76-byte software divider, function table
