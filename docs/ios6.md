@@ -3,10 +3,41 @@
 The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
 a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
 interrupt fabric, UART, timebase counter, deadline timer, GPIO, I2C and a
-bounded PMU clock endpoint, plus explicitly configured identification words.
+bounded PMU clock endpoint, explicitly configured identification words and
+partial clock-gate programming.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## Bounded clock-gate programming
+
+The 52 aligned gate words at `0xbf100078..0xbf100144` require independent
+initial inputs through `s5l8920_clock_gate_configure`. Guest writes can set
+the low nibble to `0xf` or `0`, preserving all upper bits. Unconfigured
+accesses, mixed modes, other widths, misalignment and changes to upper bits
+remain checked failures. Reapplying an identical initial input preserves
+guest programming; replacing it fails. Functional reset restores the supplied
+initial words, and free/init invalidates them.
+
+The matching LLB initializer and iBoot gate helper agree with the pinned
+[S5L8920 clock implementation](https://github.com/iDroid-Project/openiBoot/blob/866562fdb1cfd019bcd77885c80fbf0af65d5c15/plat-s5l8920/clock.c)
+on the enable/disable masks. The original iBoot helper's upper address bound
+also establishes the 52-word extent. Its separate bit-31 reset pulse remains
+unsupported. This is bounded programming state: no clock signals, source
+readiness, connected-device reset effects, physical timing or power-on values
+are established by storing these controls.
+
+The private witness passes 848 original iBoot helper cases: 832 valid calls
+across all gates, four raw input patterns and four on/off arguments, plus
+12 upper-bound returns and four preserved failures from wrapped addresses.
+With explicit initial gate words of either `0` or `0xf`, and either tested
+chip-ID bit-8 input, the unchanged original LLB completes all 52 gate writes.
+It selects gates 0, 24, 36, 37, 44 and 49 and clears the others. All four runs
+then stop at the first dynamic-clock selector write: `0xb00` to `0xbf100070`
+at Thumb `0x84008904`, after 18,756 steps and 18,755 retired instructions.
+The initial inputs remain diagnostic configurations, not measured reset
+state. Leaving gate inputs absent preserves the earlier 17,032-step stop;
+the full kernel's separate GPIO stop also remains unchanged.
 
 ## Explicit identification inputs
 

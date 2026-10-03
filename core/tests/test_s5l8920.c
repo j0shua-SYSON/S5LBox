@@ -1441,6 +1441,100 @@ static void test_pmu_rtc(s5l8920_t *m) {
     CHECK(s5l8920_reset(m),"PMU final reset");
 }
 
+static bool test_clock_gates(s5l8920_t *m) {
+    static s5l8920_t empty, before;
+    CHECK(!s5l8920_clock_gate_configure(NULL,0u,0u) &&
+          !s5l8920_clock_gate_configure(&empty,0u,0u),"uninitialized gate configuration");
+    CHECK(s5l8920_reset(m),"gate initial reset");
+    for (unsigned i=0;i<S5L8920_CLOCK_GATE_COUNT;i++) {
+        uint32_t address=S5L8920_CLOCK_GATE_BASE+4u*i,initial=0xa55a0000u^(i*0x12345u);
+        CHECK(!m->clock_gate[i].configured,"invented gate configuration");
+        for (unsigned write=0;write<2u;write++) {
+            s5l8920_clear_bus_failure(m);
+            if (write) m->bus.write32(m,address,15u); else (void)m->bus.read32(m,address);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+                  m->bus_failure.address==address && m->bus_failure.write==(write!=0u) &&
+                  !m->clock_gate[i].configured,"unconfigured gate access accepted");
+        }
+        s5l8920_bus_failure_t stopped=m->bus_failure;
+        CHECK(s5l8920_clock_gate_configure(m,i,initial) &&
+              !memcmp(&stopped,&m->bus_failure,sizeof stopped),"gate configuration lost diagnostic");
+        s5l8920_clear_bus_failure(m);
+        CHECK(m->bus.read32(m,address)==initial,"raw gate input was interpreted");
+        for (unsigned mode=0;mode<16u;mode++) {
+            uint32_t previous=m->clock_gate[i].value,value=(initial&~15u)|mode;
+            s5l8920_clear_bus_failure(m);m->bus.write32(m,address,value);
+            CHECK(m->bus_failure.reason==((mode==0u || mode==15u)?S5L8920_BUS_OK:S5L8920_BUS_REGISTER_REFUSED) &&
+                  m->clock_gate[i].value==((mode==0u || mode==15u)?value:previous),"gate mode or atomic rejection");
+        }
+        for (unsigned bit=4;bit<32u;bit++) {
+            uint32_t previous=m->clock_gate[i].value;
+            s5l8920_clear_bus_failure(m);m->bus.write32(m,address,previous^(1u<<bit));
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+                  m->clock_gate[i].value==previous,"unknown upper gate bit accepted");
+        }
+        before=*m;
+        CHECK(s5l8920_clock_gate_configure(m,i,initial) && !memcmp(m,&before,sizeof before),
+              "reapplying gate input erased guest state");
+        CHECK(!s5l8920_clock_gate_configure(m,i,initial^1u) && !memcmp(m,&before,sizeof before),
+              "changed gate initial state accepted");
+    }
+    before=*m;
+    CHECK(!s5l8920_clock_gate_configure(m,52u,0u) &&
+          !s5l8920_clock_gate_configure(m,UINT32_MAX,0u) && !memcmp(m,&before,sizeof before),
+          "invalid gate selector changed board");
+    for (unsigned offset=0;offset<4u*S5L8920_CLOCK_GATE_COUNT;offset++) for (unsigned kind=0;kind<6u;kind++) {
+        uint32_t address=S5L8920_CLOCK_GATE_BASE+offset;
+        before=*m;s5l8920_clear_bus_failure(m);
+        if (kind==0u) (void)m->bus.read8(m,address);
+        else if (kind==1u) (void)m->bus.read16(m,address);
+        else if (kind==2u) (void)m->bus.read32(m,address);
+        else if (kind==3u) m->bus.write8(m,address,0u);
+        else if (kind==4u) m->bus.write16(m,address,0u);
+        else m->bus.write32(m,address,m->clock_gate[offset/4u].value);
+        CHECK(m->bus_failure.reason==((kind%3u==2u && !(offset&3u))?S5L8920_BUS_OK:S5L8920_BUS_ACCESS_UNIMPLEMENTED) &&
+              !memcmp(m->clock_gate,before.clock_gate,sizeof m->clock_gate),"gate width/alignment changed state");
+    }
+    for (unsigned i=0;i<2u;i++) {
+        s5l8920_clear_bus_failure(m);
+        (void)m->bus.read32(m,i?S5L8920_CLOCK_GATE_BASE+4u*S5L8920_CLOCK_GATE_COUNT:S5L8920_CLOCK_GATE_BASE-4u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"gate span grew into unknown PMGR");
+    }
+    CHECK(s5l8920_reset(m),"gate reset");
+    for (unsigned i=0;i<S5L8920_CLOCK_GATE_COUNT;i++)
+        CHECK(m->clock_gate[i].configured && m->bus.read32(m,S5L8920_CLOCK_GATE_BASE+4u*i)==(0xa55a0000u^(i*0x12345u)),
+              "functional reset did not restore supplied gate input");
+    CHECK(!m->bus.host_ram(m,S5L8920_CLOCK_GATE_BASE,4u) &&
+          !m->bus.host_ram_write(m,S5L8920_CLOCK_GATE_BASE,4u),"gate registers exposed as RAM");
+    s5l8920_free(m);
+    CHECK(!s5l8920_clock_gate_configure(m,0u,0u) && !m->clock_gate[0].configured &&
+          !m->clock_gate[51].configured,"free retained gate configuration");
+    bool ready=s5l8920_init(m);CHECK(ready,"gate reinitialize");if (!ready) return false;
+    for (unsigned thumb=0;thumb<2u;thumb++) for (unsigned write=0;write<2u;write++) {
+        unsigned gate=50u*thumb+write;
+        CHECK(s5l8920_reset(m) && !m->clock_gate[gate].configured,"new board retained gate input");
+        put(m,0x100u,thumb?(write?0x0000f8c1u:0x0000f8d1u):(write?0xe5810000u:0xe5910000u));
+        m->cpu.r[0]=0xaabbccdfu;m->cpu.r[1]=S5L8920_CLOCK_GATE_BASE+4u*gate;
+        m->cpu.r[15]=S5L8920_RAM_BASE+0x100u;
+        m->cpu.cpsr=ARM_MODE_SVC|ARM_CPSR_I|ARM_CPSR_F|ARM_CPSR_C|(thumb?ARM_CPSR_T:0u);
+        uint32_t flags=m->cpu.cpsr,pc=m->cpu.r[15];
+        CHECK(arm_step(&m->cpu)==ARM_HALT && !m->cpu.cycles && m->cpu.r[15]==pc &&
+              m->cpu.r[0]==0xaabbccdfu && m->cpu.cpsr==flags &&
+              m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && m->bus_failure.write==(write!=0u),
+              "unprepared gate CPU access retired");
+        before=*m;
+        CHECK(s5l8920_clock_gate_configure(m,gate,0xaabbccd0u) &&
+              !memcmp(&m->cpu,&before.cpu,sizeof m->cpu) &&
+              !memcmp(&m->bus_failure,&before.bus_failure,sizeof m->bus_failure),"gate preparation changed stopped CPU");
+        s5l8920_clear_bus_failure(m);
+        CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.cycles==1u && m->cpu.r[15]==pc+4u &&
+              m->cpu.cpsr==flags && !m->bus_failure.reason &&
+              m->cpu.r[0]==(write?0xaabbccdfu:0xaabbccd0u) &&
+              m->clock_gate[gate].value==(write?0xaabbccdfu:0xaabbccd0u),"gate CPU retry failed");
+    }
+    return true;
+}
+
 static bool test_chipid(s5l8920_t *m) {
     static s5l8920_t empty, before;
     const uint32_t words[]={0xfedcba98u,0x01234567u,0u,UINT32_MAX};
@@ -1553,6 +1647,7 @@ int main(void) {
     test_i2c_checked_cpu(&m);
     test_pmu_rtc(&m);
     test_fiq_and_reset(&m);
+    if (!test_clock_gates(&m)) return 1;
     if (!test_chipid(&m)) return 1;
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");

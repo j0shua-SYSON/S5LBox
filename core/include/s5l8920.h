@@ -38,6 +38,8 @@
 #define S5L8920_I2C_CAPACITY 128u
 #define S5L8920_I2C0_IRQ 19u /* Consecutive banks use sources 19, 18, 17. */
 #define S5L8920_CHIPID_BASE UINT32_C(0xbf500000)
+#define S5L8920_CLOCK_GATE_BASE UINT32_C(0xbf100078)
+#define S5L8920_CLOCK_GATE_COUNT 52u
 
 typedef struct {
     uint64_t sequence;
@@ -63,6 +65,11 @@ typedef struct {
     uint32_t remaining;
     bool programmed, enabled, expired, pending;
 } s5l8920_deadline_t;
+
+typedef struct {
+    uint32_t initial, value;
+    bool configured;
+} s5l8920_clock_gate_t;
 
 typedef enum {
     S5L8920_BUS_OK = 0,
@@ -97,6 +104,7 @@ typedef struct {
     uint32_t pmu_rtc_counter, pmu_rtc_offset;
     uint32_t chipid_words[4];
     uint8_t chipid_configured;
+    s5l8920_clock_gate_t clock_gate[S5L8920_CLOCK_GATE_COUNT];
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -109,8 +117,9 @@ void s5l8920_free(s5l8920_t *m);
 
 /* Reset CPU/controller/UART/timer/I2C state and clear diagnostics, preserving RAM
  * and externally supplied interrupt levels/GPIO samples and configured PMU
- * clock/offset state and explicitly configured identification words. GPIO programming is
- * invalidated. This is a functional reset, not a
+ * clock/offset state and explicitly configured identification words. Gate controls
+ * return to their supplied initial words. GPIO programming is invalidated.
+ * This is a functional reset, not a
  * model of power sequencing. The caller owns execution and device timing. */
 bool s5l8920_reset(s5l8920_t *m);
 bool s5l8920_set_irq(s5l8920_t *m, unsigned source, bool asserted);
@@ -205,6 +214,17 @@ bool s5l8920_pmu_rtc_service(s5l8920_t *m, uint64_t sequence);
  * Functional reset retains these inputs; free/init invalidates them. This
  * models fixed emulated inputs, not fuse programming or physical reset state. */
 bool s5l8920_chipid_configure(s5l8920_t *m, unsigned offset, uint32_t value);
+
+/* Supply the initial raw word for one of 52 clock gates. Each gate requires
+ * independent configuration before reads or writes. Identical reapplication
+ * preserves guest programming; replacing the supplied initial word fails.
+ * Aligned guest word writes may select low nibble 0/f only, preserving all
+ * upper bits. Other widths, mixed modes, reset-bit changes and unconfigured
+ * accesses refuse. Functional reset restores these inputs; free/init clears
+ * them. Call between CPU steps; CPU and latched diagnostics are preserved.
+ * This models bounded programming state, not clock signal generation, source
+ * readiness, connected-device reset effects or physical power-on values. */
+bool s5l8920_clock_gate_configure(s5l8920_t *m, unsigned gate, uint32_t initial);
 
 /* Supply timebase source ticks explicitly, modulo 2^64, and advance the enabled
  * deadline countdown. Reads and CPU steps do not advance time. A programmed
