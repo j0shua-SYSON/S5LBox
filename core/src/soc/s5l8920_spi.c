@@ -28,8 +28,8 @@ bool s5l8920_spi_write(s5l8920_spi_t *s, uint32_t offset, uint32_t value) {
         return true;
     }
     if (offset==8u) {
-        if (value&~S5L8920_SPI_EVENT_MASK) return false;
-        s->cleared_events|=value;
+        if (value&~(S5L8920_SPI_EVENT_MASK|S5L8920_SPI_FIFO_LEVEL_MASK)) return false;
+        s->cleared_events|=value&S5L8920_SPI_EVENT_MASK;
         return true;
     }
     return false;

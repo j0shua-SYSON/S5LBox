@@ -920,7 +920,11 @@ zero, and status offset `8` acknowledges `0x0040000f`. Control zero establishes
 a stopped controller and does not reset pin programming. The pin latch accepts
 the observed software CS bit `1` only after stopping. Partial event
 acknowledgements retain which causes have been cleared; writing zero clears
-none. No pin routing, peripheral responses or interrupts are generated.
+none. Both original service routines write the full status word back, including
+the read-only FIFO levels at bits `6..15`. Acknowledgements ignore those level
+bits and clear only selected event causes. They neither change FIFO contents
+nor establish FIFO observations. Unknown status fields reject the whole write.
+No pin routing, peripheral responses or interrupts are generated.
 
 Status reads remain refused because acknowledging pending events does not
 establish FIFO contents or counts. Start, FIFO reset, transfer/configuration
@@ -940,13 +944,23 @@ its larger FIFO limit is not adopted. A newer Apple SPI implementation has
 additional FIFO/interrupt registers and cannot establish N88 interrupt causes.
 
 The strict 80-test and shipping 75-test suites pass with this component. The
-canonical prepared-kernel trace and all three LLB traces remain unchanged.
-With the same explicit diagnostic inputs, the farther kernel run advances from
+last full boot checks, before the acknowledgement refinement, preserve the
+canonical prepared-kernel trace and all three LLB traces. With the same
+explicit diagnostic inputs, that farther kernel run advances from
 226,950,746 to 226,951,170 instructions and stops at `0x8061caa6`, writing `2`
 to SPI0's clock-divider register at `0x82000030`. Those inputs still include
 unmeasured GPIO, clock, DART and boot-state observations. This is a bounded
 initialization result; complete boot, serial transfers and hardware validation
 remain unproven.
+
+Separate original-code fixtures cover the kernel request validator and timing
+calculations, plus 1,536 iBoot interrupt-service and 16,464 kernel PIO-service
+cases. Service fixtures supply finite, explicit status and received data;
+their acknowledgements pass through the production component while transfer
+and configuration writes are recorded. They verify acknowledgement handling
+without establishing hardware event generation, FIFO thresholds, IRQ delivery
+or serial exchange. The original iBoot chip-select helpers also execute
+against the production pin latch. None of these fixtures is a full boot run.
 
 ## Bounded I2C requests and explicit responses
 

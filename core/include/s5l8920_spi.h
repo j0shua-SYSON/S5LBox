@@ -10,6 +10,7 @@
 /* Controllers described by the matching N88 device tree. */
 #define S5L8920_SPI_COUNT 3u
 #define S5L8920_SPI_EVENT_MASK UINT32_C(0x0040000f)
+#define S5L8920_SPI_FIFO_LEVEL_MASK UINT32_C(0x0000ffc0)
 
 typedef struct {
     uint32_t pin, cleared_events;
@@ -22,8 +23,10 @@ void s5l8920_spi_reset(s5l8920_spi_t *s);
 
 /* Word offsets. Control0=0 establishes a stopped controller. Pin0c accepts
  * the observed software CS bit1, after stopping; writes preserve its latch.
- * Status08 acknowledges only event mask40000f, accumulating which unknown
- * causes have been cleared. Neither stopping nor acknowledgement establishes
+ * Status08 acknowledges event mask40000f, accumulating which unknown
+ * causes have been cleared. Echoed read-only FIFO level fields (bits6..15)
+ * are ignored, not retained as observations. Other fields remain refused.
+ * Neither stopping nor acknowledgement establishes
  * FIFO counts: status reads remain unavailable, even after a complete ACK.
  * Start/reset commands, transfer/configuration registers, pin signal routing,
  * clocks, IRQ generation and attached devices are not yet implemented.

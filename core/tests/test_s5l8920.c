@@ -1234,6 +1234,28 @@ static bool test_spi_initialization(s5l8920_t *m) {
     s5l8920_spi_reset(NULL);
     CHECK(s5l8920_spi_write(&s,0u,0u) && s.stopped && !s.cleared_events,
           "stop establishes no interrupt observations");
+    /* Both original service routines acknowledge a complete status word.
+     * FIFO levels are read-only fields: their echoed bits clear no events and
+     * supply no FIFO observation, including encodings above the FIFO depth. */
+    const unsigned levels[]={0u,1u,16u,31u};
+    for (unsigned tx=0;tx<4u;tx++) for (unsigned rx=0;rx<4u;rx++) {
+        uint32_t counts=(levels[tx]<<6)|(levels[rx]<<11);
+        copy=s;
+        CHECK(s5l8920_spi_write(&s,8u,counts) && !memcmp(&s,&copy,sizeof s),
+              "echoed read-only FIFO levels change no controller state");
+        CHECK(!s5l8920_spi_read(&s,8u,&value) && value==0xfeedfaceu,
+              "FIFO count bits in an acknowledgement do not become readable observations");
+        for (unsigned mask=0;mask<32u;mask++) {
+            s5l8920_spi_t ack={0};
+            uint32_t events=(mask&15u)|((mask&16u)<<18);
+            CHECK(s5l8920_spi_write(&ack,0u,0u) && s5l8920_spi_write(&ack,8u,counts|events) &&
+                  ack.cleared_events==events && !ack.pin_programmed,
+                  "mixed status acknowledgement clears only selected event causes");
+            copy=ack;
+            CHECK(!s5l8920_spi_write(&ack,8u,counts|events|0x10u) &&
+                  !memcmp(&ack,&copy,sizeof ack),"unsupported status bits reject the entire acknowledgement");
+        }
+    }
     uint32_t known=0u;
     for (unsigned bit=0;bit<23u;bit++) if (bit<4u || bit==22u) {
         known|=1u<<bit;
@@ -1297,7 +1319,7 @@ static bool test_spi_initialization(s5l8920_t *m) {
             m->bus.write32(m,base+8u,events);
             CHECK(!m->bus_failure.reason,"SPI partial/repeated W1C event acknowledgements");
         }
-        for (unsigned bit=4;bit<32u;bit++) if (bit!=22u) {
+        for (unsigned bit=4;bit<32u;bit++) if (bit!=22u && (bit<6u || bit>15u)) {
             m->bus.write32(m,base+8u,1u<<bit);
             CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"unknown SPI status write field refused");
             s5l8920_clear_bus_failure(m);
