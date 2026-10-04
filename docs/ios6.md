@@ -1127,6 +1127,36 @@ The strict 82-test and shipping 77-test configurations pass. With the same
 explicit boot inputs, all three LLB traces and both prepared-kernel traces
 match their prior results exactly; this connection alone does not advance boot.
 
+An explicit `sst25vf080b_init_unbacked` option represents the candidate chip
+with its entire array unavailable. It allocates no storage and returns no
+invented erased bytes. Identification, status, authorization, power-up and pin
+behavior remain modeled. READ/fast-READ accepts command/address bytes but
+refuses at the first array-data byte. A program or erase that would modify
+storage refuses at CE rising; known protected or unauthorized no-ops still
+complete without storage access. Refusal preserves the flash, controller and
+GPIO states. The ordinary image-backed initializer still rejects missing or
+incorrectly sized images; accidental absence does not select this mode.
+
+This permits bounded driver discovery without supplying synthetic target
+contents. It does not identify the physical part or establish its warm state,
+and it cannot complete any firmware operation requiring unknown NOR data.
+
+With this explicit candidate attached to GPIO 148/gate 9, a diagnostic kernel
+run exchanges eight bytes for status, JEDEC identification and another status
+request. Transfers drive the production IRQ path during guest execution. It
+advances from 226,951,489 to 247,423,479 instructions and stops at
+`0x8078c1e0`, where I2C0 refuses a request-start write of `4` to `0x83200024`.
+This run supplies one NCLK cycle per diagnostic timebase tick, with a 24 MHz
+elapsed-time conversion, known high MISO bias and cold chip state. These are
+explicit unmeasured inputs, alongside the earlier prepared boot assumptions;
+they are not a measured CPU clock ratio or a complete bootloader handoff.
+Read-only bus observation confirms the guest consumes `FF 1C`, `FF BF 25 8E`
+and `FF 1C`, with chip-select stores from the original GPIO accessor. At the
+new stop, I2C0 requests one byte from address `1D`, subaddress `0F`; auxiliary
+register `14` has not been initialized, so the prepared-field guard refuses.
+No NOR array bytes are supplied. The 82-test strict and 77-test shipping
+configurations pass; complete boot and physical-device behavior remain unproven.
+
 ## Bounded I2C requests and explicit responses
 
 Three I2C apertures at `0x83200000`, `0x83300000` and `0x83400000` use

@@ -703,7 +703,7 @@ bool s5l8920_spi_bank_delay_clock(s5l8920_t *m,unsigned bank,uint64_t cycles) {
 bool s5l8920_spi_attach_flash(s5l8920_t *m,unsigned bank,sst25vf080b_t *flash,
     unsigned cs_pin,unsigned gate,unsigned tx_low,unsigned rx_high,uint8_t bias_value,uint8_t bias_known) {
     if (!m || !m->ram || bank>=S5L8920_SPI_COUNT || !flash ||
-        !flash->initialized || !flash->image || cs_pin>=S5L8920_GPIO_PIN_COUNT ||
+        !flash->initialized || cs_pin>=S5L8920_GPIO_PIN_COUNT ||
         gate>=S5L8920_CLOCK_GATE_COUNT) return false;
     if (m->spi_flash[bank])
         return m->spi_flash[bank]==flash && m->spi_flash_cs[bank]==cs_pin &&

@@ -12,22 +12,33 @@
 #define WRITABLE 0xbcu
 
 static bool valid(const sst25vf080b_t *f) {
-    return f && f->initialized && f->image;
+    return f && f->initialized && ((f->image!=NULL)!=f->array_unavailable);
 }
 
 static bool duration(uint64_t n,uint64_t maximum) { return n && n<=maximum; }
 
-bool sst25vf080b_init(sst25vf080b_t *f, uint8_t *image, size_t size,
+static bool initialize(sst25vf080b_t *f, uint8_t *image,
     const sst25vf080b_timing_t *timing, bool wp_high, bool hold_high) {
-    if (!f || !image || size!=SST25VF080B_SIZE || !timing ||
+    if (!f || !timing ||
         !duration(timing->program_ns,10000u) || !duration(timing->sector_ns,25000000u) ||
         !duration(timing->block32_ns,25000000u) || !duration(timing->block64_ns,25000000u) ||
         !duration(timing->chip_ns,50000000u)) return false;
     sst25vf080b_t next={0};
     next.image=image; next.timing=*timing; next.powerup_ns=100000u;
     next.status=0x1cu; next.wp_high=wp_high; next.hold_high=hold_high;
-    next.initialized=true; *f=next;
+    next.array_unavailable=image==NULL;next.initialized=true; *f=next;
     return true;
+}
+
+bool sst25vf080b_init(sst25vf080b_t *f, uint8_t *image, size_t size,
+    const sst25vf080b_timing_t *timing, bool wp_high, bool hold_high) {
+    if (!image || size!=SST25VF080B_SIZE) return false;
+    return initialize(f,image,timing,wp_high,hold_high);
+}
+
+bool sst25vf080b_init_unbacked(sst25vf080b_t *f,
+    const sst25vf080b_timing_t *timing, bool wp_high, bool hold_high) {
+    return initialize(f,NULL,timing,wp_high,hold_high);
 }
 
 /* First protected address. BP3 is reserved/don't-care in table4-3. */
@@ -42,6 +53,7 @@ static uint8_t status(const sst25vf080b_t *f) {
 
 static bool start_program(sst25vf080b_t *f,uint32_t address,unsigned count) {
     if (!(f->status&WEL) || address+count>protected_start(f)) return true;
+    if (!f->image) return false;
     /* The specified program precondition is erased storage. Preserve the
      * evidence boundary for undefined repeated programming, rather than RAM. */
     for (unsigned i=0;i<count;++i) if (f->image[address+i]!=0xffu) return false;
@@ -51,11 +63,12 @@ static bool start_program(sst25vf080b_t *f,uint32_t address,unsigned count) {
     return true;
 }
 
-static void start_erase(sst25vf080b_t *f,uint32_t size,uint64_t time) {
+static bool start_erase(sst25vf080b_t *f,uint32_t size,uint64_t time) {
     uint32_t address=f->address&~(size-1u);
-    if (!(f->status&WEL) || address+size>protected_start(f)) return;
+    if (!(f->status&WEL) || address+size>protected_start(f)) return true;
+    if (!f->image) return false;
     f->operation=f->command; f->operation_address=address; f->operation_size=size;
-    f->busy_ns=time;
+    f->busy_ns=time;return true;
 }
 
 static bool commit(sst25vf080b_t *f) {
@@ -91,16 +104,16 @@ static bool commit(sst25vf080b_t *f) {
             return start_program(f,f->aai_continuation?f->aai_next:(f->address&~1u),2u);
         break;
     case 0x20:
-        if (f->position==4u) start_erase(f,0x1000u,f->timing.sector_ns);
+        if (f->position==4u) return start_erase(f,0x1000u,f->timing.sector_ns);
         break;
     case 0x52:
-        if (f->position==4u) start_erase(f,0x8000u,f->timing.block32_ns);
+        if (f->position==4u) return start_erase(f,0x8000u,f->timing.block32_ns);
         break;
     case 0xd8:
-        if (f->position==4u) start_erase(f,0x10000u,f->timing.block64_ns);
+        if (f->position==4u) return start_erase(f,0x10000u,f->timing.block64_ns);
         break;
     case 0x60: case 0xc7:
-        if (f->position==1u) start_erase(f,SST25VF080B_SIZE,f->timing.chip_ns);
+        if (f->position==1u) return start_erase(f,SST25VF080B_SIZE,f->timing.chip_ns);
         break;
     default: break;
     }
@@ -173,6 +186,7 @@ static bool transfer(sst25vf080b_t *f,uint8_t input,sst25vf080b_output_t *out) {
         if (f->position==4u) { f->position++; return true; }
         /* fall through */
     case 0x03:
+        if (!f->image) return false;
         out->value=f->image[f->address]; out->driven=0xffu;
         f->address=(f->address+1u)&(SST25VF080B_SIZE-1u); return true;
     case 0x90: case 0xab:
@@ -203,7 +217,7 @@ bool sst25vf080b_transfer(sst25vf080b_t *f,uint8_t input,sst25vf080b_output_t *o
 }
 
 bool sst25vf080b_advance(sst25vf080b_t *f, uint64_t nanoseconds) {
-    if (!valid(f)) return false;
+    if (!valid(f) || (f->busy_ns && !f->image)) return false;
     f->powerup_ns=nanoseconds>=f->powerup_ns?0u:f->powerup_ns-nanoseconds;
     if (!f->busy_ns) return true;
     if (nanoseconds<f->busy_ns) { f->busy_ns-=nanoseconds; return true; }

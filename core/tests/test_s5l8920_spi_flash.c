@@ -205,9 +205,33 @@ static void test_external_ce_and_binding(void) {
     CHECK(!s5l8920_spi_attach_flash(&board,1,&other,149,9,0,1,0xff,0xff));
     CHECK(s5l8920_reset(&board));
 }
+static void test_unbacked_board(void) {
+    sst25vf080b_t f;
+    bool ok=sst25vf080b_init_unbacked(&f,&timing,true,true);CHECK(ok);if(!ok)return;
+    CHECK(sst25vf080b_advance(&f,100000));CHECK(s5l8920_reset(&board));
+    write32(cs,0x213);CHECK(s5l8920_clock_gate_configure(&board,9,0));write32(gate,15);
+    ok=s5l8920_spi_attach_flash(&board,0,&f,148,9,0,1,0xff,0xff);CHECK(ok);if(!ok)return;
+    const uint8_t id[]={0x9f,0xff,0xff,0xff},want[]={0xff,0xbf,0x25,0x8e};
+    request(id,4);size_t count=0;
+    CHECK(s5l8920_spi_bank_flash_clock(&board,0,true,64,&count) && count==4);
+    for(unsigned i=0;i<4;++i)CHECK(board.bus.read32(&board,S5L8920_SPI_BASE+0x20)==want[i]);
+    write32(cs,0x213);CHECK(!f.image);
+    const uint8_t read[]={3,0,0,0,0xff};request(read,5);
+    s5l8920_spi_t before=board.spi[0];sst25vf080b_t peer=f;count=19;
+    bool irq=board.cpu.irq_line,fiq=board.cpu.fiq_line;
+    CHECK(!s5l8920_spi_bank_flash_clock(&board,0,true,80,&count));
+    CHECK(count==19 && !memcmp(&before,&board.spi[0],sizeof before) && !memcmp(&peer,&f,sizeof f));
+    CHECK(irq==board.cpu.irq_line && fiq==board.cpu.fiq_line && !board.bus_failure.reason);
+    CHECK(s5l8920_spi_bank_flash_clock(&board,0,true,64,&count) && count==4);
+    CHECK(f.position==4 && f.address==0 && !f.image);before=board.spi[0];peer=f;count=19;
+    CHECK(!s5l8920_spi_bank_flash_clock(&board,0,true,16,&count));
+    CHECK(count==19 && !memcmp(&before,&board.spi[0],sizeof before) && !memcmp(&peer,&f,sizeof f));
+    CHECK(s5l8920_reset(&board));CHECK(!memcmp(&peer,&f,sizeof f) && !board.spi_flash[0]);
+}
+
 int main(void) {
     CHECK(s5l8920_init(&board));if(!board.ram)return 1;
     test_source_divider();test_phase_guards();test_delay_and_rollback();
-    test_board_gpio_irq();test_board_rollback();test_board_ce_commit();test_external_ce_and_binding();
+    test_board_gpio_irq();test_board_rollback();test_board_ce_commit();test_external_ce_and_binding();test_unbacked_board();
     s5l8920_free(&board);printf("s5l8920_spi_flash: %u passed, %u failed\n",passed,failed);return failed?1:0;
 }

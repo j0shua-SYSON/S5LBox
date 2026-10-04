@@ -24,6 +24,7 @@ typedef struct {
     uint8_t status, command, position, data[2], operation_data[2], operation;
     bool initialized, selected, wp_high, hold_high;
     bool ewsr, status_authorized, busy_output, aai_continuation;
+    bool array_unavailable;
 } sst25vf080b_t;
 
 /* Cold power-on with CE high. Borrow exactly 1 MiB, never initialize, allocate,
@@ -33,6 +34,13 @@ typedef struct {
  * sector/block25ms, chip50ms. No N88 identity or warm-handoff state is inferred.
  * Reinitializing during a pending operation is not a power-loss simulation. */
 bool sst25vf080b_init(sst25vf080b_t *f, uint8_t *image, size_t size,
+    const sst25vf080b_timing_t *timing, bool wp_high, bool hold_high);
+/* Explicitly model this candidate chip without any known array contents.
+ * ID/status/pins retain device semantics; array reads and authorized storage
+ * mutations refuse transactionally. No blank image, erased bytes or persistent
+ * state is invented. Existing image-backed initialization still requires 1 MiB.
+ * This is not evidence of the actual board's chip identity or warm state. */
+bool sst25vf080b_init_unbacked(sst25vf080b_t *f,
     const sst25vf080b_timing_t *timing, bool wp_high, bool hold_high);
 /* Pins supplied at byte boundaries, with HOLD changes already qualified at
  * SCK low by the caller. Selecting during power-up refuses. Deasserting CE

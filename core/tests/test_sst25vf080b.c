@@ -309,10 +309,45 @@ static void test_spi_connection(void) {
     CHECK(s5l8920_spi_write(&s,8,S5L8920_SPI_EVENT_MASK)); CHECK(!s5l8920_spi_irq(&s)); pins(&f,true);
 }
 
+static void test_unavailable_array(void) {
+    sst25vf080b_t f;memset(&f,0xa5,sizeof f);sst25vf080b_t before=f;
+    CHECK(!sst25vf080b_init_unbacked(NULL,&timing,true,true));
+    CHECK(!sst25vf080b_init_unbacked(&f,NULL,true,true));CHECK(!memcmp(&before,&f,sizeof f));
+    bool ok=sst25vf080b_init_unbacked(&f,&timing,true,true);CHECK(ok);if(!ok)return;
+    CHECK(!f.image && f.array_unavailable && f.initialized && f.powerup_ns==100000);
+    before=f;CHECK(!sst25vf080b_pins(&f,false,true,true));CHECK(!memcmp(&before,&f,sizeof f));
+    CHECK(sst25vf080b_advance(&f,100000));CHECK(status(&f)==0x1c);
+    pins(&f,false);CHECK(!byte(&f,0x9f).driven);
+    const uint8_t id[]={0xbf,0x25,0x8e};
+    for(unsigned i=0;i<3;++i) {sst25vf080b_output_t out=byte(&f,0xff);CHECK(out.value==id[i] && out.driven==0xff);}
+    pins(&f,true);
+    const uint8_t reads[]={3,0xb};
+    for(unsigned i=0;i<2;++i) {
+        addressed(&f,reads[i],0xfffff);if(reads[i]==0xb)CHECK(!byte(&f,0xff).driven);
+        refusal(&f,0xff);pins(&f,true);
+    }
+    /* Protected writes are known to have no storage effect even without data. */
+    opcode(&f,6);program(&f,0,0xa5);CHECK(!f.busy_ns && status(&f)==0x1e);opcode(&f,4);
+    const uint8_t writes[]={2,0xad,0x20,0x52,0xd8,0x60,0xc7};
+    for(unsigned i=0;i<sizeof writes;++i) {
+        CHECK(sst25vf080b_init_unbacked(&f,&timing,true,true));CHECK(sst25vf080b_advance(&f,100000));
+        unprotect(&f,0);opcode(&f,6);
+        if(writes[i]==0x60 || writes[i]==0xc7) {pins(&f,false);CHECK(!byte(&f,writes[i]).driven);}
+        else addressed(&f,writes[i],0x2000);
+        if(writes[i]==2 || writes[i]==0xad)CHECK(!byte(&f,0x55).driven);
+        if(writes[i]==0xad)CHECK(!byte(&f,0xaa).driven);
+        before=f;CHECK(!sst25vf080b_pins(&f,true,true,true));
+        CHECK(!memcmp(&before,&f,sizeof f) && !f.busy_ns && !f.operation);
+        CHECK(sst25vf080b_advance(&f,UINT64_MAX));CHECK(!memcmp(&before,&f,sizeof f));
+    }
+    CHECK(!sst25vf080b_init(&f,NULL,SST25VF080B_SIZE,&timing,true,true));
+    CHECK(!memcmp(&before,&f,sizeof f));
+}
+
 int main(void) {
     test_power_and_inputs(); test_reads_and_pins(); test_status_authorization();
     test_program_and_busy(); test_protection_table(); test_erases(); test_aai();
-    test_busy_stream_and_hardware_pin(); test_spi_connection(); test_adapter();
+    test_busy_stream_and_hardware_pin(); test_spi_connection(); test_adapter();test_unavailable_array();
     printf("sst25vf080b: %u passed, %u failed\n",passed,failed);
     return failed?1:0;
 }

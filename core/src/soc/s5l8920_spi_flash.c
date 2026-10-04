@@ -4,7 +4,8 @@
 
 static bool flash_clock(s5l8920_spi_t *s,sst25vf080b_t *flash,bool source,bool nclk,
     uint64_t periods,uint8_t bias_value,uint8_t bias_known,size_t *count) {
-    if (!s || !flash || !count || !flash->initialized || !flash->image ||
+    sst25vf080b_output_t pin;
+    if (!s || !flash || !count || !sst25vf080b_ready_pin(flash,&pin) ||
         flash->powerup_ns || !s->pin_programmed ||
         (!source && flash->selected!=(s->pin==0u)) || ((s->config>>15)&3u)) return false;
     /* First plan the controller's completions on a disposable copy. Placeholder
