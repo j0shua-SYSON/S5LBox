@@ -906,6 +906,48 @@ pass and the canonical 61,650-step ECC-guard trace is unchanged. The full
 182,680,916-step trace matches the GPIO polling checkpoint, including the
 unprepared-pin failure and preserved post-stop bus diagnostics.
 
+## SPI initialization boundary
+
+The matching device tree describes SPI controllers at `0x82000000`,
+`0x82100000` and `0x82200000`, each with a `0x1000`-byte aperture. SPI0 has
+a NOR-flash child, SPI1 has the N88 multitouch device, and SPI2 uses a
+separate baseband driver. The first two match `AppleSamsungSPIController`.
+These device descriptions do not supply NOR contents or calibration data.
+
+The separate S5L8920 component accepts the matching driver's stopped-state
+initialization: control offset `0` receives zero, pin offset `0x0c` receives
+zero, and status offset `8` acknowledges `0x0040000f`. Control zero establishes
+a stopped controller and does not reset pin programming. The pin latch accepts
+the observed software CS bit `1` only after stopping. Partial event
+acknowledgements retain which causes have been cleared; writing zero clears
+none. No pin routing, peripheral responses or interrupts are generated.
+
+Status reads remain refused because acknowledging pending events does not
+establish FIFO contents or counts. Start, FIFO reset, transfer/configuration
+registers, unsupported fields and non-word accesses remain guarded before
+state changes. Reset invalidates all programming rather than supplying a
+silicon reset image. The controller gaps, additional banks and legacy address
+aliases remain unmapped; no S5L8900 SPI behavior is imported.
+
+Original version-1 driver helpers decode five-bit FIFO levels at status bits
+`6..10` and `11..15`, and compute free space using capacity 16. A fixture
+checks these helpers in 3,468 cases. Its separate initialization fixture uses
+synthetic objects and mappings, starts after the provider's clock callback,
+and ends before event-source enable. Thus it establishes the original three
+register stores, not a complete power transition, serial transfer or boot.
+The pinned public S5L8920 implementation corroborates register locations;
+its larger FIFO limit is not adopted. A newer Apple SPI implementation has
+additional FIFO/interrupt registers and cannot establish N88 interrupt causes.
+
+The strict 80-test and shipping 75-test suites pass with this component. The
+canonical prepared-kernel trace and all three LLB traces remain unchanged.
+With the same explicit diagnostic inputs, the farther kernel run advances from
+226,950,746 to 226,951,170 instructions and stops at `0x8061caa6`, writing `2`
+to SPI0's clock-divider register at `0x82000030`. Those inputs still include
+unmeasured GPIO, clock, DART and boot-state observations. This is a bounded
+initialization result; complete boot, serial transfers and hardware validation
+remain unproven.
+
 ## Bounded I2C requests and explicit responses
 
 Three I2C apertures at `0x83200000`, `0x83300000` and `0x83400000` use

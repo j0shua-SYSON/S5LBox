@@ -8,6 +8,7 @@
 #include "pl192.h"
 #include "s5l8920_uart.h"
 #include "s5l8920_dart.h"
+#include "s5l8920_spi.h"
 #include <stddef.h>
 
 #define S5L8920_RAM_BASE UINT32_C(0x40000000)
@@ -251,6 +252,7 @@ typedef struct {
     s5l8920_audio_nco_t audio_nco;
     s5l8920_dmc_t dmc;
     s5l8920_dart_t dart[S5L8920_DART_COUNT];
+    s5l8920_spi_t spi[S5L8920_SPI_COUNT];
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching

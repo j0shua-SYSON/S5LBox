@@ -35,6 +35,14 @@ static bool dart_address(uint32_t address, unsigned *bank, uint32_t *offset) {
     return *bank<S5L8920_DART_COUNT && *offset<0x1000u;
 }
 
+static bool spi_address(uint32_t address, unsigned *bank, uint32_t *offset) {
+    if (address<S5L8920_SPI_BASE) return false;
+    uint32_t relative=address-S5L8920_SPI_BASE;
+    *bank=relative/S5L8920_SPI_STRIDE;
+    *offset=relative%S5L8920_SPI_STRIDE;
+    return *bank<S5L8920_SPI_COUNT && *offset<0x1000u;
+}
+
 static int dmc_index(uint32_t offset) {
     if (offset>=0x0cu && offset<=0x50u) return (int)((offset-0x0cu)/4u);
     if (offset>=0x100u && offset<=0x13cu) return 18+(int)((offset-0x100u)/4u);
@@ -265,6 +273,18 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         for (unsigned n = 0; n < size; n++) value |= (uint32_t)p[n] << (8u * n);
         return value;
     }
+    unsigned spi_bank; uint32_t spi_offset;
+    if (spi_address(address,&spi_bank,&spi_offset)) {
+        uint32_t value;
+        if (spi_offset>=0x50u)
+            fail(m,S5L8920_BUS_UNMAPPED,address,size,false,0u);
+        else if (size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
+        else if (!s5l8920_spi_read(&m->spi[spi_bank],spi_offset,&value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        else return value;
+        return 0u;
+    }
     unsigned dart_bank; uint32_t dart_offset;
     if (dart_address(address,&dart_bank,&dart_offset)) {
         uint32_t value;
@@ -402,6 +422,16 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
     if (ram_offset(m,address,size,&ram_at)) {
         uint8_t *p = m->ram + ram_at;
         for (unsigned n = 0; n < size; n++) p[n] = (uint8_t)(value >> (8u * n));
+        return;
+    }
+    unsigned spi_bank; uint32_t spi_offset;
+    if (spi_address(address,&spi_bank,&spi_offset)) {
+        if (spi_offset>=0x50u)
+            fail(m,S5L8920_BUS_UNMAPPED,address,size,true,value);
+        else if (size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        else if (!s5l8920_spi_write(&m->spi[spi_bank],spi_offset,value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
         return;
     }
     unsigned dart_bank; uint32_t dart_offset;
@@ -1171,6 +1201,8 @@ bool s5l8920_reset(s5l8920_t *m) {
     m->dmc.state=S5L8920_DMC_CONFIG;
     for (unsigned bank=0;bank<S5L8920_DART_COUNT;bank++)
         s5l8920_dart_reset(&m->dart[bank]);
+    for (unsigned bank=0;bank<S5L8920_SPI_COUNT;bank++)
+        s5l8920_spi_reset(&m->spi[bank]);
     m->powerid.value=m->powerid.initial;
     for (unsigned index=0;index<S5L8920_USB_CONTROL_COUNT;index++)
         m->usb_control[index].value=m->usb_control[index].initial;

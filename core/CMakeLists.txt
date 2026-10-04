@@ -32,6 +32,7 @@ add_library(emucore STATIC
     src/soc/s5l8920.c
     src/soc/s5l8920_uart.c
     src/soc/s5l8920_dart.c
+    src/soc/s5l8920_spi.c
     src/soc/timer.c
     src/soc/mbx.c
     src/soc/power.c

@@ -1227,6 +1227,126 @@ static bool test_gpio_peripheral_selection(s5l8920_t *m) {
     return true;
 }
 
+static bool test_spi_initialization(s5l8920_t *m) {
+    s5l8920_spi_t s={0},copy; uint32_t value=0xfeedfaceu;
+    CHECK(!s5l8920_spi_read(NULL,0u,&value) && value==0xfeedfaceu &&
+          !s5l8920_spi_read(&s,0u,NULL) && !s5l8920_spi_write(NULL,0u,0u),"SPI null API contract");
+    s5l8920_spi_reset(NULL);
+    CHECK(s5l8920_spi_write(&s,0u,0u) && s.stopped && !s.cleared_events,
+          "stop establishes no interrupt observations");
+    uint32_t known=0u;
+    for (unsigned bit=0;bit<23u;bit++) if (bit<4u || bit==22u) {
+        known|=1u<<bit;
+        CHECK(s5l8920_spi_write(&s,8u,1u<<bit) && s.cleared_events==known,
+              "partial W1C establishes only the selected cleared causes");
+        copy=s;
+        CHECK(s5l8920_spi_write(&s,8u,0u) && !memcmp(&s,&copy,sizeof s),"zero ACK is not full acknowledgement");
+        CHECK(!s5l8920_spi_read(&s,8u,&value) && value==0xfeedfaceu,
+              "even all cleared causes do not establish unknown FIFO levels");
+    }
+    CHECK(s5l8920_spi_write(&s,12u,2u),"direct pin programming");
+    for (unsigned off=0;off<0x54u;off++) if (off!=0u && off!=8u && off!=12u) {
+        copy=s;
+        CHECK(!s5l8920_spi_write(&s,off,0u) && !memcmp(&s,&copy,sizeof s),"unknown SPI offset write atomic");
+        CHECK(!s5l8920_spi_read(&s,off,&value) && value==0xfeedfaceu &&
+              !memcmp(&s,&copy,sizeof s),"unknown SPI offset read preserves output and state");
+    }
+    s5l8920_spi_reset(&s);
+    CHECK(!s.stopped && !s.pin_programmed && !s.pin && !s.cleared_events,"SPI reset invalidates all knowledge");
+    s5l8920_free(m);
+    if (!s5l8920_init(m)) { CHECK(false,"fresh SPI board"); return false; }
+    for (unsigned bank=0;bank<3u;bank++) {
+        uint32_t base=0x82000000u+bank*0x100000u;
+        (void)m->bus.read32(m,base);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"unknown SPI control must not default to zero");
+        s5l8920_clear_bus_failure(m);
+        m->bus.write32(m,base+12u,2u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"SPI pin setup requires known stopped control");
+        s5l8920_clear_bus_failure(m);
+        m->bus.write32(m,base,0u);
+        m->bus.write32(m,base+12u,0u);
+        m->bus.write32(m,base+8u,0x40000fu);
+        CHECK(!m->bus_failure.reason && m->bus.read32(m,base)==0u &&
+              m->bus.read32(m,base+12u)==0u,"original SPI initialization writes and control/pin retention");
+        (void)m->bus.read32(m,base+8u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"ACK does not establish FIFO levels or status readback");
+        s5l8920_clear_bus_failure(m);
+        m->bus.write32(m,base+12u,2u);
+        for (unsigned bit=0;bit<32u;bit++) {
+            m->bus.write32(m,base,1u<<bit);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+                  m->bus_failure.address==base && m->bus_failure.write,
+                  "unimplemented SPI start/reset/control must stop before effects");
+            s5l8920_bus_failure_t first=m->bus_failure;
+            m->bus.write32(m,base+12u,0u);
+            CHECK(!memcmp(&first,&m->bus_failure,sizeof first),"SPI preserves first bus failure");
+            s5l8920_clear_bus_failure(m);
+            CHECK(m->bus.read32(m,base)==0u && m->bus.read32(m,base+12u)==2u,
+                  "rejected SPI control and later writes preserve programmed state");
+        }
+        for (unsigned bit=0;bit<32u;bit++) if (bit!=1u) {
+            m->bus.write32(m,base+12u,1u<<bit);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"unknown SPI pin field refused");
+            s5l8920_clear_bus_failure(m);
+            CHECK(m->bus.read32(m,base+12u)==2u,"pin refusal preserves prior value");
+        }
+        /* Only observed event bits are acknowledged. A status read remains
+         * unavailable, so no FIFO-count readback is invented by these writes. */
+        for (unsigned mask=0;mask<32u;mask++) {
+            uint32_t events=(mask&15u)|((mask&16u)<<18);
+            m->bus.write32(m,base+8u,events);
+            CHECK(!m->bus_failure.reason,"SPI partial/repeated W1C event acknowledgements");
+        }
+        for (unsigned bit=4;bit<32u;bit++) if (bit!=22u) {
+            m->bus.write32(m,base+8u,1u<<bit);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"unknown SPI status write field refused");
+            s5l8920_clear_bus_failure(m);
+        }
+        for (unsigned off=0;off<0x50u;off+=4u) if (off!=0u && off!=8u && off!=12u) {
+            m->bus.write32(m,base+off,0u);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"SPI transfer/configuration registers remain guarded");
+            s5l8920_clear_bus_failure(m);
+            (void)m->bus.read32(m,base+off);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"unknown SPI read remains guarded");
+            s5l8920_clear_bus_failure(m);
+        }
+        m->bus.write32(m,base,0u);
+        CHECK(m->bus.read32(m,base+12u)==2u,"repeated SPI stop is not a reset");
+        CHECK(!m->bus.host_ram(m,base,4u) && !m->bus.host_ram_write(m,base,4u) &&
+              !s5l8920_load(m,base,m->ram,4u),"SPI does not expose host RAM access");
+        for (unsigned which=0;which<3u;which++) {
+            if (!which) m->bus.write8(m,base,0u);
+            else if (which==1u) m->bus.write16(m,base+12u,0u);
+            else m->bus.write32(m,base+1u,0u);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED,"SPI width/alignment guard");
+            s5l8920_clear_bus_failure(m);
+            CHECK(m->bus.read32(m,base+12u)==2u,"invalid width leaves pin unchanged");
+        }
+        CHECK(!m->cpu.irq_line && !m->cpu.fiq_line,"SPI programming invents no interrupts");
+        for (unsigned other=0;other<3u;other++)
+            CHECK(m->spi[other].stopped==(other<=bank) &&
+                  m->spi[other].pin_programmed==(other<=bank),"SPI bank programming remains isolated");
+    }
+    const uint32_t holes[]={0x81fffffcu,0x82001000u,0x820ffffcu,0x82101000u,
+        0x82201000u,0x82300000u,0x82400000u,0x3cd00000u};
+    for (unsigned n=0;n<sizeof holes/sizeof holes[0];n++) {
+        m->bus.write32(m,holes[n],0u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_UNMAPPED,"SPI aperture/unsupported-bank/legacy-alias boundary");
+        s5l8920_clear_bus_failure(m);
+    }
+    CHECK(s5l8920_reset(m),"SPI board reset");
+    for (unsigned bank=0;bank<3u;bank++) {
+        uint32_t base=0x82000000u+bank*0x100000u;
+        (void)m->bus.read32(m,base+12u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"reset invalidates SPI programming");
+        s5l8920_clear_bus_failure(m);
+        m->bus.write32(m,base+8u,0x40000fu);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"reset removes known stopped state");
+        s5l8920_clear_bus_failure(m);
+    }
+    return true;
+}
+
 static void test_i2c_staging_bus(s5l8920_t *m) {
     for (unsigned bus=0;bus<3u;bus++) for (unsigned write=0;write<2u;write++)
      for (unsigned width=0;width<2u;width++) {
@@ -3396,6 +3516,7 @@ int main(void) {
     if (!test_gpio_configuration_fields(&m)) return 1;
     if (!test_gpio_inactive_readback(&m)) return 1;
     if (!test_gpio_peripheral_selection(&m)) return 1;
+    if (!test_spi_initialization(&m)) return 1;
     test_i2c_staging_bus(&m);
     test_i2c_endpoints(&m);
     test_i2c_bounds(&m);
