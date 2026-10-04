@@ -1295,7 +1295,7 @@ static bool test_spi_initialization(s5l8920_t *m) {
         CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"ACK does not establish FIFO levels or status readback");
         s5l8920_clear_bus_failure(m);
         m->bus.write32(m,base+12u,2u);
-        for (unsigned bit=0;bit<32u;bit++) {
+        for (unsigned bit=0;bit<32u;bit++) if (bit!=2u && bit!=3u) {
             m->bus.write32(m,base,1u<<bit);
             CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
                   m->bus_failure.address==base && m->bus_failure.write,
@@ -1413,7 +1413,7 @@ static void test_spi_programming(s5l8920_t *m) {
         CHECK(!s5l8920_spi_read(&s,offsets[n],&output) && output==0xfeedfaceu && !memcmp(&s,&copy,sizeof s),
               "staged programming is not hardware readback or effective timing");
     CHECK(!s5l8920_spi_write(&s,0u,13u) && !memcmp(&s,&copy,sizeof s),
-          "FIFO reset/start remains refused before staged programming can take effect");
+          "unsupported DMA/interrupt configuration refuses run before side effects");
     CHECK(s5l8920_spi_write(&s,0u,0u) && !memcmp(&s,&copy,sizeof s),"repeated stop preserves all staged programming");
     s5l8920_spi_reset(&s);
     CHECK(!s.config_programmed && !s.divider_programmed && !s.word_delay_programmed &&
@@ -1452,6 +1452,127 @@ static void test_spi_programming(s5l8920_t *m) {
     for (unsigned bank=0;bank<3u;bank++)
         CHECK(!m->spi[bank].config_programmed && !m->spi[bank].divider_programmed && !m->spi[bank].word_delay_programmed,
               "board reset invalidates SPI programming on every bank");
+}
+
+static bool spi_prepare_fifo(s5l8920_spi_t *s) {
+    s5l8920_spi_reset(s);
+    return s5l8920_spi_write(s,0u,0u) && s5l8920_spi_write(s,4u,0x4018u) &&
+        s5l8920_spi_write(s,0x30u,2u) && s5l8920_spi_write(s,0x38u,0u) &&
+        s5l8920_spi_write(s,12u,2u);
+}
+
+static void test_spi_fifo_preparation(s5l8920_t *m) {
+    s5l8920_spi_t s={0},copy;uint32_t value=0xfeedfaceu;
+    CHECK(!s5l8920_spi_write(&s,0x10u,1u) && !s5l8920_spi_write(&s,0x34u,1u) &&
+          !s5l8920_spi_write(&s,0x4cu,1u),"unknown FIFOs/counts are not empty defaults");
+    CHECK(s5l8920_spi_write(&s,0u,4u) && s.stopped && s.control_programmed &&
+          s.tx.known && !s.tx.count && !s.rx.known,"TX reset establishes only its FIFO");
+    CHECK(!s5l8920_spi_read(&s,0u,&value) && value==0xfeedfaceu,
+          "reset command readback is not guessed from the request");
+    CHECK(s5l8920_spi_write(&s,0u,8u) && s.tx.known && s.rx.known && !s.rx.count,
+          "RX reset preserves known TX FIFO");
+    CHECK(!s5l8920_spi_read(&s,0x20u,&value) && value==0xfeedfaceu,"empty RX read returns no invented data");
+    /* Explicit internal queued-data fixture, not a received serial exchange. */
+    s.rx.head=15u;s.rx.count=3u;s.rx.words[15]=0xabcdef01u;s.rx.words[0]=0x11223344u;s.rx.words[1]=0x55667788u;
+    s.rx_words=9u;s.rx_count_programmed=true;
+    const uint32_t receive[]={0xabcdef01u,0x11223344u,0x55667788u};
+    for (unsigned n=0;n<3u;n++)
+        CHECK(s5l8920_spi_read(&s,0x20u,&value) && value==receive[n] && s.rx.count==2u-n &&
+              s.rx_words==9u && s.rx_count_programmed,"RX FIFO read wraps and consumes data, not serial count");
+    copy=s;
+    CHECK(!s5l8920_spi_read(&s,0x20u,&value) && value==receive[2] && !memcmp(&s,&copy,sizeof s),
+          "RX underflow preserves output and state");
+    CHECK(spi_prepare_fifo(&s) && s5l8920_spi_write(&s,0u,12u) &&
+          s5l8920_spi_write(&s,4u,0x4038u),"prepare stopped PIO FIFO");
+    for (unsigned n=0;n<16u;n++)
+        CHECK(s5l8920_spi_write(&s,16u,0xfedc0000u+n) && s.tx.count==n+1u &&
+              s.tx.words[n]==0xfedc0000u+n && !s.tx_count_programmed,"TX FIFO preserves raw word order before count programming");
+    copy=s;
+    CHECK(!s5l8920_spi_write(&s,16u,0xbadu) && !memcmp(&s,&copy,sizeof s),"full TX write is refused without overflow side effects");
+    CHECK(s5l8920_spi_write(&s,0x4cu,0xffffffffu) && s.tx_count_programmed && s.tx_words==0xffffffffu &&
+          s5l8920_spi_write(&s,0x34u,0u) && s.rx_count_programmed && !s.rx_words,
+          "independent count programming neither transfers nor completes data");
+    s.rx.head=7u;s.rx.count=1u;s.rx.words[7]=0x76543210u;
+    s5l8920_spi_fifo_t rx=s.rx;
+    CHECK(s5l8920_spi_write(&s,0u,4u) && !s.tx.count && s.tx.known && !s.tx_count_programmed &&
+          !memcmp(&s.rx,&rx,sizeof rx) && s.rx_count_programmed,"TX reset empties TX and invalidates its count knowledge only");
+    CHECK(spi_prepare_fifo(&s),"prepare control matrix");
+    for (unsigned bits=0;bits<8u;bits++) {
+        CHECK(spi_prepare_fifo(&s),"fresh command setup");
+        s.tx.known=s.rx.known=true;s.tx.count=s.rx.count=2u;s.tx.head=5u;s.rx.head=9u;
+        s.tx_count_programmed=s.rx_count_programmed=true;s.tx_words=7u;s.rx_words=8u;
+        s.cleared_events=0x40000fu;
+        uint32_t command=(bits&1u)|((bits&6u)<<1);
+        CHECK(s5l8920_spi_write(&s,0u,command) && s.stopped==!(command&1u) &&
+              s.control_readable==(command==0u),"control request records stop/run without command readback assumptions");
+        CHECK(s.tx.count==((command&4u)?0u:2u) && s.rx.count==((command&8u)?0u:2u) &&
+              s.tx_count_programmed==!(command&4u) && s.rx_count_programmed==!(command&8u),
+              "each FIFO reset affects only the selected data and count knowledge");
+        CHECK(s.cleared_events==(command?0u:0x40000fu),"run/reset invalidates pending event knowledge rather than asserting completion");
+    }
+    CHECK(spi_prepare_fifo(&s),"prepare invalid command tests");
+    copy=s;
+    for (unsigned bit=1;bit<32u;bit++) if (bit!=2u && bit!=3u)
+        CHECK(!s5l8920_spi_write(&s,0u,13u|(1u<<bit)) && !memcmp(&s,&copy,sizeof s),
+              "unsupported control fields reject before either FIFO reset");
+    const uint32_t bad_config[]={0u,0x4019u,0x4058u,0x204018u,0x4098u,0x4118u};
+    for (unsigned n=0;n<sizeof bad_config/sizeof bad_config[0];n++) {
+        CHECK(spi_prepare_fifo(&s) && s5l8920_spi_write(&s,4u,bad_config[n]),"stage unsupported run mode");
+        copy=s;
+        CHECK(!s5l8920_spi_write(&s,0u,13u) && !memcmp(&s,&copy,sizeof s),
+              "slave, automatic transmit, DMA and interrupt modes cannot arm an unmodeled transfer");
+    }
+    CHECK(spi_prepare_fifo(&s) && s5l8920_spi_write(&s,0x30u,0u),"stage unknown zero divider");
+    copy=s;
+    CHECK(!s5l8920_spi_write(&s,0u,13u) && !memcmp(&s,&copy,sizeof s),"zero-divider run remains guarded");
+    CHECK(spi_prepare_fifo(&s) && s5l8920_spi_write(&s,0u,13u) && !s.stopped && s.tx.known && s.rx.known,
+          "original controlD initializes both FIFOs and records run request");
+    CHECK(s5l8920_spi_write(&s,0x4cu,20u) && s5l8920_spi_write(&s,0x34u,20u) &&
+          s5l8920_spi_write(&s,12u,0u) && s5l8920_spi_write(&s,4u,0x4038u),"original count, chip-select and PIO mode setup after run request");
+    for (unsigned n=0;n<16u;n++)CHECK(s5l8920_spi_write(&s,16u,n),"prime original16FIFOwords");
+    copy=s;
+    const uint32_t runtime_bad[]={0x2041b8u,0x4058u,0x4039u,0x8038u,0x38u};
+    for (unsigned n=0;n<sizeof runtime_bad/sizeof runtime_bad[0];n++)
+        CHECK(!s5l8920_spi_write(&s,4u,runtime_bad[n]) && !memcmp(&s,&copy,sizeof s),
+              "runtime IRQ/DMA/auto-transmit and base reconfiguration stop before effects");
+    CHECK(!s5l8920_spi_write(&s,0x30u,3u) && !s5l8920_spi_write(&s,0x38u,1u) &&
+          !memcmp(&s,&copy,sizeof s),"armed timing changes require stopping");
+    CHECK(s5l8920_spi_write(&s,0x30u,2u) && s5l8920_spi_write(&s,0x38u,0u) &&
+          !memcmp(&s,&copy,sizeof s),"identical armed timing writes preserve programming");
+    CHECK(s5l8920_spi_write(&s,8u,0x40000fu) && s.cleared_events==0x40000fu,
+          "ACK while armed records only cleared event causes");
+    CHECK(!s5l8920_spi_read(&s,8u,&value) && s.tx.count==16u && s.tx_words==20u && s.rx_words==20u,
+          "ACK plus known FIFOs does not fabricate a full status word or serial progress");
+    CHECK(s5l8920_spi_write(&s,0u,0u) && s5l8920_spi_read(&s,0u,&value) && !value &&
+          s.tx.count==16u && s.tx_count_programmed && s.rx_count_programmed,"stop preserves queued data and count programming");
+    for (unsigned bank=0;bank<3u;bank++) {
+        uint32_t base=0x82000000u+bank*0x100000u;
+        CHECK(spi_prepare_fifo(&m->spi[bank]),"board SPI preconfiguration");
+        m->bus.write32(m,base,13u);m->bus.write32(m,base+0x34u,20u);m->bus.write32(m,base+0x4cu,20u);
+        m->bus.write32(m,base+4u,0x4038u);
+        for (unsigned n=0;n<16u;n++)m->bus.write32(m,base+16u,bank*16u+n);
+        CHECK(!m->bus_failure.reason && m->spi[bank].tx.count==16u && m->spi[bank].tx_words==20u,
+              "board routes FIFO preparation and raw counts");
+        copy=m->spi[bank];m->bus.write32(m,base+4u,0x2041b8u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && m->bus_failure.address==base+4u &&
+              !memcmp(&m->spi[bank],&copy,sizeof copy),"original interrupt-enable store fails before changing model");
+        s5l8920_clear_bus_failure(m);
+        m->bus.write32(m,base+16u,17u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !memcmp(&m->spi[bank],&copy,sizeof copy),"board full FIFO guard");
+        s5l8920_clear_bus_failure(m);
+        m->spi[bank].rx.words[0]=0x55660000u+bank;m->spi[bank].rx.count=1u;
+        CHECK(m->bus.read32(m,base+32u)==0x55660000u+bank && !m->spi[bank].rx.count,
+              "board consumes explicitly queued RX fixture word once");
+        (void)m->bus.read32(m,base+32u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"board empty FIFO read is guarded");
+        s5l8920_clear_bus_failure(m);
+        CHECK(!m->cpu.irq_line && !m->cpu.fiq_line,"FIFO preparation fabricates no interrupt");
+        for (unsigned other=0;other<3u;other++)CHECK(m->spi[other].tx.count==(other<=bank?16u:0u),"FIFO bank isolation");
+    }
+    CHECK(s5l8920_reset(m),"reset FIFO board");
+    for (unsigned bank=0;bank<3u;bank++)
+        CHECK(!m->spi[bank].control_programmed && !m->spi[bank].tx.known && !m->spi[bank].rx.known &&
+              !m->spi[bank].tx_count_programmed && !m->spi[bank].rx_count_programmed,"board reset restores unknown FIFO/control state");
 }
 
 static void test_i2c_staging_bus(s5l8920_t *m) {
@@ -3625,6 +3746,7 @@ int main(void) {
     if (!test_gpio_peripheral_selection(&m)) return 1;
     if (!test_spi_initialization(&m)) return 1;
     test_spi_programming(&m);
+    test_spi_fifo_preparation(&m);
     test_i2c_staging_bus(&m);
     test_i2c_endpoints(&m);
     test_i2c_bounds(&m);

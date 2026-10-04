@@ -918,7 +918,7 @@ The separate S5L8920 component accepts the matching driver's stopped-state
 initialization: control offset `0` receives zero, pin offset `0x0c` receives
 zero, and status offset `8` acknowledges `0x0040000f`. Control zero establishes
 a stopped controller and does not reset pin programming. The pin latch accepts
-the observed software CS bit `1` only after stopping. Partial event
+the observed software CS bit `1` after a known control command. Partial event
 acknowledgements retain which causes have been cleared; writing zero clears
 none. Both original service routines write the full status word back, including
 the read-only FIFO levels at bits `6..15`. Acknowledgements ignore those level
@@ -936,11 +936,26 @@ staging does not validate timing, activate DMA, or enable serial traffic.
 Readback remains guarded for all three registers. Repeating stop preserves
 their programming; reset invalidates it.
 
-Status reads remain refused because acknowledging pending events does not
-establish FIFO contents or counts. Start, FIFO reset, other transfer
-registers, unsupported fields and non-word accesses remain guarded before
-state changes. Reset invalidates all programming rather than supplying a
-silicon reset image. The controller gaps, additional banks and legacy address
+Control bits `2/3` reset the TX/RX FIFOs independently, establishing an empty
+16-entry buffer and invalidating the corresponding count programming. Bit `0`
+records an armed request when configuration, nonzero divider, word delay,
+pin and both FIFOs are known. Only manual master operation with mode `0/1`
+can arm; DMA, automatic transmit and interrupt enables remain guarded.
+Nonzero control commands have no inferred self-clearing readback or event
+effects. Stopping preserves queued data and programming.
+
+TX/RX counts at `0x4c/0x34` retain independent raw requests after their FIFOs
+are known. PIO writes at `0x10` queue raw words; reads at `0x20` consume known
+received words. Full TX and empty RX refuse without changing state. There is
+no received-data producer or clock advance yet, so programming and FIFO access
+never imply serial progress or count completion. Armed configuration changes
+are limited to selecting PIO mode; timing changes require stopping.
+
+Status reads remain refused: FIFO knowledge alone does not establish all
+event causes. Unsupported fields, transfer operations and non-word accesses
+remain guarded before state changes. Component reset invalidates all
+programming rather than supplying a silicon reset image. The controller
+gaps, additional banks and legacy address
 aliases remain unmapped; no S5L8900 SPI behavior is imported.
 
 Original version-1 driver helpers decode five-bit FIFO levels at status bits
@@ -956,9 +971,10 @@ additional FIFO/interrupt registers and cannot establish N88 interrupt causes.
 The strict 80-test and shipping 75-test suites pass with this component. Full
 boot checks preserve the canonical prepared-kernel trace and all three LLB
 traces. With the same explicit diagnostic inputs, the farther kernel run
-advances from the divider stop at 226,951,170 to 226,951,206 instructions and
-stops at `0x8061caa6`, writing the reset/start request `0x0d` to SPI0 control
-at `0x82000000`. Those inputs still include
+advances from the reset/start stop at 226,951,206 to 226,951,489 instructions and
+stops at `0x8061caa6`, writing interrupt-enable configuration `0x002041b8`
+to SPI0 at `0x82000004`. Reset, counts, chip selection and initial FIFO
+loading now execute through the component. Those inputs still include
 unmeasured GPIO, clock, DART and boot-state observations. This is a bounded
 initialization result; complete boot, serial transfers and hardware validation
 remain unproven.
@@ -979,6 +995,16 @@ stopping before the original reset/start write. The kernel's request validator
 accepts products up to a computed divider of 2,048; the matching iBoot warns
 at 1,024 and still writes the value. These are software behaviors and do not
 establish a silicon register-width mask.
+
+A further 147 original PIO preparation cases execute through production reset,
+count programming, software chip select and initial FIFO priming. The driver
+writes control `0x0d` once, programs both counts to the larger buffer length,
+queues at most 16 real transmit bytes and then enables interrupts. Production
+stops at that interrupt-enable write before changing the configuration. A
+separate witness records only that final write and reaches the subsequent
+wait boundary. Both use synthetic objects and explicit clocks/PIN input;
+zero-length cases are sequence probes, not completed transactions. They
+establish neither event thresholds nor serial exchange or interrupt delivery.
 
 ## Bounded I2C requests and explicit responses
 
