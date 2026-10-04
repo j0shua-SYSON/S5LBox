@@ -9192,107 +9192,6 @@ static bool compact_raw_single_resident_fallback_case(
     return true;
 }
 
-/* Keep indexed transfers in a live-register chain. In particular, a load into
- * Rm must not replace the saved offset before post-indexed writeback, and RRX
- * must consume the resident carry without publishing shifter flags. */
-static bool validate_compact_raw_a32_indexed_chain_oracle(void) {
-    static const unsigned amounts[] = {0u, 1u, 2u, 31u};
-    const uint32_t pc = UINT32_C(0x7000);
-    const uint32_t address = DATA_BASE + UINT32_C(0x800);
-    const uint32_t value = UINT32_C(0x80000108);
-    arm_bus_t write_bus = g_bus;
-    unsigned cases = 0u;
-    write_bus.host_ram_write = mem_host_ram;
-
-    for (unsigned cached = 0u; cached < 2u; cached++)
-        for (unsigned mode = 0u; mode < 32u; mode++) {
-            const bool pre = (mode & 16u) != 0u, up = (mode & 8u) != 0u;
-            const bool wb = (mode & 2u) != 0u, load = (mode & 1u) != 0u;
-            const bool writeback = !pre || wb;
-            if (!pre && wb) continue; /* Translation forms keep their decoder. */
-            for (unsigned variant = 0u; variant < 4u; variant++) {
-                const unsigned rn = 4u, rm = (variant & 1u) ? 9u : 1u;
-                const unsigned rd = variant == 0u ? 3u : variant == 1u ? 12u :
-                                    variant == 2u ? rm : rn;
-                if (writeback && rn == rd) continue;
-                for (unsigned type = 0u; type < 4u; type++)
-                    for (unsigned index = 0u; index < 4u; index++)
-                        for (unsigned carry = 0u; carry < 2u; carry++) {
-                            const unsigned amount = amounts[index];
-                            uint32_t offset;
-                            if (type == 0u) offset = value << amount;
-                            else if (type == 1u) offset = amount ? value >> amount : 0u;
-                            else if (type == 2u) offset = amount ?
-                                (value >> amount) | (UINT32_MAX << (32u - amount)) : UINT32_MAX;
-                            else offset = amount ? (value >> amount) | (value << (32u - amount)) :
-                                (value >> 1) | (carry << 31);
-                            const uint32_t base = !pre ? address : up ? address - offset : address + offset;
-                            const uint32_t program[] = {
-                                UINT32_C(0xe2200080) | (rm << 16) | (rm << 12),
-                                UINT32_C(0xe2844004),
-                                UINT32_C(0xe3570001),
-                                UINT32_C(0xe6000000) | (mode << 20) | (rn << 16) |
-                                    (rd << 12) | (amount << 7) | (type << 5) | rm,
-                                UINT32_C(0xe0266000) | rd,
-                            };
-                            arm_cpu_t reference, compact;
-                            seed_cpu_at(&reference, program, 5u, false, pc);
-                            reference.r[rn] = base - 4u;
-                            reference.r[rm] = value ^ UINT32_C(0x80);
-                            reference.r[7] = carry ? 2u : 0u;
-                            reference.cpsr ^= ARM_CPSR_C;
-                            if (cached) {
-                                if (load) oracle_warm_dread_as(&reference, address, true);
-                                else {
-                                    reference.bus = &write_bus;
-                                    oracle_warm_dwrite(&reference, address, true);
-                                }
-                            }
-                            compact = reference;
-                            mem_w32(NULL, address, UINT32_C(0x89abcdef));
-                            uint8_t before[8], expected[8];
-                            memcpy(before, &g_ram[address], sizeof before);
-                            arm_status_t status = ARM_OK;
-                            for (unsigned step = 0u; step < 5u && status == ARM_OK; step++)
-                                status = arm_step(&reference);
-                            memcpy(expected, &g_ram[address], sizeof expected);
-                            memcpy(&g_ram[address], before, sizeof before);
-                            unsigned completed = UINT_MAX, native = UINT_MAX, fallback = UINT_MAX;
-                            compact_raw_resident_oracle_context_t context;
-                            memset(&context, 0, sizeof context);
-                            context.cpu = &compact;
-                            context.status = ARM_OK;
-                            context.code = g_ram;
-                            context.code_bytes = (uint32_t)sizeof g_ram;
-                            const bool ran = cached ? a64_compact_raw_run_code_window_resident(
-                                &compact, &g_ram[pc], pc, sizeof program, 5u,
-                                compact_raw_resident_oracle_step, &context,
-                                &completed, &native, &fallback) : a64_compact_raw_run(
-                                &compact, &g_ram[pc], pc, sizeof program, 5u,
-                                g_ram, sizeof g_ram, &completed);
-                            if (!ran || status != ARM_OK || completed != 5u ||
-                                (cached && (native != 5u || fallback || context.calls ||
-                                 context.status != ARM_OK)) ||
-                                !(cached ? static_vfp_states_equal(&reference, &compact) :
-                                  indirect_register_states_equal(&reference, &compact)) ||
-                                memcmp(expected, &g_ram[address], sizeof expected)) {
-                                fprintf(stderr, "jitbench: indexed chain cached=%u insn=%08" PRIx32
-                                        " carry=%u completed=%u native=%u fallback=%u\n",
-                                        cached, program[3], carry, completed, native, fallback);
-                                return false;
-                            }
-                            cases++;
-                        }
-            }
-        }
-    if (cases != 5120u) return false;
-    printf("COMPACT-RAW-A32-INDEXED-CHAIN-ORACLE exact=yes cases=%u "
-           "dirty-operands=yes resident-carry=yes shifts=all indexing=pre-post "
-           "load-offset-alias=yes base-data-alias=yes flat-and-cached=yes "
-           "native-only=yes flags-preserved=yes\n", cases);
-    return true;
-}
-
 static bool validate_compact_raw_a32_single_oracles(void) {
     const uint32_t ordinary = DATA_BASE + UINT32_C(0x800);
     const compact_raw_single_case_t cases[] = {
@@ -9431,7 +9330,6 @@ static bool validate_compact_raw_a32_single_oracles(void) {
     uint8_t *expected = (uint8_t *)malloc(sizeof g_ram);
     bool ok = false;
 
-    if (!validate_compact_raw_a32_indexed_chain_oracle()) goto done;
     if (!baseline || !expected) {
         fprintf(stderr,
                 "jitbench: compact raw A32 single allocation failed\n");

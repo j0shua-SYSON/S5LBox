@@ -3716,7 +3716,7 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
     """Live-word A32 execution with the same resident ABI as the Thumb tier.
 
     Tables specialize ISA operands at build time, never guest code. Immediate
-    DP, non-PC shifted-register DP, word/byte transfers and B/BL stay
+    DP, non-PC shifted-register DP, immediate word/byte transfers and B/BL stay
     resident. Everything else spills into the old decoder exactly once. No
     guest state changes before an instruction's final guard has succeeded.
     """
@@ -3796,7 +3796,7 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
         body, base = read(rn, 10)
         operation = "add" if up else "sub"
         if pre:
-            body += [f"    {operation} w10, {base}, w8"]
+            body += ["    and w8, w9, #0xfff", f"    {operation} w10, {base}, w8"]
         elif base != "w10":
             body += [f"    mov w10, {base}"]
         body += [f"    bl {prefix}{'read' if load else 'write'}{1 if byte else 4}"]
@@ -3812,7 +3812,7 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
         # the access, so a miss/fault cannot publish speculative writeback.
         if writeback:
             if not pre:
-                body += [f"    {operation} w10, w10, w8"]
+                body += ["    and w8, w9, #0xfff", f"    {operation} w10, w10, w8"]
             body += write(rn, "w10")
         return [*body, *sequential]
 
@@ -3834,7 +3834,6 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
             f"{prefix}classify:", "    ubfx w10, w9, #25, #3",
             "    cmp w10, #5", f"    b.eq {prefix}branch",
             "    cmp w10, #2", f"    b.eq {prefix}memory",
-            "    cmp w10, #3", f"    b.eq {prefix}memory_register",
             "    cmp w10, #1", f"    b.eq {prefix}immediate",
             f"    cbnz w10, {prefix}extension",
             # Only the ordinary unshifted, all-low-register form. The high
@@ -3846,8 +3845,7 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
             "    add w10, w11, w10, lsl #3", "    and w11, w9, #7",
             "    add w10, w11, w10, lsl #3", "    add w10, w10, #2, lsl #12",
             f"    b {prefix}dispatch",
-            f"{prefix}memory:", "    and w8, w9, #0xfff",
-            f"{prefix}memory_dispatch:", "    ubfx w10, w9, #12, #13",
+            f"{prefix}memory:", "    ubfx w10, w9, #12, #13",
             "    add w10, w10, #6, lsl #12", f"    b {prefix}dispatch",
             f"{prefix}immediate:", "    and w8, w9, #255",
             "    ubfx w11, w9, #8, #4", "    lsl w11, w11, #1",
@@ -3954,20 +3952,13 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
     # the immediate table. Keep its shifter outside the already-fast low,
     # unshifted path and do not multiply handlers by shift type/amount/Rs.
     # All encoding/PC guards precede changes to resident architectural state.
-    body += [f"{prefix}memory_register:",
-             # Addressing mode 2 only permits an immediate shift. Reuse the
-             # operand shifter but never its flag update. Rm==PC is rejected
-             # by the operand table before any architectural state changes.
-             f"    tbnz w9, #4, {prefix}decode",
-             f"    b {prefix}operand_rm_load",
-             f"{prefix}register_operand:",
+    body += [f"{prefix}register_operand:",
              "    tbz w9, #4, 1f", "    tbnz w9, #7, " + prefix + "decode", "1:",
              "    ubfx w10, w9, #23, #2", "    cmp w10, #2", "    b.ne 2f",
              f"    tbz w9, #20, {prefix}decode", "2:",
              "    ubfx w10, w9, #12, #4", "    cmp w10, #15",
              f"    b.eq {prefix}decode", "    ubfx w10, w9, #16, #4",
              "    cmp w10, #15", f"    b.eq {prefix}decode",
-             f"{prefix}operand_rm_load:",
              "    and w10, w9, #15", *table_address(15, prefix + "operand_rm"),
              "    ldrsw x10, [x15, w10, uxtw #2]", "    add x15, x15, x10",
              "    br x15", f"{prefix}operand_rm_ready:",
@@ -4012,10 +4003,6 @@ def compact_register_a32() -> tuple[list[str], list[str]]:
              f"    b {prefix}operand_ready",
              f"{prefix}operand_zero:", "    mov w12, wzr", "    mov w8, wzr",
              f"{prefix}operand_ready:",
-             # Only transfers have bit 26 set here. w8 remains the original
-             # shifted offset through the memory witness and a possible load
-             # into Rm, including post-indexed writeback. CPSR stays untouched.
-             f"    tbnz w9, #26, {prefix}memory_dispatch",
              # Only logical S operations consume shifter carry. ADC/SBC/RSC
              # must still read the OLD C, and arithmetic S supplies its own C.
              "    tbz w9, #20, 1f", "    mov w10, #0xf303",
