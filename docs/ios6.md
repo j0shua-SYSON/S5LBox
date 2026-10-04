@@ -790,8 +790,9 @@ corroborates them. Its separate older interrupt-controller definitions are
 excluded because they conflict with the matching kernel's register layout.
 
 `s5l8920_gpio_input` supplies a digital sample for a selected pin. Input
-reads require a supplied sample; input-enabled output reads reflect the
-programmed level.
+reads require a supplied sample; ordinary input-enabled GPIO output reads
+reflect the programmed level. Peripheral-selected output reads use the
+supplied pad sample instead.
 Input writes and pull settings do not fabricate external levels. Functional
 reset preserves samples but invalidates all pin programming. No power-on or
 bootloader pin configuration is assumed. Unsupported widths, field
@@ -799,14 +800,39 @@ combinations and unknown register bits retain checked failures before
 mutating device state.
 
 Drive field `0xc00` is retained with these controls. Peripheral selectors
-`0x20`, `0x40` and `0x60` can be stored with masked, input-enabled mode;
-their reads use explicitly supplied samples. This models configuration
-storage, without peripheral signal generation or routing. Interrupt-off
-mode `0xe` requires mask `0x10` and no peripheral selector. Its input enable
-bit `0x200` is optional for writes. Disabled-input reads require the separate
-explicit inactive-data observation described above, even when a live sample
-exists. Neither a pull setting nor a written data bit establishes the
-disabled sampler's readback value.
+`0x20`, `0x40` and `0x60` can be stored with masked input, output or
+interrupt-off mode, preserving either input-enable setting. Enabled reads
+use explicitly supplied pad samples; a retained output-mode bit does not
+make the GPIO software latch the peripheral's signal source. Disabled
+peripheral reads remain guarded, including interrupt-off mode. This models
+configuration and explicit digital samples, without peripheral signal
+generation, routing or analog drive behavior.
+
+Interrupt-off mode `0xe` requires mask `0x10`. With no peripheral selector,
+its disabled-input reads accept the separate inactive-data observation
+described above. That observation API rejects peripheral-selected pins.
+Every accepted configuration write invalidates the prior observation.
+Neither a pull setting nor a written data bit establishes a disabled
+sampler's readback value.
+
+The matching kernel's selector requests 2, 3 and 4 change only bits `0x60`,
+preserving the low mode, DATA, input enable, interrupt mask, pull and drive
+fields. In 1,800 isolated original-driver cases, the previous model refused
+1,440 output/off cases; all now pass. These execute the original post-lock
+dispatch and virtual register store with synthetic objects and mappings,
+without executing locking or establishing peripheral traffic. Host tests
+cover sampled and unavailable readback, opposing output latch/sample values,
+pending-cause preservation, interrupt suppression, rejected fields and reset.
+Peripheral selections combined with GPIO interrupt modes remain refused.
+
+Validation passes all 80 strict and 75 shipping tests. The normal LLB,
+two finite audio-prefix scenarios and canonical prepared-kernel traces stay
+unchanged. With the preceding diagnostic's same harness and explicit inputs,
+including its 30 unmeasured DART post-write observations, the kernel passes
+the GPIO31 selector write and reaches 226,950,746 instructions. It then stops
+at PC `0x8061caa6` on an unmapped word write of zero to `0x82000000`.
+This retains the diagnostic's GPIO, clock, gate, DMC and handoff assumptions;
+it establishes neither a connected bootloader handoff nor a complete boot.
 
 Masked output mode also accepts input-disabled controls `0x12`/`0x13`,
 retaining pull and drive fields without a peripheral selector. The matching

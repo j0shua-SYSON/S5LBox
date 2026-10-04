@@ -686,7 +686,7 @@ static void test_gpio_output_registers(s5l8920_t *m) {
           !m->bus.host_ram_write(m,0x83000000u,4u) &&
           !s5l8920_load(m,0x83000000u,m->ram,4u),"GPIO exposed as plain RAM");
     const uint32_t rejected[]={0u,1u,0x202u,0x014u,0x016u,0x018u,0x01au,
-        0x01cu,0x20eu,0x232u,0x252u,0x272u,0x392u,0x1612u,0x1212u,
+        0x01cu,0x20eu,0x222u,0x242u,0x262u,0x392u,0x1612u,0x1212u,
         0x10000212u,UINT32_MAX};
     for (unsigned n=0;n<sizeof rejected/sizeof rejected[0];n++) {
         s5l8920_clear_bus_failure(m); m->bus.write32(m,0x83000000u,0x213u);
@@ -764,7 +764,7 @@ static void test_gpio_output_input_disabled(s5l8920_t *m) {
     for (unsigned group=0;group<S5L8920_GPIO_IRQ_GROUPS;group++)
         CHECK(m->gpio_pending[group]==0u,"output configuration invented a pending interrupt");
     CHECK(!m->gpio_irq && !m->cpu.irq_line,"output configuration invented interrupt delivery");
-    const uint32_t rejected[]={2u,3u,0x32u,0x52u,0x72u,0x192u,0x1012u};
+    const uint32_t rejected[]={2u,3u,0x22u,0x42u,0x62u,0x192u,0x1012u};
     for (unsigned n=0;n<sizeof rejected/sizeof rejected[0];n++) {
         m->bus.write32(m,S5L8920_GPIO_BASE,0x13u);
         m->bus.write32(m,S5L8920_GPIO_BASE,rejected[n]);
@@ -1108,8 +1108,8 @@ static bool test_gpio_configuration_fields(s5l8920_t *m) {
         CHECK(!m->cpu.irq_line && m->bus.read32(m,0x83000800u)==0u,
               "off/peripheral mode relatched an active level");
     }
-    const uint32_t unsupported[]={0xd0eu,0xd3eu,0xd1cu,0xe20u,0xe32u,
-        0xe34u,0xe38u,0xe3eu,0x430u,0xff0u,0x1d1eu};
+    const uint32_t unsupported[]={0xd0eu,0xd2eu,0xd1cu,0xe20u,0xe22u,
+        0xe34u,0xe38u,0xe2eu,0x420u,0xff0u,0x1d1eu};
     for (unsigned n=0;n<sizeof unsupported/sizeof unsupported[0];n++) {
         m->bus.write32(m,0x83000000u,0xd1fu);
         m->bus.write32(m,0x83000000u,unsupported[n]);
@@ -1125,6 +1125,105 @@ static bool test_gpio_configuration_fields(s5l8920_t *m) {
               "reset retained fields or lost explicit sample");
     }
     CHECK(!m->gpio_irq && !m->cpu.irq_line && !m->cpu.fiq_line,"reset retained configuration IRQ");
+    return true;
+}
+
+static bool test_gpio_peripheral_selection(s5l8920_t *m) {
+    s5l8920_free(m);
+    if (!s5l8920_init(m)) { CHECK(false,"fresh peripheral GPIO board"); return false; }
+    const unsigned pins[]={0u,31u,223u,224u,367u};
+    const uint32_t modes[]={0u,2u,0xeu},pulls[]={0u,0x80u,0x100u};
+    /* Each first access has no external sample. Programming even an output's
+     * data latch must not invent the peripheral's actual pad level. */
+    for (unsigned n=0;n<5u;n++) {
+        unsigned pin=pins[n];uint32_t address=S5L8920_GPIO_BASE+4u*pin;
+        m->bus.write32(m,address,0x233u);
+        CHECK(!m->bus_failure.reason && m->gpio[pin].control==0x233u,
+              "selector1 accepts preserved output mode");
+        (void)m->bus.read32(m,address);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,
+              "peripheral output synthesized a sample from data latch");
+        s5l8920_clear_bus_failure(m);
+    }
+    for (unsigned n=0;n<5u;n++) for (unsigned mode=0;mode<3u;mode++)
+     for (unsigned selector=1;selector<4u;selector++) for (unsigned enable=0;enable<2u;enable++)
+      for (unsigned drive=0;drive<4u;drive++) for (unsigned pull=0;pull<3u;pull++)
+       for (unsigned high=0;high<2u;high++) {
+        unsigned pin=pins[n];uint32_t address=S5L8920_GPIO_BASE+4u*pin;
+        uint32_t control=0x10u|modes[mode]|(selector<<5)|(enable<<9)|(drive<<10)|pulls[pull]|(high^1u);
+        s5l8920_clear_bus_failure(m);
+        m->bus.write32(m,address,0x1eu);
+        CHECK(s5l8920_gpio_inactive_readback(m,pin,high==0u),"prior off-mode observation");
+        m->bus.write32(m,address,control);
+        CHECK(!m->bus_failure.reason && m->gpio[pin].programmed &&
+              m->gpio[pin].control==control && !m->gpio[pin].inactive_valid,
+              "selector preserves fields and invalidates previous readback");
+        CHECK(s5l8920_gpio_input(m,pin,high!=0u),"opposing explicit peripheral pad sample");
+        uint32_t value=m->bus.read32(m,address);
+        if (enable) CHECK(!m->bus_failure.reason && value==((control&~1u)|high),
+                          "peripheral DATA must use external sample, not output latch");
+        else CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,
+                   "disabled peripheral sampler invented DATA");
+        s5l8920_bus_failure_t failure=m->bus_failure;
+        s5l8920_gpio_pin_t before=m->gpio[pin];
+        CHECK(!s5l8920_gpio_inactive_readback(m,pin,high!=0u) &&
+              !memcmp(&before,&m->gpio[pin],sizeof before) &&
+              !memcmp(&failure,&m->bus_failure,sizeof failure),
+              "inactive GPIO observation cannot override peripheral DATA");
+        if (!enable) {
+            m->bus.write32(m,address,0x213u);
+            CHECK(m->gpio[pin].control==control && !memcmp(&failure,&m->bus_failure,sizeof failure),
+                  "first checked failure prevents later writes");
+        }
+        s5l8920_clear_bus_failure(m);
+        m->bus.write32(m,address,0x212u|(high^1u));
+        CHECK(!m->bus_failure.reason && m->bus.read32(m,address)==(0x212u|(high^1u)),
+              "return to ordinary GPIO uses its programmed output latch");
+    }
+    /* Pending GPIO causes survive mux selection, but peripheral-selected
+     * passive modes neither deliver nor create GPIO edge/level causes. */
+    vic_write(m,2u,PL192_INTENABLE,1u<<30);
+    const uint32_t address=S5L8920_GPIO_BASE+31u*4u,pending=S5L8920_GPIO_BASE+0x800u;
+    for (unsigned mode=0;mode<3u;mode++) for (unsigned selector=1;selector<4u;selector++) {
+        CHECK(s5l8920_gpio_input(m,31u,false),"low initial IRQ sample");
+        m->bus.write32(m,address,0x208u);
+        CHECK(s5l8920_gpio_input(m,31u,true) && m->cpu.irq_line,"rising source before peripheral selection");
+        uint32_t peripheral=0x210u|modes[mode]|(selector<<5);
+        m->bus.write32(m,address,peripheral);
+        CHECK(!m->bus_failure.reason && !m->cpu.irq_line &&
+              m->bus.read32(m,pending)==0x80000000u,"selection masks delivery, retains pending");
+        m->bus.write32(m,address,0x208u);CHECK(m->cpu.irq_line,"GPIO reselect retains pending cause");
+        m->bus.write32(m,address,peripheral);m->bus.write32(m,pending,0x80000000u);
+        CHECK(s5l8920_gpio_input(m,31u,false) && s5l8920_gpio_input(m,31u,true) &&
+              !m->cpu.irq_line && m->bus.read32(m,pending)==0,"muxed passive pin creates no GPIO events");
+        m->bus.write32(m,address,0x208u);CHECK(!m->cpu.irq_line,"reselection fabricated edge");
+        m->bus.write32(m,address,0x204u);CHECK(m->cpu.irq_line,"ordinary level mode still observes sample");
+        m->bus.write32(m,address,peripheral);m->bus.write32(m,pending,0x80000000u);
+        CHECK(!m->cpu.irq_line && !m->gpio_pending[0],"acknowledge does not relatch muxed passive mode");
+    }
+    const uint32_t bad[]={0x220u,0x222u,0x22eu,0x230u|0x180u,0x1232u,
+        0x234u,0x236u,0x238u,0x23au,0x23cu};
+    m->bus.write32(m,address,0x232u);
+    for (unsigned i=0;i<sizeof bad/sizeof bad[0];i++) {
+        s5l8920_gpio_pin_t before=m->gpio[31];m->bus.write32(m,address,bad[i]);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+              !memcmp(&before,&m->gpio[31],sizeof before) && !m->cpu.irq_line,
+              "unknown mux/IRQ/pull/upper fields refuse atomically");
+        s5l8920_clear_bus_failure(m);
+    }
+    for (unsigned size=1u;size<=4u;size*=2u) {
+        s5l8920_gpio_pin_t before=m->gpio[31];
+        if (size==1u) m->bus.write8(m,address,0x32u);
+        else if (size==2u) m->bus.write16(m,address,0x232u);
+        else m->bus.write32(m,address+1u,0x232u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED &&
+              !memcmp(&before,&m->gpio[31],sizeof before),"mux width/alignment guard");
+        s5l8920_clear_bus_failure(m);
+    }
+    CHECK(s5l8920_reset(m),"peripheral configuration reset");
+    for (unsigned n=0;n<5u;n++) CHECK(!m->gpio[pins[n]].programmed && !m->gpio[pins[n]].control &&
+        m->gpio[pins[n]].input_valid && !m->gpio[pins[n]].inactive_valid,"reset clears mux, retains explicit sample");
+    CHECK(!m->gpio_irq && !m->cpu.irq_line,"reset clears GPIO interrupt state");
     return true;
 }
 
@@ -3296,6 +3395,7 @@ int main(void) {
     test_gpio_irq_cpu(&m);
     if (!test_gpio_configuration_fields(&m)) return 1;
     if (!test_gpio_inactive_readback(&m)) return 1;
+    if (!test_gpio_peripheral_selection(&m)) return 1;
     test_i2c_staging_bus(&m);
     test_i2c_endpoints(&m);
     test_i2c_bounds(&m);

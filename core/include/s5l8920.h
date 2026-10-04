@@ -326,12 +326,13 @@ bool s5l8920_uart_divisor_configure(s5l8920_t *m, unsigned bank, uint32_t initia
  * controls: 0x210/0x212, data bit0, pull selection 0/0x80/0x100. Input
  * reads require a supplied sample; output reads return the programmed level.
  * Pulls and drive field0xc00 are retained without analog/floating-pin behavior.
- * Peripheral selectors0x20/0x40/0x60 are stored only with masked input mode;
- * reads use explicit samples, without simulating peripheral signal routing.
- * Interrupt-off mode0xe requires mask0x10 and no peripheral selector. Input
- * enable0x200 is optional for its writes; disabled-input reads require the
- * separate observation below, even with a sample. Unknown combinations and
- * register bits remain refused.
+ * Peripheral selectors0x20/0x40/0x60 preserve masked input/output/off modes
+ * and either input-enable setting. Enabled reads use explicit pad samples,
+ * even when the preserved low mode is output; no peripheral signal routing
+ * or software-latch-to-pad connection is inferred. Disabled peripheral reads
+ * remain refused. Interrupt-off mode0xe requires mask0x10. With no peripheral
+ * selector, disabled-input off-mode reads accept the separate observation
+ * below. Unknown combinations and register bits remain refused.
  * Pins0..223 also support input IRQ modes 0x204 high, 0x206 low, 0x208 rising,
  * 0x20a falling and 0x20c either edge; bit0x10 masks delivery to source94.
  * Seven pending words at0x800..0x818 are W1C. Masked events latch; initial
@@ -341,8 +342,9 @@ bool s5l8920_uart_divisor_configure(s5l8920_t *m, unsigned bank, uint32_t initia
  * This is logical sampling/latching, not measured phase or debounce timing. */
 bool s5l8920_gpio_input(s5l8920_t *m, unsigned pin, bool high);
 
-/* Supply bit0 readback for a programmed interrupt-off pin whose input enable
- * is clear. The firmware reads its control word before enabling input, but
+/* Supply bit0 readback for a programmed interrupt-off GPIO pin whose input
+ * enable and peripheral selector are clear. The firmware reads its control
+ * word before enabling input, but
  * the inactive data bit is not inferred from live samples or guest writes.
  * Aligned word reads retain the programmed control fields and this supplied
  * bit. This is an explicit logical observation, not a physical sampler/latch

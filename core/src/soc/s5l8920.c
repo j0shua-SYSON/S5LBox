@@ -141,9 +141,13 @@ static bool gpio_control_supported(unsigned index,uint32_t control) {
      * output setter preserves input enable. Neither establishes DATA readback. */
     if ((control&~0xfffu) || (control&0x180u)==0x180u) return false;
     unsigned mode=control&0xeu;
+    /* The kernel's peripheral selectors change only bits5/6, preserving
+     * passive input/output/off modes and input enable. Their DATA source is
+     * an explicit pad sample, never the ordinary GPIO output latch. */
+    if (control&0x60u)
+        return (control&0x10u) && (mode==0u || mode==2u || mode==0xeu);
     if (mode==2u || mode==0xeu) return (control&0x70u)==0x10u;
     if (!(control&0x200u)) return false;
-    if (control&0x60u) return mode==0u && (control&0x10u)!=0u;
     if (mode<=2u) return (control&0x10u)!=0u;
     return index<S5L8920_GPIO_IRQ_PINS && mode<=0xcu;
 }
@@ -321,7 +325,7 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
         } else if (offset/4u<S5L8920_GPIO_PIN_COUNT) {
             const s5l8920_gpio_pin_t *pin=&m->gpio[offset/4u];
-            bool output=(pin->control&0xeu)==2u;
+            bool output=(pin->control&0x6eu)==2u;
             if (pin->programmed && (pin->control&0x200u) && (output || pin->input_valid))
                 return output ? pin->control :
                        (pin->control&~1u)|(pin->input_high ? 1u:0u);
@@ -683,7 +687,7 @@ bool s5l8920_gpio_input(s5l8920_t *m,unsigned pin,bool high) {
 
 bool s5l8920_gpio_inactive_readback(s5l8920_t *m,unsigned pin,bool high) {
     if (!m || !m->ram || pin>=S5L8920_GPIO_PIN_COUNT || !m->gpio[pin].programmed ||
-        (m->gpio[pin].control&0x20eu)!=0xeu) return false;
+        (m->gpio[pin].control&0x26eu)!=0xeu) return false;
     m->gpio[pin].inactive_high=high;
     m->gpio[pin].inactive_valid=true;
     return true;
