@@ -20,6 +20,58 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
+## DART programming and page translation
+
+The matching device tree places two `dart,s5l8920x` controllers at
+`0xbfe00000` and `0xbff00000`. The original AppleH2PDART initializer programs
+sixteen segment-table addresses through offset `8`. Its mapper allocates
+64 KiB of table storage, writes 32-bit entries for 4 KiB pages, and returns
+device addresses in `0x3c000000..0x3fffffff`. Entry bit0 marks validity;
+bits12..27 select a physical page in `0x40000000..0x4fffffff`.
+
+Each controller now retains those indexed segment writes and bounded config
+fields at offset `0x0c`. The uncached translation API walks the actual
+little-endian guest RAM tables, including independently placed segment
+tables. It checks enable state, unknown/invalid segments, invalid or unsupported
+PTEs, table backing, target backing, and page boundaries. Failure preserves
+the caller's output. Results are host diagnostics; hardware error-status
+encoding, counters, interrupt delivery and peripheral DMA clients remain
+unimplemented. The observed `0x702` flush command has no cache work in this
+uncached model; no cache topology or completion timing is claimed.
+
+Initial config and command-window observations must be supplied explicitly;
+there are no power-on defaults. Initial config must disable translation.
+Config reads retain the programmed fields. Writes to the command or table
+window invalidate that window's read observation: subsequent reads remain
+guarded because their values are not established. In particular, the model
+does not return a last-written command as guessed readback. Indexed data,
+error status, miss counts and unsupported commands also remain guarded.
+Functional reset restores supplied initial observations and invalidates every
+segment; free/init discards them. The two banks are independent.
+
+The original complete initializer passed 54 cases with production writes and
+config reads, using fifteen explicitly supplied post-write table-port
+observations per case. These observations are a private fixture input, not
+production behavior. Four direct-bus original-code cases verify the cold
+config-read stop and the next unknown table-port read after one segment write.
+Twenty-one original map/dummy-page/unmap cases produce entries that the
+production walker translates and then refuses after unmapping. These block
+fixtures use explicit objects/registers; they do not execute IOKit allocation.
+Host tests cover every device page, both banks, boundaries and rejected state.
+This adds functional translation, not a completed DART driver or boot.
+
+The strict host suite passes 80 tests and the shipping configuration passes
+75. The existing prepared-kernel trace and all three bootloader validation
+traces are unchanged. With no supplied DART observations, the farther
+prepared-kernel diagnostic still stops after 216,561,265 instructions on the
+config read at `0xbfe0000c`; its checked failure now identifies unavailable
+register state. That diagnostic retains unmeasured GPIO/clock/handoff inputs
+and is not a complete bootloader-to-kernel execution.
+Supplying three explicit, unmeasured zero initial observations for each DART
+allows the original initializer to program its first segment. It then stops
+29 instructions later, at `0x808b0e7c`, on the unknown post-write table-port
+read at `0xbfe00008`. No such initial values are production defaults.
+
 ## DRAM controller configuration
 
 The register layout and initialization commands at `0xbfc00000` match the

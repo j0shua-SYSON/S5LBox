@@ -31,6 +31,7 @@ add_library(emucore STATIC
     src/soc/pl192.c
     src/soc/s5l8920.c
     src/soc/s5l8920_uart.c
+    src/soc/s5l8920_dart.c
     src/soc/timer.c
     src/soc/mbx.c
     src/soc/power.c
@@ -224,6 +225,10 @@ add_test(NAME s5l8920_machine COMMAND test_s5l8920)
 add_executable(test_s5l8920_uart tests/test_s5l8920_uart.c)
 target_link_libraries(test_s5l8920_uart PRIVATE emucore)
 add_test(NAME s5l8920_uart COMMAND test_s5l8920_uart)
+
+add_executable(test_s5l8920_dart tests/test_s5l8920_dart.c)
+target_link_libraries(test_s5l8920_dart PRIVATE emucore)
+add_test(NAME s5l8920_dart COMMAND test_s5l8920_dart)
 
 add_executable(test_vfp tests/test_vfp.c)
 target_link_libraries(test_vfp PRIVATE emucore)

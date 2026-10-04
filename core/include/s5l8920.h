@@ -7,6 +7,7 @@
 #include "arm.h"
 #include "pl192.h"
 #include "s5l8920_uart.h"
+#include "s5l8920_dart.h"
 #include <stddef.h>
 
 #define S5L8920_RAM_BASE UINT32_C(0x40000000)
@@ -249,6 +250,7 @@ typedef struct {
     s5l8920_pmu_saved_t pmu_saved;
     s5l8920_audio_nco_t audio_nco;
     s5l8920_dmc_t dmc;
+    s5l8920_dart_t dart[S5L8920_DART_COUNT];
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -267,6 +269,7 @@ void s5l8920_free(s5l8920_t *m);
  * their supplied words. PLL controls return to
  * their supplied disabled words, cancelling settling. GPIO and clock-selector programming
  * and audio NCO/DMC programming are invalidated. DMC returns to Config.
+ * DART restores supplied initial observations and invalidates segment tables.
  * This is a functional reset, not a
  * model of power sequencing. The caller owns execution and device timing. */
 bool s5l8920_reset(s5l8920_t *m);
