@@ -1045,6 +1045,50 @@ board clock integration or full boot is established by this word-link result.
 The boot checks leave the link unconfigured and retain the exact prior kernel
 and LLB traces.
 
+## Explicit serial flash device
+
+The optional `sst25vf080b` component implements a candidate 1 MiB serial NOR.
+The original flash driver's `BF258E` branch selects matching geometry; its
+status and identification helpers emit `05 FF` and `9F FF FF FF`. Other chip
+IDs are supported by that driver, so this does not identify the fitted N88 chip.
+
+Device semantics follow [Microchip DS20005045D](https://ww1.microchip.com/downloads/en/DeviceDoc/20005045D.pdf),
+sections 4.3/4.4 and tables 4-2/4-3/7-1. Commands cover status/ID and streaming
+reads, write authorization, status protection, byte/AAI programming and
+sector/block/chip erase. The cold status is `1C` from table 4-2; BP3 is reserved
+in the protection table. `WP#` qualifies status lock-down. EWSR authorizes the
+next WRSR only. Programs require erased bytes; protected operations are ignored.
+AAI advances in aligned pairs without wrapping; its limit clears write
+permission, while WRDI exits the mode. WRDI does not cancel a pending
+program. Hardware AAI ready/busy output can be sampled without shifting a byte.
+
+Initialization borrows an explicit mutable image; it never creates, clears,
+loads or persists one. The owner supplies isolated storage and nonzero
+program/erase durations within the specified limits. Elapsed nanoseconds are
+separate from SPI clocks. The device waits through the 100 us power-up interval;
+polling cannot finish an operation. Image changes occur when its busy interval
+expires. Status-latch writes occur at CE rising without an invented busy delay.
+This is a decoded-byte interface for qualified mode-0/3 traffic. HOLD changes
+must already be qualified at SCK low. Analog edges, partial-byte aborts and
+power-loss damage are outside this interface.
+
+The separate `s5l8920_spi_flash_clock` adapter exchanges completed 8-bit words
+through production FIFOs and the device command parser. An explicit known-bit
+bias resolves undriven MISO; unknown received bits refuse the whole operation.
+Both states remain unchanged if any byte, FIFO capacity or input condition
+fails. Chip selection, word-delay clocks, flash time and board interrupt refresh
+remain explicit caller responsibilities. The board does not attach this part
+or invent a target NOR image by default.
+
+Host tests cover protection boundaries, authorization, timing, storage bounds,
+command refusal and adapter rollback. With an isolated test image and explicit
+pins/bias/clocks, 150 executions of the original PIO setup/service routines
+complete 330 services and 618 exchanged bytes. They include status and ID reads,
+wrapped reads, programming, busy polling, erase and AAI continuation. The fixture
+does not run the event wait or interrupt dispatcher, and supplies no target NOR
+contents or automatic board clock scheduling. This addition does not advance
+the last verified full-kernel boot stops or establish physical-device behavior.
+
 ## Bounded I2C requests and explicit responses
 
 Three I2C apertures at `0x83200000`, `0x83300000` and `0x83400000` use
