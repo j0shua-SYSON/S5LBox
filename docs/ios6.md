@@ -3,7 +3,7 @@
 The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
 a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
 interrupt fabric, UART, timebase counter, deadline timer, GPIO, I2C and
-bounded PMU clock/control/ADC/configuration/event/boot-state endpoints, explicitly
+bounded PMU clock/control/ADC/configuration/event/boot-state/voltage endpoints, explicitly
 configured identification words and
 partial clock-gate/selector programming, a PLL model with explicit clock inputs,
 and bounded POWERID software-cache fields. Inactive GPIO data readback can
@@ -17,6 +17,50 @@ events. Automatic transmit flow control requires an explicit CTS observation.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## D1755 voltage programming and readback
+
+Exact byte transactions at I2C0/address `0x74` retain voltage configuration
+registers `0x14`, `0x23`, and `0x2c..0x2f`. Reads require explicit initial
+state or supported completed guest programming. Initial configuration is
+immutable and idempotent; it cannot reload or replace guest writes. The voltage
+bytes update their five-bit setting while preserving known upper bits. The
+bootloader's complete writes with zero upper bits are also accepted at `0x14`
+and `0x2f`. Other upper-field changes remain refused. Control `0x23` requires
+an initial byte and supports retaining or setting bits 6/7; clearing them or
+changing other bits remains unimplemented. Unsupported shapes, neighboring
+registers and stale transaction tokens leave state unchanged. Functional SoC
+reset retains the external PMU domain and cancels controller transactions;
+free/init clears it. No analog voltage, readiness, settling or power transition
+is supplied by these configuration operations.
+
+The unchanged LLB helper at `0x84001d44` programs `0x14`, writes zero to
+`0x2f`, and reads/modifies/writes `0x23` with bit 6 set. It verifies all three
+writes. Its integer range is 725 through 1500; it rounds the encoded setting
+upward. The complete kernel method at `0x80ae6c68` instead rounds downward,
+preserves the upper three bits, and addresses `0x14/0x2c/0x2d/0x2e` for its
+four indices. Initialization reads `0x14/0x2d/0x2e/0x2f` and separately sets
+control bit 7. Those differing offsets are present in the original firmware;
+the emulator preserves distinct addresses and does not infer preset aliases.
+
+Private original-code witnesses passed 792 LLB helper calls and 1,307 kernel
+method calls against the production service. They exercise voltage bounds,
+upper-bit preservation, argument modes, missing initial state and withheld
+transactions. LLB uses actual CPU I2C exceptions after reset initialization;
+the kernel fixture supplies objects/MMU/time and uses original polling
+transport with CPU IRQs masked and a zero delay argument. Invalid-index
+logging and nonzero delay execution are not covered. Separate finite-response
+experiments show the LLB helper can return zero despite failed verification;
+its return value alone is not evidence that programming succeeded.
+
+Connected original-reset execution with explicit boot-state, CHIPID word 3
+and control `0x23` inputs now completes all seven regulator transfers and
+three successful readback checks. A supplied zero trim field reaches that
+return after 993,014 steps; the next pending request writes register `0x17`,
+the first entry in the later configuration table. Missing initial control
+remains pending at its `0x23` read. The other boot-state branch still requires
+explicit ADC conversion inputs. The separate prepared kernel remains at its
+unprogrammed GPIO pin 0 stop; no connected kernel boot or SpringBoard is proven.
 
 ## D1755 software boot-state byte
 

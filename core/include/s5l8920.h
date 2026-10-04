@@ -45,6 +45,7 @@
 #define S5L8920_PMU_EVENT_REGISTER 0x01u
 #define S5L8920_PMU_IRQ_PIN 157u
 #define S5L8920_PMU_BOOT_STATE_REGISTER 0x6fu
+#define S5L8920_PMU_VOLTAGE_REGISTERS 6u
 #define S5L8920_CHIPID_BASE UINT32_C(0xbf500000)
 #define S5L8920_CLOCK_GATE_BASE UINT32_C(0xbf100078)
 #define S5L8920_CLOCK_GATE_COUNT 52u
@@ -143,6 +144,12 @@ typedef struct {
     bool configured, status_valid;
 } s5l8920_pmu_events_t;
 
+typedef struct {
+    uint8_t initial[S5L8920_PMU_VOLTAGE_REGISTERS];
+    uint8_t value[S5L8920_PMU_VOLTAGE_REGISTERS];
+    uint8_t configured, programmed;
+} s5l8920_pmu_voltage_t;
+
 typedef enum {
     S5L8920_BUS_OK = 0,
     S5L8920_BUS_UNMAPPED,
@@ -192,6 +199,7 @@ typedef struct {
     s5l8920_pmu_events_t pmu_events;
     uint8_t pmu_boot_initial, pmu_boot_value;
     bool pmu_boot_configured, pmu_boot_programmed;
+    s5l8920_pmu_voltage_t pmu_voltage;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -410,6 +418,23 @@ bool s5l8920_pmu_events_service(s5l8920_t *m, uint64_t sequence);
  * Unsupported/stale requests preserve state. Call between CPU steps. */
 bool s5l8920_pmu_boot_state_configure(s5l8920_t *m, uint8_t initial);
 bool s5l8920_pmu_boot_state_service(s5l8920_t *m, uint64_t sequence);
+
+/* D1755 voltage configuration bytes14,23,2c..2f at I2C0/74. These addresses
+ * remain independent: matching kernel initialization and setters use different
+ * preset offsets. No alias or preset numbering is inferred. Configure supplies
+ * one immutable initial byte; identical repeats never reload guest writes.
+ * First configuration after programming refuses. Reads require known state.
+ * Voltage bytes14/2c..2f update low5 while preserving known upper bits. Full
+ * writes with zero upper bits are also supported at14/2f, as used by LLB.
+ * Register23 requires initial state and supports retaining/setting bits6/7;
+ * clearing them or changing other bits remains unimplemented. Only exact byte
+ * transactions with the current sequence complete. Unknown requests preserve
+ * all state. These are retained settings, not analog voltage, settling, ready
+ * status or power transitions. Functional SoC reset retains the external PMU
+ * domain; free/init invalidates it. Call between CPU steps; CPU registers and
+ * bus diagnostics are preserved while the controller IRQ is refreshed. */
+bool s5l8920_pmu_voltage_configure(s5l8920_t *m, unsigned reg, uint8_t initial);
+bool s5l8920_pmu_voltage_service(s5l8920_t *m, uint64_t sequence);
 
 /* Supply one immutable identification word at offset0/4/8/12. Only aligned
  * word reads in this 16-byte span are modeled; each requires its own explicit

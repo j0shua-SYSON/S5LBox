@@ -1608,6 +1608,126 @@ static bool test_pmu_boot_state(s5l8920_t *m) {
     return true;
 }
 
+static bool test_pmu_voltage(s5l8920_t *m) {
+    static s5l8920_t before;s5l8920_t empty={0};
+    const unsigned regs[]={0x14u,0x23u,0x2cu,0x2du,0x2eu,0x2fu};
+    CHECK(s5l8920_reset(m),"voltage test reset");
+    CHECK(!s5l8920_pmu_voltage_service(NULL,1u) && !s5l8920_pmu_voltage_service(&empty,1u) &&
+          !s5l8920_pmu_voltage_configure(NULL,0x14u,0u) &&
+          !s5l8920_pmu_voltage_configure(&empty,0x14u,0u),"invalid voltage board");
+    for (unsigned n=0;n<6u;n++) {
+        uint64_t seq=pmu_request(m,0x74u,regs[n],false,1u,0u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_voltage_service(m,seq) && !memcmp(&before,m,sizeof before),"invented initial voltage byte");
+        CHECK(s5l8920_reset(m),"cancel unknown voltage read");
+        seq=pmu_request(m,0x74u,regs[n],true,1u,0xe0u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_voltage_service(m,seq) && !memcmp(&before,m,sizeof before),"unknown voltage upper bits acknowledged");
+        CHECK(s5l8920_reset(m),"cancel unsupported voltage write");
+    }
+    for (unsigned n=0;n<6u;n++) {
+        uint64_t seq=pmu_request(m,0x74u,regs[n],true,1u,0x19u);
+        bool complete=s5l8920_pmu_voltage_service(m,seq);
+        CHECK(complete==(n==0u || n==5u),"cold programming escaped observed full-byte registers");
+        CHECK(s5l8920_reset(m),"cold voltage programming reset");
+        if (complete) {
+            memcpy(&before,m,sizeof before);
+            CHECK(!s5l8920_pmu_voltage_configure(m,regs[n],0x19u) && !memcmp(&before,m,sizeof before),"initial byte overwrote guest setting");
+            seq=pmu_request(m,0x74u,regs[n],false,1u,0u);
+            CHECK(s5l8920_pmu_voltage_service(m,seq) && pmu_read_bytes(m,1u)==0x19u,"SoC reset lost guest voltage setting");
+        }
+    }
+    s5l8920_free(m);
+    if (!s5l8920_init(m)) { CHECK(false,"fresh voltage board");return false; }
+    CHECK(!m->pmu_voltage.configured && !m->pmu_voltage.programmed,"cold board retained external voltage state");
+    for (unsigned n=0;n<6u;n++) {
+        uint8_t initial=(uint8_t)(n==1u?3u:(0xe0u|n));
+        arm_cpu_t cpu=m->cpu;
+        CHECK(s5l8920_pmu_voltage_configure(m,regs[n],initial) && !memcmp(&cpu,&m->cpu,sizeof cpu),"voltage initial state changed CPU");
+        memcpy(&before,m,sizeof before);
+        CHECK(s5l8920_pmu_voltage_configure(m,regs[n],initial) &&
+              !s5l8920_pmu_voltage_configure(m,regs[n],initial^1u) && !memcmp(&before,m,sizeof before),"mutable initial voltage byte");
+    }
+    for (unsigned n=0;n<6u;n++) {
+        if (n==1u) continue;
+        m->bus.write32(m,S5L8920_VIC_BASE+0x10u,1u<<S5L8920_I2C0_IRQ);
+        for (unsigned code=0;code<32u;code++) {
+            uint64_t seq=pmu_request(m,0x74u,regs[n],true,1u,0xe0u|code);memcpy(&before,m,sizeof before);
+            CHECK(!s5l8920_pmu_voltage_service(m,seq-1u) && !s5l8920_pmu_voltage_service(m,seq+1u) &&
+                  !s5l8920_pmu_control_service(m,seq) && !s5l8920_pmu_config_service(m,seq) &&
+                  !s5l8920_pmu_boot_state_service(m,seq) && !memcmp(&before,m,sizeof before),"voltage request identity/isolation");
+            CHECK(s5l8920_pmu_voltage_service(m,seq) && m->cpu.irq_line,"voltage low-field update/IRQ refused");
+            for (unsigned other=0;other<6u;other++) if (other!=n)
+                CHECK(m->pmu_voltage.value[other]==before.pmu_voltage.value[other],"voltage registers aliased");
+            memcpy(&before,m,sizeof before);
+            CHECK(!s5l8920_pmu_voltage_service(m,seq) && !memcmp(&before,m,sizeof before),"voltage write replay");
+            CHECK(s5l8920_pmu_voltage_configure(m,regs[n],(uint8_t)(0xe0u|n)) &&
+                  m->pmu_voltage.value[n]==(0xe0u|code),"initial voltage configuration reloaded programming");
+            for (unsigned repeat=0;repeat<2u;repeat++) {
+                seq=pmu_request(m,0x74u,regs[n],false,1u,0u);arm_cpu_t cpu=m->cpu;
+                CHECK(s5l8920_pmu_voltage_service(m,seq) && pmu_read_bytes(m,1u)==(0xe0u|code),"voltage readback/retention");
+                cpu.irq_line=m->cpu.irq_line;CHECK(!memcmp(&cpu,&m->cpu,sizeof cpu),"voltage service changed CPU");
+            }
+        }
+        uint64_t seq=pmu_request(m,0x74u,regs[n],true,1u,0x80u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_voltage_service(m,seq) && !memcmp(&before,m,sizeof before),"unimplemented upper-field update completed");
+        CHECK(s5l8920_reset(m),"cancel voltage upper-field update");
+    }
+    const unsigned controls[]={3u,0x43u,0xc3u,0xc3u};
+    for (unsigned n=0;n<4u;n++) {
+        uint64_t seq=pmu_request(m,0x74u,0x23u,true,1u,controls[n]);
+        CHECK(s5l8920_pmu_voltage_service(m,seq),"observed voltage control setting");
+        seq=pmu_request(m,0x74u,0x23u,false,1u,0u);
+        CHECK(s5l8920_pmu_voltage_service(m,seq) && pmu_read_bytes(m,1u)==controls[n],"voltage control readback");
+    }
+    const unsigned unsupported[]={0x83u,0x43u,3u,0xc2u,0xc7u};
+    for (unsigned n=0;n<5u;n++) {
+        uint64_t seq=pmu_request(m,0x74u,0x23u,true,1u,unsupported[n]);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_voltage_service(m,seq) && !memcmp(&before,m,sizeof before),"unknown voltage control transition completed");
+        CHECK(s5l8920_reset(m),"cancel unknown voltage control transition");
+    }
+    const unsigned bad[][3]={{0x75u,0x14u,1u},{0x74u,0x13u,1u},{0x74u,0x15u,1u},
+        {0x74u,0x22u,1u},{0x74u,0x24u,1u},{0x74u,0x2bu,1u},{0x74u,0x30u,1u},
+        {0x74u,0x14u,2u},{0x74u,0x23u,2u},{0x74u,0x2cu,4u},{0x74u,0x2fu,2u}};
+    for (unsigned n=0;n<sizeof bad/sizeof bad[0];n++) for (unsigned wr=0;wr<2u;wr++) {
+        uint64_t seq=pmu_request(m,bad[n][0],bad[n][1],wr!=0u,bad[n][2],0u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_voltage_service(m,seq) && !memcmp(&before,m,sizeof before),"unsupported voltage shape/neighbors changed state");
+        CHECK(s5l8920_reset(m),"cancel invalid voltage request");
+    }
+    memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_voltage_configure(m,0x2bu,0u) && !s5l8920_pmu_voltage_configure(m,0x114u,0u) &&
+          !s5l8920_pmu_voltage_configure(m,UINT32_MAX,0u) && !memcmp(&before,m,sizeof before),"invalid voltage register truncated");
+    for (unsigned bus=1u;bus<3u;bus++) {
+        uint32_t base=S5L8920_I2C_BASE+bus*S5L8920_I2C_STRIDE;
+        const unsigned offsets[]={8u,12u,0u,16u,20u,24u,32u,36u};
+        const unsigned values[]={0x30u,0x37u,0x74u,0x14u,0u,1u,0x19u,5u};
+        for (unsigned n=0;n<8u;n++) m->bus.write32(m,base+offsets[n],values[n]);
+        s5l8920_i2c_request_t request;CHECK(s5l8920_i2c_request(m,bus,&request),"other controller voltage request");
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_voltage_service(m,request.sequence) && !memcmp(&before,m,sizeof before),"voltage service crossed controllers");
+        CHECK(s5l8920_reset(m),"cancel other controller voltage request");
+    }
+    uint64_t rejected=pmu_request(m,0x74u,0x14u,true,1u,0u);
+    CHECK(s5l8920_i2c_complete(m,0u,rejected,false,NULL,0u),"explicit voltage write NACK");
+    memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_voltage_service(m,rejected) && !memcmp(&before,m,sizeof before) &&
+          m->pmu_voltage.value[0]==0xffu,"NACK committed or replayed voltage write");
+    CHECK(s5l8920_reset(m),"clear voltage write NACK");
+    for (unsigned n=0;n<6u;n+=5u) {
+        uint64_t seq=pmu_request(m,0x74u,regs[n],true,1u,0u);
+        CHECK(s5l8920_pmu_voltage_service(m,seq),"bootloader full setting after known upper bits");
+        seq=pmu_request(m,0x74u,regs[n],false,1u,0u);
+        CHECK(s5l8920_pmu_voltage_service(m,seq) && pmu_read_bytes(m,1u)==0u,"bootloader zero-upper setting readback");
+    }
+    uint64_t seq=pmu_request(m,0x74u,0x14u,true,1u,0x1fu);
+    s5l8920_pmu_voltage_t saved=m->pmu_voltage;
+    CHECK(s5l8920_reset(m) && !s5l8920_pmu_voltage_service(m,seq) &&
+          !memcmp(&saved,&m->pmu_voltage,sizeof saved),"reset committed pending voltage programming");
+    seq=pmu_request(m,0x74u,0x14u,false,1u,0u);(void)m->bus.read32(m,0u);
+    s5l8920_bus_failure_t failure=m->bus_failure;
+    CHECK(failure.reason && s5l8920_pmu_voltage_service(m,seq) &&
+          !memcmp(&failure,&m->bus_failure,sizeof failure),"voltage service repaired bus failure");
+    return true;
+}
+
 static bool test_pmu_events(s5l8920_t *m) {
     static s5l8920_t before;s5l8920_t empty={0};
     s5l8920_free(m);
@@ -2701,10 +2821,13 @@ int main(void) {
     test_uart_banks(&m);
     if (!test_pmu_events(&m)) return 1;
     if (!test_pmu_boot_state(&m)) return 1;
+    if (!test_pmu_voltage(&m)) return 1;
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
     CHECK(!m.pmu_boot_configured && !m.pmu_boot_programmed && !m.pmu_boot_initial && !m.pmu_boot_value &&
           !s5l8920_pmu_boot_state_service(&m,1u) && !s5l8920_pmu_boot_state_configure(&m,0u),"free retained boot-state byte");
+    CHECK(!m.pmu_voltage.configured && !m.pmu_voltage.programmed &&
+          !s5l8920_pmu_voltage_service(&m,1u) && !s5l8920_pmu_voltage_configure(&m,0x23u,0u),"free retained voltage domain");
     CHECK(!m.pmu_adc.programmed && !m.pmu_adc.result_valid && !m.pmu_adc.sequence &&
           !s5l8920_pmu_adc_service(&m,1u) && !s5l8920_pmu_adc_complete(&m,1u,0u,0u),"free retained ADC state");
     CHECK(!m.pmu_config.control_programmed && !m.pmu_config.selectors_programmed &&

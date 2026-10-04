@@ -799,6 +799,42 @@ bool s5l8920_pmu_boot_state_service(s5l8920_t *m,uint64_t sequence) {
     return s5l8920_i2c_complete(m,0u,sequence,true,&m->pmu_boot_value,1u);
 }
 
+static unsigned pmu_voltage_index(unsigned reg) {
+    if (reg==0x14u) return 0u;
+    if (reg==0x23u) return 1u;
+    if (reg>=0x2cu && reg<=0x2fu) return reg-0x2au;
+    return S5L8920_PMU_VOLTAGE_REGISTERS;
+}
+
+bool s5l8920_pmu_voltage_configure(s5l8920_t *m,unsigned reg,uint8_t initial) {
+    unsigned index=pmu_voltage_index(reg);
+    if (!m || !m->ram || index==S5L8920_PMU_VOLTAGE_REGISTERS) return false;
+    s5l8920_pmu_voltage_t *v=&m->pmu_voltage;uint8_t bit=(uint8_t)(1u<<index);
+    if (v->configured&bit) return v->initial[index]==initial;
+    if (v->programmed&bit) return false;
+    v->initial[index]=v->value[index]=initial;v->configured|=bit;
+    return true;
+}
+
+bool s5l8920_pmu_voltage_service(s5l8920_t *m,uint64_t sequence) {
+    if (!m || !m->ram) return false;
+    const s5l8920_i2c_t *i=&m->i2c[0];
+    unsigned index=pmu_voltage_index(i->subaddress);
+    if (!i->active || i->sequence!=sequence || i->address!=0x74u || i->length!=1u ||
+        index==S5L8920_PMU_VOLTAGE_REGISTERS) return false;
+    s5l8920_pmu_voltage_t *v=&m->pmu_voltage;uint8_t bit=(uint8_t)(1u<<index);
+    bool known=((v->configured|v->programmed)&bit)!=0u;
+    if (!i->write) return known && s5l8920_i2c_complete(m,0u,sequence,true,&v->value[index],1u);
+    uint8_t value=i->tx[0],previous=v->value[index];
+    if (i->subaddress==0x23u) {
+        if (!known || ((value^previous)&0x3fu) || (previous&~value)) return false;
+    } else if (!((i->subaddress==0x14u || i->subaddress==0x2fu) && !(value&0xe0u)) &&
+               (!known || ((value^previous)&0xe0u))) return false;
+    if (!s5l8920_i2c_complete(m,0u,sequence,true,NULL,0u)) return false;
+    v->value[index]=value;v->programmed|=bit;
+    return true;
+}
+
 bool s5l8920_pmu_config_service(s5l8920_t *m,uint64_t sequence) {
     if (!m || !m->ram) return false;
     const s5l8920_i2c_t *i=&m->i2c[0];
