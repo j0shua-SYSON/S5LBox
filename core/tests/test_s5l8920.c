@@ -1269,7 +1269,8 @@ static bool test_spi_initialization(s5l8920_t *m) {
     CHECK(s5l8920_spi_write(&s,12u,2u),"direct pin programming");
     for (unsigned off=0;off<0x54u;off++) if (off!=0u && off!=8u && off!=12u) {
         copy=s;
-        CHECK(!s5l8920_spi_write(&s,off,0u) && !memcmp(&s,&copy,sizeof s),"unknown SPI offset write atomic");
+        if (off!=4u && off!=0x30u && off!=0x38u)
+            CHECK(!s5l8920_spi_write(&s,off,0u) && !memcmp(&s,&copy,sizeof s),"unknown SPI offset write atomic");
         CHECK(!s5l8920_spi_read(&s,off,&value) && value==0xfeedfaceu &&
               !memcmp(&s,&copy,sizeof s),"unknown SPI offset read preserves output and state");
     }
@@ -1325,9 +1326,11 @@ static bool test_spi_initialization(s5l8920_t *m) {
             s5l8920_clear_bus_failure(m);
         }
         for (unsigned off=0;off<0x50u;off+=4u) if (off!=0u && off!=8u && off!=12u) {
-            m->bus.write32(m,base+off,0u);
-            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"SPI transfer/configuration registers remain guarded");
-            s5l8920_clear_bus_failure(m);
+            if (off!=4u && off!=0x30u && off!=0x38u) {
+                m->bus.write32(m,base+off,0u);
+                CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"SPI transfer registers remain guarded");
+                s5l8920_clear_bus_failure(m);
+            }
             (void)m->bus.read32(m,base+off);
             CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"unknown SPI read remains guarded");
             s5l8920_clear_bus_failure(m);
@@ -1367,6 +1370,88 @@ static bool test_spi_initialization(s5l8920_t *m) {
         s5l8920_clear_bus_failure(m);
     }
     return true;
+}
+
+static void test_spi_programming(s5l8920_t *m) {
+    s5l8920_spi_t s={0},copy;uint32_t output=0xfeedfaceu;
+    const uint32_t offsets[]={4u,0x30u,0x38u};
+    for (unsigned n=0;n<3u;n++) {
+        copy=s;
+        CHECK(!s5l8920_spi_write(&s,offsets[n],0u) && !memcmp(&s,&copy,sizeof s),
+              "SPI programming requires an explicitly stopped controller");
+    }
+    CHECK(s5l8920_spi_write(&s,0u,0u),"SPI programming stop");
+    const uint32_t timing[]={0u,1u,2u,1023u,1024u,2047u,2048u,65535u,65536u,0xffffffffu};
+    for (unsigned n=0;n<sizeof timing/sizeof timing[0];n++) {
+        CHECK(s5l8920_spi_write(&s,0x30u,timing[n]) && s.divider_programmed && s.divider==timing[n] &&
+              !s.word_delay_programmed && !s.config_programmed,"retain raw divider programming without assuming a silicon width");
+    }
+    for (unsigned n=0;n<sizeof timing/sizeof timing[0];n++)
+        CHECK(s5l8920_spi_write(&s,0x38u,timing[n]) && s.word_delay_programmed && s.word_delay==timing[n] &&
+              s.divider==0xffffffffu && !s.config_programmed,"word-delay programming is independent from divider");
+    for (unsigned width=0;width<3u;width++) for (unsigned master=0;master<2u;master++)
+      for (unsigned mode=0;mode<3u;mode++) for (unsigned flags=0;flags<128u;flags++) {
+        uint32_t config=(width<<15)|(master?0x18u:0u)|(mode<<5)|
+            (flags&7u)|((flags&8u)<<10)|((flags&16u)<<10)|
+            ((flags&32u)<<2)|((flags&64u)<<2);
+        for (unsigned txirq=0;txirq<2u;txirq++) {
+            uint32_t value=config|(txirq<<21);
+            CHECK(s5l8920_spi_write(&s,4u,value) && s.config_programmed && s.config==value &&
+                  s.divider==0xffffffffu && s.word_delay==0xffffffffu,
+                  "retain driver configuration combinations without starting clocks or transfer");
+        }
+    }
+    copy=s;
+    for (unsigned bit=0;bit<32u;bit++) if (!(0x21e1ffu&(1u<<bit)))
+        CHECK(!s5l8920_spi_write(&s,4u,copy.config|(1u<<bit)) && !memcmp(&s,&copy,sizeof s),
+              "unknown SPI configuration field is rejected atomically");
+    const uint32_t invalid[]={8u,16u,0x60u,0x18000u};
+    for (unsigned n=0;n<4u;n++)
+        CHECK(!s5l8920_spi_write(&s,4u,invalid[n]) && !memcmp(&s,&copy,sizeof s),
+              "unsupported master, mode and word-size encodings preserve prior programming");
+    for (unsigned n=0;n<3u;n++)
+        CHECK(!s5l8920_spi_read(&s,offsets[n],&output) && output==0xfeedfaceu && !memcmp(&s,&copy,sizeof s),
+              "staged programming is not hardware readback or effective timing");
+    CHECK(!s5l8920_spi_write(&s,0u,13u) && !memcmp(&s,&copy,sizeof s),
+          "FIFO reset/start remains refused before staged programming can take effect");
+    CHECK(s5l8920_spi_write(&s,0u,0u) && !memcmp(&s,&copy,sizeof s),"repeated stop preserves all staged programming");
+    s5l8920_spi_reset(&s);
+    CHECK(!s.config_programmed && !s.divider_programmed && !s.word_delay_programmed &&
+          !s.config && !s.divider && !s.word_delay,"reset invalidates every SPI programming word");
+    for (unsigned bank=0;bank<3u;bank++) {
+        uint32_t base=0x82000000u+bank*0x100000u;
+        m->bus.write32(m,base,0u);
+        m->bus.write32(m,base+0x30u,0x11223344u);
+        m->bus.write32(m,base+0x38u,0xffeeddccu);
+        m->bus.write32(m,base+4u,0x2141b8u);
+        CHECK(!m->bus_failure.reason && m->spi[bank].divider_programmed && m->spi[bank].word_delay_programmed &&
+              m->spi[bank].config_programmed && m->spi[bank].divider==0x11223344u &&
+              m->spi[bank].word_delay==0xffeeddccu && m->spi[bank].config==0x2141b8u,"bus routes distinct SPI programming words");
+        s5l8920_clear_bus_failure(m);copy=m->spi[bank];
+        for (unsigned n=0;n<3u;n++) {
+            (void)m->bus.read32(m,base+offsets[n]);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !memcmp(&copy,&m->spi[bank],sizeof copy),
+                  "bus readback remains guarded after SPI programming");
+            s5l8920_clear_bus_failure(m);
+        }
+        m->bus.write8(m,base+0x30u,1u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED && !memcmp(&copy,&m->spi[bank],sizeof copy),
+              "non-word programming preserves all staged fields");
+        s5l8920_clear_bus_failure(m);
+        m->bus.write32(m,base+4u,0x80000000u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !memcmp(&copy,&m->spi[bank],sizeof copy),
+              "bus refuses unknown configuration before changes");
+        s5l8920_clear_bus_failure(m);
+        for (unsigned other=0;other<3u;other++)
+            CHECK(m->spi[other].config_programmed==(other<=bank) &&
+                  m->spi[other].divider_programmed==(other<=bank) &&
+                  m->spi[other].word_delay_programmed==(other<=bank),"SPI staged programming remains bank-local");
+        CHECK(!m->cpu.irq_line && !m->cpu.fiq_line,"SPI programming raises no synthetic interrupt");
+    }
+    CHECK(s5l8920_reset(m),"reset SPI programming board");
+    for (unsigned bank=0;bank<3u;bank++)
+        CHECK(!m->spi[bank].config_programmed && !m->spi[bank].divider_programmed && !m->spi[bank].word_delay_programmed,
+              "board reset invalidates SPI programming on every bank");
 }
 
 static void test_i2c_staging_bus(s5l8920_t *m) {
@@ -3539,6 +3624,7 @@ int main(void) {
     if (!test_gpio_inactive_readback(&m)) return 1;
     if (!test_gpio_peripheral_selection(&m)) return 1;
     if (!test_spi_initialization(&m)) return 1;
+    test_spi_programming(&m);
     test_i2c_staging_bus(&m);
     test_i2c_endpoints(&m);
     test_i2c_bounds(&m);

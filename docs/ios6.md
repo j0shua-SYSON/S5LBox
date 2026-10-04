@@ -906,7 +906,7 @@ pass and the canonical 61,650-step ECC-guard trace is unchanged. The full
 182,680,916-step trace matches the GPIO polling checkpoint, including the
 unprepared-pin failure and preserved post-stop bus diagnostics.
 
-## SPI initialization boundary
+## SPI programming boundary
 
 The matching device tree describes SPI controllers at `0x82000000`,
 `0x82100000` and `0x82200000`, each with a `0x1000`-byte aperture. SPI0 has
@@ -926,8 +926,18 @@ bits and clear only selected event causes. They neither change FIFO contents
 nor establish FIFO observations. Unknown status fields reject the whole write.
 No pin routing, peripheral responses or interrupts are generated.
 
+While stopped, the component also stages configuration at offset `4`, the
+clock-divider word at `0x30`, and word-delay programming at `0x38`. It retains
+the two timing words independently without guessing register-width masks or
+effective clock rates. Configuration accepts the fields emitted by the driver,
+with master encodings `0/3`, mode encodings `0/1/2`, and word-size encodings
+`0/1/2`; unknown fields and encodings are refused before changing state. This
+staging does not validate timing, activate DMA, or enable serial traffic.
+Readback remains guarded for all three registers. Repeating stop preserves
+their programming; reset invalidates it.
+
 Status reads remain refused because acknowledging pending events does not
-establish FIFO contents or counts. Start, FIFO reset, transfer/configuration
+establish FIFO contents or counts. Start, FIFO reset, other transfer
 registers, unsupported fields and non-word accesses remain guarded before
 state changes. Reset invalidates all programming rather than supplying a
 silicon reset image. The controller gaps, additional banks and legacy address
@@ -943,12 +953,12 @@ The pinned public S5L8920 implementation corroborates register locations;
 its larger FIFO limit is not adopted. A newer Apple SPI implementation has
 additional FIFO/interrupt registers and cannot establish N88 interrupt causes.
 
-The strict 80-test and shipping 75-test suites pass with this component. The
-last full boot checks, before the acknowledgement refinement, preserve the
-canonical prepared-kernel trace and all three LLB traces. With the same
-explicit diagnostic inputs, that farther kernel run advances from
-226,950,746 to 226,951,170 instructions and stops at `0x8061caa6`, writing `2`
-to SPI0's clock-divider register at `0x82000030`. Those inputs still include
+The strict 80-test and shipping 75-test suites pass with this component. Full
+boot checks preserve the canonical prepared-kernel trace and all three LLB
+traces. With the same explicit diagnostic inputs, the farther kernel run
+advances from the divider stop at 226,951,170 to 226,951,206 instructions and
+stops at `0x8061caa6`, writing the reset/start request `0x0d` to SPI0 control
+at `0x82000000`. Those inputs still include
 unmeasured GPIO, clock, DART and boot-state observations. This is a bounded
 initialization result; complete boot, serial transfers and hardware validation
 remain unproven.
@@ -961,6 +971,14 @@ and configuration writes are recorded. They verify acknowledgement handling
 without establishing hardware event generation, FIFO thresholds, IRQ delivery
 or serial exchange. The original iBoot chip-select helpers also execute
 against the production pin latch. None of these fixtures is a full boot run.
+
+A further configuration fixture varies the divider and delay source clocks
+independently. The original methods produce separate ceiling-divided timing
+words, and 72 register-prefix cases pass through the production component,
+stopping before the original reset/start write. The kernel's request validator
+accepts products up to a computed divider of 2,048; the matching iBoot warns
+at 1,024 and still writes the value. These are software behaviors and do not
+establish a silicon register-width mask.
 
 ## Bounded I2C requests and explicit responses
 
