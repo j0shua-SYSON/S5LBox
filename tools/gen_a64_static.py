@@ -4878,6 +4878,8 @@ def compact_raw_function() -> list[str]:
         "    b.eq .La64cr_thumb_high_mov_plain",
         "    cmp w0, #4",
         "    b.eq .La64cr_thumb_memory_reg_plain",
+        "    cmp w0, #5",
+        "    b.eq .La64cr_memory_decoded",
         "    cbz w0, .La64cr_dp_write",
         "    cmp w0, #1",
         "    b.eq .La64cr_dp_sub_plain",
@@ -5058,6 +5060,17 @@ def compact_raw_function() -> list[str]:
         ".La64cr_memory:",
         "    tbz w9, #25, .La64cr_memory_decoded",
         "    tbnz w9, #4, .La64cr_media",
+        # A whole witnessed table-probe loop can replace repeated dispatch.
+        # Probe only this exact indexed-load encoding; ordinary immediate
+        # transfers and media encodings keep their existing path unchanged.
+        "    ldr x14, [x27, #344]",
+        "    cbz x14, .La64cr_memory_decoded",
+        "    mov w15, #0x4105",
+        "    movk w15, #0xe793, lsl #16",
+        "    cmp w9, w15",
+        "    b.ne .La64cr_memory_decoded",
+        "    mov w0, #5",
+        "    b .La64cr_bulk_call",
         ".La64cr_memory_decoded:",
         # Complete ARM addressing-mode-2 byte/word LDR/STR semantics. Both
         # immediate and shifted-register offsets, pre/post indexing,
