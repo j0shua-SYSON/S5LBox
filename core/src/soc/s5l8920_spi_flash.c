@@ -2,11 +2,11 @@
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "s5l8920_spi_flash.h"
 
-bool s5l8920_spi_flash_clock(s5l8920_spi_t *s,sst25vf080b_t *flash,
+static bool flash_clock(s5l8920_spi_t *s,sst25vf080b_t *flash,bool source,bool nclk,
     uint64_t periods,uint8_t bias_value,uint8_t bias_known,size_t *count) {
     if (!s || !flash || !count || !flash->initialized || !flash->image ||
         flash->powerup_ns || !s->pin_programmed ||
-        flash->selected!=(s->pin==0u) || ((s->config>>15)&3u)) return false;
+        (!source && flash->selected!=(s->pin==0u)) || ((s->config>>15)&3u)) return false;
     /* First plan the controller's completions on a disposable copy. Placeholder
      * receive words are never committed: actual flash bytes must all validate
      * before replaying and publishing either state. No clock/time/CE side effects
@@ -15,7 +15,8 @@ bool s5l8920_spi_flash_clock(s5l8920_spi_t *s,sst25vf080b_t *flash,
     uint32_t rx[WORDS]={0},tx[WORDS];
     s5l8920_spi_t next=*s;
     size_t done=0;
-    if (!s5l8920_spi_serial_clock(&next,periods,rx,WORDS,tx,WORDS,&done)) return false;
+    if (source ? !s5l8920_spi_source_clock(&next,nclk,periods,rx,WORDS,tx,WORDS,&done) :
+        !s5l8920_spi_serial_clock(&next,periods,rx,WORDS,tx,WORDS,&done)) return false;
     sst25vf080b_t peer=*flash;
     for (size_t i=0;i<done;++i) {
         sst25vf080b_output_t out;
@@ -24,7 +25,18 @@ bool s5l8920_spi_flash_clock(s5l8920_spi_t *s,sst25vf080b_t *flash,
         rx[i]=(uint8_t)((out.value&out.driven)|(bias_value&(uint8_t)~out.driven));
     }
     next=*s;
-    if (!s5l8920_spi_serial_clock(&next,periods,rx,done,tx,WORDS,&done)) return false;
+    if (source ? !s5l8920_spi_source_clock(&next,nclk,periods,rx,done,tx,WORDS,&done) :
+        !s5l8920_spi_serial_clock(&next,periods,rx,done,tx,WORDS,&done)) return false;
     *s=next; *flash=peer; *count=done;
     return true;
+}
+
+bool s5l8920_spi_flash_clock(s5l8920_spi_t *s,sst25vf080b_t *flash,
+    uint64_t periods,uint8_t bias_value,uint8_t bias_known,size_t *count) {
+    return flash_clock(s,flash,false,false,periods,bias_value,bias_known,count);
+}
+
+bool s5l8920_spi_flash_source_clock(s5l8920_spi_t *s,sst25vf080b_t *flash,
+    bool nclk,uint64_t cycles,uint8_t bias_value,uint8_t bias_known,size_t *count) {
+    return flash_clock(s,flash,true,nclk,cycles,bias_value,bias_known,count);
 }

@@ -1089,6 +1089,44 @@ does not run the event wait or interrupt dispatcher, and supplies no target NOR
 contents or automatic board clock scheduling. This addition does not advance
 the last verified full-kernel boot stops or establish physical-device behavior.
 
+The board can now bind an initialized, caller-owned chip to an explicitly
+configured GPIO output and clock gate before SPI control programming. GPIO
+output edges drive CE through the flash command model; a refused command commit
+preserves both GPIO and flash state. Shared chip/CS wiring, peripheral/input
+pad modes, and midword selection changes refuse. Reset and free detach the
+connection without changing the borrowed chip or image. Direct peer-word input
+is refused on an attached port so it cannot bypass the connected flash.
+
+An additional clock API accepts undivided PCLK or NCLK cycles, selected by
+configuration bit 14 and divided by the raw programmed divider. Fractional
+progress starts an active word and is retained across stop/resume and gated
+input. Idle and unselected-source cycles do not earn future progress. Direct
+SCK-period input refuses while fractional source progress exists. Gate nibble
+zero pauses source input, and `F` permits it. Flash CE is independent of the
+controller's software CS latch: an unselected chip supplies undriven bits,
+resolved only by explicit receive bias. Completed transfers refresh the real
+VIC IRQ/FIQ lines without changing CPU registers or a latched bus failure.
+Word-delay cycles and flash elapsed time still require separate ordered inputs;
+no source frequency or conversion from retired CPU instructions is inferred.
+
+A read-only observer at the retained diagnostic kernel stop identifies the
+driver's GPIO selection path, with `internal-cs` false, GPIO 148 driven low,
+divider 2, zero word delay and gate 9 enabled. Its cached NCLK is 24 MHz. The
+cached 100 MHz delay clock does not establish the live PCLK rate, because the
+current selector word differs from the earlier captured input. Gate 9 remains
+explicit wiring; no mapping from device-tree logical gate 21 is invented.
+
+Focused tests cover fractional division, independent clock selection and delay,
+stop/gate preservation, GPIO command commits, missing data, rollback and reset
+ownership. The original 150 PIO transactions also pass through board source
+clocks, flash state and interrupt refresh. That fixture retains its original
+internal-CS path and supplies separate host GPIO edges; it does not execute the
+kernel's GPIO callback or event dispatcher. Automatic scheduling and actual
+target NOR contents remain unresolved. No flash is attached by default.
+The strict 82-test and shipping 77-test configurations pass. With the same
+explicit boot inputs, all three LLB traces and both prepared-kernel traces
+match their prior results exactly; this connection alone does not advance boot.
+
 ## Bounded I2C requests and explicit responses
 
 Three I2C apertures at `0x83200000`, `0x83300000` and `0x83400000` use

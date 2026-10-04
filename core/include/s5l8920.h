@@ -9,6 +9,7 @@
 #include "s5l8920_uart.h"
 #include "s5l8920_dart.h"
 #include "s5l8920_spi.h"
+#include "s5l8920_spi_flash.h"
 #include <stddef.h>
 
 #define S5L8920_RAM_BASE UINT32_C(0x40000000)
@@ -253,6 +254,9 @@ typedef struct {
     s5l8920_dmc_t dmc;
     s5l8920_dart_t dart[S5L8920_DART_COUNT];
     s5l8920_spi_t spi[S5L8920_SPI_COUNT];
+    sst25vf080b_t *spi_flash[S5L8920_SPI_COUNT];
+    unsigned spi_flash_cs[S5L8920_SPI_COUNT], spi_flash_gate[S5L8920_SPI_COUNT];
+    uint8_t spi_flash_bias[S5L8920_SPI_COUNT], spi_flash_bias_known[S5L8920_SPI_COUNT];
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -294,12 +298,29 @@ bool s5l8920_set_ram_boot_window(s5l8920_t *m, bool enabled);
  * sources29-bank, ORed with external inputs. Failures preserve output/device/
  * interrupt state. Successful events preserve latched bus diagnostics and CPU
  * registers, while IRQ/FIQ reflect resulting causes. No clock-source conversion,
- * peripheral pin routing, NOR reply or reset threshold is inferred here. */
+ * peripheral pin routing, NOR reply or reset threshold is inferred here.
+ * Direct serial input refuses on a port with an attached flash peer. */
 bool s5l8920_spi_bank_configure_link(s5l8920_t *m, unsigned bank, unsigned tx_low, unsigned rx_high);
 bool s5l8920_spi_bank_serial_clock(s5l8920_t *m, unsigned bank, uint64_t cycles,
     const uint32_t *received, size_t received_count, uint32_t *transmitted,
     size_t capacity, size_t *count);
 bool s5l8920_spi_bank_delay_clock(s5l8920_t *m, unsigned bank, uint64_t cycles);
+/* Explicit wiring: caller owns initialized flash/image/pins and elapsed time.
+ * GPIO must be a known plain output, gate independently configured, and SPI
+ * control not yet programmed. Accepted GPIO writes drive CE; other pad modes
+ * and midword CS edges refuse. Gate nibble0 pauses source input, f permits it.
+ * Wiring/bias are explicit, not inferred from logical device-tree gate numbers.
+ * Identical repeats preserve state; chip/CS sharing or replacement refuses.
+ * Functional reset/free detach wiring without changing the borrowed chip.
+ * No automatic clocks, image, power sequence or controller reset defaults. */
+bool s5l8920_spi_attach_flash(s5l8920_t *m, unsigned bank, sst25vf080b_t *flash,
+    unsigned cs_pin, unsigned gate, unsigned tx_low, unsigned rx_high,
+    uint8_t bias_value, uint8_t bias_known);
+/* Raw PCLK/NCLK source cycles to the bound chip, refreshing real IRQ/FIQ.
+ * Word-delay PCLK and flash elapsed time are separately supplied in order.
+ * CPU registers and latched bus diagnostics are preserved. */
+bool s5l8920_spi_bank_flash_clock(s5l8920_t *m, unsigned bank, bool nclk,
+    uint64_t cycles, size_t *count);
 
 /* Board-owned UART input advances refresh the real interrupt fabric before
  * returning. Use these instead of advancing the embedded component directly

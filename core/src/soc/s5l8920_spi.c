@@ -152,7 +152,7 @@ bool s5l8920_spi_irq(const s5l8920_spi_t *s) {
         ((s->config&0x200000u) && (events&SPI_TX_COMPLETE));
 }
 
-bool s5l8920_spi_serial_clock(s5l8920_spi_t *s,uint64_t cycles,
+static bool spi_clock(s5l8920_spi_t *s,uint64_t cycles,uint32_t divider,
     const uint32_t *received,size_t received_count,uint32_t *transmitted,size_t capacity,size_t *count) {
     if (!spi_link_ready(s) || !count || (!received && received_count) || (!transmitted && capacity)) return false;
     s5l8920_spi_t next=*s;
@@ -169,11 +169,17 @@ bool s5l8920_spi_serial_clock(s5l8920_spi_t *s,uint64_t cycles,
             next.tx.count--;
             next.bits_remaining=bits;next.busy=true;
         }
-        if (cycles<next.bits_remaining) {
-            next.bits_remaining-=(unsigned)cycles;
+        /* At most 32 bits times a raw uint32 divider: this product and the
+         * partial-word sum below cannot overflow uint64, even when the caller
+         * supplies UINT64_MAX cycles. Idle excess is never accumulated. */
+        uint64_t remaining=(uint64_t)next.bits_remaining*divider-next.source_phase;
+        if (cycles<remaining) {
+            uint64_t progress=cycles+next.source_phase;
+            next.bits_remaining-=(unsigned)(progress/divider);
+            next.source_phase=(uint32_t)(progress%divider);
             break;
         }
-        cycles-=next.bits_remaining;
+        cycles-=remaining;
         if (done>=capacity) return false;
         if (next.rx_words) {
             if (used>=received_count || next.rx.count>=S5L8920_SPI_FIFO_DEPTH) return false;
@@ -182,7 +188,7 @@ bool s5l8920_spi_serial_clock(s5l8920_spi_t *s,uint64_t cycles,
             if (!--next.rx_words) next.pending|=SPI_RX_COMPLETE;
         }
         output[done++]=next.shift_word;
-        next.busy=false;next.bits_remaining=0u;
+        next.busy=false;next.bits_remaining=0u;next.source_phase=0u;
         if (!--next.tx_words) next.pending|=SPI_TX_COMPLETE;
         if (next.tx_words) next.delay_remaining=next.word_delay;
     }
@@ -191,8 +197,21 @@ bool s5l8920_spi_serial_clock(s5l8920_spi_t *s,uint64_t cycles,
     return true;
 }
 
+bool s5l8920_spi_serial_clock(s5l8920_spi_t *s,uint64_t cycles,
+    const uint32_t *received,size_t received_count,uint32_t *transmitted,size_t capacity,size_t *count) {
+    if (!s || s->source_phase) return false;
+    return spi_clock(s,cycles,1u,received,received_count,transmitted,capacity,count);
+}
+
 bool s5l8920_spi_delay_clock(s5l8920_spi_t *s,uint64_t cycles) {
     if (!spi_link_ready(s)) return false;
     if (!s->stopped) s->delay_remaining=cycles>=s->delay_remaining?0u:s->delay_remaining-(uint32_t)cycles;
     return true;
+}
+
+bool s5l8920_spi_source_clock(s5l8920_spi_t *s,bool nclk,uint64_t cycles,
+    const uint32_t *received,size_t received_count,uint32_t *transmitted,size_t capacity,size_t *count) {
+    if (!spi_link_ready(s) || !count || (!received && received_count) || (!transmitted && capacity)) return false;
+    if (nclk!=((s->config&0x4000u)!=0u)) { *count=0u;return true; }
+    return spi_clock(s,cycles,s->divider,received,received_count,transmitted,capacity,count);
 }

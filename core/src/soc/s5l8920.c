@@ -174,6 +174,20 @@ static void gpio_latch_level(s5l8920_t *m,unsigned index) {
         m->gpio_pending[index/32u]|=1u<<(index%32u);
 }
 
+static bool gpio_flash_select(s5l8920_t *m,unsigned index,uint32_t control) {
+    for (unsigned bank=0;bank<S5L8920_SPI_COUNT;++bank) {
+        sst25vf080b_t *flash=m->spi_flash[bank];
+        if (!flash || m->spi_flash_cs[bank]!=index) continue;
+        bool high=(control&1u)!=0u;
+        if ((control&0x7eu)!=0x12u ||
+            (m->spi[bank].busy && high!=((m->gpio[index].control&1u)!=0u))) return false;
+        /* Attach forbids shared CS pins. Chip CE commit can refuse undefined
+         * programming; in that case neither GPIO nor chip state is published. */
+        return sst25vf080b_pins(flash,high,flash->wp_high,flash->hold_high);
+    }
+    return true;
+}
+
 static void gpio_refresh_irq(s5l8920_t *m) {
     m->gpio_irq=false;
     for (unsigned index=0;index<S5L8920_GPIO_IRQ_PINS;index++) {
@@ -508,6 +522,10 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         if (size!=4u || (offset&3u)) {
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
         } else if (offset/4u<S5L8920_GPIO_PIN_COUNT && gpio_control_supported(offset/4u,value)) {
+            if (!gpio_flash_select(m,offset/4u,value)) {
+                fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+                return;
+            }
             s5l8920_gpio_pin_t *pin=&m->gpio[offset/4u];
             pin->control=(uint16_t)value;
             pin->programmed=true;
@@ -673,12 +691,47 @@ bool s5l8920_spi_bank_configure_link(s5l8920_t *m,unsigned bank,unsigned tx_low,
 }
 bool s5l8920_spi_bank_serial_clock(s5l8920_t *m,unsigned bank,uint64_t cycles,
     const uint32_t *received,size_t received_count,uint32_t *transmitted,size_t capacity,size_t *count) {
-    if (!m || !m->ram || bank>=S5L8920_SPI_COUNT ||
+    if (!m || !m->ram || bank>=S5L8920_SPI_COUNT || m->spi_flash[bank] ||
         !s5l8920_spi_serial_clock(&m->spi[bank],cycles,received,received_count,transmitted,capacity,count)) return false;
     refresh_interrupts(m);return true;
 }
 bool s5l8920_spi_bank_delay_clock(s5l8920_t *m,unsigned bank,uint64_t cycles) {
     if (!m || !m->ram || bank>=S5L8920_SPI_COUNT || !s5l8920_spi_delay_clock(&m->spi[bank],cycles)) return false;
+    refresh_interrupts(m);return true;
+}
+
+bool s5l8920_spi_attach_flash(s5l8920_t *m,unsigned bank,sst25vf080b_t *flash,
+    unsigned cs_pin,unsigned gate,unsigned tx_low,unsigned rx_high,uint8_t bias_value,uint8_t bias_known) {
+    if (!m || !m->ram || bank>=S5L8920_SPI_COUNT || !flash ||
+        !flash->initialized || !flash->image || cs_pin>=S5L8920_GPIO_PIN_COUNT ||
+        gate>=S5L8920_CLOCK_GATE_COUNT) return false;
+    if (m->spi_flash[bank])
+        return m->spi_flash[bank]==flash && m->spi_flash_cs[bank]==cs_pin &&
+            m->spi_flash_gate[bank]==gate && m->spi_flash_bias[bank]==bias_value &&
+            m->spi_flash_bias_known[bank]==bias_known && m->spi[bank].tx_low==tx_low &&
+            m->spi[bank].rx_high==rx_high;
+    const s5l8920_gpio_pin_t *pin=&m->gpio[cs_pin];
+    if (!pin->programmed || (pin->control&0x7eu)!=0x12u ||
+        !m->clock_gate[gate].configured || m->spi[bank].control_programmed) return false;
+    for (unsigned i=0;i<S5L8920_SPI_COUNT;++i)
+        if (m->spi_flash[i] && (m->spi_flash[i]==flash || m->spi_flash_cs[i]==cs_pin)) return false;
+    s5l8920_spi_t next=m->spi[bank];
+    sst25vf080b_t peer=*flash;
+    if (!s5l8920_spi_configure_link(&next,tx_low,rx_high) ||
+        !sst25vf080b_pins(&peer,(pin->control&1u)!=0u,peer.wp_high,peer.hold_high)) return false;
+    m->spi[bank]=next;*flash=peer;
+    m->spi_flash[bank]=flash;m->spi_flash_cs[bank]=cs_pin;m->spi_flash_gate[bank]=gate;
+    m->spi_flash_bias[bank]=bias_value;m->spi_flash_bias_known[bank]=bias_known;
+    refresh_interrupts(m);return true;
+}
+bool s5l8920_spi_bank_flash_clock(s5l8920_t *m,unsigned bank,bool nclk,uint64_t cycles,size_t *count) {
+    if (!m || !m->ram || bank>=S5L8920_SPI_COUNT || !count || !m->spi_flash[bank]) return false;
+    const s5l8920_clock_gate_t *gate=&m->clock_gate[m->spi_flash_gate[bank]];
+    if (!gate->configured) return false;
+    unsigned enabled=gate->value&15u;
+    if (!enabled) { *count=0u;return true; }
+    if (enabled!=15u || !s5l8920_spi_flash_source_clock(&m->spi[bank],m->spi_flash[bank],
+        nclk,cycles,m->spi_flash_bias[bank],m->spi_flash_bias_known[bank],count)) return false;
     refresh_interrupts(m);return true;
 }
 
@@ -1225,6 +1278,11 @@ bool s5l8920_reset(s5l8920_t *m) {
         s5l8920_dart_reset(&m->dart[bank]);
     for (unsigned bank=0;bank<S5L8920_SPI_COUNT;bank++)
         s5l8920_spi_reset(&m->spi[bank]);
+    memset(m->spi_flash,0,sizeof m->spi_flash);
+    memset(m->spi_flash_cs,0,sizeof m->spi_flash_cs);
+    memset(m->spi_flash_gate,0,sizeof m->spi_flash_gate);
+    memset(m->spi_flash_bias,0,sizeof m->spi_flash_bias);
+    memset(m->spi_flash_bias_known,0,sizeof m->spi_flash_bias_known);
     m->powerid.value=m->powerid.initial;
     for (unsigned index=0;index<S5L8920_USB_CONTROL_COUNT;index++)
         m->usb_control[index].value=m->usb_control[index].initial;

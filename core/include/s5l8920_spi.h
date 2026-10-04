@@ -37,6 +37,7 @@ typedef struct {
     bool control_programmed, control_readable;
     s5l8920_spi_fifo_t tx, rx;
     uint32_t pending, shift_word, delay_remaining;
+    uint32_t source_phase;
     unsigned bits_remaining, tx_low, rx_high;
     bool link_configured, busy;
 } s5l8920_spi_t;
@@ -95,6 +96,15 @@ bool s5l8920_spi_irq(const s5l8920_spi_t *s);
  * Idle, stopped and delay-blocked periods are discarded, never banked.
  * Status reads do not clock; absent backend input never becomes zero data. */
 bool s5l8920_spi_serial_clock(s5l8920_spi_t *s, uint64_t cycles,
+    const uint32_t *received, size_t received_count, uint32_t *transmitted,
+    size_t capacity, size_t *count);
+/* Undivided cycles on PCLK(false) or NCLK(true). Config bit14 selects the
+ * input and the raw divider sets complete SCK periods. Partial divider progress
+ * belongs to an in-flight word and pauses on stop; unused/idle cycles never
+ * accumulate credit. No divider width or source frequency is guessed. Delay
+ * reference input remains separate. Direct period input refuses while a
+ * fractional source period exists. Transactional like the period API. */
+bool s5l8920_spi_source_clock(s5l8920_spi_t *s, bool nclk, uint64_t cycles,
     const uint32_t *received, size_t received_count, uint32_t *transmitted,
     size_t capacity, size_t *count);
 /* Independent word-delay reference cycles, supplied only in their real order

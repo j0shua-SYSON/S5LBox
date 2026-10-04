@@ -18,4 +18,10 @@
  * or change flash pins during a partial word. No board IRQ refresh is implied. */
 bool s5l8920_spi_flash_clock(s5l8920_spi_t *s, sst25vf080b_t *flash,
     uint64_t periods, uint8_t bias_value, uint8_t bias_known, size_t *count);
+/* Exchange supplied with selected undivided PCLK/NCLK source cycles. External
+ * GPIO owns flash CE independently of the controller's software CS latch.
+ * An unselected flash returns undriven bits, requiring explicit receive bias.
+ * The caller must prevent external CE changes during an active word. */
+bool s5l8920_spi_flash_source_clock(s5l8920_spi_t *s, sst25vf080b_t *flash,
+    bool nclk, uint64_t cycles, uint8_t bias_value, uint8_t bias_known, size_t *count);
 #endif

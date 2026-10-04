@@ -237,6 +237,10 @@ add_executable(test_sst25vf080b tests/test_sst25vf080b.c)
 target_link_libraries(test_sst25vf080b PRIVATE emucore)
 add_test(NAME sst25vf080b COMMAND test_sst25vf080b)
 
+add_executable(test_s5l8920_spi_flash tests/test_s5l8920_spi_flash.c)
+target_link_libraries(test_s5l8920_spi_flash PRIVATE emucore)
+add_test(NAME s5l8920_spi_flash COMMAND test_s5l8920_spi_flash)
+
 add_executable(test_vfp tests/test_vfp.c)
 target_link_libraries(test_vfp PRIVATE emucore)
 add_test(NAME vfp COMMAND test_vfp)
