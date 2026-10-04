@@ -1227,9 +1227,7 @@ static uint64_t native_differential(arm_cpu_t *cpu,
     bool ok = a64_compact_raw_run_code_window_resident_options(cpu, memory->code,
         memory->code_base, memory->code_bytes, budget, native_fallback, &context,
         &options, NULL, &stats, NULL, &n, &native, &fallback);
-    /* A zero budget is an invalid runner contract, not a successful empty
-     * run. Still compare its complete unchanged state and zero accounting. */
-    CHECK(ok == (budget != 0u), "native bulk wrapper admission differs, budget=%u", budget);
+    CHECK(ok, "native bulk wrapper refused");
     CHECK(n <= budget && native + fallback == n, "native retirement partition");
     CHECK(stats.retired <= native, "bulk retirement is not a native subset");
     if (enabled && memory->ram_window)
