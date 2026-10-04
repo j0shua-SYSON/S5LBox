@@ -18,6 +18,49 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
+## D1755 LDO and pin configuration
+
+Exact byte transactions now retain eleven LDO settings at `0x17..0x21`,
+selector fields at `0x22`, and enable fields at `0x10/0x11`. Their masks come
+from the matching kernel's twelve-row table at `0x80af1f90`: the twelfth rail
+has an enable bit but no voltage setting. Known initial bytes are explicit,
+immutable and idempotent. Field updates preserve all other bits. The complete
+bytes written by the original LLB tables at `0x840115c4/0x840115d4` can also
+establish state at `0x10/0x11/0x17..0x21`; other full-byte changes remain
+unimplemented. There is no inferred complete image or initial value for `0x22`.
+Reads remain pending until their byte is known.
+
+The existing configuration service also supports independent pin bytes
+`0x50..0x57`. Exact byte writes establish their retained configuration, including
+the LLB's `0x50=0x11`; reads require prior programming. Burst accesses and
+neighboring registers remain unimplemented. These bytes are separate from
+the packed selectors at `0x59..0x5b` and the explicit live status at `0x05..0x08`.
+Neither LDO nor pin configuration creates electrical pin samples, voltage
+readiness, settling, power transitions or spontaneous events. Functional SoC
+reset retains the external PMU state; free/init clears it.
+
+The complete original kernel LDO method at `0x80ae8a74` passed 3,522 calls
+against the production service, exercising the rail table, flags, enables,
+preserved bits, bounds and missing responses. It executes the original mutex
+and ARM division helpers. Its lower bound is unsigned and its upper bound
+signed: some large unsigned arguments therefore reach masked programming.
+The model retains those raw field encodings without inventing physical
+voltages or changing firmware arithmetic. The original pin method at
+`0x80ae8c28` passed 1,124 calls with prior explicit byte programming, varied
+masks/values, invalid indices and withheld responses. Its OR value is not
+limited by its clear-mask argument. Packed-selector arguments are zero in
+that witness. Both kernel fixtures prepare objects/MMU/time and execute the
+original polling transport with CPU IRQs masked.
+
+Connected original LLB reset execution now completes all fourteen later
+write/readback checks through production LDO and pin services, after the
+earlier regulator sequence. With explicit boot-state `0x80`, zero trim field
+and initial control `0x23=0`, the complete PMU initializer returns at
+1,162,251 steps. The next pending request reads PMU register `0x61`.
+This progression uses unchanged firmware and actual CPU I2C exceptions.
+It does not establish a bootloader/kernel handoff, physical PMU behavior or
+complete boot. The prepared kernel's separate GPIO pin 0 stop is unchanged.
+
 ## D1755 voltage programming and readback
 
 Exact byte transactions at I2C0/address `0x74` retain voltage configuration
@@ -56,8 +99,8 @@ its return value alone is not evidence that programming succeeded.
 Connected original-reset execution with explicit boot-state, CHIPID word 3
 and control `0x23` inputs now completes all seven regulator transfers and
 three successful readback checks. A supplied zero trim field reaches that
-return after 993,014 steps; the next pending request writes register `0x17`,
-the first entry in the later configuration table. Missing initial control
+return after 993,014 steps, then writes register `0x17`, the first entry in
+the later configuration table supported above. Missing initial control
 remains pending at its `0x23` read. The other boot-state branch still requires
 explicit ADC conversion inputs. The separate prepared kernel remains at its
 unprogrammed GPIO pin 0 stop; no connected kernel boot or SpringBoard is proven.

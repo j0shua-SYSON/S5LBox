@@ -46,6 +46,7 @@
 #define S5L8920_PMU_IRQ_PIN 157u
 #define S5L8920_PMU_BOOT_STATE_REGISTER 0x6fu
 #define S5L8920_PMU_VOLTAGE_REGISTERS 6u
+#define S5L8920_PMU_LDO_REGISTERS 14u
 #define S5L8920_CHIPID_BASE UINT32_C(0xbf500000)
 #define S5L8920_CLOCK_GATE_BASE UINT32_C(0xbf100078)
 #define S5L8920_CLOCK_GATE_COUNT 52u
@@ -136,6 +137,7 @@ typedef struct {
 typedef struct {
     uint8_t control, selectors[3], selectors_programmed;
     bool control_programmed;
+    uint8_t pins[8], pins_programmed;
 } s5l8920_pmu_config_t;
 
 typedef struct {
@@ -149,6 +151,12 @@ typedef struct {
     uint8_t value[S5L8920_PMU_VOLTAGE_REGISTERS];
     uint8_t configured, programmed;
 } s5l8920_pmu_voltage_t;
+
+typedef struct {
+    uint8_t initial[S5L8920_PMU_LDO_REGISTERS];
+    uint8_t value[S5L8920_PMU_LDO_REGISTERS];
+    uint16_t configured, programmed;
+} s5l8920_pmu_ldo_t;
 
 typedef enum {
     S5L8920_BUS_OK = 0,
@@ -200,6 +208,7 @@ typedef struct {
     uint8_t pmu_boot_initial, pmu_boot_value;
     bool pmu_boot_configured, pmu_boot_programmed;
     s5l8920_pmu_voltage_t pmu_voltage;
+    s5l8920_pmu_ldo_t pmu_ldo;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -378,7 +387,9 @@ bool s5l8920_pmu_adc_complete(s5l8920_t *m, uint64_t sequence, uint8_t low, uint
  * values, including the kernel's power-related bit7 update, remain refused.
  * Registers59..5b hold eight packed three-bit fields: exact byte accesses or
  * a three-byte transfer beginning at59. Every read requires prior programming
- * of all requested bytes; no initial values are inferred. These are logical
+ * of all requested bytes. Registers50..57 are independent pin configuration
+ * bytes, supporting exact byte writes and retained reads after programming.
+ * No initial values are inferred. These are logical
  * configuration images, without electrical routing or power effects.
  * Service only the matching active I2C transaction, preserving CPU registers
  * and diagnostics while refreshing the controller IRQ. Unknown requests leave
@@ -435,6 +446,21 @@ bool s5l8920_pmu_boot_state_service(s5l8920_t *m, uint64_t sequence);
  * bus diagnostics are preserved while the controller IRQ is refreshed. */
 bool s5l8920_pmu_voltage_configure(s5l8920_t *m, unsigned reg, uint8_t initial);
 bool s5l8920_pmu_voltage_service(s5l8920_t *m, uint64_t sequence);
+
+/* D1755 LDO settings17..21, selector22 and enable fields10/11 at I2C0/74.
+ * Configure supplies immutable initial bytes; identical repeats do not reload
+ * guest writes, and first configuration after programming refuses. Exact byte
+ * reads require known state. Writes preserve bits outside the original kernel
+ * table's fields. The matching LLB's complete configuration bytes at17..21
+ * and10/11 may also establish/replace state; no complete write is inferred
+ * for22. Raw field encodings are retained without clamping or translating
+ * them into physical voltages. Unsupported fields/shapes and stale requests
+ * remain pending without mutation. SoC reset retains these external settings;
+ * free/init invalidates them. No defaults, settling, readiness or power effects
+ * are inferred. Call between CPU steps; CPU registers and diagnostics are
+ * preserved while the I2C completion refreshes the controller IRQ. */
+bool s5l8920_pmu_ldo_configure(s5l8920_t *m, unsigned reg, uint8_t initial);
+bool s5l8920_pmu_ldo_service(s5l8920_t *m, uint64_t sequence);
 
 /* Supply one immutable identification word at offset0/4/8/12. Only aligned
  * word reads in this 16-byte span are modeled; each requires its own explicit

@@ -835,6 +835,45 @@ bool s5l8920_pmu_voltage_service(s5l8920_t *m,uint64_t sequence) {
     return true;
 }
 
+static unsigned pmu_ldo_index(unsigned reg) {
+    if (reg>=0x17u && reg<=0x22u) return reg-0x17u;
+    if (reg==0x10u || reg==0x11u) return reg-4u;
+    return S5L8920_PMU_LDO_REGISTERS;
+}
+
+bool s5l8920_pmu_ldo_configure(s5l8920_t *m,unsigned reg,uint8_t initial) {
+    unsigned index=pmu_ldo_index(reg);
+    if (!m || !m->ram || index==S5L8920_PMU_LDO_REGISTERS) return false;
+    s5l8920_pmu_ldo_t *v=&m->pmu_ldo;uint16_t bit=(uint16_t)(1u<<index);
+    if (v->configured&bit) return v->initial[index]==initial;
+    if (v->programmed&bit) return false;
+    v->initial[index]=v->value[index]=initial;v->configured|=bit;
+    return true;
+}
+
+bool s5l8920_pmu_ldo_service(s5l8920_t *m,uint64_t sequence) {
+    if (!m || !m->ram) return false;
+    const s5l8920_i2c_t *i=&m->i2c[0];
+    unsigned index=pmu_ldo_index(i->subaddress);
+    if (!i->active || i->sequence!=sequence || i->address!=0x74u || i->length!=1u ||
+        index==S5L8920_PMU_LDO_REGISTERS) return false;
+    /* Eleven voltage fields, selector22, then enables10/11. These are logical
+     * configuration masks, not assertions about electrical behavior. */
+    static const uint8_t masks[S5L8920_PMU_LDO_REGISTERS]={
+        0x1f,0x3f,0x1f,0x1f,0x1f,0x1f,0x1f,0x1f,0x0f,0x1f,0x1f,0x07,0xf8,0xf7};
+    static const uint8_t boot[S5L8920_PMU_LDO_REGISTERS]={
+        0x8a,0x06,0x8a,0xb8,0x6a,0xf0,0x4f,0xb6,0x44,0xba,0xd7,0x00,0xeb,0xbe};
+    s5l8920_pmu_ldo_t *v=&m->pmu_ldo;uint16_t bit=(uint16_t)(1u<<index);
+    bool known=((v->configured|v->programmed)&bit)!=0u;
+    if (!i->write) return known && s5l8920_i2c_complete(m,0u,sequence,true,&v->value[index],1u);
+    uint8_t value=i->tx[0];
+    bool complete_image=index!=11u && value==boot[index];
+    if (!complete_image && (!known || ((value^v->value[index])&~masks[index]))) return false;
+    if (!s5l8920_i2c_complete(m,0u,sequence,true,NULL,0u)) return false;
+    v->value[index]=value;v->programmed|=bit;
+    return true;
+}
+
 bool s5l8920_pmu_config_service(s5l8920_t *m,uint64_t sequence) {
     if (!m || !m->ram) return false;
     const s5l8920_i2c_t *i=&m->i2c[0];
@@ -847,6 +886,15 @@ bool s5l8920_pmu_config_service(s5l8920_t *m,uint64_t sequence) {
         if (i->tx[0]!=0x2au) return false;
         if (!s5l8920_i2c_complete(m,0u,sequence,true,NULL,0u)) return false;
         c->control=0x2au;c->control_programmed=true;
+        return true;
+    }
+    if (i->subaddress>=0x50u && i->subaddress<=0x57u && i->length==1u) {
+        unsigned pin=i->subaddress-0x50u;uint8_t bit=(uint8_t)(1u<<pin);
+        if (!i->write) return (c->pins_programmed&bit)!=0u &&
+            s5l8920_i2c_complete(m,0u,sequence,true,c->pins+pin,1u);
+        uint8_t value=i->tx[0];
+        if (!s5l8920_i2c_complete(m,0u,sequence,true,NULL,0u)) return false;
+        c->pins[pin]=value;c->pins_programmed|=bit;
         return true;
     }
     if (i->subaddress<0x59u || i->subaddress>0x5bu ||

@@ -1728,6 +1728,147 @@ static bool test_pmu_voltage(s5l8920_t *m) {
     return true;
 }
 
+static bool test_pmu_ldo(s5l8920_t *m) {
+    static s5l8920_t before;s5l8920_t empty={0};
+    const unsigned regs[]={0x17u,0x18u,0x19u,0x1au,0x1bu,0x1cu,0x1du,0x1eu,0x1fu,0x20u,0x21u,0x22u,0x10u,0x11u};
+    const unsigned masks[]={31u,63u,31u,31u,31u,31u,31u,31u,15u,31u,31u,7u,248u,247u};
+    const unsigned boot[]={0x8au,0x06u,0x8au,0xb8u,0x6au,0xf0u,0x4fu,0xb6u,0x44u,0xbau,0xd7u,0u,0xebu,0xbeu};
+    CHECK(!s5l8920_pmu_ldo_service(NULL,1u) && !s5l8920_pmu_ldo_service(&empty,1u) &&
+          !s5l8920_pmu_ldo_configure(NULL,0x17u,0u) && !s5l8920_pmu_ldo_configure(&empty,0x17u,0u),"invalid LDO board");
+    CHECK(s5l8920_reset(m),"LDO reset");
+    for (unsigned n=0;n<14u;n++) {
+        uint64_t seq=pmu_request(m,0x74u,regs[n],false,1u,0u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_ldo_service(m,seq) && !memcmp(&before,m,sizeof before),"invented LDO initial state");
+        CHECK(s5l8920_reset(m),"cancel unknown LDO read");
+        seq=pmu_request(m,0x74u,regs[n],true,1u,boot[n]^1u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_ldo_service(m,seq) && !memcmp(&before,m,sizeof before),"unestablished LDO fields acknowledged");
+        CHECK(s5l8920_reset(m),"cancel unknown LDO write");
+        seq=pmu_request(m,0x74u,regs[n],true,1u,boot[n]);
+        CHECK(s5l8920_pmu_ldo_service(m,seq)==(n!=11u),"observed full LDO image/unknown selector22");
+        CHECK(s5l8920_reset(m),"retain external LDO programming");
+        if (n!=11u) {
+            memcpy(&before,m,sizeof before);
+            CHECK(!s5l8920_pmu_ldo_configure(m,regs[n],(uint8_t)boot[n]) && !memcmp(&before,m,sizeof before),"late initial LDO state overwrote programming");
+            seq=pmu_request(m,0x74u,regs[n],false,1u,0u);
+            CHECK(s5l8920_pmu_ldo_service(m,seq) && pmu_read_bytes(m,1u)==boot[n],"LDO image readback after reset");
+        }
+    }
+    s5l8920_free(m);
+    if (!s5l8920_init(m)) { CHECK(false,"fresh LDO board");return false; }
+    CHECK(!m->pmu_ldo.configured && !m->pmu_ldo.programmed,"cold board retained LDO state");
+    for (unsigned n=0;n<14u;n++) {
+        arm_cpu_t cpu=m->cpu;
+        CHECK(s5l8920_pmu_ldo_configure(m,regs[n],0xa5u) && !memcmp(&cpu,&m->cpu,sizeof cpu),"explicit LDO configuration changed CPU");
+        memcpy(&before,m,sizeof before);
+        CHECK(s5l8920_pmu_ldo_configure(m,regs[n],0xa5u) && !s5l8920_pmu_ldo_configure(m,regs[n],0xa4u) &&
+              !memcmp(&before,m,sizeof before),"mutable initial LDO byte");
+    }
+    for (unsigned n=0;n<14u;n++) {
+        vic_write(m,0u,PL192_INTENABLE,1u<<19);
+        for (unsigned field=0;field<256u;field++) if (!(field&~masks[n])) {
+            unsigned value=(0xa5u&~masks[n])|field;
+            uint64_t seq=pmu_request(m,0x74u,regs[n],true,1u,value);memcpy(&before,m,sizeof before);
+            CHECK(!s5l8920_pmu_ldo_service(m,seq-1u) && !s5l8920_pmu_ldo_service(m,seq+1u) &&
+                  !s5l8920_pmu_voltage_service(m,seq) && !s5l8920_pmu_config_service(m,seq) &&
+                  !s5l8920_pmu_events_service(m,seq) && !memcmp(&before,m,sizeof before),"LDO token/domain isolation");
+            CHECK(s5l8920_pmu_ldo_service(m,seq) && m->cpu.irq_line,"LDO field programming/IRQ");
+            before.cpu.irq_line=m->cpu.irq_line;
+            CHECK(!memcmp(&before.cpu,&m->cpu,sizeof m->cpu) && !memcmp(before.gpio,m->gpio,sizeof m->gpio) &&
+                  !memcmp(&before.pmu_events,&m->pmu_events,sizeof m->pmu_events),"LDO write invented CPU/pin/event effects");
+            for (unsigned other=0;other<14u;other++) if (other!=n)
+                CHECK(m->pmu_ldo.value[other]==before.pmu_ldo.value[other],"LDO registers aliased");
+            memcpy(&before,m,sizeof before);
+            CHECK(!s5l8920_pmu_ldo_service(m,seq) && !memcmp(&before,m,sizeof before),"LDO write replay");
+            CHECK(s5l8920_pmu_ldo_configure(m,regs[n],0xa5u) && m->pmu_ldo.value[n]==value,"initial LDO value reloaded");
+            for (unsigned repeat=0;repeat<2u;repeat++) {
+                seq=pmu_request(m,0x74u,regs[n],false,1u,0u);
+                CHECK(s5l8920_pmu_ldo_service(m,seq) && pmu_read_bytes(m,1u)==value,"retained LDO readback");
+            }
+        }
+        for (unsigned bit=1u;bit<256u;bit<<=1) if (!(bit&masks[n])) {
+            unsigned value=m->pmu_ldo.value[n]^bit;
+            uint64_t seq=pmu_request(m,0x74u,regs[n],true,1u,value);memcpy(&before,m,sizeof before);
+            CHECK(!s5l8920_pmu_ldo_service(m,seq) && !memcmp(&before,m,sizeof before),"unknown LDO field transition acknowledged");
+            CHECK(s5l8920_reset(m),"cancel unsupported LDO field");
+        }
+    }
+    const unsigned bad[][3]={{0x75u,0x17u,1u},{0x74u,0x0fu,1u},{0x74u,0x12u,1u},
+        {0x74u,0x16u,1u},{0x74u,0x23u,1u},{0x74u,0x10u,2u},{0x74u,0x17u,2u},{0x74u,0x22u,2u}};
+    for (unsigned n=0;n<sizeof bad/sizeof bad[0];n++) for (unsigned wr=0;wr<2u;wr++) {
+        uint64_t seq=pmu_request(m,bad[n][0],bad[n][1],wr!=0u,bad[n][2],0x8au);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_ldo_service(m,seq) && !memcmp(&before,m,sizeof before),"unsupported LDO request changed state");
+        CHECK(s5l8920_reset(m),"cancel unsupported LDO shape");
+    }
+    memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_ldo_configure(m,0x12u,0u) && !s5l8920_pmu_ldo_configure(m,0x117u,0u) &&
+          !s5l8920_pmu_ldo_configure(m,UINT32_MAX,0u) && !memcmp(&before,m,sizeof before),"invalid LDO address truncated");
+    uint64_t seq=pmu_request(m,0x74u,0x17u,true,1u,0x8au);s5l8920_pmu_ldo_t saved=m->pmu_ldo;
+    CHECK(s5l8920_i2c_complete(m,0u,seq,false,NULL,0u) && !s5l8920_pmu_ldo_service(m,seq) &&
+          !memcmp(&saved,&m->pmu_ldo,sizeof saved),"NACK committed LDO image");
+    CHECK(s5l8920_reset(m),"clear LDO NACK");
+    seq=pmu_request(m,0x74u,0x17u,true,1u,0x8au);
+    CHECK(s5l8920_reset(m) && !s5l8920_pmu_ldo_service(m,seq) &&
+          !memcmp(&saved,&m->pmu_ldo,sizeof saved),"reset committed pending LDO image");
+    for (unsigned n=0;n<14u;n++) if (n!=11u) {
+        seq=pmu_request(m,0x74u,regs[n],true,1u,boot[n]);
+        CHECK(s5l8920_pmu_ldo_service(m,seq),"LLB complete image replaced prior field programming");
+    }
+    seq=pmu_request(m,0x74u,0x17u,false,1u,0u);(void)m->bus.read32(m,0u);
+    s5l8920_bus_failure_t failure=m->bus_failure;
+    CHECK(failure.reason && s5l8920_pmu_ldo_service(m,seq) &&
+          !memcmp(&failure,&m->bus_failure,sizeof failure),"LDO service repaired bus failure");
+    CHECK(s5l8920_reset(m),"final LDO reset");
+    return true;
+}
+
+static void test_pmu_pins(s5l8920_t *m) {
+    static s5l8920_t before;
+    for (unsigned pin=0;pin<8u;pin++) {
+        uint64_t seq=pmu_request(m,0x74u,0x50u+pin,false,1u,0u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),"invented PMU pin configuration");
+        CHECK(s5l8920_reset(m),"cancel unknown pin read");
+        vic_write(m,0u,PL192_INTENABLE,1u<<19);
+        for (unsigned value=0;value<256u;value++) {
+            seq=pmu_request(m,0x74u,0x50u+pin,true,1u,value);memcpy(&before,m,sizeof before);
+            CHECK(!s5l8920_pmu_config_service(m,seq-1u) && !s5l8920_pmu_config_service(m,seq+1u) &&
+                  !s5l8920_pmu_ldo_service(m,seq) && !s5l8920_pmu_events_service(m,seq) &&
+                  !memcmp(&before,m,sizeof before),"pin transaction identity/isolation");
+            CHECK(s5l8920_pmu_config_service(m,seq) && m->cpu.irq_line,"pin configuration write/IRQ");
+            before.cpu.irq_line=m->cpu.irq_line;
+            CHECK(!memcmp(&before.cpu,&m->cpu,sizeof m->cpu) && !memcmp(before.gpio,m->gpio,sizeof m->gpio) &&
+                  !memcmp(&before.pmu_events,&m->pmu_events,sizeof m->pmu_events) &&
+                  !memcmp(&before.pmu_ldo,&m->pmu_ldo,sizeof m->pmu_ldo),"pin image invented CPU/GPIO/event/LDO effects");
+            for (unsigned other=0;other<8u;other++) if (other!=pin)
+                CHECK(m->pmu_config.pins[other]==before.pmu_config.pins[other],"PMU pin registers aliased");
+            memcpy(&before,m,sizeof before);
+            CHECK(!s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),"pin programming replay");
+            seq=pmu_request(m,0x74u,0x50u+pin,false,1u,0u);
+            CHECK(s5l8920_pmu_config_service(m,seq) && pmu_read_bytes(m,1u)==value,"pin configuration readback");
+        }
+        CHECK(s5l8920_reset(m),"pin configuration retention reset");
+        seq=pmu_request(m,0x74u,0x50u+pin,false,1u,0u);
+        CHECK(s5l8920_pmu_config_service(m,seq) && pmu_read_bytes(m,1u)==255u,"reset lost PMU pin configuration");
+    }
+    const unsigned bad[][3]={{0x75u,0x50u,1u},{0x74u,0x4fu,1u},{0x74u,0x58u,1u},
+        {0x74u,0x50u,2u},{0x74u,0x50u,8u},{0x74u,0x57u,2u}};
+    for (unsigned n=0;n<sizeof bad/sizeof bad[0];n++) for (unsigned wr=0;wr<2u;wr++) {
+        uint64_t seq=pmu_request(m,bad[n][0],bad[n][1],wr!=0u,bad[n][2],0u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),"unsupported pin configuration shape");
+        CHECK(s5l8920_reset(m),"cancel unsupported pin shape");
+    }
+    uint64_t seq=pmu_request(m,0x74u,0x50u,true,1u,0x11u);s5l8920_pmu_config_t saved=m->pmu_config;
+    CHECK(s5l8920_i2c_complete(m,0u,seq,false,NULL,0u) && !s5l8920_pmu_config_service(m,seq) &&
+          !memcmp(&saved,&m->pmu_config,sizeof saved),"NACK committed pin configuration");
+    CHECK(s5l8920_reset(m),"clear pin NACK");
+    seq=pmu_request(m,0x74u,0x50u,true,1u,0x11u);
+    CHECK(s5l8920_reset(m) && !s5l8920_pmu_config_service(m,seq) &&
+          !memcmp(&saved,&m->pmu_config,sizeof saved),"reset committed pending pin configuration");
+    seq=pmu_request(m,0x74u,0x50u,false,1u,0u);(void)m->bus.read32(m,0u);
+    s5l8920_bus_failure_t failure=m->bus_failure;
+    CHECK(failure.reason && s5l8920_pmu_config_service(m,seq) &&
+          !memcmp(&failure,&m->bus_failure,sizeof failure),"pin read repaired bus failure");
+}
+
 static bool test_pmu_events(s5l8920_t *m) {
     static s5l8920_t before;s5l8920_t empty={0};
     s5l8920_free(m);
@@ -2822,15 +2963,19 @@ int main(void) {
     if (!test_pmu_events(&m)) return 1;
     if (!test_pmu_boot_state(&m)) return 1;
     if (!test_pmu_voltage(&m)) return 1;
+    if (!test_pmu_ldo(&m)) return 1;
+    test_pmu_pins(&m);
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
     CHECK(!m.pmu_boot_configured && !m.pmu_boot_programmed && !m.pmu_boot_initial && !m.pmu_boot_value &&
           !s5l8920_pmu_boot_state_service(&m,1u) && !s5l8920_pmu_boot_state_configure(&m,0u),"free retained boot-state byte");
     CHECK(!m.pmu_voltage.configured && !m.pmu_voltage.programmed &&
           !s5l8920_pmu_voltage_service(&m,1u) && !s5l8920_pmu_voltage_configure(&m,0x23u,0u),"free retained voltage domain");
+    CHECK(!m.pmu_ldo.configured && !m.pmu_ldo.programmed &&
+          !s5l8920_pmu_ldo_service(&m,1u) && !s5l8920_pmu_ldo_configure(&m,0x17u,0u),"free retained LDO domain");
     CHECK(!m.pmu_adc.programmed && !m.pmu_adc.result_valid && !m.pmu_adc.sequence &&
           !s5l8920_pmu_adc_service(&m,1u) && !s5l8920_pmu_adc_complete(&m,1u,0u,0u),"free retained ADC state");
-    CHECK(!m.pmu_config.control_programmed && !m.pmu_config.selectors_programmed &&
+    CHECK(!m.pmu_config.control_programmed && !m.pmu_config.selectors_programmed && !m.pmu_config.pins_programmed &&
           !s5l8920_pmu_config_service(&m,1u),"free retained PMU configuration");
     CHECK(!m.pmu_events.configured && !m.pmu_events.status_valid && !m.pmu_events.masks_programmed &&
           !m.pmu_events.pending && !s5l8920_pmu_events_service(&m,1u) &&
