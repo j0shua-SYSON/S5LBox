@@ -10,6 +10,7 @@
 #include "s5l8920_dart.h"
 #include "s5l8920_spi.h"
 #include "s5l8920_spi_flash.h"
+#include "lis331dl.h"
 #include <stddef.h>
 
 #define S5L8920_RAM_BASE UINT32_C(0x40000000)
@@ -410,6 +411,14 @@ bool s5l8920_gpio_inactive_readback(s5l8920_t *m, unsigned pin, bool high);
 bool s5l8920_i2c_request(const s5l8920_t *m, unsigned bus, s5l8920_i2c_request_t *request);
 bool s5l8920_i2c_complete(s5l8920_t *m, unsigned bus, uint64_t sequence,
                          bool success, const uint8_t *data, size_t size);
+
+/* Service one matching request using a caller-owned, explicitly initialized
+ * LIS331DL. No attachment, scheduling, device clock or default sensor is added.
+ * Unknown device operations remain pending with device/controller unchanged.
+ * Successful transfers use normal FIFO/completion/IRQ semantics. The external
+ * device survives controller reset/free and must outlive this call only. */
+bool s5l8920_lis331dl_service(s5l8920_t *m, unsigned bus, uint64_t sequence,
+                            lis331dl_t *device);
 
 /* Bounded D1755 clock endpoint at I2C0 address0x74. Explicit configuration
  * supplies a raw32-bit counter and offset; it is refused while bus0 has an

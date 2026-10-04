@@ -20,6 +20,47 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
+## Accelerometer configuration
+
+The matching tree identifies `i2c0/accelerometer` at address `0x1d` with
+`accelerometer,lis331dl` and `accelerometer,lis302dl` compatibility strings.
+The original kernel uses the AppleLIS302DL-compatible probe at `0x80acfa54`:
+it reads register `0x0f`, checks the transfer result, then programs interrupt
+configuration. Its call stack was observed at the pending read. It does not
+compare the returned ID byte. LIS331DLH is a different driver personality.
+
+An explicitly initialized LIS331DL now supports its `0x3b` identification byte,
+the three control registers, and both wake configuration/threshold/duration
+sets. SDO selects address `0x1c` or `0x1d`; subaddress bit7 controls incrementing.
+The documented cold configuration is `07/00/00`, with wake configuration zero.
+This is an explicit powered, calibrated device state, not inferred board state.
+The register behavior follows STMicroelectronics
+[AN2960, sections4 through8](https://datasheet.octopart.com/LIS331DLTR-STMicroelectronics-datasheet-66494901.pdf).
+This copy is hosted by a distributor; the document is ST's June2009 revision1.
+
+Setting BOOT starts a calibration reload with a caller-supplied nonzero duration.
+Only elapsed device time clears BOOT; polling cannot complete it. User control
+registers survive the reload. Configuration writes during reload refuse, as do
+reserved accesses and unsupported status, acceleration, filter and interrupt
+source reads. No acceleration samples, calibration coefficients or sensor
+interrupts are fabricated. Motion conversion and interrupt generation remain
+unimplemented; this is identification/configuration support, not a full sensor.
+
+`s5l8920_lis331dl_service` services a matching pending controller request through
+the existing FIFO/completion/IRQ path. It stages the device update and leaves
+unsupported requests pending atomically. It does not attach a default sensor,
+advance device time or establish I2C wire timing. The caller owns the external
+device; controller reset/free leaves it unchanged. Existing machine defaults
+are unaffected.
+
+With the endpoint explicitly supplied, the prepared kernel completes the ID
+read and writes `22=c0`, `22=c0`, `30=00`. It advances from247,423,500 to
+249,751,450 retired instructions, then requests a byte from address `0x1e`,
+subaddress `0xc0`, at PC `0x8078c1e2`. That request remains pending without
+ACK or data. The diagnostic retains the earlier prepared boot inputs and
+assumed clock schedule; the configured1ms calibration reload is not exercised
+by this four-transfer sequence. No full boot or sensor-data claim follows.
+
 ## DART programming and page translation
 
 The matching device tree places two `dart,s5l8920x` controllers at

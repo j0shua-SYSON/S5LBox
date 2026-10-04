@@ -850,6 +850,20 @@ bool s5l8920_i2c_complete(s5l8920_t *m,unsigned bus,uint64_t sequence,
     return true;
 }
 
+bool s5l8920_lis331dl_service(s5l8920_t *m,unsigned bus,uint64_t sequence,
+                            lis331dl_t *device) {
+    s5l8920_i2c_request_t request;
+    if(!device || !s5l8920_i2c_request(m,bus,&request) || request.sequence!=sequence)return false;
+    lis331dl_t next=*device;
+    uint8_t data[LIS331DL_MAX_TRANSFER];
+    bool accepted=request.write?
+        lis331dl_write(&next,request.address,request.subaddress,request.data,request.length):
+        lis331dl_read(&next,request.address,request.subaddress,data,request.length);
+    if(!accepted || !s5l8920_i2c_complete(m,bus,sequence,true,
+        request.write?NULL:data,request.write?0u:request.length))return false;
+    *device=next;return true;
+}
+
 bool s5l8920_pmu_rtc_configure(s5l8920_t *m,uint32_t counter,uint32_t offset) {
     if (!m || !m->ram || m->i2c[0].active || m->i2c[0].status ||
         m->i2c[0].rx_cursor<m->i2c[0].rx_count) return false;
