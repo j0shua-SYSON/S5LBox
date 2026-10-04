@@ -906,7 +906,7 @@ pass and the canonical 61,650-step ECC-guard trace is unchanged. The full
 182,680,916-step trace matches the GPIO polling checkpoint, including the
 unprepared-pin failure and preserved post-stop bus diagnostics.
 
-## SPI programming boundary
+## SPI programming and explicit word link
 
 The matching device tree describes SPI controllers at `0x82000000`,
 `0x82100000` and `0x82200000`, each with a `0x1000`-byte aperture. SPI0 has
@@ -924,7 +924,8 @@ none. Both original service routines write the full status word back, including
 the read-only FIFO levels at bits `6..15`. Acknowledgements ignore those level
 bits and clear only selected event causes. They neither change FIFO contents
 nor establish FIFO observations. Unknown status fields reject the whole write.
-No pin routing, peripheral responses or interrupts are generated.
+Programming alone generates no pin traffic or peripheral responses. Interrupt
+service requires the explicit word-link contract described below.
 
 While stopped, the component also stages configuration at offset `4`, the
 clock-divider word at `0x30`, and word-delay programming at `0x38`. It retains
@@ -947,12 +948,13 @@ effects. Stopping preserves queued data and programming.
 TX/RX counts at `0x4c/0x34` retain independent raw requests after their FIFOs
 are known. PIO writes at `0x10` queue raw words; reads at `0x20` consume known
 received words. Full TX and empty RX refuse without changing state. There is
-no received-data producer or clock advance yet, so programming and FIFO access
-never imply serial progress or count completion. Armed configuration changes
-are limited to selecting PIO mode; timing changes require stopping.
+no implicit received-data producer or clock advance, so programming and FIFO
+access never imply serial progress or count completion. With no word link,
+armed configuration changes are limited to selecting PIO mode; timing changes
+require stopping.
 
-Status reads remain refused: FIFO knowledge alone does not establish all
-event causes. Unsupported fields, transfer operations and non-word accesses
+Without a configured link, status reads remain refused: FIFO knowledge alone
+does not establish all event causes. Unsupported fields and non-word accesses
 remain guarded before state changes. Component reset invalidates all
 programming rather than supplying a silicon reset image. The controller
 gaps, additional banks and legacy address
@@ -1005,6 +1007,43 @@ separate witness records only that final write and reaches the subsequent
 wait boundary. Both use synthetic objects and explicit clocks/PIN input;
 zero-length cases are sequence probes, not completed transactions. They
 establish neither event thresholds nor serial exchange or interrupt delivery.
+
+An explicit error-free word backend now supplies serial progress. Before
+control programming, its caller must provide TX-low (`0..15`) and RX-high
+(`1..16`) thresholds. These define a functional level model; they are not
+asserted silicon reset thresholds or measured event-edge timing. Status then
+combines actual FIFO levels, RX/TX completion causes at bits `0/22`, and
+threshold cause bit `1`. Completion causes latch until W1C. An active threshold
+level persists through acknowledgement. Configuration enables `7/8/21` route
+those causes to VIC sources `29/28/27`, ORed with external inputs. IRQ and FIQ
+selection use the existing interrupt fabric.
+
+The caller supplies complete SCK periods after external clock selection and
+division: each word needs `8/16/32` periods. Word-delay reference cycles are
+supplied separately, preserving the driver's independent timing domains.
+This API does not guess a CPU-clock conversion, divider width or physical
+source frequency. It exchanges decoded error-free words; the device backend
+owns electrical phase, line sampling and received values. Unknown bit-13 wire
+ordering and exchange with software CS deasserted remain guarded.
+
+Completed words decrement the programmed counts, return actual transmitted
+words, and queue only explicitly supplied receive data. Missing peer input,
+receive FIFO overflow, or insufficient output storage refuses the whole clock
+call without changing state or output. Partial words retain their remaining
+periods; stopping pauses them. Midword reset, count, timing, base configuration
+and CS changes refuse. Component reset discards the link and in-flight state.
+There is no automatic serial progress from MMIO reads or writes.
+
+With explicit peer words, thresholds and divided SCK periods, 147 original
+request/setup and PIO-service cases complete through production FIFO, status,
+acknowledgement and configuration handling: 261 service calls exchange 2,748
+words, including original dummy transmit bytes and receive discards. Missing
+peer input refuses before advancing the request. The fixture still enters
+the original routines directly with synthetic objects; it does not execute
+their event wait or IRQ dispatcher. No flash identity, status reply, NOR image,
+board clock integration or full boot is established by this word-link result.
+The boot checks leave the link unconfigured and retain the exact prior kernel
+and LLB traces.
 
 ## Bounded I2C requests and explicit responses
 

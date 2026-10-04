@@ -290,6 +290,17 @@ bool s5l8920_set_irq(s5l8920_t *m, unsigned source, bool asserted);
  * Call between CPU steps; this API does not configure BF100000 readback. */
 bool s5l8920_set_ram_boot_window(s5l8920_t *m, bool enabled);
 
+/* Explicit SPI word-link inputs use the component contract and refresh VIC
+ * sources29-bank, ORed with external inputs. Failures preserve output/device/
+ * interrupt state. Successful events preserve latched bus diagnostics and CPU
+ * registers, while IRQ/FIQ reflect resulting causes. No clock-source conversion,
+ * peripheral pin routing, NOR reply or reset threshold is inferred here. */
+bool s5l8920_spi_bank_configure_link(s5l8920_t *m, unsigned bank, unsigned tx_low, unsigned rx_high);
+bool s5l8920_spi_bank_serial_clock(s5l8920_t *m, unsigned bank, uint64_t cycles,
+    const uint32_t *received, size_t received_count, uint32_t *transmitted,
+    size_t capacity, size_t *count);
+bool s5l8920_spi_bank_delay_clock(s5l8920_t *m, unsigned bank, uint64_t cycles);
+
 /* Board-owned UART input advances refresh the real interrupt fabric before
  * returning. Use these instead of advancing the embedded component directly
  * when interrupt delivery matters. No source frequency, gating or conversion

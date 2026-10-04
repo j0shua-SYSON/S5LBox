@@ -115,6 +115,11 @@ static bool decode_uart(uint32_t address,unsigned *bank,uint32_t *offset) {
  * DDI0273A 2.3.2 blocking wiring: no acknowledgement is forwarded downstream.
  * Logical levels are propagated without asserting physical timing accuracy. */
 static void refresh_interrupts(s5l8920_t *m) {
+    for (unsigned bank=0;bank<S5L8920_SPI_COUNT;bank++) {
+        unsigned source=S5L8920_SPI0_IRQ-bank;
+        (void)pl192_set_line(&m->vic[0],source,
+            (m->input_levels[0]&(1u<<source))!=0u || s5l8920_spi_irq(&m->spi[bank]));
+    }
     (void)pl192_set_line(&m->vic[S5L8920_GPIO_IRQ/32u],S5L8920_GPIO_IRQ%32u,
                         (m->input_levels[S5L8920_GPIO_IRQ/32u]&(1u<<(S5L8920_GPIO_IRQ%32u)))!=0u ||
                         m->gpio_irq);
@@ -282,7 +287,7 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
         else if (!s5l8920_spi_read(&m->spi[spi_bank],spi_offset,&value))
             fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
-        else return value;
+        else { refresh_interrupts(m); return value; }
         return 0u;
     }
     unsigned dart_bank; uint32_t dart_offset;
@@ -432,6 +437,7 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
         else if (!s5l8920_spi_write(&m->spi[spi_bank],spi_offset,value))
             fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+        else refresh_interrupts(m);
         return;
     }
     unsigned dart_bank; uint32_t dart_offset;
@@ -658,6 +664,22 @@ bool s5l8920_build_empty_nvram_proxy(void *data, size_t size) {
 bool s5l8920_uart0_clock(s5l8920_t *m,bool nclk,uint64_t ticks,
                         uint8_t *output,size_t capacity,size_t *count) {
     return s5l8920_uart_bank_clock(m,0u,nclk,ticks,output,capacity,count);
+}
+
+bool s5l8920_spi_bank_configure_link(s5l8920_t *m,unsigned bank,unsigned tx_low,unsigned rx_high) {
+    if (!m || !m->ram || bank>=S5L8920_SPI_COUNT ||
+        !s5l8920_spi_configure_link(&m->spi[bank],tx_low,rx_high)) return false;
+    refresh_interrupts(m);return true;
+}
+bool s5l8920_spi_bank_serial_clock(s5l8920_t *m,unsigned bank,uint64_t cycles,
+    const uint32_t *received,size_t received_count,uint32_t *transmitted,size_t capacity,size_t *count) {
+    if (!m || !m->ram || bank>=S5L8920_SPI_COUNT ||
+        !s5l8920_spi_serial_clock(&m->spi[bank],cycles,received,received_count,transmitted,capacity,count)) return false;
+    refresh_interrupts(m);return true;
+}
+bool s5l8920_spi_bank_delay_clock(s5l8920_t *m,unsigned bank,uint64_t cycles) {
+    if (!m || !m->ram || bank>=S5L8920_SPI_COUNT || !s5l8920_spi_delay_clock(&m->spi[bank],cycles)) return false;
+    refresh_interrupts(m);return true;
 }
 
 bool s5l8920_uart_bank_clock(s5l8920_t *m,unsigned bank,bool nclk,uint64_t ticks,

@@ -1575,6 +1575,123 @@ static void test_spi_fifo_preparation(s5l8920_t *m) {
               !m->spi[bank].tx_count_programmed && !m->spi[bank].rx_count_programmed,"board reset restores unknown FIFO/control state");
 }
 
+static bool spi_prepare_link_limits(s5l8920_spi_t *s,unsigned word,uint32_t delay,unsigned count,unsigned low,unsigned high) {
+    s5l8920_spi_reset(s);
+    uint32_t config=0x4018u|(word<<15);
+    return s5l8920_spi_configure_link(s,low,high) && s5l8920_spi_write(s,0u,0u) &&
+        s5l8920_spi_write(s,4u,config) && s5l8920_spi_write(s,0x30u,2u) &&
+        s5l8920_spi_write(s,0x38u,delay) && s5l8920_spi_write(s,12u,2u) &&
+        s5l8920_spi_write(s,0u,13u) && s5l8920_spi_write(s,0x4cu,count) &&
+        s5l8920_spi_write(s,0x34u,count) && s5l8920_spi_write(s,12u,0u) &&
+        s5l8920_spi_write(s,4u,config|0x2001a0u);
+}
+
+static bool spi_prepare_link(s5l8920_spi_t *s,unsigned word,uint32_t delay,unsigned count) {
+    return spi_prepare_link_limits(s,word,delay,count,0u,16u);
+}
+
+static void test_spi_word_link(s5l8920_t *m) {
+    s5l8920_spi_t s={0},copy;uint32_t status=0xfeedfaceu,out[17],in[17];size_t count=99u;
+    for(unsigned n=0;n<17u;n++){out[n]=0xdeadbeefu;in[n]=0xfedc1200u+n;}
+    CHECK(!s5l8920_spi_configure_link(NULL,0u,1u) && !s5l8920_spi_configure_link(&s,16u,1u) &&
+          !s5l8920_spi_configure_link(&s,0u,0u) && !s5l8920_spi_configure_link(&s,0u,17u),"explicit thresholds have bounded ranges");
+    CHECK(!s5l8920_spi_serial_clock(&s,8u,in,1u,out,1u,&count) && count==99u && out[0]==0xdeadbeefu,
+          "unconfigured SPI link supplies no successful clocks or data");
+    for(unsigned word=0;word<3u;word++) {
+        unsigned bits=8u<<word;uint32_t mask=word==2u?UINT32_MAX:(1u<<bits)-1u;
+        CHECK(spi_prepare_link(&s,word,0u,2u),"prepare error-free word link with explicit thresholds");
+        CHECK(s5l8920_spi_write(&s,16u,0x12345605u) && s5l8920_spi_write(&s,16u,0x89abcdeFu),"queue two real output words");
+        CHECK(s5l8920_spi_read(&s,8u,&status) && status==(2u<<6) && !s5l8920_spi_irq(&s),"known FIFO levels without a premature completion");
+        copy=s;count=99u;out[0]=out[1]=0xdeadbeefu;
+        CHECK(!s5l8920_spi_serial_clock(&s,2u*bits,in,1u,out,2u,&count) && !memcmp(&s,&copy,sizeof s) &&
+              count==99u && out[0]==0xdeadbeefu && out[1]==0xdeadbeefu,"missing second response rolls back entire clock batch");
+        CHECK(!s5l8920_spi_serial_clock(&s,2u*bits,in,2u,out,1u,&count) && !memcmp(&s,&copy,sizeof s) &&
+              count==99u && out[0]==0xdeadbeefu,"insufficient output capacity rolls back all word progress");
+        CHECK(s5l8920_spi_serial_clock(&s,bits-1u,NULL,0u,NULL,0u,&count) && !count && s.busy &&
+              s.bits_remaining==1u && s.tx.count==1u && s.tx_words==2u && !s.rx.count,
+              "partial word consumes serial periods, not transfer counts or received bytes");
+        copy=s;
+        CHECK(!s5l8920_spi_serial_clock(&s,1u,NULL,0u,out,2u,&count) && !memcmp(&s,&copy,sizeof s),"last bit needs actual receive input");
+        CHECK(s5l8920_spi_serial_clock(&s,1u,in,1u,out,2u,&count) && count==1u && out[0]==(0x12345605u&mask) &&
+              !s.busy && s.tx_words==1u && s.rx_words==1u && s.rx.count==1u && !s5l8920_spi_irq(&s),"first completed word commits both directions");
+        CHECK(s5l8920_spi_serial_clock(&s,bits,in+1u,1u,out+1u,1u,&count) && count==1u && out[1]==(0x89abcdefu&mask) &&
+              !s.tx_words && !s.rx_words && s.rx.count==2u && s5l8920_spi_irq(&s),"last word produces real completion causes");
+        CHECK(s5l8920_spi_read(&s,8u,&status) && status==(0x400001u|(2u<<11)),"legacy completion bits and real FIFO levels");
+        s5l8920_spi_t complete=s;
+        for(unsigned enables=0;enables<8u;enables++) {
+            s=complete;
+            uint32_t config=(s.config&~0x200180u)|((enables&1u)?0x80u:0u)|((enables&2u)?0x100u:0u)|((enables&4u)?0x200000u:0u);
+            CHECK(s5l8920_spi_write(&s,4u,config) && s5l8920_spi_irq(&s)==!!(enables&5u) &&
+                  s5l8920_spi_read(&s,8u,&status) && status==(0x400001u|(2u<<11)),"each IRQ mask gates delivery without clearing completed state");
+        }
+        s=complete;
+        CHECK(s5l8920_spi_read(&s,32u,&status) && status==(in[0]&mask) &&
+              s5l8920_spi_read(&s,32u,&status) && status==(in[1]&mask),"received word order and width");
+        CHECK(s5l8920_spi_write(&s,8u,0x40ffc1u) && !s5l8920_spi_irq(&s) && s5l8920_spi_read(&s,8u,&status) && !status,
+              "W1C drops completion IRQ without retaining echoed FIFO levels");
+        copy=s;
+        CHECK(s5l8920_spi_serial_clock(&s,UINT64_MAX,NULL,0u,NULL,0u,&count) && !count && !memcmp(&s,&copy,sizeof s),"idle periods never become credit for a later word");
+    }
+    CHECK(spi_prepare_link(&s,0u,5u,2u) && s5l8920_spi_write(&s,16u,5u) && s5l8920_spi_write(&s,16u,255u),"prepare independent delay domain");
+    CHECK(s5l8920_spi_serial_clock(&s,1000u,in,2u,out,2u,&count) && count==1u && s.delay_remaining==5u && s.tx.count==1u,
+          "serial periods cannot consume reference-clock word delay");
+    CHECK(s5l8920_spi_delay_clock(&s,4u) && s.delay_remaining==1u &&
+          s5l8920_spi_serial_clock(&s,1000u,in,1u,out,1u,&count) && !count && s.delay_remaining==1u,
+          "interword reference-clock delay is independent of serial clocks");
+    CHECK(s5l8920_spi_delay_clock(&s,1u) && !s.delay_remaining &&
+          s5l8920_spi_serial_clock(&s,3u,NULL,0u,NULL,0u,&count) && s.bits_remaining==5u,"next word starts only after its delay");
+    CHECK(s5l8920_spi_write(&s,0u,0u),"stop pauses in-flight word");copy=s;
+    CHECK(s5l8920_spi_serial_clock(&s,100u,in,1u,out,1u,&count) && !count && !memcmp(&s,&copy,sizeof s),"stopped clocks leave shifter intact");
+    CHECK(!s5l8920_spi_write(&s,0u,12u) && !s5l8920_spi_write(&s,0x34u,3u) && !s5l8920_spi_write(&s,0x4cu,3u) &&
+          !s5l8920_spi_write(&s,12u,2u) && !s5l8920_spi_write(&s,0x30u,3u) && !s5l8920_spi_write(&s,4u,0x8038u) &&
+          !memcmp(&s,&copy,sizeof s),"unknown midword reset/reprogram/CS semantics are refused atomically");
+    CHECK(s5l8920_spi_write(&s,0u,1u) && s5l8920_spi_serial_clock(&s,5u,in,1u,out,1u,&count) && count==1u && out[0]==255u,
+          "RUN resumes the original remaining bit count");
+    CHECK(spi_prepare_link(&s,0u,0u,17u),"prepare FIFO wrap transfer");
+    for(unsigned n=0;n<16u;n++)CHECK(s5l8920_spi_write(&s,16u,n),"fill TX FIFO before clocking");
+    CHECK(s5l8920_spi_serial_clock(&s,8u,in,1u,out,1u,&count) && count==1u && !out[0] &&
+          s5l8920_spi_read(&s,32u,&status) && !status && s5l8920_spi_write(&s,16u,16u),"shifter frees one FIFO slot and tail wraps");
+    CHECK(s5l8920_spi_serial_clock(&s,128u,in+1u,16u,out,16u,&count) && count==16u && s.rx.count==16u,"full FIFO transfers in order through wrapped head");
+    for(unsigned n=0;n<16u;n++)CHECK(out[n]==n+1u,"wrapped output order");
+    CHECK(s5l8920_spi_write(&s,0x4cu,1u) && s5l8920_spi_write(&s,0x34u,1u) && s5l8920_spi_write(&s,16u,99u),"prepare full RX rejection");copy=s;
+    CHECK(!s5l8920_spi_serial_clock(&s,8u,in,1u,out,1u,&count) && !memcmp(&s,&copy,sizeof s),"RX overflow is a checked failure, not dropped data");
+    CHECK(spi_prepare_link(&s,0u,0u,1u) && s5l8920_spi_write(&s,0x34u,0u) && s5l8920_spi_write(&s,16u,0x55u),"prepare transmit-only count");
+    CHECK(s5l8920_spi_serial_clock(&s,8u,NULL,0u,out,1u,&count) && count==1u && out[0]==0x55u && !s.rx.count &&
+          s5l8920_spi_read(&s,8u,&status) && status==0x400000u,"disabled capture creates no receive word or RX completion");
+    CHECK(spi_prepare_link(&s,0u,0u,1u) && s5l8920_spi_write(&s,16u,5u) && s5l8920_spi_write(&s,12u,2u),"prepare deselected peer");copy=s;
+    CHECK(!s5l8920_spi_serial_clock(&s,8u,in,1u,out,1u,&count) && !memcmp(&s,&copy,sizeof s),"deselected peer cannot supply an invented response");
+    CHECK(s5l8920_spi_write(&s,0u,0u) && s5l8920_spi_write(&s,4u,0x6038u) && s5l8920_spi_write(&s,0u,1u),"stage unknown bit13 wire ordering");copy=s;
+    CHECK(!s5l8920_spi_serial_clock(&s,8u,in,1u,out,1u,&count) && !s5l8920_spi_write(&s,4u,0x2061b8u) &&
+          !memcmp(&s,&copy,sizeof s),"unknown wire ordering cannot enable IRQ service or clock traffic");
+    for(unsigned low=0;low<16u;low++)for(unsigned high=1;high<=16u;high++) {
+        CHECK(spi_prepare_link_limits(&s,0u,0u,2u,low,high),"prepare threshold matrix");
+        CHECK(s5l8920_spi_write(&s,16u,1u) && s5l8920_spi_write(&s,16u,2u),"threshold initial FIFO");
+        CHECK(s5l8920_spi_read(&s,8u,&status) && !!(status&2u)==(low>=2u),"explicit TX threshold before clock");
+        CHECK(s5l8920_spi_serial_clock(&s,8u,in,1u,out,1u,&count) && s5l8920_spi_read(&s,8u,&status) &&
+              !!(status&2u)==(low>=1u || high==1u),"explicit TX/RX threshold conditions after one word");
+        CHECK(s5l8920_spi_write(&s,8u,2u) && s5l8920_spi_irq(&s)==(low>=1u || high==1u),"active threshold level persists through ACK");
+    }
+    for(unsigned bank=0;bank<3u;bank++)for(unsigned fiq=0;fiq<2u;fiq++) {
+        CHECK(s5l8920_reset(m),"reset SPI IRQ board");unsigned source=29u-bank;uint32_t line=1u<<source;
+        CHECK(spi_prepare_link(&m->spi[bank],0u,0u,1u) && s5l8920_spi_write(&m->spi[bank],16u,5u),"prepare independent IRQ bank");
+        vic_write(m,0u,PL192_INTENABLE,line);vic_write(m,0u,PL192_INTSELECT,fiq?line:0u);
+        (void)m->bus.read32(m,0x82000024u+bank*0x100000u);s5l8920_bus_failure_t failure=m->bus_failure;
+        CHECK(s5l8920_spi_bank_serial_clock(m,bank,8u,in,1u,out,1u,&count) && count==1u &&
+              m->cpu.irq_line==!fiq && m->cpu.fiq_line==!!fiq && (m->vic[0].input&line) &&
+              !memcmp(&failure,&m->bus_failure,sizeof failure),"real completion drives its bank IRQ/FIQ without clearing a prior bus failure");
+        s5l8920_clear_bus_failure(m);
+        CHECK(s5l8920_set_irq(m,source,true),"assert shared external SPI source");
+        m->bus.write32(m,0x82000008u+bank*0x100000u,0x40000fu);
+        CHECK(m->vic[0].input&line,"completion ACK preserves shared external interrupt");
+        CHECK(s5l8920_set_irq(m,source,false) && !(m->vic[0].input&line) && !m->cpu.irq_line && !m->cpu.fiq_line,
+              "completion ACK and external release deassert IRQ/FIQ");
+        for(unsigned other=0;other<3u;other++)if(other!=bank)CHECK(!m->spi[other].link_configured && !m->spi[other].pending,"SPI link and IRQ bank isolation");
+    }
+    CHECK(s5l8920_reset(m) && !m->spi[0].link_configured && !m->spi[1].busy && !m->spi[2].pending,"functional reset invalidates link and shifter state");
+    CHECK(!s5l8920_spi_bank_configure_link(m,3u,0u,1u) && !s5l8920_spi_bank_delay_clock(m,3u,1u) &&
+          !s5l8920_spi_bank_serial_clock(m,3u,1u,in,1u,out,1u,&count),"invalid bank host events refuse");
+}
+
 static void test_i2c_staging_bus(s5l8920_t *m) {
     for (unsigned bus=0;bus<3u;bus++) for (unsigned write=0;write<2u;write++)
      for (unsigned width=0;width<2u;width++) {
@@ -3747,6 +3864,7 @@ int main(void) {
     if (!test_spi_initialization(&m)) return 1;
     test_spi_programming(&m);
     test_spi_fifo_preparation(&m);
+    test_spi_word_link(&m);
     test_i2c_staging_bus(&m);
     test_i2c_endpoints(&m);
     test_i2c_bounds(&m);
