@@ -129,11 +129,11 @@ static void refresh_i2c_interrupt(s5l8920_t *m,unsigned bus) {
 
 static bool gpio_control_supported(unsigned index,uint32_t control) {
     /* Preserve drive and peripheral fields without synthesizing pad signals.
-     * The matching restore initializer also writes input-disabled/off pins;
-     * inactive data readback requires a separate explicit observation. */
+     * The restore initializer writes input-disabled/off pins, and the kernel
+     * output setter preserves input enable. Neither establishes DATA readback. */
     if ((control&~0xfffu) || (control&0x180u)==0x180u) return false;
     unsigned mode=control&0xeu;
-    if (mode==0xeu) return (control&0x70u)==0x10u;
+    if (mode==2u || mode==0xeu) return (control&0x70u)==0x10u;
     if (!(control&0x200u)) return false;
     if (control&0x60u) return mode==0u && (control&0x10u)!=0u;
     if (mode<=2u) return (control&0x10u)!=0u;

@@ -738,7 +738,8 @@ corroborates them. Its separate older interrupt-controller definitions are
 excluded because they conflict with the matching kernel's register layout.
 
 `s5l8920_gpio_input` supplies a digital sample for a selected pin. Input
-reads require a supplied sample; output reads reflect the programmed level.
+reads require a supplied sample; input-enabled output reads reflect the
+programmed level.
 Input writes and pull settings do not fabricate external levels. Functional
 reset preserves samples but invalidates all pin programming. No power-on or
 bootloader pin configuration is assumed. Unsupported widths, field
@@ -754,6 +755,15 @@ bit `0x200` is optional for writes. Disabled-input reads require the separate
 explicit inactive-data observation described above, even when a live sample
 exists. Neither a pull setting nor a written data bit establishes the
 disabled sampler's readback value.
+
+Masked output mode also accepts input-disabled controls `0x12`/`0x13`,
+retaining pull and drive fields without a peripheral selector. The matching
+kernel's output configuration body at `0x807886e4..0x80788768` changes mode
+and level while preserving bit `0x200`; its getter explicitly selects input
+mode before reading DATA. Programming an input-disabled output clears any
+previous inactive observation, and DATA reads remain guarded. The off-mode
+observation API does not supply readback for outputs. This models the
+programmed output latch, without establishing an electrical pad level.
 
 The first 224 pins also support high/low level, rising/falling edge and
 either-edge interrupt modes (`0x204`, `0x206`, `0x208`, `0x20a`, `0x20c`).

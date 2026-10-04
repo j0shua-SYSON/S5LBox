@@ -726,6 +726,57 @@ static void test_gpio_output_registers(s5l8920_t *m) {
     CHECK(s5l8920_reset(m),"reset after GPIO fixture");
 }
 
+static void test_gpio_output_input_disabled(s5l8920_t *m) {
+    /* The original kernel's output setter preserves bit 0x200. A retained
+     * input-disabled pin can therefore be programmed without enabling its
+     * sampler; neither the output latch nor a live sample proves DATA readback. */
+    CHECK(s5l8920_reset(m),"reset input-disabled output fixture");
+    const unsigned pins[]={0u,181u,223u,224u,367u};
+    const uint32_t pulls[]={0u,0x80u,0x100u};
+    for (unsigned n=0;n<sizeof pins/sizeof pins[0];n++)
+        for (unsigned pull=0;pull<3u;pull++) for (unsigned drive=0;drive<4u;drive++)
+            for (unsigned high=0;high<2u;high++) {
+                unsigned pin=pins[n]; uint32_t address=S5L8920_GPIO_BASE+4u*pin;
+                uint32_t value=0x12u|pulls[pull]|(drive<<10)|high;
+                CHECK(s5l8920_gpio_input(m,pin,high==0u),"opposing output input sample");
+                m->bus.write32(m,address,(value&~0xfu)|0xeu);
+                CHECK(s5l8920_gpio_inactive_readback(m,pin,high!=0u),"off-mode observation");
+                m->bus.write32(m,address,value);
+                CHECK(!m->bus_failure.reason && m->gpio[pin].programmed &&
+                      m->gpio[pin].control==value && !m->gpio[pin].inactive_valid,
+                      "input-disabled output refused or retained old observation");
+                CHECK(!s5l8920_gpio_inactive_readback(m,pin,true),
+                      "off-mode observation API accepted output mode");
+                (void)m->bus.read32(m,address);
+                CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+                      !m->bus_failure.write && m->bus_failure.address==address,
+                      "input-disabled output invented DATA readback");
+                s5l8920_bus_failure_t stopped=m->bus_failure;
+                m->bus.write32(m,address,value|0x200u);
+                CHECK(m->gpio[pin].control==value &&
+                      !memcmp(&stopped,&m->bus_failure,sizeof stopped),
+                      "latched read failure allowed output mutation");
+                s5l8920_clear_bus_failure(m);
+                m->bus.write32(m,address,value|0x200u);
+                CHECK(m->bus.read32(m,address)==(value|0x200u) && !m->bus_failure.reason,
+                      "enabling output sampler lost the programmed level");
+            }
+    for (unsigned group=0;group<S5L8920_GPIO_IRQ_GROUPS;group++)
+        CHECK(m->gpio_pending[group]==0u,"output configuration invented a pending interrupt");
+    CHECK(!m->gpio_irq && !m->cpu.irq_line,"output configuration invented interrupt delivery");
+    const uint32_t rejected[]={2u,3u,0x32u,0x52u,0x72u,0x192u,0x1012u};
+    for (unsigned n=0;n<sizeof rejected/sizeof rejected[0];n++) {
+        m->bus.write32(m,S5L8920_GPIO_BASE,0x13u);
+        m->bus.write32(m,S5L8920_GPIO_BASE,rejected[n]);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+              m->bus_failure.write && m->bus_failure.value==rejected[n] &&
+              m->gpio[0].control==0x13u,"unsupported disabled output changed state");
+        s5l8920_clear_bus_failure(m);
+    }
+    CHECK(s5l8920_reset(m) && !m->gpio[0].programmed && !m->gpio[0].inactive_valid,
+          "reset retained input-disabled output programming");
+}
+
 static void test_gpio_input_samples(s5l8920_t *m) {
     s5l8920_t empty={0};
     CHECK(S5L8920_GPIO_PIN_COUNT==368u && S5L8920_GPIO_BASE==0x83000000u,
@@ -3237,6 +3288,7 @@ int main(void) {
     test_guest_irq_handler(&m);
     test_gpio_output_registers(&m);
     test_gpio_input_samples(&m);
+    test_gpio_output_input_disabled(&m);
     test_gpio_checked_cpu(&m);
     test_gpio_interrupt_modes(&m);
     test_gpio_irq_banks_and_bounds(&m);
