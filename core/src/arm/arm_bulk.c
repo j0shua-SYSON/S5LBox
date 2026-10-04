@@ -97,13 +97,6 @@ static const uint32_t compare_words[] = {
     0x0afffff6u,
 };
 
-/* Masked, linear table probe. Both exits and the wrapping back edge must be
- * present: proving only the indexed load would not authorize a loop shortcut. */
-static const uint32_t probe_words[] = {
-    0xe7934105u, 0xe3340000u, 0xe2855001u, 0x0a000007u,
-    0xe594c000u, 0xe131000cu, 0xe0055006u, 0x1afffff7u,
-};
-
 static uint32_t read32(const uint8_t *p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 |
            (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
@@ -753,47 +746,6 @@ static unsigned thumb_filtered_chain(arm_cpu_t *cpu,
     return retired;
 }
 
-static unsigned probe_loop(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
-                            unsigned budget) {
-    uint32_t index = cpu->r[5], entry = cpu->r[4], key = cpu->r[12];
-    uint32_t flags = cpu->cpsr, pc = cpu->r[15];
-    unsigned retired = 0u, loads = 0u, tlb_reads = 0u, walk_reads = 0u;
-    chain_reader_t reader = { .cpu = cpu, .memory = memory };
-    while (budget - retired >= 4u) {
-        unsigned reads = 0u, walks = 0u;
-        const uint8_t *slot = chain_word_at(&reader,
-            cpu->r[3] + (index << 2), &reads, &walks);
-        if (!slot) break;
-        uint32_t next = read32(slot);
-        if (!next) {
-            entry = 0u; index++;
-            flags = (flags & ~(ARM_CPSR_N | ARM_CPSR_Z)) | ARM_CPSR_Z;
-            loads++; tlb_reads += reads; walk_reads += walks;
-            retired += 4u; pc += 48u;
-            break;
-        }
-        if (budget - retired < 8u) break;
-        const uint8_t *value = chain_word_at(&reader, next, &reads, &walks);
-        if (!value) break;
-        entry = next; key = read32(value);
-        index = (index + 1u) & cpu->r[6];
-        uint32_t difference = cpu->r[1] ^ key;
-        flags = (flags & ~(ARM_CPSR_N | ARM_CPSR_Z)) |
-                (difference & ARM_CPSR_N) | (!difference ? ARM_CPSR_Z : 0u);
-        loads += 2u; tlb_reads += reads; walk_reads += walks;
-        retired += 8u;
-        if (!difference) { pc += 32u; break; }
-    }
-    if (!retired) return 0u;
-    cpu->r[4] = entry; cpu->r[5] = index; cpu->r[12] = key;
-    cpu->r[15] = pc; cpu->cpsr = flags;
-    if (!memory->flat_ram) {
-        cpu->dread_hits += loads - tlb_reads - walk_reads;
-        cpu->tlb_hits += tlb_reads; cpu->tlb_misses += walk_reads;
-    }
-    return retired;
-}
-
 static unsigned compare_loop(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
                               unsigned budget) {
     uint32_t left = cpu->r[0], right = cpu->r[12];
@@ -884,10 +836,6 @@ unsigned arm_bulk_string_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
         return count ? count : thumb_filtered_chain(cpu, memory, offset, budget);
     }
     uint32_t first = read32(memory->code + offset);
-    if (first == probe_words[0]) {
-        if (!matches(memory, offset, probe_words, 8u)) return 0u;
-        return probe_loop(cpu, memory, budget);
-    }
     if (first == compare_words[5]) {
         if (offset < 20u || !matches(memory, offset - 20u, compare_words, 9u))
             return 0u;

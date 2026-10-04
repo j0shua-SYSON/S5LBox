@@ -35,10 +35,6 @@ static const uint32_t compare_code[] = {
     0x0a000003u, 0xe1d020d0u, 0xe1dc30d0u, 0xe1520003u,
     0x0afffff6u,
 };
-static const uint32_t probe_code[] = {
-    0xe7934105u, 0xe3340000u, 0xe2855001u, 0x0a000007u,
-    0xe594c000u, 0xe131000cu, 0xe0055006u, 0x1afffff7u,
-};
 
 static uint8_t *mapped(uint32_t a) {
     a &= RAM_SIZE - 1u;
@@ -397,102 +393,6 @@ static void test_compare_prefixes(void) {
     CHECK(prefix_differential(&cpu, &memory, 256u, true) == 252u, "cached compare");
     cpu.dread[(0x2000u >> 10) & (ARM_DREAD_ENTRIES - 1u)].gen++;
     refusal(&cpu, &memory, 256u);
-}
-
-static void probe_setup(arm_cpu_t *cpu, arm_bulk_memory_t *memory,
-                        unsigned start, unsigned collisions, unsigned exit_kind,
-                        unsigned flags, bool cached) {
-    setup(cpu, memory, DATA, 0u, flags << 28, false);
-    for (unsigned i = 0u; i < 8u; i++) {
-        w32(NULL, CODE + i * 4u, probe_code[i]);
-        w32(NULL, DATA + i * 4u, 0x2000u + i * 16u);
-        w32(NULL, 0x2000u + i * 16u, i ^ UINT32_C(0x80000000));
-    }
-    unsigned last = (start + collisions) & 7u;
-    if (exit_kind == 0u) w32(NULL, 0x2000u + last * 16u, UINT32_C(0x12345678));
-    if (exit_kind == 1u) w32(NULL, DATA + last * 4u, 0u);
-    cpu->r[1] = UINT32_C(0x12345678);
-    cpu->r[3] = DATA; cpu->r[5] = start; cpu->r[6] = 7u;
-    memory->code_bytes = sizeof probe_code;
-    if (cached) {
-        memory->flat_ram = NULL; memory->data_cache = true;
-        CHECK(arm_data_cache_try_refill(cpu, DATA, ARM_ACCESS_READ, false), "probe slots map");
-        CHECK(arm_data_cache_try_refill(cpu, 0x2000u, ARM_ACCESS_READ, false), "probe keys map");
-    }
-}
-
-static unsigned probe_differential(arm_cpu_t *cpu,
-                                    const arm_bulk_memory_t *memory, unsigned budget) {
-    arm_cpu_t slow = *cpu, expected = *cpu;
-    unsigned reads = bus_reads, writes = bus_writes;
-    memcpy(before_ram, ram, sizeof ram);
-    unsigned n = arm_bulk_string_try(cpu, memory, budget);
-    CHECK(n <= budget && !(n & 3u), "probe exceeded/split budget: %u/%u", n, budget);
-    CHECK(bus_reads == reads && bus_writes == writes, "probe touched bus");
-    CHECK(memcmp(before_ram, ram, sizeof ram) == 0, "probe wrote RAM");
-    for (unsigned i = 0u; i < n; i++) CHECK(arm_step(&slow) == ARM_OK, "probe reference fault");
-    memcpy(expected.r, slow.r, sizeof expected.r);
-    expected.cpsr = slow.cpsr;
-    if (!memory->flat_ram) expected.dread_hits += n / 4u;
-    CHECK(memcmp(cpu, &expected, sizeof expected) == 0, "probe CPU/cache differs, n=%u", n);
-    return n;
-}
-
-static void test_probes(void) {
-    static const unsigned budgets[] = {0u, 1u, 3u, 4u, 7u, 8u, 9u, 12u, 15u, 16u, 31u, 64u, 129u};
-    for (unsigned cached = 0u; cached < 2u; cached++)
-        for (unsigned flags = 0u; flags < 16u; flags++)
-            for (unsigned kind = 0u; kind < 3u; kind++)
-                for (unsigned collisions = 0u; collisions < 8u; collisions++)
-                    for (unsigned start = 0u; start < 2u; start++)
-                        for (unsigned b = 0u; b < sizeof budgets / sizeof budgets[0]; b++) {
-                            arm_cpu_t cpu; arm_bulk_memory_t memory;
-                            probe_setup(&cpu, &memory, start * 6u, collisions, kind, flags, cached != 0u);
-                            unsigned n = probe_differential(&cpu, &memory, budgets[b]);
-                            unsigned full = collisions * 8u + (kind == 1u ? 4u : 8u);
-                            unsigned expected = kind < 2u && budgets[b] >= full ? full : budgets[b] / 8u * 8u;
-                            CHECK(n == expected, "probe prefix %u != %u kind=%u budget=%u", n, expected, kind, budgets[b]);
-                        }
-    for (unsigned word = 0u; word < 8u; word++) {
-        arm_cpu_t cpu; arm_bulk_memory_t memory;
-        probe_setup(&cpu, &memory, 0u, 2u, 0u, 15u, true);
-        w32(NULL, CODE + word * 4u, probe_code[word] ^ 1u);
-        refusal(&cpu, &memory, 128u);
-    }
-    for (unsigned bytes = 0u; bytes < sizeof probe_code; bytes++) {
-        arm_cpu_t cpu; arm_bulk_memory_t memory;
-        probe_setup(&cpu, &memory, 0u, 2u, 0u, 15u, true);
-        memory.code_bytes = bytes;
-        refusal(&cpu, &memory, 128u);
-    }
-    for (unsigned scenario = 0u; scenario < 6u; scenario++) {
-        arm_cpu_t cpu; arm_bulk_memory_t memory;
-        probe_setup(&cpu, &memory, 0u, 3u, 0u, 15u, true);
-        if (scenario == 0u) cpu.r[3]++;
-        if (scenario == 1u) w32(NULL, DATA, 0x2001u);
-        if (scenario == 2u) cpu.dread[(DATA >> 10) & (ARM_DREAD_ENTRIES - 1u)].host = NULL;
-        if (scenario == 3u) cpu.dread[(0x2000u >> 10) & (ARM_DREAD_ENTRIES - 1u)].host = NULL;
-        if (scenario == 4u) cpu.tlb_gen++;
-        if (scenario == 5u) cpu.cp15.context_id++;
-        refusal(&cpu, &memory, 128u);
-    }
-    for (unsigned stop = 1u; stop < 8u; stop++) {
-        arm_cpu_t cpu; arm_bulk_memory_t memory;
-        probe_setup(&cpu, &memory, 0u, 0u, 2u, 15u, true);
-        w32(NULL, DATA + stop * 4u, 0x3000u); /* No READ witness for this key. */
-        CHECK(probe_differential(&cpu, &memory, 128u) == stop * 8u, "probe cold-key prefix");
-    }
-    {
-        arm_cpu_t cpu; arm_bulk_memory_t memory;
-        probe_setup(&cpu, &memory, 0u, 0u, 2u, 15u, false);
-        cpu.r[5] = UINT32_MAX;
-        w32(NULL, DATA - 4u, 0x2000u);
-        CHECK(probe_differential(&cpu, &memory, 16u) == 16u, "probe index wrap");
-        cpu.r[15] = CODE; cpu.r[5] = UINT32_MAX;
-        w32(NULL, DATA - 4u, 0u);
-        CHECK(probe_differential(&cpu, &memory, 8u) == 4u, "probe null index wrap");
-    }
-    puts("arm_bulk table probes: exact flags, exits, wrap, budgets and READ refusals");
 }
 
 static void chain_setup(arm_cpu_t *cpu, arm_bulk_memory_t *memory,
@@ -1319,30 +1219,6 @@ static void test_native_integration(void) {
         return;
     }
     test_native_resident_bulk_transitions();
-    unsigned probe_calls = 0u;
-    for (unsigned flags = 0u; flags < 16u; flags++)
-        for (unsigned kind = 0u; kind < 3u; kind++)
-            for (unsigned scenario = 0u; scenario < 3u; scenario++)
-                for (unsigned enabled = 0u; enabled < 2u; enabled++)
-                    for (unsigned budget = 0u; budget < 75u; budget++) {
-                        arm_cpu_t cpu; arm_bulk_memory_t memory;
-                        probe_setup(&cpu, &memory, 6u, 3u, kind, flags, true);
-                        w32(NULL, CODE - 12u, 0xe1a03008u); /* MOV r3,r8 */
-                        w32(NULL, CODE - 8u, 0xe1a05009u);  /* MOV r5,r9 */
-                        w32(NULL, CODE - 4u, 0xe3570001u);  /* CMP r7,#1 */
-                        cpu.r[8] = cpu.r[3]; cpu.r[9] = cpu.r[5];
-                        cpu.r[3] = 0u; cpu.r[5] = 0u;
-                        cpu.r[7] = flags & 1u;
-                        cpu.r[15] = CODE - 12u;
-                        memory.code_base -= 12u; memory.code -= 12u; memory.code_bytes += 12u;
-                        if (scenario == 1u) w32(NULL, CODE + 24u, 0xe0055005u); /* Changed mask. */
-                        if (scenario == 2u) memory.code_bytes = 16u; /* Only first load witnessed. */
-                        uint64_t accepted = native_differential(&cpu, &memory, budget, enabled != 0u);
-                        CHECK((enabled && scenario == 0u) || accepted == 0u, "invalid probe executed bulk");
-                        probe_calls += (unsigned)accepted;
-                    }
-    CHECK(probe_calls > 0u, "native table probe never executed");
-    printf("arm_bulk native table probes: %u accepted calls\n", probe_calls);
     /* Enter the word-scan candidate after resident code changes r2 and NZCV.
      * Test the successful bridge, a changed-body refusal, and a window ending
      * just after SUB. The latter must not read unproven following words. */
@@ -1736,7 +1612,6 @@ int main(void) {
     test_cached_boundaries();
     test_length_prefixes();
     test_compare_prefixes();
-    test_probes();
     test_thumb_chains();
     test_thumb_chain_tlb();
     test_chain_reader_lifetime();
