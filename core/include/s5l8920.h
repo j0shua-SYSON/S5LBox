@@ -42,6 +42,8 @@
 #define S5L8920_PMU_CONTROL_REGISTER 0x0du
 #define S5L8920_PMU_ADC_CONTROL 0x30u
 #define S5L8920_PMU_CONFIG_CONTROL 0x24u
+#define S5L8920_PMU_EVENT_REGISTER 0x01u
+#define S5L8920_PMU_IRQ_PIN 157u
 #define S5L8920_CHIPID_BASE UINT32_C(0xbf500000)
 #define S5L8920_CLOCK_GATE_BASE UINT32_C(0xbf100078)
 #define S5L8920_CLOCK_GATE_COUNT 52u
@@ -134,6 +136,12 @@ typedef struct {
     bool control_programmed;
 } s5l8920_pmu_config_t;
 
+typedef struct {
+    uint32_t initial, pending, status, masks;
+    uint8_t masks_programmed;
+    bool configured, status_valid;
+} s5l8920_pmu_events_t;
+
 typedef enum {
     S5L8920_BUS_OK = 0,
     S5L8920_BUS_UNMAPPED,
@@ -180,6 +188,7 @@ typedef struct {
     uint8_t pmu_control_initial, pmu_control_value;
     s5l8920_pmu_adc_t pmu_adc;
     s5l8920_pmu_config_t pmu_config;
+    s5l8920_pmu_events_t pmu_events;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -341,12 +350,14 @@ bool s5l8920_pmu_control_service(s5l8920_t *m, uint64_t sequence);
  * the old result. Reads never advance a conversion. Only explicit completion
  * with the current token supplies both raw bytes and clears busy. Consumers
  * decode (low & 3) | (high << 2); upper low-byte bits are supplied, not invented.
- * No analog values, calibration, timing or PMU event-register/IRQ delivery are
- * inferred. The latter remains necessary for the kernel's interrupt wait.
+ * No analog values, calibration or timing are inferred. With the optional
+ * event domain configured, explicit completion latches register02 bit5;
+ * programmed masks and GPIO/VIC configuration determine interrupt delivery.
  * Functional SoC reset retains the external PMU state/token, cancelling only
  * controller transactions. Free/init invalidates it. Tokens never wrap.
  * Call between CPU steps. Failures preserve state and request output. Valid
- * events preserve CPU/diagnostics; servicing I2C can change its IRQ level. */
+ * events preserve CPU registers/diagnostics; I2C and PMU events can change
+ * interrupt levels. */
 bool s5l8920_pmu_adc_service(s5l8920_t *m, uint64_t sequence);
 bool s5l8920_pmu_adc_request(const s5l8920_t *m, s5l8920_pmu_adc_request_t *request);
 bool s5l8920_pmu_adc_complete(s5l8920_t *m, uint64_t sequence, uint8_t low, uint8_t high);
@@ -363,6 +374,28 @@ bool s5l8920_pmu_adc_complete(s5l8920_t *m, uint64_t sequence, uint8_t low, uint
  * all state unchanged. Functional SoC reset retains external PMU programming;
  * free/init invalidates it. Call between CPU steps. */
 bool s5l8920_pmu_config_service(s5l8920_t *m, uint64_t sequence);
+
+/* D1755 logical events1..4, independent live status5..8 and masks9..0c.
+ * Configure supplies the complete initial event image once; identical repeats
+ * do not reload consumed events. Raise ORs explicit causes into that image.
+ * Status replaces the independent supplied status image; reads retain it.
+ * Supported event reads are byte02 or four bytes at01. Successful transfers
+ * consume only the returned event bytes. This read-clear model is inferred
+ * from the matching level-interrupt handler's read/no-write-ACK contract and
+ * saved wake-event merge, not physical read-phase/timing measurements.
+ * Status uses exact four-byte reads at05. Masks support single bytes9..0c or
+ * four bytes at09; reads require prior programming of all requested bytes.
+ * Mask bits suppress delivery without discarding events. Once events and all
+ * mask bytes are known, unmasked causes drive GPIO157 low, otherwise high.
+ * GPIO pending/acknowledgement and VIC routing retain their normal behavior.
+ * Explicit ADC completion raises register02 bit5 when events are configured.
+ * No initial status/masks, spontaneous events or ADC completion are inferred.
+ * Unsupported/stale requests refuse without mutation. Functional SoC reset
+ * retains the external PMU domain; free/init clears it. Call between CPU steps. */
+bool s5l8920_pmu_events_configure(s5l8920_t *m, uint32_t initial);
+bool s5l8920_pmu_events_raise(s5l8920_t *m, uint32_t causes);
+bool s5l8920_pmu_status_input(s5l8920_t *m, uint32_t status);
+bool s5l8920_pmu_events_service(s5l8920_t *m, uint64_t sequence);
 
 /* Supply one immutable identification word at offset0/4/8/12. Only aligned
  * word reads in this 16-byte span are modeled; each requires its own explicit

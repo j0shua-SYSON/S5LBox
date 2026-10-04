@@ -690,6 +690,7 @@ bool s5l8920_pmu_adc_complete(s5l8920_t *m,uint64_t sequence,uint8_t low,uint8_t
     if (!a->programmed || !(a->control&0x10u) || a->sequence!=sequence) return false;
     a->result[0]=low;a->result[1]=high;a->result_valid=true;
     a->control&=(uint8_t)~0x10u;
+    if (m->pmu_events.configured) (void)s5l8920_pmu_events_raise(m,UINT32_C(0x2000));
     return true;
 }
 
@@ -712,6 +713,67 @@ bool s5l8920_pmu_adc_service(s5l8920_t *m,uint64_t sequence) {
     if (i->subaddress==0x31u && i->length==2u && !i->write && a->result_valid)
         return s5l8920_i2c_complete(m,0u,sequence,true,a->result,2u);
     return false;
+}
+
+static void pmu_events_refresh(s5l8920_t *m) {
+    const s5l8920_pmu_events_t *e=&m->pmu_events;
+    if (e->configured && e->masks_programmed==15u)
+        (void)s5l8920_gpio_input(m,S5L8920_PMU_IRQ_PIN,(e->pending&~e->masks)==0u);
+}
+
+bool s5l8920_pmu_events_configure(s5l8920_t *m,uint32_t initial) {
+    if (!m || !m->ram) return false;
+    s5l8920_pmu_events_t *e=&m->pmu_events;
+    if (e->configured) return e->initial==initial;
+    e->initial=e->pending=initial;e->configured=true;
+    pmu_events_refresh(m);
+    return true;
+}
+
+bool s5l8920_pmu_events_raise(s5l8920_t *m,uint32_t causes) {
+    if (!m || !m->ram || !m->pmu_events.configured) return false;
+    m->pmu_events.pending|=causes;
+    pmu_events_refresh(m);
+    return true;
+}
+
+bool s5l8920_pmu_status_input(s5l8920_t *m,uint32_t status) {
+    if (!m || !m->ram) return false;
+    m->pmu_events.status=status;m->pmu_events.status_valid=true;
+    return true;
+}
+
+bool s5l8920_pmu_events_service(s5l8920_t *m,uint64_t sequence) {
+    if (!m || !m->ram) return false;
+    const s5l8920_i2c_t *i=&m->i2c[0];s5l8920_pmu_events_t *e=&m->pmu_events;
+    if (!i->active || i->sequence!=sequence || i->address!=0x74u) return false;
+    unsigned offset=0u,length=i->length;uint32_t value=0u,consume=0u;
+    if (!i->write && e->configured && ((i->subaddress==1u && length==4u) ||
+        (i->subaddress==2u && length==1u))) {
+        offset=i->subaddress-1u;value=e->pending>>(offset*8u);
+        consume=length==4u?UINT32_MAX:UINT32_C(0xff00);
+    } else if (!i->write && e->status_valid && i->subaddress==5u && length==4u) {
+        value=e->status;
+    } else if (i->subaddress>=9u && i->subaddress<=12u &&
+               (length==1u || (i->subaddress==9u && length==4u))) {
+        offset=i->subaddress-9u;
+        uint8_t known=(uint8_t)(((1u<<length)-1u)<<offset);
+        if (i->write) {
+            for (unsigned n=0;n<length;n++) value|=(uint32_t)i->tx[n]<<(8u*n);
+            if (!s5l8920_i2c_complete(m,0u,sequence,true,NULL,0u)) return false;
+            uint32_t mask=length==4u?UINT32_MAX:(UINT32_C(0xff)<<(8u*offset));
+            e->masks=(e->masks&~mask)|(value<<(8u*offset));e->masks_programmed|=known;
+            pmu_events_refresh(m);
+            return true;
+        }
+        if ((e->masks_programmed&known)!=known) return false;
+        value=e->masks>>(8u*offset);
+    } else return false;
+    uint8_t bytes[4];
+    for (unsigned n=0;n<length;n++) bytes[n]=(uint8_t)(value>>(8u*n));
+    if (!s5l8920_i2c_complete(m,0u,sequence,true,bytes,length)) return false;
+    if (consume) { e->pending&=~consume;pmu_events_refresh(m); }
+    return true;
 }
 
 bool s5l8920_pmu_config_service(s5l8920_t *m,uint64_t sequence) {

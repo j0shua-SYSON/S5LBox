@@ -3,7 +3,8 @@
 The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
 a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
 interrupt fabric, UART, timebase counter, deadline timer, GPIO, I2C and
-bounded PMU clock/control/ADC/configuration endpoints, explicitly configured identification words and
+bounded PMU clock/control/ADC/configuration/event endpoints, explicitly
+configured identification words and
 partial clock-gate/selector programming, a PLL model with explicit clock inputs,
 and bounded POWERID software-cache fields. Inactive GPIO data readback can
 be supplied explicitly, separately from live pin samples. MIU control can
@@ -16,6 +17,51 @@ events. Automatic transmit flow control requires an explicit CTS observation.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## D1755 events, status and interrupt masks
+
+The event endpoint models explicitly initialized event latches at registers
+`0x01–0x04`, independent supplied status at `0x05–0x08`, and guest-programmed
+interrupt masks at `0x09–0x0c`. New explicit causes accumulate even while
+masked. The observed byte read at `0x02` consumes that byte only; the four-byte
+read at `0x01` consumes all four returned bytes. Repeated reads cannot reload
+consumed events. Status reads retain the separate supplied status image.
+Unsupported access shapes remain pending without changing device state.
+
+Read-clear is a logical model inferred from the matching kernel's complete
+event handler, its saved wake-event merge, and its low-level parent interrupt.
+The original handler performs one event read and no event-register write
+acknowledgement, including for unregistered events. The matching device tree
+specifies GPIO pin 157 with flag 1; the original GPIO driver maps that flag to
+low-level mode and acknowledges the GPIO latch after its callback. These
+consumers establish the software contract; physical byte-phase and propagation
+timing have not been measured.
+
+Once initial events and every mask byte are known, unmasked pending events
+drive GPIO 157 low. Consuming or masking them releases the pin, while the
+GPIO's own pending latch still requires its normal acknowledgement. Initial
+events, status and masks are never invented. Explicit ADC completion also
+raises register `0x02` bit 5 when the event domain is configured. CPU execution,
+polling and time advancement cannot complete a conversion. Functional SoC
+reset preserves the external PMU domain and cancels controller transactions;
+free/init invalidates the supplied state.
+
+The unchanged connected LLB passes 38 cases through the production endpoint,
+covering every event bit, status decisions and withheld service. With supplied
+causes/status, its original cache helper returns after 934,495, 940,371 or
+940,376 instructions and reaches a one-byte read at `0x6f` for general-purpose
+slot 0. Fourteen or fifteen actual CPU interrupts execute the I2C completion
+path. The LLB witness does not program PMU masks or invent their reset values.
+
+A separate 37-case witness executes the complete original kernel event
+handler and polling transport against the model. It verifies event indexing,
+saved wake-event merging and the original ADC callback in idle state. Explicit
+unmask programming and GPIO configuration verify that the handler's event read
+releases the pin while retaining the GPIO latch until acknowledgement. CPU
+interrupts are masked in this prepared kernel context and client interrupt
+records are unregistered; full driver initialization and a PMU-triggered CPU
+exception through that kernel driver have not been demonstrated. Both old-library
+witnesses leave the original event read pending. Full boot remains unproven.
 
 ## D1755 configuration and complete kernel field updates
 
@@ -33,11 +79,12 @@ to have been programmed. Electrical routing and GPIO level effects remain
 unmodeled. Functional SoC reset preserves this external PMU programming while
 cancelling I2C transactions; free/init invalidates it.
 
-The connected, unchanged LLB now completes all six initial PMU write/read
+The connected, unchanged LLB completes all six initial PMU write/read
 checks at instruction 928,600, with thirteen actual CPU interrupts. It then
-waits on a four-byte read of event/status registers starting at `0x01`.
-The first observed `0x02` byte is still supplied explicitly; event behavior
-has not been inferred from that sample.
+waits on a four-byte read of event/status registers starting at `0x01` when
+event service is withheld.
+The first observed `0x02` byte in this configuration-only witness is supplied
+explicitly. The event model above has separate supporting consumers.
 
 A separate witness executes the complete original packed-field helper,
 including its real uncontended kernel mutex acquire/release and original
@@ -65,7 +112,8 @@ the request; accepted control programming invalidates the previous result.
 Tokens reject stale/duplicate completions and never wrap. Functional SoC reset
 preserves this external PMU domain while cancelling I2C traffic. This is an
 explicit reset policy, not measured power sequencing. No conversion duration,
-voltage, calibration or PMU event interrupt is inferred.
+voltage or calibration is inferred. Configuring the event domain above enables
+the completion event and its mask-controlled GPIO interrupt.
 
 The unchanged connected LLB now completes control write/read verification at
 instruction 881,952, using five actual CPU interrupts across the initial PMU

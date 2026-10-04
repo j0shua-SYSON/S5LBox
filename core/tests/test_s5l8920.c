@@ -1545,6 +1545,110 @@ static void test_pmu_config(s5l8920_t *m) {
     CHECK(s5l8920_reset(m),"final configuration reset");
 }
 
+static bool test_pmu_events(s5l8920_t *m) {
+    static s5l8920_t before;s5l8920_t empty={0};
+    s5l8920_free(m);
+    if (!s5l8920_init(m)) { CHECK(false,"fresh PMU event board");return false; }
+    CHECK(!s5l8920_pmu_events_configure(NULL,0u) && !s5l8920_pmu_events_configure(&empty,0u) &&
+          !s5l8920_pmu_events_raise(m,1u) && !s5l8920_pmu_status_input(&empty,0u) &&
+          !s5l8920_pmu_events_service(&empty,1u),"unconfigured/freed event APIs");
+    const unsigned cold[][2]={{1u,4u},{2u,1u},{5u,4u},{9u,4u},{10u,1u}};
+    uint64_t seq;
+    for (unsigned n=0;n<5u;n++) {
+        seq=pmu_request(m,0x74u,cold[n][0],false,cold[n][1],0u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_events_service(m,seq) && !memcmp(&before,m,sizeof before),"cold event/status/mask supplied data");
+        CHECK(s5l8920_reset(m),"cancel cold read");
+    }
+    CHECK(s5l8920_pmu_events_configure(m,0x11223344u) && !m->gpio[S5L8920_PMU_IRQ_PIN].input_valid,"unknown masks drove pin");
+    memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_events_configure(m,0u) && !memcmp(&before,m,sizeof before),"initial events replaced");
+    seq=pmu_request(m,0x74u,2u,false,1u,0u);memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_events_service(m,seq-1u) && !s5l8920_pmu_events_service(m,seq+1u) &&
+          !s5l8920_pmu_adc_service(m,seq) && !s5l8920_pmu_config_service(m,seq) &&
+          !memcmp(&before,m,sizeof before),"event transaction identity/isolation");
+    CHECK(s5l8920_pmu_events_service(m,seq) && pmu_read_bytes(m,1u)==0x33u &&
+          m->pmu_events.pending==0x11220044u,"early byte02 consumed unrelated event bytes");
+    memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_events_service(m,seq) && !memcmp(&before,m,sizeof before),"event replay");
+    CHECK(s5l8920_pmu_events_configure(m,0x11223344u) && m->pmu_events.pending==0x11220044u,"configure reloaded consumed event");
+    seq=pmu_request(m,0x74u,1u,false,4u,0u);
+    CHECK(s5l8920_pmu_events_service(m,seq) && pmu_read_result(m)==0x11220044u && !m->pmu_events.pending,"block read-clear");
+    seq=pmu_request(m,0x74u,1u,false,4u,0u);
+    CHECK(s5l8920_pmu_events_service(m,seq) && pmu_read_result(m)==0u,"consumed events returned twice");
+    for (unsigned n=0;n<4u;n++) {
+        seq=pmu_request(m,0x74u,9u+n,true,1u,255u);
+        CHECK(s5l8920_pmu_events_service(m,seq),"individual mask programming");
+        seq=pmu_request(m,0x74u,9u,false,4u,0u);
+        if (n<3u) {
+            memcpy(&before,m,sizeof before);
+            CHECK(!s5l8920_pmu_events_service(m,seq) && !memcmp(&before,m,sizeof before) &&
+                  !m->gpio[S5L8920_PMU_IRQ_PIN].input_valid,"partial masks inferred remaining bytes/pin");
+            CHECK(s5l8920_reset(m),"cancel partial mask read");
+        } else CHECK(s5l8920_pmu_events_service(m,seq) && pmu_read_result(m)==UINT32_MAX &&
+                     m->gpio[S5L8920_PMU_IRQ_PIN].input_high,"complete masked output");
+    }
+    const uint32_t pin_address=S5L8920_GPIO_BASE+S5L8920_PMU_IRQ_PIN*4u;
+    const uint32_t pending_address=S5L8920_GPIO_BASE+0x810u,pin_bit=UINT32_C(1)<<29;
+    m->bus.write32(m,pin_address,0x206u);vic_write(m,2u,PL192_INTENABLE,UINT32_C(1)<<30);
+    for (unsigned bit=0;bit<32u;bit++) {
+        uint32_t event=UINT32_C(1)<<bit;
+        seq=pmu_request(m,0x74u,9u,true,4u,UINT32_MAX);CHECK(s5l8920_pmu_events_service(m,seq),"mask all events");
+        CHECK(s5l8920_pmu_events_raise(m,event) && s5l8920_pmu_events_raise(m,event) &&
+              m->pmu_events.pending==event && m->gpio[S5L8920_PMU_IRQ_PIN].input_high && !m->cpu.irq_line,"masked events lost/coalescing");
+        unsigned byte=bit/8u;seq=pmu_request(m,0x74u,9u+byte,true,1u,255u^(1u<<(bit%8u)));
+        CHECK(s5l8920_pmu_events_service(m,seq) && m->pmu_events.masks==~event &&
+              !m->gpio[S5L8920_PMU_IRQ_PIN].input_high && m->cpu.irq_line,"unmasked event/GPIO157/source94");
+        m->bus.write32(m,pending_address,pin_bit);
+        CHECK(m->cpu.irq_line,"active PMU level failed to relatch GPIO acknowledgement");
+        seq=pmu_request(m,0x74u,1u,false,4u,0u);arm_cpu_t cpu=m->cpu;
+        CHECK(s5l8920_pmu_events_service(m,seq) && pmu_read_result(m)==event &&
+              !m->pmu_events.pending && m->gpio[S5L8920_PMU_IRQ_PIN].input_high && m->cpu.irq_line,"PMU clear prematurely acknowledged GPIO");
+        CHECK(!memcmp(&cpu,&m->cpu,sizeof cpu),"event service changed CPU registers");
+        m->bus.write32(m,pending_address,pin_bit);CHECK(!m->cpu.irq_line,"released PMU level retained GPIO IRQ");
+    }
+    CHECK(s5l8920_pmu_status_input(m,0xa55a8008u),"explicit live status");
+    for (unsigned n=0;n<3u;n++) {
+        seq=pmu_request(m,0x74u,5u,false,4u,0u);
+        CHECK(s5l8920_pmu_events_service(m,seq) && pmu_read_result(m)==0xa55a8008u && !m->pmu_events.pending,"status read created/consumed events");
+    }
+    CHECK(s5l8920_pmu_status_input(m,0x12345678u),"replace live status");
+    seq=pmu_request(m,0x74u,9u,true,4u,0xffffdfffu);CHECK(s5l8920_pmu_events_service(m,seq),"original ADC mask");
+    seq=pmu_request(m,0x74u,0x30u,true,1u,0x90u);s5l8920_pmu_adc_request_t adc;
+    CHECK(s5l8920_pmu_adc_service(m,seq) && s5l8920_pmu_adc_request(m,&adc) &&
+          s5l8920_timebase_clock(m,1000000u) && !m->pmu_events.pending,"ADC start/time invented completion event");
+    CHECK(s5l8920_pmu_adc_complete(m,adc.sequence,3u,255u) && m->pmu_events.pending==0x2000u &&
+          m->cpu.irq_line && !m->gpio[S5L8920_PMU_IRQ_PIN].input_high,"explicit ADC completion event");
+    seq=pmu_request(m,0x74u,1u,false,4u,0u);
+    CHECK(s5l8920_reset(m) && !s5l8920_pmu_events_service(m,seq) && m->pmu_events.pending==0x2000u &&
+          m->pmu_events.status==0x12345678u && m->pmu_events.masks==0xffffdfffu,"reset consumed external PMU state");
+    m->bus.write32(m,pin_address,0x206u);vic_write(m,2u,PL192_INTENABLE,UINT32_C(1)<<30);
+    CHECK(m->cpu.irq_line,"retained PMU level after SoC reset");
+    seq=pmu_request(m,0x74u,2u,false,1u,0u);
+    CHECK(s5l8920_pmu_events_service(m,seq) && pmu_read_bytes(m,1u)==0x20u,"ADC event byte");
+    m->bus.write32(m,pending_address,pin_bit);CHECK(!m->cpu.irq_line,"ADC IRQ release");
+    memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_adc_complete(m,adc.sequence,0u,0u) && !memcmp(&before,m,sizeof before),"replayed ADC raised another event");
+    const unsigned bad_requests[][3]={{0x75u,1u,4u},{0x74u,1u,1u},{0x74u,2u,4u},{0x74u,3u,1u},
+        {0x74u,5u,1u},{0x74u,6u,4u},{0x74u,9u,2u},{0x74u,10u,4u},{0x74u,13u,1u}};
+    for (unsigned n=0;n<sizeof bad_requests/sizeof bad_requests[0];n++) for (unsigned wr=0;wr<2u;wr++) {
+        seq=pmu_request(m,bad_requests[n][0],bad_requests[n][1],wr!=0u,bad_requests[n][2],0u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_events_service(m,seq) && !memcmp(&before,m,sizeof before),"unsupported event transfer mutation");
+        CHECK(s5l8920_reset(m),"cancel unsupported event transfer");
+    }
+    const unsigned read_only[][2]={{1u,4u},{2u,1u},{5u,4u}};
+    for (unsigned n=0;n<3u;n++) {
+        seq=pmu_request(m,0x74u,read_only[n][0],true,read_only[n][1],UINT32_MAX);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_events_service(m,seq) && !memcmp(&before,m,sizeof before),"invented event/status write ACK");
+        CHECK(s5l8920_reset(m),"cancel read-only register write");
+    }
+    CHECK(s5l8920_reset(m) && s5l8920_pmu_events_raise(m,0x2000u),"diagnostic setup");
+    seq=pmu_request(m,0x74u,1u,false,4u,0u);(void)m->bus.read32(m,0u);
+    s5l8920_bus_failure_t diagnostic=m->bus_failure;
+    CHECK(diagnostic.reason && s5l8920_pmu_events_service(m,seq) &&
+          !memcmp(&diagnostic,&m->bus_failure,sizeof diagnostic),"event service repaired bus failure");
+    return true;
+}
+
 static void test_pmu_control(s5l8920_t *m) {
     s5l8920_t empty={0};static s5l8920_t before;
     CHECK(!s5l8920_pmu_control_configure(NULL,0u) && !s5l8920_pmu_control_configure(&empty,0u) &&
@@ -2532,12 +2636,16 @@ int main(void) {
     test_miu(&m);
     test_usb_controls(&m);
     test_uart_banks(&m);
+    if (!test_pmu_events(&m)) return 1;
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
     CHECK(!m.pmu_adc.programmed && !m.pmu_adc.result_valid && !m.pmu_adc.sequence &&
           !s5l8920_pmu_adc_service(&m,1u) && !s5l8920_pmu_adc_complete(&m,1u,0u,0u),"free retained ADC state");
     CHECK(!m.pmu_config.control_programmed && !m.pmu_config.selectors_programmed &&
           !s5l8920_pmu_config_service(&m,1u),"free retained PMU configuration");
+    CHECK(!m.pmu_events.configured && !m.pmu_events.status_valid && !m.pmu_events.masks_programmed &&
+          !m.pmu_events.pending && !s5l8920_pmu_events_service(&m,1u) &&
+          !s5l8920_pmu_events_raise(&m,1u),"free retained PMU event state");
     CHECK(!m.pmu_control_configured && !m.pmu_control_initial && !m.pmu_control_value &&
           !s5l8920_pmu_control_configure(&m,0u) && !s5l8920_pmu_control_service(&m,1u),"free retained PMU control");
     for (unsigned bank=0;bank<S5L8920_UART_COUNT;bank++)CHECK(!m.uart_divisor_configured[bank] &&
