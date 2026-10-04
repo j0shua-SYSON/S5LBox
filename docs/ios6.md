@@ -3,7 +3,7 @@
 The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
 a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
 interrupt fabric, UART, timebase counter, deadline timer, GPIO, I2C and
-bounded PMU clock/control/ADC endpoints, explicitly configured identification words and
+bounded PMU clock/control/ADC/configuration endpoints, explicitly configured identification words and
 partial clock-gate/selector programming, a PLL model with explicit clock inputs,
 and bounded POWERID software-cache fields. Inactive GPIO data readback can
 be supplied explicitly, separately from live pin samples. MIU control can
@@ -16,6 +16,38 @@ events. Automatic transmit flow control requires an explicit CTS observation.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## D1755 configuration and complete kernel field updates
+
+The configuration endpoint supports the original LLB's `0x2a` programming at
+register `0x24` and its independently verified readback. This is the only
+supported value for that register: other values, including the kernel's
+power-related bit-7 update, remain pending. It is not an assumed reset value
+or a power-transition model.
+
+Registers `0x59–0x5b` hold eight packed three-bit configuration fields. Matching
+kernel code at `0x80ae8c28` masks and replaces an indexed field while preserving
+its neighbors. The endpoint supports the observed individual byte accesses
+and three-byte transfers starting at `0x59`. Reads require every requested byte
+to have been programmed. Electrical routing and GPIO level effects remain
+unmodeled. Functional SoC reset preserves this external PMU programming while
+cancelling I2C transactions; free/init invalidates it.
+
+The connected, unchanged LLB now completes all six initial PMU write/read
+checks at instruction 928,600, with thirteen actual CPU interrupts. It then
+waits on a four-byte read of event/status registers starting at `0x01`.
+The first observed `0x02` byte is still supplied explicitly; event behavior
+has not been inferred from that sample.
+
+A separate witness executes the complete original packed-field helper,
+including its real uncontended kernel mutex acquire/release and original
+PMU/ARMIIC/N88 polling transport. It passes 2,051 cases: four initial patterns,
+eight field indices, eight masks and eight input values, two rejected indices,
+and withheld configuration. Fields crossing byte boundaries retain neighboring
+bits. Missing service leaves the original request pending. CPU, stack, objects,
+MMU and transport-lock ownership are prepared explicitly; no firmware code is
+patched. The separate per-pin register update is masked off in this witness.
+This is not complete kernel driver initialization or a full boot.
 
 ## D1755 ADC requests and supplied conversion results
 
@@ -38,7 +70,8 @@ voltage, calibration or PMU event interrupt is inferred.
 The unchanged connected LLB now completes control write/read verification at
 instruction 881,952, using five actual CPU interrupts across the initial PMU
 observation and modeled transactions. Its next pending request is a one-byte
-write to register `0x24`. No conversion result is supplied in this trace.
+write to register `0x24` when configuration service is withheld. No conversion
+result is supplied in this trace.
 
 A separate witness calls the complete original ADC routine at `0x84001e10`
 from prepared context after the real bootloader setup. All 16 channel values

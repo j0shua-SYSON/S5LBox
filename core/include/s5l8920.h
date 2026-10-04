@@ -41,6 +41,7 @@
 #define S5L8920_I2C0_IRQ 19u /* Consecutive banks use sources 19, 18, 17. */
 #define S5L8920_PMU_CONTROL_REGISTER 0x0du
 #define S5L8920_PMU_ADC_CONTROL 0x30u
+#define S5L8920_PMU_CONFIG_CONTROL 0x24u
 #define S5L8920_CHIPID_BASE UINT32_C(0xbf500000)
 #define S5L8920_CLOCK_GATE_BASE UINT32_C(0xbf100078)
 #define S5L8920_CLOCK_GATE_COUNT 52u
@@ -128,6 +129,11 @@ typedef struct {
     uint8_t control; /* Channel bits0..3, start bit4, mode bit5, config bit7. */
 } s5l8920_pmu_adc_request_t;
 
+typedef struct {
+    uint8_t control, selectors[3], selectors_programmed;
+    bool control_programmed;
+} s5l8920_pmu_config_t;
+
 typedef enum {
     S5L8920_BUS_OK = 0,
     S5L8920_BUS_UNMAPPED,
@@ -173,6 +179,7 @@ typedef struct {
     bool pmu_control_configured;
     uint8_t pmu_control_initial, pmu_control_value;
     s5l8920_pmu_adc_t pmu_adc;
+    s5l8920_pmu_config_t pmu_config;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -343,6 +350,19 @@ bool s5l8920_pmu_control_service(s5l8920_t *m, uint64_t sequence);
 bool s5l8920_pmu_adc_service(s5l8920_t *m, uint64_t sequence);
 bool s5l8920_pmu_adc_request(const s5l8920_t *m, s5l8920_pmu_adc_request_t *request);
 bool s5l8920_pmu_adc_complete(s5l8920_t *m, uint64_t sequence, uint8_t low, uint8_t high);
+
+/* Matching D1755 configuration at I2C0/74. Register24 supports only the
+ * complete 0x2a configuration verified by the original bootloader. Other
+ * values, including the kernel's power-related bit7 update, remain refused.
+ * Registers59..5b hold eight packed three-bit fields: exact byte accesses or
+ * a three-byte transfer beginning at59. Every read requires prior programming
+ * of all requested bytes; no initial values are inferred. These are logical
+ * configuration images, without electrical routing or power effects.
+ * Service only the matching active I2C transaction, preserving CPU registers
+ * and diagnostics while refreshing the controller IRQ. Unknown requests leave
+ * all state unchanged. Functional SoC reset retains external PMU programming;
+ * free/init invalidates it. Call between CPU steps. */
+bool s5l8920_pmu_config_service(s5l8920_t *m, uint64_t sequence);
 
 /* Supply one immutable identification word at offset0/4/8/12. Only aligned
  * word reads in this 16-byte span are modeled; each requires its own explicit

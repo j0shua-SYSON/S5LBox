@@ -714,6 +714,32 @@ bool s5l8920_pmu_adc_service(s5l8920_t *m,uint64_t sequence) {
     return false;
 }
 
+bool s5l8920_pmu_config_service(s5l8920_t *m,uint64_t sequence) {
+    if (!m || !m->ram) return false;
+    const s5l8920_i2c_t *i=&m->i2c[0];
+    s5l8920_pmu_config_t *c=&m->pmu_config;
+    if (!i->active || i->sequence!=sequence || i->address!=0x74u) return false;
+    if (i->subaddress==S5L8920_PMU_CONFIG_CONTROL && i->length==1u) {
+        if (!i->write) return c->control_programmed &&
+            s5l8920_i2c_complete(m,0u,sequence,true,&c->control,1u);
+        /* Only this complete configuration has verified stable readback. */
+        if (i->tx[0]!=0x2au) return false;
+        if (!s5l8920_i2c_complete(m,0u,sequence,true,NULL,0u)) return false;
+        c->control=0x2au;c->control_programmed=true;
+        return true;
+    }
+    if (i->subaddress<0x59u || i->subaddress>0x5bu ||
+        (i->length!=1u && !(i->subaddress==0x59u && i->length==3u))) return false;
+    unsigned offset=i->subaddress-0x59u,length=i->length;
+    uint8_t mask=(uint8_t)(((1u<<length)-1u)<<offset);
+    if (!i->write) return (c->selectors_programmed&mask)==mask &&
+        s5l8920_i2c_complete(m,0u,sequence,true,c->selectors+offset,length);
+    uint8_t value[3];memcpy(value,i->tx,length);
+    if (!s5l8920_i2c_complete(m,0u,sequence,true,NULL,0u)) return false;
+    memcpy(c->selectors+offset,value,length);c->selectors_programmed|=mask;
+    return true;
+}
+
 bool s5l8920_chipid_configure(s5l8920_t *m, unsigned offset, uint32_t value) {
     if (!m || !m->ram || offset>=16u || (offset&3u)) return false;
     unsigned index=offset/4u;

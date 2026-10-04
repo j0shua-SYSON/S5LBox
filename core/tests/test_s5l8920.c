@@ -1370,10 +1370,10 @@ static uint32_t pmu_read_result(s5l8920_t *m) {
     return result;
 }
 
-static unsigned adc_read_result(s5l8920_t *m,unsigned length) {
+static unsigned pmu_read_bytes(s5l8920_t *m,unsigned length) {
     unsigned value=0u;
     for (unsigned n=0;n<length;n++) value|=m->bus.read32(m,S5L8920_I2C_BASE+32u)<<(8u*n);
-    CHECK(m->i2c[0].status==0x10u,"ADC response lost completion status");
+    CHECK(m->i2c[0].status==0x10u,"PMU response lost completion status");
     m->bus.write32(m,S5L8920_I2C_BASE+12u,0x10u);
     return value;
 }
@@ -1400,7 +1400,7 @@ static void test_pmu_adc(s5l8920_t *m) {
         CHECK(s5l8920_pmu_adc_service(m,seq) && m->pmu_adc.control==control &&
               !m->pmu_adc.result_valid && !s5l8920_pmu_adc_request(m,&request),"ADC nonbusy programming");
         seq=pmu_request(m,0x74u,0x30u,false,1u,0u);
-        CHECK(s5l8920_pmu_adc_service(m,seq) && adc_read_result(m,1u)==control,"ADC control readback");
+        CHECK(s5l8920_pmu_adc_service(m,seq) && pmu_read_bytes(m,1u)==control,"ADC control readback");
         seq=pmu_request(m,0x74u,0x30u,true,1u,control|0x10u);
         vic_write(m,0u,PL192_INTENABLE,1u<<19);
         memcpy(&before,m,sizeof before);
@@ -1417,7 +1417,7 @@ static void test_pmu_adc(s5l8920_t *m) {
         for (unsigned poll=0;poll<3u;poll++) {
             CHECK(s5l8920_timebase_clock(m,1000000u),"advance unrelated clock");
             seq=pmu_request(m,0x74u,0x30u,false,1u,0u);
-            CHECK(s5l8920_pmu_adc_service(m,seq) && adc_read_result(m,1u)==(control|0x10u) &&
+            CHECK(s5l8920_pmu_adc_service(m,seq) && pmu_read_bytes(m,1u)==(control|0x10u) &&
                   !m->pmu_adc.result_valid && s5l8920_pmu_adc_request(m,&request) &&
                   request.sequence==token,"poll/time invented conversion completion");
         }
@@ -1437,10 +1437,10 @@ static void test_pmu_adc(s5l8920_t *m) {
         memcpy(&before,m,sizeof before);
         CHECK(!s5l8920_pmu_adc_complete(m,token,0u,0u) && !s5l8920_pmu_adc_request(m,&request) &&
               !memcmp(&before,m,sizeof before),"duplicate conversion accepted");
-        CHECK(s5l8920_pmu_adc_service(m,seq) && adc_read_result(m,2u)==(unsigned)(low|((unsigned)high<<8)),"raw result bits/order");
+        CHECK(s5l8920_pmu_adc_service(m,seq) && pmu_read_bytes(m,2u)==(unsigned)(low|((unsigned)high<<8)),"raw result bits/order");
         CHECK(s5l8920_reset(m) && m->pmu_adc.result_valid,"SoC reset lost external result");
         seq=pmu_request(m,0x74u,0x31u,false,2u,0u);
-        CHECK(s5l8920_pmu_adc_service(m,seq) && adc_read_result(m,2u)==(unsigned)(low|((unsigned)high<<8)),"result retention/read consumed latch");
+        CHECK(s5l8920_pmu_adc_service(m,seq) && pmu_read_bytes(m,2u)==(unsigned)(low|((unsigned)high<<8)),"result retention/read consumed latch");
     }
     seq=pmu_request(m,0x74u,0x30u,true,1u,0x93u);
     CHECK(s5l8920_pmu_adc_service(m,seq) && s5l8920_pmu_adc_request(m,&request),"cancellation start");
@@ -1471,6 +1471,78 @@ static void test_pmu_adc(s5l8920_t *m) {
     seq=pmu_request(m,0x74u,0x30u,true,1u,0x90u);memcpy(&before,m,sizeof before);
     CHECK(!s5l8920_pmu_adc_service(m,seq) && !memcmp(&before,m,sizeof before),"conversion token wrapped");
     CHECK(s5l8920_reset(m) && m->pmu_adc.sequence==UINT64_MAX,"reset reused exhausted token");
+}
+
+static void test_pmu_config(s5l8920_t *m) {
+    static s5l8920_t before;s5l8920_t empty={0};
+    CHECK(!s5l8920_pmu_config_service(NULL,0u) && !s5l8920_pmu_config_service(&empty,0u),"invalid configuration object");
+    CHECK(s5l8920_reset(m) && !m->pmu_config.control_programmed && !m->pmu_config.selectors_programmed,"invented PMU configuration");
+    const unsigned missing[][2]={{0x24u,1u},{0x59u,1u},{0x5au,1u},{0x5bu,1u},{0x59u,3u}};
+    uint64_t seq;
+    for (unsigned n=0;n<5u;n++) {
+        seq=pmu_request(m,0x74u,missing[n][0],false,missing[n][1],0u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),"unprogrammed configuration read supplied data");
+        CHECK(s5l8920_reset(m),"discard missing configuration request");
+    }
+    seq=pmu_request(m,0x74u,0x24u,true,1u,0x2au);vic_write(m,0u,PL192_INTENABLE,1u<<19);
+    memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_config_service(m,seq-1u) && !s5l8920_pmu_config_service(m,seq+1u) &&
+          !s5l8920_pmu_adc_service(m,seq) && !s5l8920_pmu_rtc_service(m,seq) &&
+          !memcmp(&before,m,sizeof before),"configuration transaction identity/isolation");
+    CHECK(s5l8920_pmu_config_service(m,seq) && m->cpu.irq_line && m->pmu_config.control_programmed &&
+          m->pmu_config.control==0x2au,"observed configuration programming/IRQ");
+    before.cpu.irq_line=m->cpu.irq_line;
+    CHECK(!memcmp(&before.cpu,&m->cpu,sizeof m->cpu),"configuration service changed CPU");
+    memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),"configuration replay");
+    seq=pmu_request(m,0x74u,0x24u,false,1u,0u);
+    CHECK(s5l8920_pmu_config_service(m,seq) && pmu_read_bytes(m,1u)==0x2au,"configuration byte readback");
+    for (unsigned value=0;value<256u;value++) if (value!=0x2au) {
+        seq=pmu_request(m,0x74u,0x24u,true,1u,value);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),"unimplemented configuration/power transition acknowledged");
+        CHECK(s5l8920_reset(m) && m->pmu_config.control==0x2au,"reset lost programmed control");
+    }
+    const unsigned order[]={0u,2u,1u},initial[]={0x82u,0x24u,8u};
+    for (unsigned n=0;n<3u;n++) {
+        unsigned index=order[n];seq=pmu_request(m,0x74u,0x59u+index,true,1u,initial[index]);
+        CHECK(s5l8920_pmu_config_service(m,seq),"individual selector programming");
+        seq=pmu_request(m,0x74u,0x59u,false,3u,0u);
+        if (n<2u) {
+            memcpy(&before,m,sizeof before);
+            CHECK(!s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),"partial selector image invented remaining bytes");
+            CHECK(s5l8920_reset(m),"reset partial selector request");
+        } else CHECK(s5l8920_pmu_config_service(m,seq) && pmu_read_bytes(m,3u)==0x082482u,"complete packed selector image");
+    }
+    for (unsigned index=0;index<8u;index++) for (unsigned field=0;field<8u;field++) {
+        uint32_t value=(0xa55aa5u&~(7u<<(index*3u)))|(field<<(index*3u));
+        seq=pmu_request(m,0x74u,0x59u,true,3u,value);
+        CHECK(s5l8920_pmu_config_service(m,seq) && m->pmu_config.selectors_programmed==7u,"packed selector write");
+        for (unsigned byte=0;byte<3u;byte++) {
+            seq=pmu_request(m,0x74u,0x59u+byte,false,1u,0u);
+            CHECK(s5l8920_pmu_config_service(m,seq) && pmu_read_bytes(m,1u)==((value>>(byte*8u))&255u),"packed field byte order/neighbors");
+        }
+        CHECK(s5l8920_reset(m),"selector reset");
+        seq=pmu_request(m,0x74u,0x59u,false,3u,0u);
+        CHECK(s5l8920_pmu_config_service(m,seq) && pmu_read_bytes(m,3u)==value,"reset/read consumed selector programming");
+    }
+    const unsigned unsupported[][3]={{0x75u,0x24u,1u},{0x75u,0x59u,3u},{0x74u,0x23u,1u},
+        {0x74u,0x25u,1u},{0x74u,0x58u,1u},{0x74u,0x5cu,1u},{0x74u,0x24u,2u},
+        {0x74u,0x59u,2u},{0x74u,0x59u,4u},{0x74u,0x5au,3u},{0x74u,0x5bu,3u}};
+    for (unsigned n=0;n<sizeof unsupported/sizeof unsupported[0];n++) for (unsigned write=0;write<2u;write++) {
+        seq=pmu_request(m,unsupported[n][0],unsupported[n][1],write!=0u,unsupported[n][2],0x2au);
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),"unsupported configuration request changed state");
+        CHECK(s5l8920_reset(m),"cancel unsupported configuration transfer");
+    }
+    seq=pmu_request(m,0x74u,0x59u,true,3u,0xffffffu);
+    memcpy(&before.pmu_config,&m->pmu_config,sizeof m->pmu_config);
+    CHECK(s5l8920_reset(m) && !s5l8920_pmu_config_service(m,seq) &&
+          !memcmp(&before.pmu_config,&m->pmu_config,sizeof m->pmu_config),"reset completed cancelled selector write");
+    seq=pmu_request(m,0x74u,0x59u,true,3u,0xffffffu);
+    (void)m->bus.read32(m,0u);s5l8920_bus_failure_t diagnostic=m->bus_failure;
+    CHECK(diagnostic.reason && s5l8920_pmu_config_service(m,seq) &&
+          !memcmp(&diagnostic,&m->bus_failure,sizeof diagnostic),"configuration service repaired bus failure");
+    CHECK(s5l8920_reset(m),"final configuration reset");
 }
 
 static void test_pmu_control(s5l8920_t *m) {
@@ -2449,6 +2521,7 @@ int main(void) {
     test_i2c_checked_cpu(&m);
     test_pmu_rtc(&m);
     test_pmu_adc(&m);
+    test_pmu_config(&m);
     test_pmu_control(&m);
     test_fiq_and_reset(&m);
     test_clock_selectors(&m);
@@ -2463,6 +2536,8 @@ int main(void) {
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
     CHECK(!m.pmu_adc.programmed && !m.pmu_adc.result_valid && !m.pmu_adc.sequence &&
           !s5l8920_pmu_adc_service(&m,1u) && !s5l8920_pmu_adc_complete(&m,1u,0u,0u),"free retained ADC state");
+    CHECK(!m.pmu_config.control_programmed && !m.pmu_config.selectors_programmed &&
+          !s5l8920_pmu_config_service(&m,1u),"free retained PMU configuration");
     CHECK(!m.pmu_control_configured && !m.pmu_control_initial && !m.pmu_control_value &&
           !s5l8920_pmu_control_configure(&m,0u) && !s5l8920_pmu_control_service(&m,1u),"free retained PMU control");
     for (unsigned bank=0;bank<S5L8920_UART_COUNT;bank++)CHECK(!m.uart_divisor_configured[bank] &&
