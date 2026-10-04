@@ -62,6 +62,8 @@
 #define S5L8920_USB_BASE UINT32_C(0x86100000)
 #define S5L8920_USB_CONTROL_COUNT 6u
 #define S5L8920_AUDIO_NCO_BASE UINT32_C(0x84300014)
+#define S5L8920_DMC_BASE UINT32_C(0xbfc00000)
+#define S5L8920_DMC_CONFIG_COUNT 36u
 
 typedef struct {
     uint64_t sequence;
@@ -176,6 +178,24 @@ typedef struct {
 } s5l8920_audio_nco_t;
 
 typedef enum {
+    S5L8920_DMC_CONFIG = 0,
+    S5L8920_DMC_READY = 1,
+    S5L8920_DMC_PAUSED = 2,
+    S5L8920_DMC_LOW_POWER = 3
+} s5l8920_dmc_state_t;
+
+/* PL340 configuration phase for the observed 32-bit LPDDR/two-chip setup.
+ * Indices0..17 cover offsets0x0c..0x50,18..33 cover QoS0..15,34..35 chips0..1.
+ * No target tie-off values are supplied; words become readable after writes.
+ * Reset enters Config and invalidates words. State-changing/direct commands,
+ * status, PHY and live DRAM transactions are not yet implemented. */
+typedef struct {
+    uint32_t value[S5L8920_DMC_CONFIG_COUNT];
+    uint64_t programmed;
+    s5l8920_dmc_state_t state;
+} s5l8920_dmc_t;
+
+typedef enum {
     S5L8920_BUS_OK = 0,
     S5L8920_BUS_UNMAPPED,
     S5L8920_BUS_ACCESS_UNIMPLEMENTED,
@@ -228,6 +248,7 @@ typedef struct {
     s5l8920_pmu_ldo_t pmu_ldo;
     s5l8920_pmu_saved_t pmu_saved;
     s5l8920_audio_nco_t audio_nco;
+    s5l8920_dmc_t dmc;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -245,7 +266,7 @@ void s5l8920_free(s5l8920_t *m);
  * restores its supplied initial word and supported mapping. USB controls restore
  * their supplied words. PLL controls return to
  * their supplied disabled words, cancelling settling. GPIO and clock-selector programming
- * and audio NCO programming are invalidated.
+ * and audio NCO/DMC programming are invalidated. DMC returns to Config.
  * This is a functional reset, not a
  * model of power sequencing. The caller owns execution and device timing. */
 bool s5l8920_reset(s5l8920_t *m);

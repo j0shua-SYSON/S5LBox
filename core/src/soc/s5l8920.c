@@ -23,6 +23,41 @@ static bool audio_nco_address(uint32_t address) {
     return address>=S5L8920_AUDIO_NCO_BASE && address-S5L8920_AUDIO_NCO_BASE<12u;
 }
 
+static bool dmc_address(uint32_t address) {
+    return address>=S5L8920_DMC_BASE && address-S5L8920_DMC_BASE<0x1000u;
+}
+
+static int dmc_index(uint32_t offset) {
+    if (offset>=0x0cu && offset<=0x50u) return (int)((offset-0x0cu)/4u);
+    if (offset>=0x100u && offset<=0x13cu) return 18+(int)((offset-0x100u)/4u);
+    if (offset==0x200u || offset==0x204u) return 34+(int)((offset-0x200u)/4u);
+    return -1;
+}
+
+static bool dmc_config_access(const s5l8920_dmc_t *dmc) {
+    return dmc->state==S5L8920_DMC_CONFIG || dmc->state==S5L8920_DMC_LOW_POWER;
+}
+
+static bool dmc_config_value(unsigned index, uint32_t value) {
+    static const uint32_t masks[18]={
+        UINT32_MAX,0x7fffu,0xfu,3u,0x7fu,0xfu,0xfu,0x3fu,0x3ffu,
+        0x3fu,0xfu,7u,7u,0xffu,0xffu,0xffu,0x7ffu,0xfffu
+    };
+    uint32_t mask=index<18u?masks[index]:(index<34u?0x3ffu:0x1ffffu);
+    if (value&~mask) return false;
+    if (!index) {
+        /* Reject reserved encodings and chips outside the observed pair.
+         * Cross-register timing/mode consistency is needed before Go; that
+         * command remains refused, so programming cannot start DRAM traffic. */
+        return ((value>>21)&3u)<=1u && ((value>>18)&7u)<=4u &&
+               ((value>>15)&7u)<=4u && ((value>>3)&7u)<=5u && (value&7u)<=4u;
+    }
+    /* Only the observed LPDDR, 32-bit configuration is supported. Read delay
+     * is the PL340 two-bit field; clock encoding2 is not a supported mode. */
+    if (index==16u) return (value&0x1f0u)==0xd0u && (value&3u)!=2u;
+    return true;
+}
+
 static int usb_control_index(uint32_t address) {
     switch (address) {
     case S5L8920_USB_BASE+0xe00u: return 0;
@@ -218,6 +253,21 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         for (unsigned n = 0; n < size; n++) value |= (uint32_t)p[n] << (8u * n);
         return value;
     }
+    if (dmc_address(address)) {
+        uint32_t offset=address-S5L8920_DMC_BASE;
+        int index=dmc_index(offset&~3u);
+        if (index<0 && offset>=12u) {
+            fail(m,S5L8920_BUS_UNMAPPED,address,size,false,0u);
+            return 0u;
+        }
+        if (size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
+        else if (index<0 || !dmc_config_access(&m->dmc) ||
+                 !(m->dmc.programmed&(UINT64_C(1)<<(unsigned)index)))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        else return m->dmc.value[index];
+        return 0u;
+    }
     if (audio_nco_address(address)) {
         unsigned index=(address-S5L8920_AUDIO_NCO_BASE)/4u;
         if (size!=4u || (address&3u))
@@ -328,6 +378,25 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
     if (ram_offset(m,address,size,&ram_at)) {
         uint8_t *p = m->ram + ram_at;
         for (unsigned n = 0; n < size; n++) p[n] = (uint8_t)(value >> (8u * n));
+        return;
+    }
+    if (dmc_address(address)) {
+        uint32_t offset=address-S5L8920_DMC_BASE;
+        int index=dmc_index(offset&~3u);
+        if (index<0 && offset>=12u) {
+            fail(m,S5L8920_BUS_UNMAPPED,address,size,true,value);
+            return;
+        }
+        if (size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        else if (index<0 || !dmc_config_access(&m->dmc) ||
+                 !dmc_config_value((unsigned)index,value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+        else {
+            /* LPDDR forces the CAS half-cycle bit to zero (DDI0331E3.3.6). */
+            m->dmc.value[index]=index==2 ? value&~1u : value;
+            m->dmc.programmed|=UINT64_C(1)<<(unsigned)index;
+        }
         return;
     }
     if (audio_nco_address(address)) {
@@ -1064,6 +1133,8 @@ bool s5l8920_reset(s5l8920_t *m) {
         m->clock_gate[gate].value=m->clock_gate[gate].initial;
     memset(m->clock_selector,0,sizeof m->clock_selector);
     memset(&m->audio_nco,0,sizeof m->audio_nco);
+    memset(&m->dmc,0,sizeof m->dmc);
+    m->dmc.state=S5L8920_DMC_CONFIG;
     m->powerid.value=m->powerid.initial;
     for (unsigned index=0;index<S5L8920_USB_CONTROL_COUNT;index++)
         m->usb_control[index].value=m->usb_control[index].initial;

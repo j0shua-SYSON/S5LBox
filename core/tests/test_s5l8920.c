@@ -1869,6 +1869,147 @@ static void test_pmu_pins(s5l8920_t *m) {
           !memcmp(&failure,&m->bus_failure,sizeof failure),"pin read repaired bus failure");
 }
 
+static void test_dmc_refresh(s5l8920_t *m) {
+    const uint32_t at=0xbfc00010u;
+    CHECK(s5l8920_reset(m),"PMGR timing reset");
+    (void)m->bus.read32(m,at);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"PMGR timing invented cold value");
+    s5l8920_clear_bus_failure(m);
+    for(unsigned n=0;n<32u;n++) {
+        uint32_t value=n<15u?(1u<<n):(n<30u?(0x7fffu^(1u<<(n-15u))):(n==30u?0u:0x617u));
+        arm_cpu_t cpu=m->cpu;uint64_t ticks=m->timebase_ticks;
+        m->bus.write32(m,at,value);
+        CHECK(!m->bus_failure.reason && m->bus.read32(m,at)==value &&
+              m->bus.read32(m,at)==value,"PMGR timing field/readback");
+        CHECK(!memcmp(&cpu,&m->cpu,sizeof cpu) && ticks==m->timebase_ticks,
+              "PMGR timing programming advanced CPU or clocks");
+    }
+    for(unsigned bit=15;bit<32;bit++) {
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,at,(1u<<bit)|0x123u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+              m->bus_failure.address==at && m->bus_failure.size==4u && m->bus_failure.write,
+              "PMGR timing accepted unknown control or lost diagnostics");
+        s5l8920_bus_failure_t failure=m->bus_failure;
+        m->bus.write32(m,at,0u);
+        CHECK(!memcmp(&failure,&m->bus_failure,sizeof failure),"PMGR timing replaced first failure");
+        s5l8920_clear_bus_failure(m);
+        CHECK(m->bus.read32(m,at)==0x617u,"refused/latched write changed PMGR timing");
+    }
+    for(unsigned off=0;off<4;off++)for(unsigned kind=0;kind<6;kind++) {
+        if(!off && (kind==2u || kind==5u))continue;
+        s5l8920_clear_bus_failure(m);
+        if(kind==0u)(void)m->bus.read8(m,at+off);
+        else if(kind==1u)(void)m->bus.read16(m,at+off);
+        else if(kind==2u)(void)m->bus.read32(m,at+off);
+        else if(kind==3u)m->bus.write8(m,at+off,0u);
+        else if(kind==4u)m->bus.write16(m,at+off,0u);
+        else m->bus.write32(m,at+off,0u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED,"PMGR timing width/alignment");
+    }
+    s5l8920_clear_bus_failure(m);
+    CHECK(m->bus.read32(m,at)==0x617u,"invalid PMGR accesses modified timing");
+    const uint32_t neighbors[]={0xbfc00054u,0xbfc00140u,0xbfc00208u,0xbfc00ffcu};
+    for(unsigned n=0;n<sizeof neighbors/sizeof neighbors[0];n++) {
+        s5l8920_clear_bus_failure(m);(void)m->bus.read32(m,neighbors[n]);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_UNMAPPED,"PMGR timing fabricated neighboring status");
+    }
+    CHECK(!m->bus.host_ram(m,at,4u) && !m->bus.host_ram_write(m,at,4u),"PMGR timing exposed as RAM");
+    CHECK(s5l8920_reset(m),"PMGR timing invalidate programming");
+    (void)m->bus.read32(m,at);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"PMGR reset retained timing validity");
+    s5l8920_clear_bus_failure(m);m->bus.write32(m,at,0x8000u);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"cold unknown timing control accepted");
+    s5l8920_clear_bus_failure(m);(void)m->bus.read32(m,at);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"rejected timing write established validity");
+    CHECK(s5l8920_reset(m),"PMGR timing final reset");
+}
+
+static void test_dmc_configuration(s5l8920_t *m) {
+    /* Original LLB values; the controller remains in its reset Config state.
+     * No DRAM/PHY readiness, commands or complete initialization are supplied. */
+    static const uint32_t words[][3]={
+        {0x4c,0x6d1,0x800},{0x50,0x57,0x1000},{0x14,6,0x10},
+        {0x18,0,4},{0x1c,2,0x80},{0x20,8,0x10},{0x24,11,0x10},
+        {0x28,12,0x40},{0x2c,0x1b0,0x400},{0x30,4,0x40},
+        {0x34,2,0x10},{0x38,4,8},{0x3c,3,8},{0x40,3,0x100},
+        {0x44,24,0x100},{0x48,24,0x100},{0x200,0x88,0x20000},
+        {0x204,0x888,0x20000},{0x13c,8,0x400},{0x10,0x617,0x8000},
+        {0x0c,0x84b18492,7}
+    };
+    CHECK(s5l8920_reset(m),"DMC configuration reset");
+    CHECK(m->dmc.state==S5L8920_DMC_CONFIG && !m->dmc.programmed,"DMC reset state");
+    arm_cpu_t cpu=m->cpu;uint64_t ticks=m->timebase_ticks;
+    for(unsigned i=0;i<sizeof words/sizeof words[0];i++) {
+        uint32_t at=0xbfc00000u+words[i][0];
+        s5l8920_clear_bus_failure(m);(void)m->bus.read32(m,at);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"DMC invented cold configuration");
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,at,words[i][1]);
+        CHECK(!m->bus_failure.reason && m->bus.read32(m,at)==words[i][1],"DMC original LLB configuration/readback");
+        m->bus.write32(m,at,words[i][1]|words[i][2]);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"DMC accepted reserved configuration");
+        m->bus.write32(m,at,0u);s5l8920_clear_bus_failure(m);
+        CHECK(m->bus.read32(m,at)==words[i][1],"DMC invalid or latched write changed configuration");
+    }
+    for(unsigned i=0;i<16u;i++) {
+        uint32_t at=0xbfc00100u+4u*i,value=0x3ffu-17u*i;
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,at,value);
+        CHECK(!m->bus_failure.reason && m->bus.read32(m,at)==value,"DMC QoS bank alias");
+    }
+    for(unsigned i=0;i<16u;i++)
+        CHECK(m->bus.read32(m,0xbfc00100u+4u*i)==0x3ffu-17u*i,"DMC QoS values not independent");
+    m->bus.write32(m,0xbfc00014u,7u);
+    CHECK(!m->bus_failure.reason && m->bus.read32(m,0xbfc00014u)==6u,"LPDDR CAS half-cycle not forced zero");
+    static const uint32_t invalid_cfg[]={0x600000u,0x140000u,0x28000u,0x30u,5u};
+    for(unsigned i=0;i<sizeof invalid_cfg/sizeof invalid_cfg[0];i++) {
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,0xbfc0000cu,invalid_cfg[i]);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"DMC reserved geometry encoding accepted");
+    }
+    static const uint32_t invalid_cfg2[]={0u,0x611u,0x6c1u,0x6f1u,0x6d2u};
+    for(unsigned i=0;i<sizeof invalid_cfg2/sizeof invalid_cfg2[0];i++) {
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,0xbfc0004cu,invalid_cfg2[i]);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"DMC unsupported protocol/width/clocks accepted");
+    }
+    for(unsigned off=0;off<4u;off++)for(unsigned kind=0;kind<6u;kind++) {
+        if(!off && (kind==2u || kind==5u))continue;
+        uint32_t at=0xbfc0004cu+off;s5l8920_clear_bus_failure(m);
+        if(kind==0u)(void)m->bus.read8(m,at);
+        else if(kind==1u)(void)m->bus.read16(m,at);
+        else if(kind==2u)(void)m->bus.read32(m,at);
+        else if(kind==3u)m->bus.write8(m,at,0u);
+        else if(kind==4u)m->bus.write16(m,at,0u);
+        else m->bus.write32(m,at,0u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED,"DMC bridge width/alignment not guarded");
+    }
+    for(unsigned i=0;i<3u;i++) {
+        s5l8920_clear_bus_failure(m);(void)m->bus.read32(m,0xbfc00000u+4u*i);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"DMC invented status/command read");
+        s5l8920_clear_bus_failure(m);m->bus.write32(m,0xbfc00000u+4u*i,0u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"DMC accepted unimplemented command");
+    }
+    CHECK(!memcmp(&cpu,&m->cpu,sizeof cpu) && ticks==m->timebase_ticks,"DMC programming advanced CPU/clocks");
+    CHECK(!m->bus.host_ram(m,0xbfc00000u,0x1000u) && !m->bus.host_ram_write(m,0xbfc00000u,0x1000u),"DMC exposed as RAM");
+    /* State fixtures exercise access restrictions only. No production API
+     * completes a command or fabricates a transition into these states. */
+    for(unsigned state=0;state<5u;state++) {
+        m->dmc.state=(s5l8920_dmc_state_t)state;
+        s5l8920_clear_bus_failure(m);s5l8920_dmc_t before=m->dmc;
+        m->bus.write32(m,0xbfc00010u,0x4617u);
+        bool accessible=state==0u || state==3u;
+        CHECK(accessible ? !m->bus_failure.reason :
+              m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !memcmp(&before,&m->dmc,sizeof before),
+              "DMC write state restriction or atomicity");
+        s5l8920_clear_bus_failure(m);uint32_t value=m->bus.read32(m,0xbfc00010u);
+        CHECK(accessible ? !m->bus_failure.reason && value==0x4617u :
+              m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"DMC read state restriction");
+    }
+    CHECK(s5l8920_reset(m),"DMC configuration invalidate reset");
+    for(unsigned i=0;i<sizeof words/sizeof words[0];i++) {
+        s5l8920_clear_bus_failure(m);(void)m->bus.read32(m,0xbfc00000u+words[i][0]);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"DMC reset retained programmed configuration");
+    }
+    CHECK(s5l8920_reset(m),"DMC final reset");
+}
+
 static void test_audio_nco(s5l8920_t *m) {
     const uint32_t base=0x84300014u;
     CHECK(s5l8920_reset(m),"NCO cold reset");
@@ -3125,10 +3266,14 @@ int main(void) {
     if (!test_pmu_voltage(&m)) return 1;
     if (!test_pmu_ldo(&m)) return 1;
     test_pmu_pins(&m);
+    test_dmc_refresh(&m);
+    test_dmc_configuration(&m);
     test_audio_nco(&m);
     if (!test_pmu_saved(&m)) return 1;
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
+    s5l8920_dmc_t empty_dmc={0};
+    CHECK(!memcmp(&m.dmc,&empty_dmc,sizeof empty_dmc),"free retained DMC configuration");
     CHECK(!m.pmu_boot_configured && !m.pmu_boot_programmed && !m.pmu_boot_initial && !m.pmu_boot_value &&
           !s5l8920_pmu_boot_state_service(&m,1u) && !s5l8920_pmu_boot_state_configure(&m,0u),"free retained boot-state byte");
     CHECK(!m.pmu_voltage.configured && !m.pmu_voltage.programmed &&

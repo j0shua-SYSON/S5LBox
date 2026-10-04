@@ -20,6 +20,36 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
+## DRAM controller configuration
+
+The register layout and initialization commands at `0xbfc00000` match the
+[ARM PL340 manual, DDI0331E](https://documentation-service.arm.com/static/5e8e330588295d1e18d39313?token=).
+The exact integration/revision is not established. The configuration model
+covers words at offsets `0x0c..0x50`, sixteen QoS words at `0x100..0x13c`,
+and the two observed chip configurations at `0x200/204`. It supports the
+bootloader's 32-bit LPDDR configuration, documented field widths, and reserved
+encoding checks. LPDDR forces the CAS half-cycle bit to zero.
+
+Functional reset enters Config and invalidates programmed words; target
+tie-off/reset register values are not supplied. Configuration reads require
+prior writes. Reads and writes require Config or Low_power state. Unsupported
+bridge widths, alignment, fields and encodings fail without changing state.
+Controller status, direct commands and state transitions remain refused;
+unimplemented register offsets and the separate PHY remain unmapped.
+
+The matching LLB initializer at `0x840033c0` computes the **15-bit** refresh
+period at `0xbfc00010` using the original clock getters and division routines.
+Explicit 200 MHz/divisor1 inputs produce `0x617`. The kernel's startup cache
+keeps only bits0..13; that mask does not reduce the hardware register width.
+Its isolated rescale block divides the cache and writes through the original
+virtual register accessor. Full LLB configuration starts at `0x840031c8`.
+
+This implements the configuration phase only. The existing host RAM backing
+remains independent of DRAM initialization; no PHY readiness, refresh traffic,
+mode-register execution, suspend/resume, controller-start success or complete
+bootloader handoff is established. Completing those behaviors requires the
+controller commands, PHY and memory timing to be connected.
+
 ## Audio NCO configuration
 
 Aligned word accesses at `0x84300014/18/1c` retain the audio NCO control and
