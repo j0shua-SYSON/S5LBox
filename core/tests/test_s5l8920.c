@@ -1545,6 +1545,69 @@ static void test_pmu_config(s5l8920_t *m) {
     CHECK(s5l8920_reset(m),"final configuration reset");
 }
 
+static bool test_pmu_boot_state(s5l8920_t *m) {
+    static s5l8920_t before;s5l8920_t empty={0};
+    CHECK(s5l8920_reset(m),"clear diagnostic before boot-state tests");
+    CHECK(!s5l8920_pmu_boot_state_configure(NULL,0u) && !s5l8920_pmu_boot_state_configure(&empty,0u) &&
+          !s5l8920_pmu_boot_state_service(NULL,1u) && !s5l8920_pmu_boot_state_service(&empty,1u),"invalid boot-state board");
+    uint64_t seq=pmu_request(m,0x74u,0x6fu,false,1u,0u);memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_boot_state_service(m,seq) && !memcmp(&before,m,sizeof before),"invented boot-state reset byte");
+    CHECK(s5l8920_reset(m),"cancel unknown boot-state read");
+    seq=pmu_request(m,0x74u,0x6fu,true,1u,0x90u);
+    CHECK(s5l8920_pmu_boot_state_service(m,seq) && m->pmu_boot_programmed && !m->pmu_boot_configured,"full guest write required invented initial state");
+    memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_boot_state_configure(m,0x90u) && !memcmp(&before,m,sizeof before),"late initial state replaced guest programming");
+    seq=pmu_request(m,0x74u,0x6fu,false,1u,0u);
+    CHECK(s5l8920_pmu_boot_state_service(m,seq) && pmu_read_bytes(m,1u)==0x90u,"guest-written boot state unreadable");
+    s5l8920_free(m);
+    if (!s5l8920_init(m)) { CHECK(false,"fresh boot-state board");return false; }
+    CHECK(s5l8920_pmu_boot_state_configure(m,0x5au),"explicit boot-state initialization");
+    memcpy(&before,m,sizeof before);
+    CHECK(s5l8920_pmu_boot_state_configure(m,0x5au) && !s5l8920_pmu_boot_state_configure(m,0u) &&
+          !memcmp(&before,m,sizeof before),"initial boot-state replacement");
+    for(unsigned value=0;value<256u;value++) {
+        seq=pmu_request(m,0x74u,0x6fu,true,1u,value);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_boot_state_service(m,seq-1u) && !s5l8920_pmu_boot_state_service(m,seq+1u) &&
+              !s5l8920_pmu_control_service(m,seq) && !s5l8920_pmu_events_service(m,seq) &&
+              !s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),"boot-state request identity/isolation");
+        CHECK(s5l8920_pmu_boot_state_service(m,seq) && m->pmu_boot_value==value,"boot-state byte write");
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_boot_state_service(m,seq) && !memcmp(&before,m,sizeof before),"replayed boot-state write");
+        CHECK(s5l8920_pmu_boot_state_configure(m,0x5au) && m->pmu_boot_value==value,"configuration reloaded guest byte");
+        for(unsigned repeat=0;repeat<2u;repeat++) {
+            seq=pmu_request(m,0x74u,0x6fu,false,1u,0u);arm_cpu_t cpu=m->cpu;
+            CHECK(s5l8920_pmu_boot_state_service(m,seq) && pmu_read_bytes(m,1u)==value && m->pmu_boot_value==value,"boot-state read consumed or changed byte");
+            cpu.irq_line=m->cpu.irq_line;
+            CHECK(!memcmp(&cpu,&m->cpu,sizeof cpu),"boot-state service changed CPU registers");
+        }
+    }
+    const unsigned bad[][3]={{0x75u,0x6fu,1u},{0x74u,0x6fu,2u},{0x74u,0x6fu,4u},
+        {0x74u,0x60u,1u},{0x74u,0x61u,1u},{0x74u,0x64u,4u},{0x74u,0x6du,1u},
+        {0x74u,0x6eu,1u},{0x74u,0x70u,1u},{0x74u,0x73u,1u}};
+    for(unsigned n=0;n<sizeof bad/sizeof bad[0];n++) for(unsigned wr=0;wr<2u;wr++) {
+        seq=pmu_request(m,bad[n][0],bad[n][1],wr!=0u,bad[n][2],0u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_boot_state_service(m,seq) && !memcmp(&before,m,sizeof before),"boot-state unsupported transfer mutation");
+        CHECK(s5l8920_reset(m),"cancel unsupported boot-state request");
+    }
+    for(unsigned bus=1u;bus<3u;bus++) {
+        uint32_t base=S5L8920_I2C_BASE+bus*S5L8920_I2C_STRIDE;
+        const unsigned offsets[]={8u,12u,0u,16u,20u,24u,32u,36u};
+        const unsigned values[]={0x30u,0x37u,0x74u,0x6fu,0u,1u,0x80u,5u};
+        for(unsigned n=0;n<8u;n++) m->bus.write32(m,base+offsets[n],values[n]);
+        s5l8920_i2c_request_t request;CHECK(s5l8920_i2c_request(m,bus,&request),"other bus boot-state request");
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_boot_state_service(m,request.sequence) && !memcmp(&before,m,sizeof before),"boot-state service crossed controller");
+        CHECK(s5l8920_reset(m),"cancel other controller boot-state request");
+    }
+    seq=pmu_request(m,0x74u,0x6fu,true,1u,0u);
+    CHECK(s5l8920_reset(m) && !s5l8920_pmu_boot_state_service(m,seq) && m->pmu_boot_value==255u &&
+          m->pmu_boot_programmed && m->pmu_boot_configured && m->pmu_boot_initial==0x5au,"reset committed pending write or lost external byte");
+    seq=pmu_request(m,0x74u,0x6fu,false,1u,0u);(void)m->bus.read32(m,0u);
+    s5l8920_bus_failure_t failure=m->bus_failure;
+    CHECK(failure.reason && s5l8920_pmu_boot_state_service(m,seq) && !memcmp(&failure,&m->bus_failure,sizeof failure),"boot-state service repaired diagnostic");
+    return true;
+}
+
 static bool test_pmu_events(s5l8920_t *m) {
     static s5l8920_t before;s5l8920_t empty={0};
     s5l8920_free(m);
@@ -2637,8 +2700,11 @@ int main(void) {
     test_usb_controls(&m);
     test_uart_banks(&m);
     if (!test_pmu_events(&m)) return 1;
+    if (!test_pmu_boot_state(&m)) return 1;
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
+    CHECK(!m.pmu_boot_configured && !m.pmu_boot_programmed && !m.pmu_boot_initial && !m.pmu_boot_value &&
+          !s5l8920_pmu_boot_state_service(&m,1u) && !s5l8920_pmu_boot_state_configure(&m,0u),"free retained boot-state byte");
     CHECK(!m.pmu_adc.programmed && !m.pmu_adc.result_valid && !m.pmu_adc.sequence &&
           !s5l8920_pmu_adc_service(&m,1u) && !s5l8920_pmu_adc_complete(&m,1u,0u,0u),"free retained ADC state");
     CHECK(!m.pmu_config.control_programmed && !m.pmu_config.selectors_programmed &&

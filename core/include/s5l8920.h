@@ -44,6 +44,7 @@
 #define S5L8920_PMU_CONFIG_CONTROL 0x24u
 #define S5L8920_PMU_EVENT_REGISTER 0x01u
 #define S5L8920_PMU_IRQ_PIN 157u
+#define S5L8920_PMU_BOOT_STATE_REGISTER 0x6fu
 #define S5L8920_CHIPID_BASE UINT32_C(0xbf500000)
 #define S5L8920_CLOCK_GATE_BASE UINT32_C(0xbf100078)
 #define S5L8920_CLOCK_GATE_COUNT 52u
@@ -189,6 +190,8 @@ typedef struct {
     s5l8920_pmu_adc_t pmu_adc;
     s5l8920_pmu_config_t pmu_config;
     s5l8920_pmu_events_t pmu_events;
+    uint8_t pmu_boot_initial, pmu_boot_value;
+    bool pmu_boot_configured, pmu_boot_programmed;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -396,6 +399,17 @@ bool s5l8920_pmu_events_configure(s5l8920_t *m, uint32_t initial);
 bool s5l8920_pmu_events_raise(s5l8920_t *m, uint32_t causes);
 bool s5l8920_pmu_status_input(s5l8920_t *m, uint32_t status);
 bool s5l8920_pmu_events_service(s5l8920_t *m, uint64_t sequence);
+
+/* D1755 register6f software boot-state byte, used by matching LLB/kernel.
+ * Exact byte reads require an explicit initial value or a successful guest
+ * byte write. Configure is immutable/idempotent, never reloading writes; it
+ * refuses first configuration after guest programming. Writes replace all
+ * eight bits and reads retain them. No erased/power-on value, autonomous
+ * flag changes, neighboring registers or power transitions are inferred.
+ * Functional SoC reset retains this external PMU byte; free/init clears it.
+ * Unsupported/stale requests preserve state. Call between CPU steps. */
+bool s5l8920_pmu_boot_state_configure(s5l8920_t *m, uint8_t initial);
+bool s5l8920_pmu_boot_state_service(s5l8920_t *m, uint64_t sequence);
 
 /* Supply one immutable identification word at offset0/4/8/12. Only aligned
  * word reads in this 16-byte span are modeled; each requires its own explicit

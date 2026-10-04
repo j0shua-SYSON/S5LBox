@@ -3,7 +3,7 @@
 The initial iOS 6 target is iPhone 3GS running 6.1.6. The foundation includes
 a distinct Cortex-A8 instruction profile and partial S5L8920 memory,
 interrupt fabric, UART, timebase counter, deadline timer, GPIO, I2C and
-bounded PMU clock/control/ADC/configuration/event endpoints, explicitly
+bounded PMU clock/control/ADC/configuration/event/boot-state endpoints, explicitly
 configured identification words and
 partial clock-gate/selector programming, a PLL model with explicit clock inputs,
 and bounded POWERID software-cache fields. Inactive GPIO data readback can
@@ -17,6 +17,40 @@ events. Automatic transmit flow control requires an explicit CTS observation.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## D1755 software boot-state byte
+
+Register `0x6f` retains a software boot-state byte used by the matching LLB
+and kernel. Exact byte reads require an explicit initial value or a completed
+guest byte write. Writes replace all eight bits; reads retain them. Repeating
+initial configuration cannot undo guest programming, and initial configuration
+after an unconfigured guest write is refused. Neighboring registers and other
+transfer sizes remain unsupported. Functional SoC reset retains the external
+PMU byte and cancels controller transactions; free/init invalidates it. This
+logical retention policy does not establish physical power sequencing or
+invent an erased value, autonomous flag changes, or power transitions.
+
+The LLB's complete general-purpose helpers pass 190 finite-observation cases,
+covering all ten logical indices, their cache behavior, invalid indices and
+I2C failures. Slots 1 and 9 alias register `0x60`; slot 0 maps to `0x6f`.
+These mappings do not enable the other registers. A separate 1,546-case
+witness executes the original slot-0 helpers against production storage,
+covering all 256 byte values through actual writes and uncached reads with
+real CPU I2C interrupts. The firmware returns success for an unverified write
+even after NACK and retains an optimistic cached byte. The device model keeps
+its actual stored byte unchanged on NACK; invalidating the firmware cache
+exposes that difference through the original read helper.
+
+Twenty connected original-reset cases exercise the boot-state decisions,
+including missing reads/writes and explicit NACKs. For supplied byte `0x00`,
+the decision returns at instruction 946,247 and the firmware starts ADC
+channel 2; no analog completion is invented. For supplied `0x80`, the
+firmware clears the flag and reaches the still-unsupplied identification
+word at `0xbf50000c`, stopping at `0x84008570` after 952,192 instructions.
+For `0xaf`, two original writes retain `0x0f` and reach that same stop after
+958,028 instructions. These are explicit input cases, not discovered
+power-on defaults. The old-library witness retains the original `0x6f` read
+pending. Neither these paths nor the separate kernel trace prove full boot.
 
 ## D1755 events, status and interrupt masks
 

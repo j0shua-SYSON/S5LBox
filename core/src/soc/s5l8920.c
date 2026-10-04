@@ -776,6 +776,29 @@ bool s5l8920_pmu_events_service(s5l8920_t *m,uint64_t sequence) {
     return true;
 }
 
+bool s5l8920_pmu_boot_state_configure(s5l8920_t *m,uint8_t initial) {
+    if (!m || !m->ram) return false;
+    if (m->pmu_boot_configured) return m->pmu_boot_initial==initial;
+    if (m->pmu_boot_programmed) return false;
+    m->pmu_boot_initial=m->pmu_boot_value=initial;m->pmu_boot_configured=true;
+    return true;
+}
+
+bool s5l8920_pmu_boot_state_service(s5l8920_t *m,uint64_t sequence) {
+    if (!m || !m->ram) return false;
+    const s5l8920_i2c_t *i=&m->i2c[0];
+    if (!i->active || i->sequence!=sequence || i->address!=0x74u ||
+        i->subaddress!=S5L8920_PMU_BOOT_STATE_REGISTER || i->length!=1u) return false;
+    if (i->write) {
+        uint8_t value=i->tx[0];
+        if (!s5l8920_i2c_complete(m,0u,sequence,true,NULL,0u)) return false;
+        m->pmu_boot_value=value;m->pmu_boot_programmed=true;
+        return true;
+    }
+    if (!m->pmu_boot_configured && !m->pmu_boot_programmed) return false;
+    return s5l8920_i2c_complete(m,0u,sequence,true,&m->pmu_boot_value,1u);
+}
+
 bool s5l8920_pmu_config_service(s5l8920_t *m,uint64_t sequence) {
     if (!m || !m->ram) return false;
     const s5l8920_i2c_t *i=&m->i2c[0];
