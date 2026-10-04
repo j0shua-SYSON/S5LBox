@@ -19,6 +19,10 @@ static bool usb_address(uint32_t address) {
            (address>=S5L8920_USB_BASE && address-S5L8920_USB_BASE<0x10000u);
 }
 
+static bool audio_nco_address(uint32_t address) {
+    return address>=S5L8920_AUDIO_NCO_BASE && address-S5L8920_AUDIO_NCO_BASE<12u;
+}
+
 static int usb_control_index(uint32_t address) {
     switch (address) {
     case S5L8920_USB_BASE+0xe00u: return 0;
@@ -214,6 +218,15 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         for (unsigned n = 0; n < size; n++) value |= (uint32_t)p[n] << (8u * n);
         return value;
     }
+    if (audio_nco_address(address)) {
+        unsigned index=(address-S5L8920_AUDIO_NCO_BASE)/4u;
+        if (size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
+        else if (!index || !(m->audio_nco.programmed&(1u<<index)))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        else return m->audio_nco.coefficient[index-1u];
+        return 0u;
+    }
     if (usb_address(address)) {
         int index=usb_control_index(address);
         if (size!=4u || (address&3u))
@@ -315,6 +328,19 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
     if (ram_offset(m,address,size,&ram_at)) {
         uint8_t *p = m->ram + ram_at;
         for (unsigned n = 0; n < size; n++) p[n] = (uint8_t)(value >> (8u * n));
+        return;
+    }
+    if (audio_nco_address(address)) {
+        unsigned index=(address-S5L8920_AUDIO_NCO_BASE)/4u;
+        if (size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        else if (!index && value!=0u && value!=0xd00u)
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+        else {
+            if (!index) m->audio_nco.control=value;
+            else m->audio_nco.coefficient[index-1u]=value;
+            m->audio_nco.programmed|=(uint8_t)(1u<<index);
+        }
         return;
     }
     if (usb_address(address)) {
@@ -1037,6 +1063,7 @@ bool s5l8920_reset(s5l8920_t *m) {
     for (unsigned gate=0;gate<S5L8920_CLOCK_GATE_COUNT;gate++)
         m->clock_gate[gate].value=m->clock_gate[gate].initial;
     memset(m->clock_selector,0,sizeof m->clock_selector);
+    memset(&m->audio_nco,0,sizeof m->audio_nco);
     m->powerid.value=m->powerid.initial;
     for (unsigned index=0;index<S5L8920_USB_CONTROL_COUNT;index++)
         m->usb_control[index].value=m->usb_control[index].initial;

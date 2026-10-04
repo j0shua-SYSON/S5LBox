@@ -14,9 +14,44 @@ guest programming. USB status and transfers remain unavailable.
 All five UART banks now support the bootloader's line/FIFO configuration,
 explicit initial divisors, receive interrupts and supplied receive-timeout
 events. Automatic transmit flow control requires an explicit CTS observation.
+Three audio NCO words support bounded clock configuration and coefficient
+readback; audio output and the remaining audio registers are unavailable.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## Audio NCO configuration
+
+Aligned word accesses at `0x84300014/18/1c` retain the audio NCO control and
+two coefficients. Control accepts the observed values `0` and `0xd00`.
+Coefficient writes establish independent full-width values; reads require
+prior programming. Control/status reads, other control values and unsupported
+widths or alignments fail without altering configuration. Functional SoC reset
+invalidates programming; free/init clears it. No reset values, reference
+frequency, generated clocks, readiness, DMA or PCM output are inferred.
+The shared audio control at `0x84304000` remains unimplemented.
+
+The matching kernel's `AppleS5L8920XAudioComplex` setter at `0x8078b7a0`
+doubles the requested value into coefficient A, subtracts its reference word
+into B, and writes control `0xd00`. Both operations wrap at 32 bits, so
+unsigned B greater than A is valid. The getter at `0x8078b740` reads both
+coefficients and uses the original division helpers to recover the configured
+value. The whole setter rejects a zero request before programming; entering
+the internal programming block with zero tests arithmetic only.
+
+Ninety-three isolated original-kernel cases passed against these production
+registers, including wrapped coefficients, the original division routines and
+three withheld writes. Objects and block entry points are explicit; complete
+IOKit methods and gate callbacks are outside this witness. All eighteen
+connected LLB scenarios passed, preserving pending transfers when responses
+are unavailable. With the existing explicit zero saved-state inputs, LLB
+advances three instructions to 1,192,354 steps, PC `0x8400989c`, where the
+write of `7` to `0x84304000` still fails. This is configuration support, not
+audio output or a complete bootloader/kernel handoff.
+
+Strict host tests passed 79/79 and shipping tests 74/74. The separate
+prepared-kernel trace remains unchanged: 182,680,916 steps, stopped at
+`0x807887ba` on an unprepared GPIO pin 0 read at `0x83000000`.
 
 ## D1755 saved software state
 
@@ -43,8 +78,8 @@ Eighteen connected original-reset scenarios passed. The real caller at
 `0x84000894` reads the previous stage from `0x61`, copies nonzero reasons to
 `0x63`, and updates a saturating nibble counter in `0x62`; equal cached results
 skip the write. Later code stores stage `0x10` and reads flags from `0x60`.
-With all four initial bytes explicitly zero, execution reaches a checked
-unmapped write of zero to physical `0x84300014`, PC `0x84009892`, after
+Before NCO support, execution with four explicit zero initial bytes reached
+a checked unmapped write of zero to physical `0x84300014`, PC `0x84009892`, after
 1,192,351 steps. The matching device tree places that address in the
 audio-complex/AMC range. Missing initial bytes or withheld transactions remain
 pending at their specific requests. These results do not establish audio

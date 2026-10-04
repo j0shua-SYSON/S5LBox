@@ -1869,6 +1869,72 @@ static void test_pmu_pins(s5l8920_t *m) {
           !memcmp(&failure,&m->bus_failure,sizeof failure),"pin read repaired bus failure");
 }
 
+static void test_audio_nco(s5l8920_t *m) {
+    const uint32_t base=0x84300014u;
+    CHECK(s5l8920_reset(m),"NCO cold reset");
+    for (unsigned n=0;n<3u;n++) {
+        (void)m->bus.read32(m,base+4u*n);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"NCO invented initial read");
+        s5l8920_clear_bus_failure(m);
+    }
+    /* Matching setter arithmetic wraps B below zero; unsigned B>A is legal.
+     * Reads are proven for the two coefficient words, not control/status. */
+    const uint32_t pairs[][2]={{22579200u,UINT32_C(0xffea5200)},
+        {24576000u,576000u},{0u,UINT32_MAX},{UINT32_MAX,0u},
+        {0x80000000u,0x80000001u},{0x12345678u,0x9abcdef0u}};
+    for (unsigned n=0;n<sizeof pairs/sizeof pairs[0];n++) {
+        arm_cpu_t cpu=m->cpu;
+        m->bus.write32(m,base+4u,pairs[n][0]);m->bus.write32(m,base+8u,pairs[n][1]);
+        m->bus.write32(m,base,0xd00u);
+        CHECK(!m->bus_failure.reason && !memcmp(&cpu,&m->cpu,sizeof cpu),"NCO programming changed CPU/interrupts");
+        for (unsigned repeat=0;repeat<2u;repeat++)
+            CHECK(m->bus.read32(m,base+4u)==pairs[n][0] && m->bus.read32(m,base+8u)==pairs[n][1] &&
+                  !m->bus_failure.reason,"NCO coefficient readback lost bits or aliased words");
+        m->bus.write32(m,base,0u);
+        CHECK(!m->bus_failure.reason && m->bus.read32(m,base+4u)==pairs[n][0] &&
+              m->bus.read32(m,base+8u)==pairs[n][1],"NCO disable changed coefficients");
+        const uint32_t bad_controls[]={1u,0xc00u,0xd01u,UINT32_MAX};
+        for(unsigned b=0;b<sizeof bad_controls/sizeof bad_controls[0];b++) {
+            m->bus.write32(m,base,bad_controls[b]);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"unknown NCO control accepted");
+            s5l8920_clear_bus_failure(m);
+            CHECK(m->bus.read32(m,base+4u)==pairs[n][0] && m->bus.read32(m,base+8u)==pairs[n][1],"invalid NCO control changed coefficients");
+        }
+    }
+    (void)m->bus.read32(m,base);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"NCO synthesized control/status readback");
+    s5l8920_bus_failure_t failure=m->bus_failure;
+    m->bus.write32(m,base+4u,0u);
+    CHECK(!memcmp(&failure,&m->bus_failure,sizeof failure),"NCO write repaired latched failure");
+    s5l8920_clear_bus_failure(m);
+    CHECK(m->bus.read32(m,base+4u)==0x12345678u,"latched failure allowed NCO write");
+    for(unsigned n=0;n<3u;n++)for(unsigned off=0;off<4u;off++)for(unsigned kind=0;kind<6u;kind++) {
+        if (!off && (kind==2u || kind==5u)) continue;
+        uint32_t at=base+4u*n+off;s5l8920_clear_bus_failure(m);
+        if(kind==0u)(void)m->bus.read8(m,at);
+        else if(kind==1u)(void)m->bus.read16(m,at);
+        else if(kind==2u)(void)m->bus.read32(m,at);
+        else if(kind==3u)m->bus.write8(m,at,0u);
+        else if(kind==4u)m->bus.write16(m,at,0u);
+        else m->bus.write32(m,at,0u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED,"NCO width/alignment accepted");
+    }
+    s5l8920_clear_bus_failure(m);
+    CHECK(m->bus.read32(m,base+4u)==0x12345678u && m->bus.read32(m,base+8u)==0x9abcdef0u,"invalid NCO accesses changed coefficients");
+    const uint32_t neighbors[]={0x84300010u,0x84300020u,0x84304000u,0x84400000u};
+    for(unsigned n=0;n<sizeof neighbors/sizeof neighbors[0];n++) {
+        m->bus.write32(m,neighbors[n],7u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_UNMAPPED,"NCO inferred neighboring audio register");
+        s5l8920_clear_bus_failure(m);
+    }
+    CHECK(s5l8920_reset(m),"NCO invalidate on reset");
+    m->bus.write32(m,base+4u,123u);
+    CHECK(!m->bus_failure.reason && m->bus.read32(m,base+4u)==123u,"NCO write required invented initial state");
+    (void)m->bus.read32(m,base+8u);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"NCO reset retained other coefficient validity");
+    CHECK(s5l8920_reset(m),"NCO final reset");
+}
+
 static bool test_pmu_saved(s5l8920_t *m) {
     static s5l8920_t before;s5l8920_t empty={0};
     CHECK(s5l8920_reset(m),"saved-state reset");
@@ -3059,6 +3125,7 @@ int main(void) {
     if (!test_pmu_voltage(&m)) return 1;
     if (!test_pmu_ldo(&m)) return 1;
     test_pmu_pins(&m);
+    test_audio_nco(&m);
     if (!test_pmu_saved(&m)) return 1;
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");

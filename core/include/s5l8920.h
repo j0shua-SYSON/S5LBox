@@ -61,6 +61,7 @@
 #define S5L8920_USB_PHY_BASE UINT32_C(0x86000000)
 #define S5L8920_USB_BASE UINT32_C(0x86100000)
 #define S5L8920_USB_CONTROL_COUNT 6u
+#define S5L8920_AUDIO_NCO_BASE UINT32_C(0x84300014)
 
 typedef struct {
     uint64_t sequence;
@@ -165,6 +166,15 @@ typedef struct {
     uint8_t configured, programmed;
 } s5l8920_pmu_saved_t;
 
+/* Observed NCO configuration only: control writes 0/d00 and two full-width
+ * coefficient words with readback after programming. Control/status reads
+ * remain unavailable. No source frequency, output clock, readiness or DMA
+ * behavior is inferred. Functional reset invalidates all programming. */
+typedef struct {
+    uint32_t control, coefficient[2];
+    uint8_t programmed; /* Control bit0, coefficient A bit1, B bit2. */
+} s5l8920_audio_nco_t;
+
 typedef enum {
     S5L8920_BUS_OK = 0,
     S5L8920_BUS_UNMAPPED,
@@ -217,6 +227,7 @@ typedef struct {
     s5l8920_pmu_voltage_t pmu_voltage;
     s5l8920_pmu_ldo_t pmu_ldo;
     s5l8920_pmu_saved_t pmu_saved;
+    s5l8920_audio_nco_t audio_nco;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -234,7 +245,7 @@ void s5l8920_free(s5l8920_t *m);
  * restores its supplied initial word and supported mapping. USB controls restore
  * their supplied words. PLL controls return to
  * their supplied disabled words, cancelling settling. GPIO and clock-selector programming
- * are invalidated.
+ * and audio NCO programming are invalidated.
  * This is a functional reset, not a
  * model of power sequencing. The caller owns execution and device timing. */
 bool s5l8920_reset(s5l8920_t *m);
