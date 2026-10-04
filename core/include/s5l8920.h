@@ -47,6 +47,8 @@
 #define S5L8920_PMU_BOOT_STATE_REGISTER 0x6fu
 #define S5L8920_PMU_VOLTAGE_REGISTERS 6u
 #define S5L8920_PMU_LDO_REGISTERS 14u
+#define S5L8920_PMU_SAVED_REGISTER 0x60u
+#define S5L8920_PMU_SAVED_COUNT 4u
 #define S5L8920_CHIPID_BASE UINT32_C(0xbf500000)
 #define S5L8920_CLOCK_GATE_BASE UINT32_C(0xbf100078)
 #define S5L8920_CLOCK_GATE_COUNT 52u
@@ -158,6 +160,11 @@ typedef struct {
     uint16_t configured, programmed;
 } s5l8920_pmu_ldo_t;
 
+typedef struct {
+    uint8_t initial[S5L8920_PMU_SAVED_COUNT], value[S5L8920_PMU_SAVED_COUNT];
+    uint8_t configured, programmed;
+} s5l8920_pmu_saved_t;
+
 typedef enum {
     S5L8920_BUS_OK = 0,
     S5L8920_BUS_UNMAPPED,
@@ -209,6 +216,7 @@ typedef struct {
     bool pmu_boot_configured, pmu_boot_programmed;
     s5l8920_pmu_voltage_t pmu_voltage;
     s5l8920_pmu_ldo_t pmu_ldo;
+    s5l8920_pmu_saved_t pmu_saved;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -429,6 +437,19 @@ bool s5l8920_pmu_events_service(s5l8920_t *m, uint64_t sequence);
  * Unsupported/stale requests preserve state. Call between CPU steps. */
 bool s5l8920_pmu_boot_state_configure(s5l8920_t *m, uint8_t initial);
 bool s5l8920_pmu_boot_state_service(s5l8920_t *m, uint64_t sequence);
+
+/* D1755 saved software state60..63 at I2C0/74. Matching firmware stores boot
+ * stages, reasons, counters and flags here. Exact byte writes replace state;
+ * reads retain it and require explicit initial state or a completed write.
+ * Configure is immutable/idempotent and never reloads guest programming;
+ * first configuration after an unconfigured guest write refuses. Register6f
+ * stays in the independent boot-state endpoint above. No RTC64..67, other GP
+ * bytes, defaults, automatic counters, watchdog or reset effects are inferred.
+ * Unknown/stale requests preserve all state. SoC reset retains these external
+ * bytes; free/init clears them. Call between CPU steps; CPU registers and bus
+ * diagnostics are preserved while I2C completion refreshes its interrupt. */
+bool s5l8920_pmu_saved_configure(s5l8920_t *m, unsigned reg, uint8_t initial);
+bool s5l8920_pmu_saved_service(s5l8920_t *m, uint64_t sequence);
 
 /* D1755 voltage configuration bytes14,23,2c..2f at I2C0/74. These addresses
  * remain independent: matching kernel initialization and setters use different

@@ -1869,6 +1869,100 @@ static void test_pmu_pins(s5l8920_t *m) {
           !memcmp(&failure,&m->bus_failure,sizeof failure),"pin read repaired bus failure");
 }
 
+static bool test_pmu_saved(s5l8920_t *m) {
+    static s5l8920_t before;s5l8920_t empty={0};
+    CHECK(s5l8920_reset(m),"saved-state reset");
+    CHECK(!s5l8920_pmu_saved_service(NULL,1u) && !s5l8920_pmu_saved_service(&empty,1u) &&
+          !s5l8920_pmu_saved_configure(NULL,0x60u,0u) && !s5l8920_pmu_saved_configure(&empty,0x60u,0u),"invalid saved-state board");
+    for (unsigned n=0;n<4u;n++) {
+        unsigned reg=0x60u+n;
+        uint64_t seq=pmu_request(m,0x74u,reg,false,1u,0u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_saved_service(m,seq) && !memcmp(&before,m,sizeof before),"invented saved-state initial byte");
+        CHECK(s5l8920_reset(m),"cancel missing saved-state read");
+        seq=pmu_request(m,0x74u,reg,true,1u,0xa7u);
+        CHECK(s5l8920_pmu_saved_service(m,seq),"full saved-state write required initial value");
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_saved_configure(m,reg,0xa7u) && !memcmp(&before,m,sizeof before),"late initial byte replaced saved programming");
+        CHECK(s5l8920_reset(m),"saved-state retention reset");
+        seq=pmu_request(m,0x74u,reg,false,1u,0u);
+        CHECK(s5l8920_pmu_saved_service(m,seq) && pmu_read_bytes(m,1u)==0xa7u,"reset/read lost external saved-state byte");
+    }
+    s5l8920_free(m);
+    if (!s5l8920_init(m)) { CHECK(false,"fresh saved-state board");return false; }
+    CHECK(!m->pmu_saved.configured && !m->pmu_saved.programmed,"cold board retained saved-state validity");
+    CHECK(s5l8920_pmu_boot_state_configure(m,0xd0u),"independent boot-state initial value");
+    for (unsigned n=0;n<4u;n++) {
+        arm_cpu_t cpu=m->cpu;
+        CHECK(s5l8920_pmu_saved_configure(m,0x60u+n,(uint8_t)(0xa0u+n)) &&
+              !memcmp(&cpu,&m->cpu,sizeof cpu),"explicit saved byte changed CPU");
+        memcpy(&before,m,sizeof before);
+        CHECK(s5l8920_pmu_saved_configure(m,0x60u+n,(uint8_t)(0xa0u+n)) &&
+              !s5l8920_pmu_saved_configure(m,0x60u+n,(uint8_t)(0x50u+n)) &&
+              !memcmp(&before,m,sizeof before),"mutable saved-state initial value");
+    }
+    for (unsigned n=0;n<4u;n++) {
+        vic_write(m,0u,PL192_INTENABLE,1u<<19);
+        for (unsigned value=0;value<256u;value++) {
+            uint64_t seq=pmu_request(m,0x74u,0x60u+n,true,1u,value);memcpy(&before,m,sizeof before);
+            CHECK(!s5l8920_pmu_saved_service(m,seq-1u) && !s5l8920_pmu_saved_service(m,seq+1u) &&
+                  !s5l8920_pmu_boot_state_service(m,seq) && !s5l8920_pmu_rtc_service(m,seq) &&
+                  !s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),"saved-state token/domain isolation");
+            CHECK(s5l8920_pmu_saved_service(m,seq) && m->cpu.irq_line,"saved-state write/IRQ");
+            before.cpu.irq_line=m->cpu.irq_line;
+            CHECK(!memcmp(&before.cpu,&m->cpu,sizeof m->cpu) && m->pmu_boot_value==0xd0u &&
+                  !memcmp(before.gpio,m->gpio,sizeof m->gpio) && !memcmp(&before.pmu_events,&m->pmu_events,sizeof m->pmu_events),
+                  "saved-state write changed CPU/boot byte/pins/events");
+            for (unsigned other=0;other<4u;other++) if (other!=n)
+                CHECK(m->pmu_saved.value[other]==before.pmu_saved.value[other],"saved-state bytes aliased");
+            memcpy(&before,m,sizeof before);
+            CHECK(!s5l8920_pmu_saved_service(m,seq) && !memcmp(&before,m,sizeof before),"saved write replay");
+            CHECK(s5l8920_pmu_saved_configure(m,0x60u+n,(uint8_t)(0xa0u+n)) &&
+                  m->pmu_saved.value[n]==value,"initial saved byte reloaded guest programming");
+            for (unsigned repeat=0;repeat<2u;repeat++) {
+                seq=pmu_request(m,0x74u,0x60u+n,false,1u,0u);
+                CHECK(s5l8920_pmu_saved_service(m,seq) && pmu_read_bytes(m,1u)==value,"retained saved-state read");
+            }
+        }
+        CHECK(s5l8920_reset(m),"saved-state post-write reset");
+        uint64_t seq=pmu_request(m,0x74u,0x60u+n,false,1u,0u);
+        CHECK(s5l8920_pmu_saved_service(m,seq) && pmu_read_bytes(m,1u)==255u,"saved byte did not survive reset");
+    }
+    const unsigned bad[][3]={{0x75u,0x60u,1u},{0x74u,0x5fu,1u},{0x74u,0x64u,1u},
+        {0x74u,0x67u,1u},{0x74u,0x6du,1u},{0x74u,0x6fu,1u},{0x74u,0x70u,1u},{0x74u,0x73u,1u},
+        {0x74u,0x60u,2u},{0x74u,0x60u,4u},{0x74u,0x63u,2u}};
+    for (unsigned n=0;n<sizeof bad/sizeof bad[0];n++) for (unsigned wr=0;wr<2u;wr++) {
+        uint64_t seq=pmu_request(m,bad[n][0],bad[n][1],wr!=0u,bad[n][2],0u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_saved_service(m,seq) && !memcmp(&before,m,sizeof before),"unsupported saved-state request changed state");
+        CHECK(s5l8920_reset(m),"cancel unsupported saved-state shape");
+    }
+    memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_saved_configure(m,0x5fu,0u) && !s5l8920_pmu_saved_configure(m,0x64u,0u) &&
+          !s5l8920_pmu_saved_configure(m,0x160u,0u) && !s5l8920_pmu_saved_configure(m,UINT32_MAX,0u) &&
+          !memcmp(&before,m,sizeof before),"invalid saved-state address truncated");
+    for (unsigned bus=1u;bus<3u;bus++) {
+        uint32_t base=S5L8920_I2C_BASE+bus*S5L8920_I2C_STRIDE;
+        const unsigned offsets[]={8u,12u,0u,16u,20u,24u,32u,36u};
+        const unsigned values[]={0x30u,0x37u,0x74u,0x61u,0u,1u,0x10u,5u};
+        for (unsigned n=0;n<8u;n++) m->bus.write32(m,base+offsets[n],values[n]);
+        s5l8920_i2c_request_t req;CHECK(s5l8920_i2c_request(m,bus,&req),"saved-state other-controller request");
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_saved_service(m,req.sequence) && !memcmp(&before,m,sizeof before),"saved-state service crossed controllers");
+        CHECK(s5l8920_reset(m),"cancel other-controller saved-state write");
+    }
+    uint64_t seq=pmu_request(m,0x74u,0x61u,true,1u,0x10u);s5l8920_pmu_saved_t saved=m->pmu_saved;
+    CHECK(s5l8920_i2c_complete(m,0u,seq,false,NULL,0u) && !s5l8920_pmu_saved_service(m,seq) &&
+          !memcmp(&saved,&m->pmu_saved,sizeof saved),"NACK committed saved-state write");
+    CHECK(s5l8920_reset(m),"clear saved-state NACK");
+    seq=pmu_request(m,0x74u,0x61u,true,1u,0x10u);
+    CHECK(s5l8920_reset(m) && !s5l8920_pmu_saved_service(m,seq) &&
+          !memcmp(&saved,&m->pmu_saved,sizeof saved),"reset committed pending saved-state write");
+    seq=pmu_request(m,0x74u,0x61u,false,1u,0u);(void)m->bus.read32(m,0u);
+    s5l8920_bus_failure_t failure=m->bus_failure;
+    CHECK(failure.reason && s5l8920_pmu_saved_service(m,seq) &&
+          !memcmp(&failure,&m->bus_failure,sizeof failure),"saved-state service repaired bus failure");
+    return true;
+}
+
 static bool test_pmu_events(s5l8920_t *m) {
     static s5l8920_t before;s5l8920_t empty={0};
     s5l8920_free(m);
@@ -2965,6 +3059,7 @@ int main(void) {
     if (!test_pmu_voltage(&m)) return 1;
     if (!test_pmu_ldo(&m)) return 1;
     test_pmu_pins(&m);
+    if (!test_pmu_saved(&m)) return 1;
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
     CHECK(!m.pmu_boot_configured && !m.pmu_boot_programmed && !m.pmu_boot_initial && !m.pmu_boot_value &&
@@ -2973,6 +3068,8 @@ int main(void) {
           !s5l8920_pmu_voltage_service(&m,1u) && !s5l8920_pmu_voltage_configure(&m,0x23u,0u),"free retained voltage domain");
     CHECK(!m.pmu_ldo.configured && !m.pmu_ldo.programmed &&
           !s5l8920_pmu_ldo_service(&m,1u) && !s5l8920_pmu_ldo_configure(&m,0x17u,0u),"free retained LDO domain");
+    CHECK(!m.pmu_saved.configured && !m.pmu_saved.programmed &&
+          !s5l8920_pmu_saved_service(&m,1u) && !s5l8920_pmu_saved_configure(&m,0x61u,0u),"free retained saved-state domain");
     CHECK(!m.pmu_adc.programmed && !m.pmu_adc.result_valid && !m.pmu_adc.sequence &&
           !s5l8920_pmu_adc_service(&m,1u) && !s5l8920_pmu_adc_complete(&m,1u,0u,0u),"free retained ADC state");
     CHECK(!m.pmu_config.control_programmed && !m.pmu_config.selectors_programmed && !m.pmu_config.pins_programmed &&

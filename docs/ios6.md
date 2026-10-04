@@ -18,6 +18,38 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
+## D1755 saved software state
+
+Registers `0x60..0x63` now retain the matching firmware's saved flags, boot
+stage, counters and reason byte. They support exact byte reads/writes at
+I2C0/address `0x74`. Each read requires an explicit initial byte or completed
+guest programming. Initial configuration is immutable and idempotent; it
+cannot reload guest writes or replace a previously unconfigured written byte.
+Functional SoC reset retains these external PMU bytes; free/init clears them.
+There are no inferred initial values, automatic counters, watchdog expiry or
+reset effects. The separate `0x6f` endpoint is unchanged; reset control `0x5f`,
+RTC bytes `0x64..0x67`, scratch `0x6d` and GP bytes `0x70..0x73` are outside
+this service. Unsupported requests remain pending without changing state.
+
+Original LLB helpers `0x84001c70/0x84001ce0` passed 6,190 isolated calls
+against the model with actual CPU I2C exceptions. These cover all byte values,
+unknown reads, cache hits/misses, slot 1/9 aliasing at `0x60`, invalid indices,
+withheld responses and NACK/cache divergence. A rejected write leaves device
+state unchanged even though the original unverified helper returns zero and
+updates its cache optimistically. The prior implementation leaves all eight
+tested read/write requests to these four bytes pending.
+
+Eighteen connected original-reset scenarios passed. The real caller at
+`0x84000894` reads the previous stage from `0x61`, copies nonzero reasons to
+`0x63`, and updates a saturating nibble counter in `0x62`; equal cached results
+skip the write. Later code stores stage `0x10` and reads flags from `0x60`.
+With all four initial bytes explicitly zero, execution reaches a checked
+unmapped write of zero to physical `0x84300014`, PC `0x84009892`, after
+1,192,351 steps. The matching device tree places that address in the
+audio-complex/AMC range. Missing initial bytes or withheld transactions remain
+pending at their specific requests. These results do not establish audio
+behavior, bootloader/kernel handoff, physical saved-state defaults or full boot.
+
 ## D1755 LDO and pin configuration
 
 Exact byte transactions now retain eleven LDO settings at `0x17..0x21`,
@@ -56,7 +88,7 @@ Connected original LLB reset execution now completes all fourteen later
 write/readback checks through production LDO and pin services, after the
 earlier regulator sequence. With explicit boot-state `0x80`, zero trim field
 and initial control `0x23=0`, the complete PMU initializer returns at
-1,162,251 steps. The next pending request reads PMU register `0x61`.
+1,162,251 steps, followed by the saved-state operations described above.
 This progression uses unchanged firmware and actual CPU I2C exceptions.
 It does not establish a bootloader/kernel handoff, physical PMU behavior or
 complete boot. The prepared kernel's separate GPIO pin 0 stop is unchanged.

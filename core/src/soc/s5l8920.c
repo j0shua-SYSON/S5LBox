@@ -799,6 +799,33 @@ bool s5l8920_pmu_boot_state_service(s5l8920_t *m,uint64_t sequence) {
     return s5l8920_i2c_complete(m,0u,sequence,true,&m->pmu_boot_value,1u);
 }
 
+bool s5l8920_pmu_saved_configure(s5l8920_t *m,unsigned reg,uint8_t initial) {
+    if (!m || !m->ram || reg<S5L8920_PMU_SAVED_REGISTER ||
+        reg>=S5L8920_PMU_SAVED_REGISTER+S5L8920_PMU_SAVED_COUNT) return false;
+    unsigned index=reg-S5L8920_PMU_SAVED_REGISTER;uint8_t bit=(uint8_t)(1u<<index);
+    s5l8920_pmu_saved_t *s=&m->pmu_saved;
+    if (s->configured&bit) return s->initial[index]==initial;
+    if (s->programmed&bit) return false;
+    s->initial[index]=s->value[index]=initial;s->configured|=bit;
+    return true;
+}
+
+bool s5l8920_pmu_saved_service(s5l8920_t *m,uint64_t sequence) {
+    if (!m || !m->ram) return false;
+    const s5l8920_i2c_t *i=&m->i2c[0];
+    if (!i->active || i->sequence!=sequence || i->address!=0x74u || i->length!=1u ||
+        i->subaddress<S5L8920_PMU_SAVED_REGISTER ||
+        i->subaddress>=S5L8920_PMU_SAVED_REGISTER+S5L8920_PMU_SAVED_COUNT) return false;
+    unsigned index=i->subaddress-S5L8920_PMU_SAVED_REGISTER;uint8_t bit=(uint8_t)(1u<<index);
+    s5l8920_pmu_saved_t *s=&m->pmu_saved;
+    if (!i->write) return ((s->configured|s->programmed)&bit)!=0u &&
+        s5l8920_i2c_complete(m,0u,sequence,true,s->value+index,1u);
+    uint8_t value=i->tx[0];
+    if (!s5l8920_i2c_complete(m,0u,sequence,true,NULL,0u)) return false;
+    s->value[index]=value;s->programmed|=bit;
+    return true;
+}
+
 static unsigned pmu_voltage_index(unsigned reg) {
     if (reg==0x14u) return 0u;
     if (reg==0x23u) return 1u;
