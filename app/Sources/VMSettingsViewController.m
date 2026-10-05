@@ -855,23 +855,13 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
 
 - (void)confirmGuestInstall {
     NSString *message = self.guestInstallRequest
-        ? @"For a new install, this downloads exact, pinned iPhone OS 3 "
-           @"packages from the publisher's archive and replaces only the "
-           @"selected virtual machine's writable disk. S5LBox does not bundle "
-           @"the packages. A compatible older Cydia machine is instead copied "
-           @"to expand it to 2 GiB and, when needed, repair the exact known "
-           @"legacy Cydia executable permissions without redownloading or "
-           @"deleting guest data. Unexpected files are refused.\n\n"
-           @"Inside the emulated guest, executable code-signature enforcement "
-           @"is disabled so Cydia and tweaks can run; APT repository signature "
-           @"verification remains enabled. Cydia is installed on the next cold "
-           @"boot. It does not modify or jailbreak the host iPhone. Historical "
-           @"snapshots of that machine must be removed first. S5LBox will "
-           @"shut down the selected guest before changing its disk. Keep "
-           @"the app open until this finishes. Continue?"
-        : @"A running virtual machine cannot have its disk replaced safely. "
-           @"Close this Settings screen, leave the machine with Back, then "
-           @"open Settings from the Machines screen.";
+        ? @"Install Cydia in the selected virtual machine. This does not "
+           @"jailbreak your iPhone.\n\n"
+           @"The guest shuts down automatically. A new install replaces its "
+           @"disk; compatible upgrades preserve data. Back up important "
+           @"guest files first."
+        : @"Return to Machines using Back, then open Settings > Jailbreak. "
+           @"The guest must be shut down before its disk can be changed.";
     UIAlertController *alert = [UIAlertController
         alertControllerWithTitle:@"Jailbreak the guest?"
                          message:message
