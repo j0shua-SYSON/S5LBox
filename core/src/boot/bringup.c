@@ -449,6 +449,8 @@ static arm_svc_result_t bringup_svc_handler(void *context, arm_cpu_t *cpu,
     if (result != ARM_SVC_UNHANDLED) return result;
     result = md_raw_bridge_handle_svc(&md->raw, cpu, pc, encoding);
     if (result != ARM_SVC_UNHANDLED) return result;
+    result = md_geometry_bridge_svc(&md->geometry, cpu, pc, encoding);
+    if (result != ARM_SVC_UNHANDLED) return result;
     return guest_packet_bridge_svc(&md->packet, cpu, pc, encoding);
 }
 
@@ -757,7 +759,9 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
         media_size = request->root_media->size;
         uint64_t token_end;
         if (media_size == 0u || media_size > S5L_BRINGUP_MD_MAX_SIZE ||
-            media_size > UINT32_MAX || (media_size & 0xfffu) != 0u ||
+            (media_size > MD_GEOMETRY_BOOTSTRAP_SIZE &&
+             !request->md_geometry_sites.register_pc) ||
+            (media_size & 0xfffu) != 0u ||
             !request->root_media->read_at || !request->root_media->write_at ||
             !add_u64(S5L_BRINGUP_MD_TOKEN_BASE, media_size, &token_end))
             return result_fail(result, S5L_BRINGUP_ROOT_MEDIA_INVALID,
@@ -768,7 +772,8 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
                                (unsigned)S5L_BRINGUP_MD_TOKEN_BASE);
         result->root_media_size = media_size;
         result->root_dt_address = (uint32_t)S5L_BRINGUP_MD_TOKEN_BASE;
-        result->root_dt_size    = (uint32_t)media_size;
+        result->root_dt_size = media_size > MD_GEOMETRY_BOOTSTRAP_SIZE ?
+            MD_GEOMETRY_BOOTSTRAP_SIZE : (uint32_t)media_size;
     }
 
     /* --- 3. load the kernel's segments ------------------------------------ */
@@ -1136,6 +1141,14 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
 
         md_bridge_init(&md->strategy, &strategy);
         md_raw_bridge_init(&md->raw, &raw);
+        md->geometry = (md_geometry_bridge_t){
+            .sites = request->md_geometry_sites, .strategy = &md->strategy
+        };
+        if (request->md_geometry_sites.register_pc &&
+            !md_geometry_bridge_valid(&md->geometry))
+            return result_fail(result, S5L_BRINGUP_ROOT_BRIDGE_REFUSED,
+                               S5L_BRINGUP_STAGE_ROOT_BRIDGE,
+                               "invalid extended memory-disk geometry sites");
         md->packet = (guest_packet_bridge_t){
             .sites = request->packet_sites,
             .ram = machine->ram,

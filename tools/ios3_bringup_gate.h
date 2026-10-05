@@ -51,7 +51,9 @@ bool ios3_bringup_gate(void *context,
 /*
  * Fill in `request`'s gate hook and the four 7E18 SVC site addresses in one
  * place, so a frontend cannot arm the bridges against a kernel patched
- * somewhere else. `gate_report` may be NULL.
+ * somewhere else. `gate_report` may be NULL. Set root_media BEFORE this call:
+ * its size selects the legacy or extended memory-disk manifest. Reconfigure
+ * if the medium changes; do not change its geometry while a guest runs.
  */
 void ios3_bringup_gate_configure(s5l_bringup_request_t *request,
                                  ios3_bringup_gate_report_t *gate_report);

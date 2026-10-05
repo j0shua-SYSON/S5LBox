@@ -84,6 +84,32 @@ static const guest_patch_entry_t kernel_patches[] = {
         .length = 4u,
         .expected = {0x5eu, 0x01u, 0x00u, 0xeau},
         .replacement = {0xf2u, 0x00u, 0x00u, 0xefu}
+    },
+    {
+        .virtual_address = IOS3_KERNEL_PATCH_MD_REGISTER_VA,
+        .length = 2u, .expected = {0x12u, 0x0bu},
+        .replacement = {0xe5u, 0xdfu}
+    },
+    {
+        .virtual_address = IOS3_KERNEL_PATCH_MD_BOUNDS_VA,
+        .length = 2u, .expected = {0xabu, 0x68u},
+        .replacement = {0xe6u, 0xdfu}
+    },
+    {
+        /* Preserve the high offset word already calculated by __muldi3. */
+        .virtual_address = IOS3_KERNEL_PATCH_MD_HIGH_VA,
+        .length = 2u, .expected = {0x00u, 0x23u},
+        .replacement = {0x05u, 0x9bu} /* ldr r3,[sp,#0x14] */
+    },
+    {
+        .virtual_address = IOS3_KERNEL_PATCH_MD_COUNT64_VA,
+        .length = 2u, .expected = {0x00u, 0x03u},
+        .replacement = {0xe7u, 0xdfu}
+    },
+    {
+        .virtual_address = IOS3_KERNEL_PATCH_MD_COUNT32_VA,
+        .length = 2u, .expected = {0x00u, 0x03u},
+        .replacement = {0xe8u, 0xdfu}
     }
 };
 
@@ -527,7 +553,9 @@ ios3_kernel_patch_status_t ios3_kernel_patch_apply(
     {
         size_t site_index;
         for (site_index = 0u;
-             site_index < sizeof kernel_patches / sizeof kernel_patches[0];
+             site_index < (saved_request.extended_md_geometry ?
+                 sizeof kernel_patches / sizeof kernel_patches[0] :
+                 IOS3_KERNEL_PATCH_SITE_MD_REGISTER);
              site_index++) {
             const guest_patch_entry_t *entry = &kernel_patches[site_index];
             uint32_t site_byte;
@@ -622,7 +650,9 @@ ios3_kernel_patch_status_t ios3_kernel_patch_apply(
         .ram_base = saved_request.ram_base,
         .virt_base = saved_request.virt_base,
         .entries = kernel_patches,
-        .entry_count = sizeof kernel_patches / sizeof kernel_patches[0]
+        .entry_count = saved_request.extended_md_geometry ?
+            sizeof kernel_patches / sizeof kernel_patches[0] :
+            IOS3_KERNEL_PATCH_SITE_MD_REGISTER
     };
     patch_status = guest_patch_apply(&manifest, &patch_report);
     if (patch_status != GUEST_PATCH_STATUS_OK) {
@@ -726,6 +756,11 @@ const char *ios3_kernel_patch_site_string(uint32_t site) {
     case IOS3_KERNEL_PATCH_SITE_PACKET_RX: return "packet receive handoff";
     case IOS3_KERNEL_PATCH_SITE_PACKET_TX: return "packet transmit handoff";
     case IOS3_KERNEL_PATCH_SITE_PACKET_BATCH: return "packet receive batch";
+    case IOS3_KERNEL_PATCH_SITE_MD_REGISTER: return "mdev capacity registration";
+    case IOS3_KERNEL_PATCH_SITE_MD_BOUNDS: return "mdev 64-bit bounds";
+    case IOS3_KERNEL_PATCH_SITE_MD_HIGH: return "mdev high offset";
+    case IOS3_KERNEL_PATCH_SITE_MD_COUNT64: return "mdev block count 64";
+    case IOS3_KERNEL_PATCH_SITE_MD_COUNT32: return "mdev block count 32";
     case IOS3_KERNEL_PATCH_NO_SITE: return "none";
     default: return "unknown kernel patch site";
     }

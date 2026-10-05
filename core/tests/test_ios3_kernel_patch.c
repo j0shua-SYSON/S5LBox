@@ -102,6 +102,26 @@ static const expected_site_t expected_sites[] = {
         IOS3_KERNEL_PATCH_PACKET_BATCH_VA, 4u,
         {0x5eu, 0x01u, 0x00u, 0xeau}, {0xf2u, 0x00u, 0x00u, 0xefu},
         IOS3_KERNEL_PATCH_SITE_PACKET_BATCH
+    },
+    {
+        IOS3_KERNEL_PATCH_MD_REGISTER_VA, 2u,
+        {0x12u,0x0bu}, {0xe5u,0xdfu}, IOS3_KERNEL_PATCH_SITE_MD_REGISTER
+    },
+    {
+        IOS3_KERNEL_PATCH_MD_BOUNDS_VA, 2u,
+        {0xabu,0x68u}, {0xe6u,0xdfu}, IOS3_KERNEL_PATCH_SITE_MD_BOUNDS
+    },
+    {
+        IOS3_KERNEL_PATCH_MD_HIGH_VA, 2u,
+        {0x00u,0x23u}, {0x05u,0x9bu}, IOS3_KERNEL_PATCH_SITE_MD_HIGH
+    },
+    {
+        IOS3_KERNEL_PATCH_MD_COUNT64_VA, 2u,
+        {0x00u,0x03u}, {0xe7u,0xdfu}, IOS3_KERNEL_PATCH_SITE_MD_COUNT64
+    },
+    {
+        IOS3_KERNEL_PATCH_MD_COUNT32_VA, 2u,
+        {0x00u,0x03u}, {0xe8u,0xdfu}, IOS3_KERNEL_PATCH_SITE_MD_COUNT32
     }
 };
 
@@ -249,7 +269,8 @@ static void bind_fixture(fixture_t *fixture) {
         .ram = fixture->ram,
         .ram_size = IOS3_KERNEL_PATCH_MIN_RAM_SIZE,
         .ram_base = IOS3_KERNEL_PATCH_RAM_BASE,
-        .virt_base = IOS3_KERNEL_PATCH_VIRT_BASE
+        .virt_base = IOS3_KERNEL_PATCH_VIRT_BASE,
+        .extended_md_geometry = true
     };
 }
 
@@ -1032,6 +1053,20 @@ static void test_private_kernel_positive(fixture_t *fixture,
           report.site == IOS3_KERNEL_PATCH_SITE_IORTC &&
           report.guest_patch_status == GUEST_PATCH_STATUS_EXPECTED_MISMATCH,
           "second application did not fail on the full IORTC instruction");
+
+    /* Ordinary media and the desktop harness retain their original manifest. */
+    bind_fixture(fixture);
+    fixture->request.extended_md_geometry = false;
+    CHECK(ios3_kernel_patch_apply(&fixture->request, &report) ==
+              IOS3_KERNEL_PATCH_STATUS_OK, "legacy manifest was rejected");
+    for (site_index = 0; site_index < sizeof expected_sites / sizeof expected_sites[0];
+         ++site_index) {
+        const expected_site_t *site = &expected_sites[site_index];
+        CHECK(memcmp(fixture->ram + ram_offset_for_va(site->va),
+                     site_index < IOS3_KERNEL_PATCH_SITE_MD_REGISTER ?
+                         site->replacement : site->expected, site->length) == 0,
+              "legacy manifest changed optional geometry site %u", (unsigned)site_index);
+    }
 }
 
 static void test_status_and_site_strings(void) {
@@ -1051,7 +1086,7 @@ static void test_status_and_site_strings(void) {
                  "unknown iOS 3 kernel patch status") == 0,
           "unknown status string changed");
     for (site = IOS3_KERNEL_PATCH_SITE_IORTC;
-         site <= IOS3_KERNEL_PATCH_SITE_RAW_WATCHER; site++) {
+         site <= IOS3_KERNEL_PATCH_SITE_MD_COUNT32; site++) {
         const char *name = ios3_kernel_patch_site_string(site);
         CHECK(name != NULL && name[0] != '\0',
               "site %u has no stable name", (unsigned)site);

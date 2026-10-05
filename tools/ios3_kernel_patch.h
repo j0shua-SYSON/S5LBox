@@ -34,6 +34,11 @@
 #define IOS3_KERNEL_PATCH_PACKET_RX_VA UINT32_C(0xc0593068)
 #define IOS3_KERNEL_PATCH_PACKET_TX_VA UINT32_C(0xc0593af8)
 #define IOS3_KERNEL_PATCH_PACKET_BATCH_VA UINT32_C(0xc05930b0)
+#define IOS3_KERNEL_PATCH_MD_REGISTER_VA UINT32_C(0xc01a1b66)
+#define IOS3_KERNEL_PATCH_MD_BOUNDS_VA UINT32_C(0xc0074088)
+#define IOS3_KERNEL_PATCH_MD_HIGH_VA UINT32_C(0xc00740e2)
+#define IOS3_KERNEL_PATCH_MD_COUNT64_VA UINT32_C(0xc0073eb4)
+#define IOS3_KERNEL_PATCH_MD_COUNT32_VA UINT32_C(0xc0073f22)
 #define IOS3_KERNEL_MBUF_FREE_VA UINT32_C(0xc012d374)
 #define IOS3_KERNEL_PACKET_TX_DONE_VA UINT32_C(0xc0593bc0)
 #define IOS3_KERNEL_PACKET_RX_DROP_VA UINT32_C(0xc05930a8)
@@ -64,7 +69,12 @@ typedef enum {
     IOS3_KERNEL_PATCH_SITE_RAW_WATCHER,
     IOS3_KERNEL_PATCH_SITE_PACKET_RX,
     IOS3_KERNEL_PATCH_SITE_PACKET_TX,
-    IOS3_KERNEL_PATCH_SITE_PACKET_BATCH
+    IOS3_KERNEL_PATCH_SITE_PACKET_BATCH,
+    IOS3_KERNEL_PATCH_SITE_MD_REGISTER,
+    IOS3_KERNEL_PATCH_SITE_MD_BOUNDS,
+    IOS3_KERNEL_PATCH_SITE_MD_HIGH,
+    IOS3_KERNEL_PATCH_SITE_MD_COUNT64,
+    IOS3_KERNEL_PATCH_SITE_MD_COUNT32
 } ios3_kernel_patch_site_t;
 
 typedef enum {
@@ -124,6 +134,9 @@ typedef struct {
     size_t ram_size;
     uint64_t ram_base;
     uint32_t virt_base;
+    /* Opt-in only with an installed md_geometry_bridge. Legacy media and
+     * desktop callers retain the original eight-site patch manifest. */
+    bool extended_md_geometry;
 } ios3_kernel_patch_request_t;
 
 /*
@@ -155,9 +168,9 @@ typedef struct {
 
 /*
  * Validate the complete build identity, exact segment topology, loaded file
- * bytes and zero-fill tails, fixed mapping, and every expected byte at all five
- * patch sites (including the raw-mdev entry/completion SVC pair) before
- * applying any replacement.
+ * bytes and zero-fill tails, fixed mapping, and every expected byte at the
+ * eight base patch sites (plus five optional extended-geometry sites) before
+ * applying any replacement. The raw-mdev entry/completion pair is one site.
  * Any rejection leaves the kernel file and guest RAM unchanged. The
  * implementation performs no allocation.
  */
