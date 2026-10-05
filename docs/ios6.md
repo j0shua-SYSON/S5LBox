@@ -20,6 +20,50 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
+## Display clock setup
+
+The prepared kernel now reaches AppleSamsungMIPIDSI, stopping on its first
+register-snapshot read at physical `0x89000000`, PC `0x8087ad7e`, after
+282,534,650 retired instructions. That run selects one compass at `0x1e` and
+an absent responder at `0x1f`; the original probe rejects the absent address.
+It transfers both explicitly empty NVRAM banks, without proving final bank
+selection or completion of the NVRAM driver's start method. The earlier
+prepared boot and clock assumptions still apply.
+
+An independent DSIM clock component implements the idle clock-control fields,
+PLL band/P/M/S programming, a system-clock stability timer, and exact rational
+PLL output frequency. It requires explicit initial idle observations and a
+continuously present reference clock. No board reset values or clock routing
+are inferred. Polling cannot advance the timer. Live PLL retuning, non-idle
+output-clock requests, and unsupported registers refuse without state changes.
+After enabling the PLL, timer-register readback remains unavailable: the
+evidence does not distinguish a live counter from a reload latch.
+
+The register fields and timer behavior are corroborated by Samsung's
+[S5PC100 manual, sections 3.2.20-21](https://www.manualslib.com/manual/1231975/Samsung-S5pc100.html?page=788)
+and its [P/M/S equation](https://www.manualslib.com/manual/1231975/Samsung-S5pc100.html?page=789),
+and the matching target initialization sequence. The manual describes related
+IP; its analog operating limits and reset values are not asserted for S5L8920.
+The component models digital configuration and timer behavior, not analog lock
+acquisition or reference-clock loss.
+
+The unchanged iBoot prefix `0x4ff095b4..0x4ff09676`, including its original
+clock-gate helper, programs `CLKCTRL=10000004`, `PLLTMR=300000` and
+`PLLCTRL=06831572`. It uses the original display table at `0x4ff2b244`:
+320x480, 24-bit color, P=12, M=343, S=1. With an explicitly supplied 24MHz
+reference, the rational output is 343MHz. The table selects one data lane;
+the later initializer first enables two lanes and then narrows to that value.
+The kernel tree's two-lane property is not substituted for this firmware input.
+
+An isolated firmware test starts after the logger call, supplies idle state,
+and advances explicit system cycles per retired instruction. With no cycles,
+the original PLL polling remains pending. With cycles, it reaches the next
+unsupported write: `SWRST=1` at `0x89000004`. No guest instruction or call is
+replaced. This is a prefix test, not the complete initializer. Software reset,
+lane transitions, FIFO/packet handling, panel support and the kernel's complete
+register snapshot remain unimplemented. The component is not yet attached to
+the board bus, and it does not move the full-kernel stop or render a display.
+
 ## Accelerometer configuration
 
 The matching tree identifies `i2c0/accelerometer` at address `0x1d` with
