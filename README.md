@@ -1,429 +1,100 @@
-<div align="center">
-
 # S5LBox
 
-### Project goal: boot **real iPhone OS 3** — Apple's actual kernel, `launchd`, and SpringBoard — inside an app on a modern iPhone. **No jailbreak required** — see *Requirements*.
+Run real **iPhone OS 3.1.3** inside an app on a modern iPhone.
 
-*A from-scratch emulator of the 2007 iPhone's chip, written in portable C.*
+S5LBox emulates the S5L8900 hardware used by the iPhone 3G. It runs Apple's
+actual operating system—not a recreation of its interface. You supply the
+firmware; no Apple firmware or decryption keys are included.
 
 [![core-tests](https://github.com/j0shua-SYSON/S5LBox/actions/workflows/core-tests.yml/badge.svg)](https://github.com/j0shua-SYSON/S5LBox/actions/workflows/core-tests.yml)
 [![ios-build](https://github.com/j0shua-SYSON/S5LBox/actions/workflows/ios-build.yml/badge.svg)](https://github.com/j0shua-SYSON/S5LBox/actions/workflows/ios-build.yml)
-[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![platform](https://img.shields.io/badge/host-iOS%20·%20arm64%20·%20no%20jailbreak-black)
-![guest](https://img.shields.io/badge/guest-iPhone%20OS%203.1.3%20·%20S5L8900-lightgrey)
 
-</div>
+## Status
 
----
+An initial release candidate is being prepared. This is still experimental.
 
-S5LBox does not reimplement iPhone OS or fake its apps. It emulates the
-**hardware** of the original iPhone — the Samsung **S5L8900** chip and its ARMv6
-processor — in software, then runs Apple's own unmodified operating system on
-top of that model. You supply the firmware; none is included here. To the
-maintainers' knowledge no publicly documented open-source emulator has booted
-iPhone OS 3.x to a home screen (the nearest prior art reaches 1.1 and 2.1.1 on
-emulated iPod touch hardware) — positioning, not proof that no private
-implementation exists.
+- Boots the real guest OS, including its lock screen, home screen and apps.
+- Supports touch, physical-button controls and saving/resuming the last session.
+- Includes optional guest networking and a Cydia installation flow.
+- Uses a build-time-generated ARM64 engine with interpreter fallback. No runtime
+  code generation or host jailbreak is required.
 
-## What this is, and what it is not
+Animations, keyboard input and heavier tasks can still be slow. Original-device
+responsiveness and consistent 30 fps are **not** established. Audio playback is
+not available, MBX graphics remain experimental, and not every app or tweak works.
+Old websites and package repositories may also be unavailable or incompatible.
 
-Read this before anything else on this page.
+## Get started
 
-**What is real:** your own unmodified iPhone OS 3.1.3 (7E18) firmware executes.
-Apple's real kernel (XNU 1357.5.30) boots, Apple's own drivers start, the real
-root filesystem mounts, and the real background programs run: `launchd`,
-`securityd`, `installd`, `mDNSResponder`, `fairplayd`, `itunesstored`,
-`lockbot`, `CommCenter`, SpringBoard. The clearest evidence that this is
-genuinely Apple's stack and not a reimplementation of it: when SpringBoard
-crashed, the guest's **own** crash reporter wrote real crash reports into its
-own filesystem, and that is how that blocker was diagnosed. The project
-ships no Apple firmware and never modifies the files you supply.
+You need an ARM64 iPhone running **iOS 13 or later**, your own supported
+**iPhone 3G / iPhone1,2, iPhone OS 3.1.3 (7E18)** firmware and its required keys.
+The deployment target is not a guarantee that every device/version has been
+tested. Keep several gigabytes of storage free for import, guest disks and
+temporary installation copies.
 
-**What it reaches:** as of 2026-07-30 a host-delivered gesture **slides the lock
-screen open and reaches the home screen** — icons, the dock, and Apple's own
-first-run tip — composited by Apple's software renderer onto the emulated panel.
+1. Obtain `S5LBox.ipa` from a successful
+   [ios-build workflow run](https://github.com/j0shua-SYSON/S5LBox/actions/workflows/ios-build.yml)
+   for the branch you intend to test. The Actions artifact is only ad-hoc signed:
+   **re-sign it with your own valid provisioning profile before installing on
+   stock iOS**.
+2. Open S5LBox. From **Machines**, tap the gear and choose **Import from an IPSW**.
+   Select your firmware and provide the keys requested by the importer.
+3. Keep **Graphics for new machines** set to **CPU software** for the default
+   configuration. Return to Machines and open a machine. Initial disk preparation
+   and a cold boot take longer than reopening a saved session.
+4. Use the app's **Back** button to save and return to Machines. Wait for that to
+   finish before force-quitting or copying machine files.
 
-Every frame on this page was drawn by the guest's own SpringBoard through
-Apple's CPU compositor and scanned out through the emulated display
-controller. Nothing in any of them is drawn by the host.
+Without supported firmware, the app runs a built-in test program—not iPhone OS.
 
-<div align="center">
+### Networking and Cydia
 
-<img src="docs/images/run85-lock-screen.png" width="240" alt="iPhone OS 3.1.3's lock screen: status bar, clock, Earth wallpaper and slide to unlock, composited by SpringBoard.">
+Networking is opt-in. Before a new machine's first open, enable **Guest
+networking (PPP over uart4)** under **Settings → Developer Mode**, and leave
+**Route guest traffic to the internet** enabled. Provisioning settings do not
+retrofit an existing disk.
 
-*run85, instruction 3.5e9 — the lock screen. 273,206 of 460,800 framebuffer
-bytes non-zero, 92,145 non-black pixels in 44,087 colours. Reached by giving
-`/vram` room for a second surface; with one, the same boot drew 1,659.*
+To install Cydia, prepare a machine first, return to Machines, then open
+**Settings → Jailbreak** and follow its prompts. This affects the **guest only**,
+not your host iPhone. Packages are downloaded separately; they are not bundled.
+Back up guest data first: a new installation replaces the selected guest disk,
+while supported upgrades use a separate migration path.
 
-</div>
+### Keep your data safe
 
-<div align="center">
+Each machine has its own writable disk. **Duplicate copies configuration, not
+guest data.** Deleting a machine also deletes its files. Cydia machines use a
+2 GiB guest volume, and installation/migration backups can require additional
+host storage. Copy a stopped machine's complete folder from
+**Files → On My iPhone → S5LBox → Machines** before experimenting; do not mix a
+saved state from one moment with a disk from another. Named snapshots are not
+yet a supported replacement for this backup.
 
-<img src="docs/images/r194-home-screen-icons.png" width="240" alt="iPhone OS 3.1.3's home screen: Messages, Calendar, Photos, Camera, YouTube, Stocks, Maps, Weather, Voice Memos, Notes, Clock, Calculator, Settings, iTunes, App Store, and the dock.">
+## Build and test
 
-*r194 — the home screen, reached by a slide-to-unlock and then a tap on
-*Dismiss*, both delivered by the emulator. Every icon composited by Apple's own
-software renderer. Its control r195 — same build, same instruction count, no
-tap — still has the dialog on screen.*
+The portable core needs a C compiler and CMake:
 
-</div>
-
-**Touch works, end to end.** The emulated Z2 digitizer has no flash, so Apple's
-driver downloads its 54,156-byte firmware over the undocumented HBPP protocol on
-every boot — and says so itself: *"downloaded 54156 bytes of firmware data
-("0x0049.bin") in 106ms"*. A gesture the host then injects is read by
-`AppleMultitouchZ2SPI`, normalised by MultitouchSupport, turned into an
-`IOHIDEvent` by Apple's MultitouchHID plugin, and delivered to SpringBoard,
-where it **drags the unlock knob and opens the phone**. The knob tracks the
-finger: measured at centre 57.5, 80.5 and 156.5 as the contact advances.
-
-**A tap works too, and it has a control.** r194 taps *Dismiss* on Apple's
-first-run dialog and the dialog goes. r195 is the same build at the same
-instruction count with no tap, and the dialog is still on screen. The two runs
-are deterministic apart from that one contact, so the tap is what dismissed it.
-
-**What is not real, and this is the honest remainder:**
-
-- **Two fingers reach userspace; no two-finger gesture has moved anything yet.**
-  A pinch delivered 26 frames carrying **two contacts each**, and Apple's
-  `_mt_FillMTContactDirectFromBinary` — called once per contact — was entered
-  exactly 78 times: 26 for the one-finger unlock plus 52 for the pinch. So
-  simultaneous contacts do traverse the device, the driver and the normaliser.
-  What has *not* been shown is an app responding to one, because a pinch on the
-  home screen has nothing to zoom.
-- **No sound has been produced.** Apple's audio drivers start
-  (`AppleWM8991Audio::start`, both I²S controllers) and **zero** words have ever
-  reached the transmit FIFO.
-- **No packet has been carried.** The PPP link comes up — `IPCP Opened`,
-  `10.0.2.15` — and every NAT counter is still zero.
-- **30 fps is not established.** User-reported foreground navigation can still
-  fall to roughly **0–4 fps** and visibly stall. In the newest exact physical-A9
-  Settings replay, the marker-free compact engine's three control arms ended at
-  15, 9 and 13 endpoint FPS, with only 1.825–3.262 changed scanouts/s and a
-  2.207–3.233 second maximum changed-pixel gap. The repeated-window cache then
-  removed about 42% of C fast refills but slowed the same instruction interval
-  by 9.5% on average and worsened the median changed-pixel gap, so it remains
-  disabled. These counters diagnose the foreground pipeline; they do not prove
-  that iOS displayed every submitted frame. No arm reached a 30-fps acceptance
-  result. See *Speed* and [`docs/hotpath.md`](docs/hotpath.md).
-
-Two smaller things the picture shows honestly. The clock reads 4:00 on
-31 December because the real-time clock answers with a placeholder nobody has
-connected to anything. "Searching…" is the status bar correctly reporting no
-baseband, which is one of five pieces of hardware deliberately hidden from the
-guest. The default also hides the graphics chip and uses Apple's software
-renderer; an experimental MBX model now completes the measured live workload,
-but has not passed final cold-boot or 30 fps acceptance. The audio hardware is
-modelled, but nothing has ever played through it — see the table below.
-
-<div align="center">
-
-<img src="docs/images/run59-first-frame.png" width="240" alt="The first frame this emulator ever drew: iPhone OS 3.1.3's activation screen, composited by SpringBoard.">
-
-*run59, instruction 4.97e9 — the first frame. 14,264,987 changed scanout
-bytes, 97,510 of 460,800 framebuffer bytes non-zero, against 384 in every
-earlier run. Reached by giving `/vram` a real address; with `reg = {0,0}`
-userspace received the framebuffer read-only and faulted on its first store.*
-
-</div>
-
-| | |
-|---|---|
-| **Real Apple software** | Your own unmodified 3.1.3 (7E18) firmware: the XNU 1357.5.30 kernel, Apple's own drivers, the real root filesystem, and the real background programs listed above. No Apple firmware is shipped, and the files you supply are never modified on disk. |
-| **CPU** | ARM, Thumb and VFPv2 floating point — over the code the boot has actually reached, not the whole architecture. The ARMv6 rules for unaligned memory access are honoured, memory translation enforces no-execute pages, and the system-control coprocessor is modelled. Runs are bit-exact reproducible. |
-| **Hardware modelled** | Serial ports, timers, both interrupt controllers, the GPIO controller, display controller, SPI, the multitouch controller, the power-management chip and its I2C bus, the USB controller's configuration registers, and an experimental MBX reset/ring/2D/3D path. The MBX path is substantial but not yet the accepted default. |
-| **Touch: works, one finger** | The Z2 is modelled on SPI and **bootloaded exactly as the real part is** — it has no flash, so its 54,156-byte firmware is downloaded on every boot over Apple's HBPP protocol, which had to be reverse-engineered before anything could work. Apple's driver confirms it in its own words: *"downloaded 54156 bytes of firmware data ("0x0049.bin") in 106ms"*. The part then leaves the bootloader, answers interrogation, and streams touch reports. A host gesture reaches SpringBoard and **completes a slide-to-unlock**. Measured through the whole stack: surface bounds `-75..4656` and `-75..7275` read out of the running guest and matching the model exactly, reports paced at 16.000 ms (62.5 Hz), and the knob tracking the contact linearly. A controlled tap dismisses Apple's first-run dialog. Two simultaneous contacts also reach userspace — a pinch's 26 two-contact frames entered Apple's per-contact normaliser exactly 52 times — but no two-finger gesture has yet produced a visible response. |
-| **Not modelled as usable devices** | No cellular radio, Wi-Fi, Bluetooth, camera or accelerometer. MBX is no longer correctly described as absent from the codebase: its experimental model completes the current measured command families, but the default machine still hides it pending final acceptance. |
-| **Audio: modelled, never heard** | The WM8991 codec, both I²S controllers and the PL080 DMA engine are modelled and unit-tested, and Apple's `AppleWM8991Audio` starts against them. That is the whole of it: **zero** words have ever reached the transmit FIFO and the DMA has never been enabled, because nothing asks a locked phone to play anything. There is also no host playback path, so even a guest that produced samples would not reach a speaker yet. |
-| **Networking: a temporary substitution** | The desktop harness now terminates the guest's own stock `pppd` over emulated uart4: LCP and IPCP reach `Opened`, and the guest receives `10.0.2.15`. That is a real advance over the earlier one-way Configure-Request, but **no guest IP packet has crossed the link** and every NAT traffic counter remains zero. The iOS app does not wire the host PPP/NAT endpoint at all. A real iPhone 3G used Wi-Fi or its cellular baseband, so PPP-over-uart4 remains an explicit temporary substitute rather than a claim of radio emulation. |
-| **Hidden from the guest by default** | SHA-1 acceleration, cellular/baseband transport and USB are deliberately declared absent by editing only the in-memory device tree, because their rows name measured boot failures. MBX is also hidden in the accepted default, but is now an opt-in experiment rather than an unmodelled register hole. The firmware files on disk are never modified. |
-| **Invented register values** | The USB controller's three configuration registers (`GHWCFG1`/`GHWCFG2`/`GHWCFG4`) hold a legal and sufficient configuration. They are **not** measured from real S5L8900 silicon. This is one of the two exceptions the networking row above draws its line around: three constants, named here so nobody has to discover them, and replaceable the day somebody reads the real part. |
-| **Rendering** | The accepted default sets `CA_ENABLE_MBX2D=0` in a new work image so QuartzCore uses Apple's CPU renderer. The experimental path leaves MBX matched and now completes a live interval of 1,388/1,388 2D jobs and 8,888/8,888 3D renders with zero decoder rejection or recovery. That interval is checkpoint-derived; final cold-boot and 30 fps acceptance are still open, so MBX is not silently promoted to the default. |
-| **Speed** | Not cycle-accurate and not 30 fps. The old monolithic signed graph remains a measured **6.17x A9 regression**, but the current iOS target uses the newer bounded compact signed-static engine with exact interpreter fallback and no runtime code generation. In the newest 7,212 M Settings replay, marker-free cache-OFF controls ended at 15, 9 and 13 endpoint FPS and only 1.825–3.262 changed scanouts/s. Repeated-window caching cut C fast refills about 42% yet slowed every same-instruction pair; mean host interval rose 9.54%, median endpoint FPS fell 13→9, and the median maximum changed-scanout gap worsened 3.105→3.614 seconds, so the cache stays off. Earlier User-mode tick batching and exact-witness work remain real efficiency gains, but neither established visible 30 fps. Historical foreground runs near 20 Minsn/s on an iPhone 6s Plus and 40 Minsn/s on an iPhone 16 Pro Max also remained around 0–2 fps, disproving any simple instruction-rate-to-visible-FPS conversion. App telemetry separates validated scanout changes, immutable-image/layer submissions, build cost, and a device-wide Core Animation gauge; a layer submission is not called a displayed frame. |
-| **Kernel patches** | The kernel is modified in memory as it loads: a real-time-clock timeout is forced to zero, the root-device lookup is redirected to the emulator's fake disk, and hooks are installed so the guest's disk access reaches the host. Applied only after checking a SHA-256 hash and a nine-segment layout check of the exact 7,942,144-byte kernel. |
-| **Storage and saved state** | Not flash memory. The desktop harness creates a fresh writable image per run; the app keeps one per machine. New Cydia guests use a 2 GiB HFSX volume. Older committed guests can be cloned, clean-unmount checked, grown, and independently repaired only when the exact pinned 320,704-byte `Cydia_` identity has the known root:root `0755` legacy tuple; any other bytes or metadata fail closed. Real-image tests proved the added blocks usable beyond the old volume boundary and all durable rename boundaries recover. On one physical iPhone 6s Plus running iOS 15.8.5, real guest shutdown made the volume eligible, both migrations completed, Cydia reorganized, refreshed its manually entered official source, and installed/configured `adv-cmds` 119-6 without `EACCES` or no-space errors. That proves one end-to-end transaction, not general package or upgrade compatibility. Fresh rootfs plans now seed `deb http://apt.saurik.com/cydia/ ./` as root:root `0644`; existing guests are not silently rewritten. Back writes one atomic last-session checkpoint and the next open consumes it once. Ordinary running checkpoints still restore CPU, RAM and the instruction timeline exactly. Full guest shutdown sets `OOCSHDWN.GO_STANDBY`; its saved CPU deliberately loops after quiescing and is not a useful suspend point. The app now validates that checkpoint and its sidecar, preserves the clean work image, discards the powered-off CPU/RAM, and performs a fresh kernel boot. On the same physical iPhone 6s Plus, the exact `9f3d107` artifact cold-booted such a checkpoint to the lock screen, accepted slide-to-unlock, saved the resulting home screen at 3,926.8 M instructions, and reopened it as an exact ordinary restore. The earlier retained-RAM wake experiment did improve PMU/GPIO interrupt fidelity, but it never re-enabled the PMU child or LCD and is not shipped as the recovery claim. The frontend still represents a powered-down guest as running until Back or Power input. Named Take/Open snapshots remain refused because their copy-on-write lifecycle is unfinished. The canonical imported root filesystem is read-only. |
-| **Boot chain** | No secure boot chain is executed. The kernel is loaded directly; the boot ROM, the low-level bootloader and iBoot are not run. Apple's firmware container format has been parsed and an extracted bootloader payload executed, but separately, never as a chain. |
-| **Optional substitution** | On in the accepted software-render default for a newly prepared work image: SpringBoard's launch configuration gains `CA_ENABLE_MBX2D=0`. It is disabled for the experimental MBX configuration. Changing it later does not rewrite an existing machine image. |
-| **Rendering reached, use not** | run59 draws real frames — 14,264,987 changed scanout bytes, 97,510 of 460,800 framebuffer bytes non-zero, against 384 (the pre-guest seed) in every earlier run. What is on screen is the **activation** UI, because that run's guest is unactivated. |
-| **Activation, and the home screen** | Provisioning `ActivationState = FactoryActivated` into the work image clears the lockout. That alone used to leave a boot spinner; with the digitizer bootload finished the guest reaches the lock screen and, given a gesture, the home screen. The historical dead ends behind that sentence — a SpringBoard crash loop, a read-only framebuffer, a stalled HBPP download, and a coordinate theory that turned out to be wrong — are in [`docs/BOOTLOG.md`](docs/BOOTLOG.md). |
-
-> The evidence behind every claim above — what was measured, in which run, and
-> what each result does *not* prove — is in
-> [Quality and validation](docs/QUALITY.md). To pick the project up, start with
-> [the roadmap](docs/ROADMAP.md) for what is done and what is next, and [where the time goes](docs/hotpath.md) for the performance picture.
-> Where a source comment cites a derivation by section number, that section is
-> in [Derivations cited by the source](docs/derivations.md).
-
-## Current status
-
-Milestones 0 through 4 are done: the build and test pipeline runs in CI; the
-emulated chip runs bare-metal code and prints over its serial port; Apple's
-firmware containers parse and a real bootloader payload executes; and the real
-XNU kernel boots, starts Apple's own drivers, and mounts the real 413 MiB root
-filesystem. Here is that kernel introducing itself over the emulated serial
-port, on hardware that exists only as C in this repository:
-
-```
-Seatbelt MACF policy initialized
-BSD root: md0, major 2, minor 0
-AppleS5L8900XIO::start: chip-revision: EVT0
-AppleARMPL192VIC::start: _vicBaseAddress = 0xe3141000
-AppleS5L8900XSerial: Identified Serial Port on ARM Device=uart0 at 0x3cc00000
-AppleMultitouchZ2SPI: successfully started
-IOSDIOController::enumerateSlot(): CMD5 failed ... (no card is modelled)
-```
-
-Those lines come from **Apple's own kernel extensions**, unmodified, after they
-matched the emulated hardware — evidence the guest reached those drivers, not
-that every device behind them is complete.
-
-Milestone 5 — `launchd` starts SpringBoard, the home screen renders, and you tap
-it — is **substantially reached: the home screen renders and a gesture drives
-it.** Three blockers were cleared to get there, and the fourth turned out not to
-exist.
-
-The first blocker is fixed. SpringBoard used to die and be restarted roughly
-every 470 million instructions — 30 times in a single run — because Apple's
-rendering code had been told to use the MBX graphics chip this emulator
-deliberately does not provide, and then stored through a null pointer. Setting
-`CA_ENABLE_MBX2D=0` in SpringBoard's environment ended that loop: it is a switch
-Apple's own code reads, selecting the CPU renderer Apple already ships, so it
-needs no GPU emulation. Thirty restarts became one, and SpringBoard went on to
-build its interface and make its window visible for the first time.
-
-The second blocker is fixed too, and the guest now renders. SpringBoard used to
-die writing the screen, with a memory-protection fault on the very first store.
-The cause was four indirections away: `/device-tree/vram` ships with
-`reg = {0,0}` and real iBoot fills it in. We load the kernel directly, never run
-iBoot, and so never did. Without it Apple's IOSurface layer cannot publish its
-video-memory region, the display driver falls back to describing the framebuffer
-as output-only, and the kernel then maps output-only memory **read-only** into
-the process that wanted to draw on it. Apple's code was correct throughout; we
-had simply never told it where video memory lives.
-
-Filling that one property in — the same in-memory device-tree patch this
-emulator already applies for the DRAM bank and the panel ID — produced the frame
-above: **14,264,987 changed scanout bytes**, where every previous run changed
-zero. SpringBoard was still compositing when the run hit its cap.
-
-That run's device is **unactivated**, so what SpringBoard draws is the
-activation screen. Provisioning `ActivationState = FactoryActivated` into the
-work image clears the lockout and the guest reaches the lock screen.
-
-The third blocker was the touchscreen itself, and it was the hardest. A Z2
-digitizer has no flash: the host must download its firmware over Apple's
-undocumented HBPP protocol on **every** boot, and until that completes the part
-never runs application firmware, so the driver correctly refuses to interrogate
-it. Reverse-engineering that protocol took four separate fixes — a chip-select
-edge that split a packet header in half, a receive FIFO left full by a
-transmit-only DMA burst, an acknowledgement literal that differs between two
-senders in the same driver, and one wrong inference that a call probe refuted.
-
-The fourth blocker did not exist. With touch delivered end to end, a drag on the
-unlock slider still appeared to do nothing — and five runs were spent hunting a
-coordinate bug that was not there. Every screenshot had been captured about four
-guest-seconds **after** the finger lifted, and iOS springs the knob back when a
-slide falls short, so a working gesture and no gesture rendered the same frame.
-Photographing the screen *during* the drag showed the knob tracking the finger
-all along; the drag simply ended too early to cross the threshold. The lesson,
-recorded in [`docs/multitouch.md`](docs/multitouch.md) §6.17.1, is that "no
-difference from baseline" is a null result until the instrument is shown capable
-of registering a change.
-
-Milestones are tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md), the run-by-run
-history including every dead end in [`docs/BOOTLOG.md`](docs/BOOTLOG.md), and
-the diagnosis procedure in [`docs/debugging.md`](docs/debugging.md).
-
-**The desktop harness and iPhone app now share the real guest path.** The app
-imports an IPSW supplied by the user, prepares one persistent writable image per
-machine, boots the same gated kernel/device-tree/rootfs path, displays the guest
-framebuffer, and delivers buttons and touch to the emulated board. With no
-firmware it deliberately falls back to a small synthetic test guest and says so.
-The desktop `bootkernel` remains the richer diagnostic instrument and is where
-the newest full SpringBoard/MBX evidence was captured. The app still lacks its
-host PPP endpoint and audio playback, and no on-device run has proved 30 fps.
-
-## How it works
-
-The emulator models the chip, not the operating system: an ARMv6 CPU
-interpreter, memory translation, and device models for the serial port, timers,
-interrupts, display controller and power management, with the guest's disk
-served from a file on the host. Apple's kernel, `launchd` and SpringBoard run on
-top, believing they are on a real 2009 iPhone. Everything the emulator claims
-about the guest's hardware is handed over at boot as a device tree, which is why
-hiding a device means editing that list rather than deleting code. All of it is
-plain C11 with no third-party dependencies, so it tests quickly on an ordinary
-desktop and drops into the iOS app unchanged; only the display and lifecycle
-shell is Apple-specific. Detail in
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-
-The runtime-code-generating translator still exists and is tested, but the boot
-loop does not call it and the iOS app excludes it. Stock iOS does not generally
-grant JIT execution, and the 30 fps target must be met without it. The old
-monolithic build-time-signed AArch64 graph is also retained as rejected
-evidence: an exact A9 app-bus replay measured it **6.17x slower** than repeated
-interpreter controls.
-
-The current iOS target instead defaults to a newer bounded compact AArch64
-engine generated entirely at build time. It creates no runtime code or
-writable-executable page and falls back to the interpreter for every unsupported
-or unsafe boundary. Marker-free machines keep User-mode window continuation,
-while privileged continuation and repeated-window caching remain opt-in after
-physical A9 gates failed to improve cadence. The newest cache replay reduced C
-fast refills about 42% but made the same 160 M-instruction interval about 9.5%
-slower on average; it therefore stays off. Full synthetic, physical and
-rejected-engine measurements remain in
-[`docs/hotpath.md`](docs/hotpath.md); they are evidence, not FPS multipliers.
-
-## Build & run
-
-Building the app needs no local Apple SDK or toolchain — CI does the
-Apple-specific build. Booting Apple software needs firmware you supply yourself.
-
-**Test the core locally** (any OS with a C compiler and CMake):
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-The public suite runs without Apple firmware; extra symbol and driver checks
-switch on only if you supply a kernelcache. Test counts move as coverage grows,
-so trust the current output and CI logs, not a number copied into this file.
-`Release` is the default on purpose: the interpreter is the hot loop here. Add
-`-DS5LBOX_JIT=ON` in a separate build directory to compile the (inactive)
-translator and run its tests.
+Public tests do not require Apple firmware. The iOS app is built with Xcode;
+the [iOS workflow](.github/workflows/ios-build.yml) contains the build and
+packaging steps.
 
-**Boot the kernel** once you have supplied firmware. The recommended path leaves
-your firmware untouched and needs a work path that does not already exist:
-```sh
-mkdir -p work
-build/core/bootkernel firmware/kernel.macho \
-    -d firmware/devicetree.bin \
-    -c "debug=0x8 serial=1 nand-enable-adm=0" \
-    --external-md firmware/rootfs.img work/rootfs-7e18-run01.img \
-    -R 128 \
-    -n 420000000
-```
+## More detail
 
-`--external-md` accepts only these exact inputs, checked by size and hash before
-anything is opened:
+- [Detailed README](docs/README-DETAILED.md) — the previous long-form overview,
+  technical explanations and historical measurements.
+- [Architecture](docs/ARCHITECTURE.md) and [firmware preparation](docs/BOOT_CHAIN.md).
+- [Validation](docs/QUALITY.md), [development history](docs/BOOTLOG.md) and
+  [performance notes](docs/hotpath.md). These include historical results, not
+  blanket compatibility guarantees.
 
-| Accepted input | Bytes | SHA-256 |
-|---|---:|---|
-| `firmware/kernel.macho` | 7,942,144 | `0d8cdb339d37cf37a1db2638fff79272ecd63a17764bf7666efa1618725df70c` |
-| `firmware/devicetree.bin` | 40,544 | `4867c95fedf544bda2ecaa2626ae14c01a60d7771dc53ffe6fd3a6aac8b8ba57` |
-| `firmware/rootfs.img` | 433,274,880 | `c3251e7f092c939d5818e92086cb47680981cfb03731de7b55d238c942eb5e82` |
+## License
 
-It then creates a writable work image — exactly 466,825,216 bytes (445.199 MiB)
-at the default growth, up to the external bridge's 2 GiB volume ceiling with
-larger `--grow` values — and serves the guest's disk from it. Budget at least
-500 MiB for the default image or slightly over 2 GiB for the maximum, plus room
-for logs; the parent directory must exist. External-media checkpoints carry
-same-name `.mdimage` and `.mdstate` sidecars and may be restored or chained.
-Any guest storage error, undefined instruction, kernel panic
-or halt exits nonzero; the work image is deliberately kept afterwards and the
-next run refuses to reuse that path, so archive it or pick a new filename. A
-cleanup warning means a second large temporary may also be left behind.
-
-Your kernel, device tree and root filesystem stay byte-for-byte unchanged: the
-five firmware patches touch only the loaded kernel copy, device-tree edits only
-the in-memory copy, and filesystem changes only the work image — where the
-guest's `/private/etc/fstab` is repointed at the emulator's fake disk and the
-volume is **grown** by `--grow` MB, default 32. Both are required, for reasons and
-numbers given in [`docs/BOOTLOG.md`](docs/BOOTLOG.md).
-
-Other flags: `nand-enable-adm=0` stops a flash-controller driver panicking on
-unmodelled hardware; three workarounds are automatic and printed in the run
-header (the real-time-clock wait patch, and hiding the MBX graphics and SHA-1
-accelerator nodes); `-g` and `-S` switch those two known-broken paths back on for
-diagnostics; `--external-md` rejects `-K`, which would disable its kernel patch
-set. The older mode that loads the root filesystem into guest RAM
-(`-r firmware/rootfs.img -R 512`) remains for checkpoint replay and alone accepts
-`--keep-fstab`, which reproduces the original `launchd` halt; its `-R 512` is a
-hard limit imposed by the kernel and the modelled memory map, not a preference,
-so historical 768 MiB experiments are not valid recipes.
-
-### The tools
-
-| | |
-|---|---|
-| `bootkernel` | boots the kernel and reports where it stopped: progress checkpoints, a sampled profile, every hardware page touched and what touched it, fault sites, and the guest's console output |
-| `bootkernel --external-md <source> <new-work>` | the gated cold-boot path above: verify the firmware, create a writable work image, and serve the guest's disk from the host instead of pinning ~445 MiB inside guest RAM |
-| `bootkernel -L` | print the map of drivers built into the kernel and exit without booting |
-| `bootkernel --snapshot-at <insn> <file>` / `--restore <file>` | save and resume the running machine. Unreachable, missed, malformed or incompatible checkpoint requests fail loudly instead of silently producing nothing |
-| `snapboot` | the snapshot acceptance harness — it also prints a report derived from the live machine, because comparing two snapshot files alone lets a field the format never stores cancel out on both sides |
-| `machoinfo <kernel> -k` / `-r <addr>` | dump the driver map, or resolve one address to a kernel symbol |
-| `img3dump`, `unlzss`, `runfw` | firmware container, decompression, and bare-payload tools |
-
-[`docs/debugging.md`](docs/debugging.md) is the procedure these add up to.
-
-**Get the app:** on a matching push or manual dispatch, the `ios-build` workflow
-produces an ad-hoc-signed `S5LBox.ipa` as a temporary GitHub Actions artifact.
-CI has no Apple signing identity, so that artifact **will not install on stock
-iOS as-is**. Re-sign it with your own ordinary provisioning profile using your
-preferred stock-device installation method. The app requests no private, JIT,
-debug, increased-memory or jailbreak entitlement and needs only the normal app
-sandbox. A jailbroken development phone makes testing easier; it is not a
-product dependency.
-
-**Supply firmware:** for the desktop harness, put your **own** iPhone OS 3.1.3
-files and keys in the git-ignored `firmware/` directory; see
-[`docs/BOOT_CHAIN.md`](docs/BOOT_CHAIN.md). In the iOS app, open Settings from
-the machine list and choose **Import from an IPSW**. The importer reads an IPSW
-you already possess, asks only for keys absent from that archive, and validates
-the three produced artefacts. Nothing is downloaded, no key list is bundled,
-and no Apple firmware is committed or shipped.
-
-For a controlled graphics comparison, choose **Graphics for new machines** in
-Settings *before* opening a newly created machine for the first time. **CPU
-software** is the accepted default; **Experimental MBX** pairs MBX-on with the
-CPU-renderer override off. That choice is written into the machine's writable
-image when it is prepared. Changing the setting afterwards does not convert an
-existing machine: the boot-time MBX switch can move, but the image-time renderer
-value cannot. Results from such a hybrid do not test the newly selected mode.
-
-## Requirements
-
-- **Host: a modern iPhone. A jailbreak is NOT required.** Corrected
-  2026-07-29 against a measurement rather than an assumption: the app has been
-  run on a **stock iPhone 17 (iPhone17,2) on iOS 26.1**, which reports
-  `CS_DEBUGGED : no` in its own on-device self-test and boots the guest kernel
-  anyway. This project was developed against a jailbroken iPhone 6s Plus (A9,
-  iOS 15), and the README stated that as a requirement when it was only the
-  first host it happened to run on.
-
-  It asks nothing special of the host because it is a pure **interpreter**. Its
-  tracked entitlement dictionary is deliberately empty. No
-  generated code is executed, so nothing has to be made writable-then-executable
-  and no debug entitlement is needed. That changes if the code translator is
-  ever finished: JIT execution needs both an executable mapping and a process
-  the kernel will let run it, which is exactly what `CS_DEBUGGED : no` denies.
-  The self-test already reports `JIT execute : not run at startup (capability
-  preflight failed)` on that stock device, and the translator stays off unless
-  an opt-in on-device check confirms generated code really can run.
-
-  NOT established: which iOS versions or devices this works on in general. Two
-  hosts are two data points, not a compatibility matrix.
-- **Firmware:** your own iPhone OS 3.1.3 image and keys. **No Apple firmware
-  image or decryption key is bundled.**
-
-## Legal
-
-S5LBox is an independently written emulator under the MIT license. It ships
-**no Apple firmware images or decryption keys.** You supply firmware you are
-entitled to use. "iPhone", "iOS", and "iPhone OS" are trademarks of Apple Inc.;
-this project is not affiliated with or endorsed by Apple.
-
-## Credits
-
-Created by [**j0shua-SYSON**](https://github.com/j0shua-SYSON). Standing on the
-shoulders of the reverse-engineering community whose public research made the
-S5L8900 boot chain and iPhone OS 3 firmware keys knowable.
-
-<div align="center">
-
-**If a real 2009 iPhone booting inside a 2015 iPhone sounds worth watching —
-give it a ⭐ and follow along, milestone by milestone.**
-
-</div>
+[MIT](LICENSE). Created by [j0shua-SYSON](https://github.com/j0shua-SYSON).
+Supply only firmware you are entitled to use. S5LBox is independent of Apple
+and is not affiliated with or endorsed by Apple.
