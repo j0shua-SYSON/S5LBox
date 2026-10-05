@@ -7,6 +7,8 @@
 #include <stdint.h>
 
 #define SST25VF080B_SIZE UINT32_C(0x100000)
+#define SST25VF080B_SECTOR_SIZE UINT32_C(0x1000)
+#define SST25VF080B_KNOWN_WORDS 8u
 
 typedef struct {
     uint64_t program_ns, sector_ns, block32_ns, block64_ns, chip_ns;
@@ -25,6 +27,7 @@ typedef struct {
     bool initialized, selected, wp_high, hold_high;
     bool ewsr, status_authorized, busy_output, aai_continuation;
     bool array_unavailable;
+    uint32_t known_sectors[SST25VF080B_KNOWN_WORDS];
 } sst25vf080b_t;
 
 /* Cold power-on with CE high. Borrow exactly 1 MiB, never initialize, allocate,
@@ -41,6 +44,16 @@ bool sst25vf080b_init(sst25vf080b_t *f, uint8_t *image, size_t size,
  * state is invented. Existing image-backed initialization still requires 1 MiB.
  * This is not evidence of the actual board's chip identity or warm state. */
 bool sst25vf080b_init_unbacked(sst25vf080b_t *f,
+    const sst25vf080b_timing_t *timing, bool wp_high, bool hold_high);
+/* Borrow a 1 MiB image with explicit availability per 4 KiB erase sector.
+ * Copy eight mask words: bit (sector%32) of word (sector/32) means every byte
+ * in that sector is supplied. Unknown reads/programs refuse even if the
+ * backing bytes happen to be FF. Completed erases establish known FF bytes
+ * for their whole extent; pending erases do not. No data is filled at init.
+ * The caller still owns backing storage and persistence. This does not create
+ * NVRAM, import firmware, or establish any target board's stored contents. */
+bool sst25vf080b_init_partial(sst25vf080b_t *f, uint8_t *image, size_t size,
+    const uint32_t known_sectors[SST25VF080B_KNOWN_WORDS],
     const sst25vf080b_timing_t *timing, bool wp_high, bool hold_high);
 /* Pins supplied at byte boundaries, with HOLD changes already qualified at
  * SCK low by the caller. Selecting during power-up refuses. Deasserting CE

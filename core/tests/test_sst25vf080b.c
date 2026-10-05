@@ -344,10 +344,146 @@ static void test_unavailable_array(void) {
     CHECK(!memcmp(&before,&f,sizeof f));
 }
 
+static bool partial(sst25vf080b_t *f,const uint32_t *known) {
+    bool ok=sst25vf080b_init_partial(f,image,SST25VF080B_SIZE,known,&timing,true,true);
+    CHECK(ok);if(!ok)return false;
+    CHECK(sst25vf080b_advance(f,100000));return true;
+}
+
+static void test_partial_reads(void) {
+    sst25vf080b_t f,before;
+    uint32_t known[SST25VF080B_KNOWN_WORDS];
+    for(unsigned n=0;n<SST25VF080B_KNOWN_WORDS;++n)known[n]=0x96966969u^(n*0x1234567u);
+    memset(image,0x6b,SST25VF080B_SIZE);
+    if(!partial(&f,known))return;
+    CHECK(!f.array_unavailable && f.image==image && !memcmp(f.known_sectors,known,sizeof known));
+    /* Every bitmap position, both ends of each sector and both read opcodes. */
+    for(unsigned sector=0;sector<256u;++sector)for(unsigned fast=0;fast<2u;++fast) {
+        uint32_t address=sector*SST25VF080B_SECTOR_SIZE+(fast?4095u:0u);
+        image[address]=(uint8_t)(sector^0xa5u);
+        addressed(&f,fast?0x0b:3,address);
+        if(fast)CHECK(!byte(&f,0xff).driven);
+        if(known[sector/32]&(1u<<(sector%32))) {
+            sst25vf080b_output_t out=byte(&f,0xff);
+            CHECK(out.driven==0xff && out.value==(uint8_t)(sector^0xa5u));
+        } else refusal(&f,0xff);
+        pins(&f,true);
+    }
+    memset(known,0,sizeof known);known[0]=1;known[7]=0x80000000u;
+    if(!partial(&f,known))return;
+    known[0]=0;CHECK(f.known_sectors[0]==1); /* caller mask was copied */
+    for(unsigned fast=0;fast<2u;++fast) {
+        addressed(&f,fast?0x0b:3,4095);if(fast)CHECK(!byte(&f,0).driven);
+        CHECK(byte(&f,0).value==image[4095]);refusal(&f,0);pins(&f,true);
+        addressed(&f,fast?0x0b:3,0xffffff);if(fast)CHECK(!byte(&f,0).driven);
+        CHECK(byte(&f,0).value==image[0xfffff]);CHECK(byte(&f,0).value==image[0]);pins(&f,true);
+    }
+    addressed(&f,3,0);f.address=SST25VF080B_SIZE;refusal(&f,0);pins(&f,true);
+    before=f;
+    CHECK(!sst25vf080b_init_partial(NULL,image,SST25VF080B_SIZE,known,&timing,true,true));
+    CHECK(!sst25vf080b_init_partial(&f,NULL,SST25VF080B_SIZE,known,&timing,true,true));
+    CHECK(!sst25vf080b_init_partial(&f,image,SST25VF080B_SIZE-1,known,&timing,true,true));
+    CHECK(!sst25vf080b_init_partial(&f,image,SST25VF080B_SIZE,NULL,&timing,true,true));
+    CHECK(!sst25vf080b_init_partial(&f,image,SST25VF080B_SIZE,known,NULL,true,true));
+    sst25vf080b_timing_t bad=timing;bad.sector_ns=0;
+    CHECK(!sst25vf080b_init_partial(&f,image,SST25VF080B_SIZE,known,&bad,true,true));
+    CHECK(!memcmp(&f,&before,sizeof f));
+    /* An aliased mask must be copied before initialization replaces state. */
+    CHECK(sst25vf080b_init_partial(&f,image,SST25VF080B_SIZE,f.known_sectors,&f.timing,true,true));
+    CHECK(!memcmp(f.known_sectors,before.known_sectors,sizeof known));
+    CHECK(f.powerup_ns==100000u && image[0]==0xa5 && image[4095]==0xa5);
+    CHECK(sst25vf080b_init(&f,image,SST25VF080B_SIZE,&timing,true,true));
+    for(unsigned n=0;n<SST25VF080B_KNOWN_WORDS;++n)CHECK(f.known_sectors[n]==UINT32_MAX);
+    CHECK(sst25vf080b_init_unbacked(&f,&timing,true,true));
+    for(unsigned n=0;n<SST25VF080B_KNOWN_WORDS;++n)CHECK(f.known_sectors[n]==0);
+}
+
+static void test_partial_mutations(void) {
+    const uint32_t known[SST25VF080B_KNOWN_WORDS]={1};
+    sst25vf080b_t f;
+    memset(image,0xff,SST25VF080B_SIZE);
+    if(!partial(&f,known))return;
+    unprotect(&f,0);opcode(&f,6);program(&f,0,0x51);
+    CHECK(sst25vf080b_advance(&f,timing.program_ns) && image[0]==0x51);
+    CHECK(f.known_sectors[0]==1);
+    for(unsigned aai_mode=0;aai_mode<2;++aai_mode) {
+        opcode(&f,6);addressed(&f,aai_mode?0xad:2,4096);
+        CHECK(!byte(&f,0x55).driven);if(aai_mode)CHECK(!byte(&f,0xaa).driven);
+        sst25vf080b_t before=f;
+        CHECK(!sst25vf080b_pins(&f,true,true,true));
+        CHECK(!memcmp(&f,&before,sizeof f) && image[4096]==0xff && image[4097]==0xff);
+        /* Restore a fresh configuration instead of forcing a refused CE edge. */
+        if(!partial(&f,known))return;
+        unprotect(&f,0);
+    }
+    const uint8_t ops[]={0x20,0x52,0xd8,0x60,0xc7};
+    const uint32_t sizes[]={0x1000,0x8000,0x10000,0x100000,0x100000};
+    const uint64_t times[]={18000000,19000000,20000000,35000000,35000000};
+    const uint32_t unknown[SST25VF080B_KNOWN_WORDS]={0};
+    for(unsigned n=0;n<sizeof ops;++n) {
+        memset(image,0x69,SST25VF080B_SIZE);
+        uint32_t seeded[SST25VF080B_KNOWN_WORDS]={0};
+        if(n){seeded[0]=1;seeded[7]=0x80000000u;}
+        if(!partial(&f,seeded))return;
+        uint32_t start=n<3?0x38000u&~(sizes[n]-1u):0u;
+        unprotect(&f,0);opcode(&f,6);
+        if(n<3){addressed(&f,ops[n],0x38abcu);pins(&f,true);}else opcode(&f,ops[n]);
+        CHECK(f.busy_ns==times[n] && f.operation_address==start && f.operation_size==sizes[n]);
+        CHECK(sst25vf080b_advance(&f,times[n]-1) && f.busy_ns==1);
+        CHECK(!memcmp(f.known_sectors,seeded,sizeof seeded));
+        CHECK(image[start]==0x69 && image[start+sizes[n]-1]==0x69);
+        CHECK(sst25vf080b_advance(&f,1) && !f.busy_ns);
+        for(unsigned sector=0;sector<256;++sector) {
+            bool erased=sector*4096u>=start && sector*4096u<start+sizes[n];
+            bool supplied=(seeded[sector/32]&(1u<<(sector%32)))!=0;
+            CHECK(((f.known_sectors[sector/32]>>(sector%32))&1u)==(unsigned)(erased||supplied));
+            CHECK(image[sector*4096u]==(erased?0xff:0x69));
+            CHECK(image[sector*4096u+4095u]==(erased?0xff:0x69));
+        }
+        opcode(&f,6);program(&f,start,0x73);
+        CHECK(sst25vf080b_advance(&f,timing.program_ns) && image[start]==0x73);
+    }
+    if(!partial(&f,unknown))return;
+    opcode(&f,6);addressed(&f,0x20,0);pins(&f,true); /* cold protection ignores erase */
+    CHECK(!f.busy_ns && !f.known_sectors[0]);
+    unprotect(&f,0);opcode(&f,4);addressed(&f,0x20,0);pins(&f,true); /* WEL clear */
+    CHECK(!f.busy_ns && !f.known_sectors[0]);
+    memset(image,0xff,SST25VF080B_SIZE);
+    if(!partial(&f,known))return;
+    unprotect(&f,0);opcode(&f,6);aai(&f,4094,0x12,0x34,true);
+    CHECK(sst25vf080b_advance(&f,timing.program_ns) && f.aai_next==4096);
+    CHECK(image[4094]==0x12 && image[4095]==0x34);
+    pins(&f,false);CHECK(!byte(&f,0xad).driven);
+    CHECK(!byte(&f,0x56).driven);CHECK(!byte(&f,0x78).driven);
+    sst25vf080b_t before=f;
+    CHECK(!sst25vf080b_pins(&f,true,true,true));
+    CHECK(!memcmp(&f,&before,sizeof f) && image[4096]==0xff && image[4097]==0xff);
+    CHECK(storage[0]==0x3c && storage[sizeof storage-1u]==0xa5);
+}
+
+static void test_partial_adapter(void) {
+    sst25vf080b_t f;const uint32_t known[SST25VF080B_KNOWN_WORDS]={1};
+    if(!partial(&f,known))return;
+    image[4095]=0x62;
+    s5l8920_spi_t s;
+    const uint8_t tx[]={3,0,0x0f,0xff,0xff,0xff};
+    prepare_spi(&s,tx,sizeof tx,sizeof tx);pins(&f,false);
+    sst25vf080b_t old_f=f;s5l8920_spi_t old_s=s;size_t count=81;
+    CHECK(!s5l8920_spi_flash_clock(&s,&f,48,0xff,0xff,&count));
+    CHECK(count==81 && !memcmp(&f,&old_f,sizeof f) && !memcmp(&s,&old_s,sizeof s));
+    CHECK(s5l8920_spi_flash_clock(&s,&f,40,0xff,0xff,&count) && count==5);
+    for(unsigned n=0;n<5;++n){uint32_t value=0;CHECK(s5l8920_spi_read(&s,0x20,&value) && value==(n<4?0xffu:0x62u));}
+    old_f=f;old_s=s;count=81;
+    CHECK(!s5l8920_spi_flash_clock(&s,&f,8,0xff,0xff,&count));
+    CHECK(count==81 && !memcmp(&f,&old_f,sizeof f) && !memcmp(&s,&old_s,sizeof s));
+    pins(&f,true);
+}
+
 int main(void) {
     test_power_and_inputs(); test_reads_and_pins(); test_status_authorization();
     test_program_and_busy(); test_protection_table(); test_erases(); test_aai();
     test_busy_stream_and_hardware_pin(); test_spi_connection(); test_adapter();test_unavailable_array();
+    test_partial_reads();test_partial_mutations();test_partial_adapter();
     printf("sst25vf080b: %u passed, %u failed\n",passed,failed);
     return failed?1:0;
 }

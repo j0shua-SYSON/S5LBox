@@ -17,6 +17,12 @@ static bool valid(const sst25vf080b_t *f) {
 
 static bool duration(uint64_t n,uint64_t maximum) { return n && n<=maximum; }
 
+static bool known(const sst25vf080b_t *f,uint32_t address) {
+    if (address>=SST25VF080B_SIZE) return false;
+    uint32_t sector=address/SST25VF080B_SECTOR_SIZE;
+    return f->image && (f->known_sectors[sector/32u]&(UINT32_C(1)<<(sector%32u)));
+}
+
 static bool initialize(sst25vf080b_t *f, uint8_t *image,
     const sst25vf080b_timing_t *timing, bool wp_high, bool hold_high) {
     if (!f || !timing ||
@@ -26,6 +32,8 @@ static bool initialize(sst25vf080b_t *f, uint8_t *image,
     sst25vf080b_t next={0};
     next.image=image; next.timing=*timing; next.powerup_ns=100000u;
     next.status=0x1cu; next.wp_high=wp_high; next.hold_high=hold_high;
+    if (image) for (unsigned i=0;i<SST25VF080B_KNOWN_WORDS;++i)
+        next.known_sectors[i]=UINT32_MAX;
     next.array_unavailable=image==NULL;next.initialized=true; *f=next;
     return true;
 }
@@ -39,6 +47,16 @@ bool sst25vf080b_init(sst25vf080b_t *f, uint8_t *image, size_t size,
 bool sst25vf080b_init_unbacked(sst25vf080b_t *f,
     const sst25vf080b_timing_t *timing, bool wp_high, bool hold_high) {
     return initialize(f,NULL,timing,wp_high,hold_high);
+}
+
+bool sst25vf080b_init_partial(sst25vf080b_t *f, uint8_t *image, size_t size,
+    const uint32_t known_sectors[SST25VF080B_KNOWN_WORDS],
+    const sst25vf080b_timing_t *timing, bool wp_high, bool hold_high) {
+    if (!f || !image || size!=SST25VF080B_SIZE || !known_sectors) return false;
+    sst25vf080b_t next;
+    if (!initialize(&next,image,timing,wp_high,hold_high)) return false;
+    memcpy(next.known_sectors,known_sectors,sizeof next.known_sectors);
+    *f=next;return true;
 }
 
 /* First protected address. BP3 is reserved/don't-care in table4-3. */
@@ -56,7 +74,8 @@ static bool start_program(sst25vf080b_t *f,uint32_t address,unsigned count) {
     if (!f->image) return false;
     /* The specified program precondition is erased storage. Preserve the
      * evidence boundary for undefined repeated programming, rather than RAM. */
-    for (unsigned i=0;i<count;++i) if (f->image[address+i]!=0xffu) return false;
+    for (unsigned i=0;i<count;++i)
+        if (!known(f,address+i) || f->image[address+i]!=0xffu) return false;
     f->operation=f->command; f->operation_address=address; f->operation_size=count;
     memcpy(f->operation_data,f->data,count); f->busy_ns=f->timing.program_ns;
     if (f->command==0xadu) f->status|=AAI;
@@ -186,7 +205,7 @@ static bool transfer(sst25vf080b_t *f,uint8_t input,sst25vf080b_output_t *out) {
         if (f->position==4u) { f->position++; return true; }
         /* fall through */
     case 0x03:
-        if (!f->image) return false;
+        if (!known(f,f->address)) return false;
         out->value=f->image[f->address]; out->driven=0xffu;
         f->address=(f->address+1u)&(SST25VF080B_SIZE-1u); return true;
     case 0x90: case 0xab:
@@ -224,7 +243,13 @@ bool sst25vf080b_advance(sst25vf080b_t *f, uint64_t nanoseconds) {
     if (f->operation==0x02u || f->operation==0xadu) {
         for (uint32_t i=0;i<f->operation_size;++i)
             f->image[f->operation_address+i]&=f->operation_data[i];
-    } else memset(f->image+f->operation_address,0xff,f->operation_size);
+    } else {
+        memset(f->image+f->operation_address,0xff,f->operation_size);
+        uint32_t first=f->operation_address/SST25VF080B_SECTOR_SIZE;
+        uint32_t end=(f->operation_address+f->operation_size)/SST25VF080B_SECTOR_SIZE;
+        for (uint32_t sector=first;sector<end;++sector)
+            f->known_sectors[sector/32u]|=UINT32_C(1)<<(sector%32u);
+    }
     f->busy_ns=0u;
     if (f->operation==0xadu && (f->status&AAI)) {
         f->aai_next=f->operation_address+2u;

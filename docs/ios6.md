@@ -1212,6 +1212,32 @@ This permits bounded driver discovery without supplying synthetic target
 contents. It does not identify the physical part or establish its warm state,
 and it cannot complete any firmware operation requiring unknown NOR data.
 
+`sst25vf080b_init_partial` also accepts a caller-owned 1 MiB image with a
+copied availability bitmap for its 256 sectors. Each set bit supplies all bytes
+of one 4 KiB sector. Initialization fills no storage. Normal and fast reads stop
+at the first unavailable byte, including across sector boundaries and address
+wrap. Byte and AAI programming require known erased bytes; an unknown backing
+byte containing `FF` is insufficient. A completed sector, block or chip erase
+establishes known `FF` contents only for its actual extent, when BUSY expires.
+Protected and unauthorized erases establish nothing. The existing complete
+image initializer supplies every sector; the unbacked option supplies none.
+The SPI adapter preserves both peers when a transfer would cross into unknown
+data. The caller remains responsible for persistence and image isolation.
+
+The timing diagnostic now reaches a NOR read at `0x0fc000`. The original
+`AppleARMCHRPNVRAM` call stack and matching device tree identify two 8 KiB banks
+at `0x0fc000` and `0x0fe000`. Original bank-validation code checks signature
+`5A`, a folded header checksum, and Adler32 over bytes `0x14..0x1fff`, returning
+the stored generation. Its 36-case isolated witness passes valid-generation
+and corruption cases, but also shows that this validator does not validate
+inner partition structure. These are synthetic witness inputs, not supplied
+boot storage. No NVRAM image, factory data or default flash attachment is
+created by the partial-availability API.
+
+The flash target passes 13,577 checks, and the full strict 84-test and shipping
+79-test configurations pass. The prepared kernel with no array supplied
+reproduces its previous trace exactly, stopping at the same unknown NOR read.
+
 With this explicit candidate attached to GPIO 148/gate 9, a diagnostic kernel
 run exchanges eight bytes for status, JEDEC identification and another status
 request. Transfers drive the production IRQ path during guest execution. It
