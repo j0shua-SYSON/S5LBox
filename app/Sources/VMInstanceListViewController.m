@@ -8,6 +8,8 @@
 #import "EmulatorViewController.h"
 #import "VMEngine.h"
 #import "VMGuestInstallViewController.h"
+#import "VMGuest.h"
+#import "VMResumeCheckpoint.h"
 #import "VMInstanceStore.h"
 #import "VMInstances.h"
 #import "VMSettings.h"
@@ -19,6 +21,8 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
 @interface VMInstanceListViewController ()
 - (BOOL)openInstanceAtIndex:(NSUInteger)index animated:(BOOL)animated
              afterShutdown:(void (^)(void))afterShutdown;
+- (void)prepareGuestInstall:(VMGuestInstallViewController *)install
+                instanceID:(NSString *)identifier;
 @end
 
 @implementation VMInstanceListViewController
@@ -185,30 +189,62 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
             [list showError:missing
                       doing:@"The installed machine no longer exists"];
         };
-        /* Use the ordinary visible machine lifecycle for shutdown. On failure
-         * it stays open and usable; no hidden engine can outlive an error page
-         * and no installer runs against an open disk. */
-        VMInstanceStore *store = [VMInstanceStore sharedStore];
-        for (NSUInteger index = 0u; index < store.count; index++) {
-            if ([[store instanceAtIndex:index][@"id"] isEqualToString:identifier]) {
-                [self_ openInstanceAtIndex:index animated:YES afterShutdown:^{
-                    VMInstanceListViewController *list = weakSelf;
-                    if (list && list.navigationController.topViewController == list)
-                        [list.navigationController pushViewController:install
-                                                             animated:YES];
-                }];
-                return;
-            }
-        }
-        NSError *missing = [NSError errorWithDomain:@"com.j0shua.S5LBox.GuestInstall"
-            code:1 userInfo:@{ NSLocalizedDescriptionKey:
-                @"The selected machine no longer exists. No jailbreak was started." }];
-        [self_ showError:missing doing:@"Could not open the machine"];
+        [self_ prepareGuestInstall:install instanceID:identifier];
     };
     UINavigationController *nav = [[UINavigationController alloc]
         initWithRootViewController:settings];
     nav.navigationBar.prefersLargeTitles = YES;
     [self presentViewController:nav animated:YES completion:nil];
+}
+
+- (void)prepareGuestInstall:(VMGuestInstallViewController *)install
+                instanceID:(NSString *)identifier {
+    NSString *directory = [[VMInstanceStore sharedStore]
+        directoryForInstanceWithID:identifier];
+    UINavigationController *navigation = self.navigationController;
+    /* Do not boot an already powered-off guest just to shut it down again.
+     * The existing read-only probe validates the complete checkpoint pair,
+     * checksum, disk geometry and PMU witness; existence alone is not enough.
+     * Keep its snapshot I/O off the main thread, and prevent another open
+     * from racing the check. The installer still performs its own preflight. */
+    navigation.view.userInteractionEnabled = NO;
+    __weak VMInstanceListViewController *weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSDictionary *attributes = [[NSFileManager defaultManager]
+            attributesOfItemAtPath:[directory stringByAppendingPathComponent:
+                @"rootfs-work.img"] error:NULL];
+        uint64_t size = [attributes fileSize];
+        BOOL poweredOff = size && vm_resume_checkpoint_probe_state(
+            directory.fileSystemRepresentation, size,
+            VM_GUEST_RAM_BASE, VM_GUEST_RAM_SIZE, NULL, 0u) ==
+                VM_RESUME_CHECKPOINT_POWERED_OFF;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            navigation.view.userInteractionEnabled = YES;
+            VMInstanceListViewController *list = weakSelf;
+            if (!list || navigation.topViewController != list) return;
+            if (poweredOff) {
+                [navigation pushViewController:install animated:YES];
+                return;
+            }
+            /* Otherwise use the visible machine lifecycle. A failed shutdown
+             * leaves that machine open; there is no hidden writable engine. */
+            VMInstanceStore *store = [VMInstanceStore sharedStore];
+            for (NSUInteger index = 0u; index < store.count; index++) {
+                if ([[store instanceAtIndex:index][@"id"] isEqualToString:identifier]) {
+                    [list openInstanceAtIndex:index animated:YES afterShutdown:^{
+                        VMInstanceListViewController *current = weakSelf;
+                        if (current && navigation.topViewController == current)
+                            [navigation pushViewController:install animated:YES];
+                    }];
+                    return;
+                }
+            }
+            NSError *missing = [NSError errorWithDomain:@"com.j0shua.S5LBox.GuestInstall"
+                code:1 userInfo:@{ NSLocalizedDescriptionKey:
+                    @"The selected machine no longer exists. No jailbreak was started." }];
+            [list showError:missing doing:@"Could not open the machine"];
+        });
+    });
 }
 
 - (void)renameAtIndex:(NSUInteger)index {

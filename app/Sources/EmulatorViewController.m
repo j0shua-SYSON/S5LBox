@@ -601,7 +601,11 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
             void (^afterShutdown)(void) = [screen.guestShutdownCompletion copy];
             screen.guestShutdownCompletion = nil;
             [screen.navigationController popViewControllerAnimated:!afterShutdown];
-            if (afterShutdown) afterShutdown();
+            /* UIKit must finish removing this controller before the install
+             * workflow pushes another. Even a nonanimated pop can still be
+             * updating the navigation stack inside this callback. */
+            if (afterShutdown)
+                dispatch_async(dispatch_get_main_queue(), afterShutdown);
             return;
         }
         UIAlertController *alert = [UIAlertController
