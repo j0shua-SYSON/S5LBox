@@ -35,6 +35,7 @@ add_library(emucore STATIC
     src/soc/s5l8920_spi.c
     src/soc/sst25vf080b.c
     src/soc/lis331dl.c
+    src/soc/ak8973.c
     src/soc/s5l8920_spi_flash.c
     src/soc/timer.c
     src/soc/mbx.c
@@ -241,6 +242,10 @@ add_test(NAME sst25vf080b COMMAND test_sst25vf080b)
 add_executable(test_lis331dl tests/test_lis331dl.c)
 target_link_libraries(test_lis331dl PRIVATE emucore)
 add_test(NAME lis331dl COMMAND test_lis331dl)
+
+add_executable(test_ak8973 tests/test_ak8973.c)
+target_link_libraries(test_ak8973 PRIVATE emucore)
+add_test(NAME ak8973 COMMAND test_ak8973)
 
 add_executable(test_s5l8920_spi_flash tests/test_s5l8920_spi_flash.c)
 target_link_libraries(test_s5l8920_spi_flash PRIVATE emucore)

@@ -61,6 +61,36 @@ ACK or data. The diagnostic retains the earlier prepared boot inputs and
 assumed clock schedule; the configured1ms calibration reload is not exercised
 by this four-transfer sequence. No full boot or sensor-data claim follows.
 
+## Compass configuration and calibration availability
+
+The next observed request belongs to the AppleAKM8973S probe at `80811624`.
+Its actual stack contains helper return `808113b5` and probe return `80811681`.
+The matching device tree selects `compass,akm8973s` at address `0x1e`.
+Its initializer enters EEPROM mode, checks status, reads `66/67/68`, returns
+to power-down, and copies those bytes into the gain registers.
+
+The explicit AK8973 model follows AKM's
+[MS0561-E-01, sections5 through9](https://media.digikey.com/pdf/Data%20Sheets/AKM%20Semiconductor%20Inc.%20PDFs/AK8973.pdf).
+It supports reset, status, configuration, bank wrapping and supplied EEPROM
+bytes. Power-down and EEPROM startup waits advance only with device time.
+Gain writes discard upper bits as specified in section5.3.3 note8. Reset
+preserves supplied calibration. Unknown EEPROM, measurement, programming and
+test operations remain unavailable. Output registers contain reset values only.
+
+This family reference and matching driver do not prove every AK8973S detail.
+Device initialization explicitly assumes a qualified reset; reset wiring,
+physical calibration, sensor conversion and interrupt generation remain open.
+`s5l8920_ak8973_service` completes supported requests through the controller's
+existing FIFO/status/IRQ path; refused transactions leave both states intact.
+No default attachment or scheduler changes the existing iPhone OS 3 machine.
+
+With an explicitly reset device and no supplied EEPROM bytes, the prepared
+kernel completes `C0` read, `E0=02` write, and another `C0` read. At 249,829,225
+retired instructions, PC `8078c908`, it requests `1e/66/1`. Calibration remains
+unknown and 268,542ns of startup wait remain under the existing assumed clock
+schedule. This request stays pending. These three transfers establish further
+driver execution, not completed calibration, connected boot or SpringBoard.
+
 ## DART programming and page translation
 
 The matching device tree places two `dart,s5l8920x` controllers at

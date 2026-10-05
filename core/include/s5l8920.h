@@ -11,6 +11,7 @@
 #include "s5l8920_spi.h"
 #include "s5l8920_spi_flash.h"
 #include "lis331dl.h"
+#include "ak8973.h"
 #include <stddef.h>
 
 #define S5L8920_RAM_BASE UINT32_C(0x40000000)
@@ -419,6 +420,12 @@ bool s5l8920_i2c_complete(s5l8920_t *m, unsigned bus, uint64_t sequence,
  * device survives controller reset/free and must outlive this call only. */
 bool s5l8920_lis331dl_service(s5l8920_t *m, unsigned bus, uint64_t sequence,
                             lis331dl_t *device);
+
+/* Same explicit transaction boundary for a caller-owned AK8973. Unknown
+ * EEPROM bytes or unsupported operations leave both participants unchanged.
+ * No attachment, device clock, reset pin or sensor interrupt is inferred. */
+bool s5l8920_ak8973_service(s5l8920_t *m, unsigned bus, uint64_t sequence,
+                           ak8973_t *device);
 
 /* Bounded D1755 clock endpoint at I2C0 address0x74. Explicit configuration
  * supplies a raw32-bit counter and offset; it is refused while bus0 has an
