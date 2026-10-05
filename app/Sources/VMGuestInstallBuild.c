@@ -2398,6 +2398,27 @@ vm_guest_install_build_from_directory(
     vm_guest_install_build_status_t snapshot_gate = build_snapshot_gate(
         work_directory, result, detail, detail_capacity);
     if (snapshot_gate != VM_GUEST_INSTALL_BUILD_OK) return snapshot_gate;
+
+    /* First installs need the same shutdown proof as maintenance. Run this
+     * before requesting packages or creating a stage, so a suspended guest
+     * keeps its resume point and does not download a payload it cannot use. */
+    char live[VM_GUEST_INSTALL_PATH_CAPACITY];
+    uint64_t live_size = 0u;
+    if (!build_join(live, work_directory, VM_GUEST_INSTALL_LIVE_FILE) ||
+        !build_regular_file_size(live, &live_size)) {
+        build_detail(detail, detail_capacity,
+                     "The machine has no valid writable guest disk.");
+        return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
+    }
+    bool allow_unclean_source = false;
+    rootfs_work_result_t preflight;
+    rootfs_work_status_t preflight_status = build_validate_source(
+        work_directory, live, live_size, &allow_unclean_source,
+        result, &preflight);
+    if (result) result->rootfs = preflight;
+    if (preflight_status != ROOTFS_WORK_OK)
+        return build_rootfs_refusal(preflight_status, &preflight,
+                                    detail, detail_capacity);
     if (!package_directory || !*package_directory) {
         build_detail(detail, detail_capacity,
                      "The verified package directory is missing.");
@@ -2448,10 +2469,8 @@ vm_guest_install_build_from_directory(
         return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
     }
 
-    char live[VM_GUEST_INSTALL_PATH_CAPACITY];
     char stage[VM_GUEST_INSTALL_PATH_CAPACITY];
-    if (!build_join(live, work_directory, VM_GUEST_INSTALL_LIVE_FILE) ||
-        !vm_guest_install_stage_image_path(stage, sizeof stage,
+    if (!vm_guest_install_stage_image_path(stage, sizeof stage,
                                            work_directory)) {
         vm_guest_rootfs_plan_close(&plan);
         build_detail(detail, detail_capacity,
@@ -2464,6 +2483,7 @@ vm_guest_install_build_from_directory(
     rootfs_work_options_t options;
     memset(&options, 0, sizeof options);
     options.preserve_fstab = true;
+    options.allow_unclean_source = allow_unclean_source;
     options.minimum_volume_bytes = VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES;
     options.entries = vm_guest_rootfs_plan_entries(plan);
     options.entry_count = vm_guest_rootfs_plan_entry_count(plan);
@@ -2476,10 +2496,8 @@ vm_guest_install_build_from_directory(
     if (result) result->rootfs = rootfs;
     vm_guest_rootfs_plan_close(&plan);
     if (rootfs_status != ROOTFS_WORK_OK || !rootfs.published) {
-        build_detail(detail, detail_capacity,
-                     rootfs.detail[0] ? rootfs.detail
-                                      : rootfs_work_status_name(rootfs_status));
-        return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
+        return build_rootfs_refusal(rootfs_status, &rootfs,
+                                    detail, detail_capacity);
     }
 
     build_progress(progress, progress_context,

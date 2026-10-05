@@ -492,9 +492,14 @@ static void test_argument_and_package_refusals(void) {
     clear_fixture();
     CHECK(make_directory(FIXTURE_DIR), "could not create builder fixture");
     char live[VM_GUEST_INSTALL_PATH_CAPACITY];
+    uint8_t fixture[HFS_FIXTURE_SIZE];
+    make_dirty_hfs_fixture(fixture);
+    write_be32(fixture + HFS_VOLUME_HEADER_OFFSET + 4u, 1u << 8);
+    write_be32(fixture + HFS_FIXTURE_SIZE - HFS_VOLUME_HEADER_OFFSET + 4u,
+               1u << 8);
     CHECK(join_path(live, sizeof live, FIXTURE_DIR,
                     VM_GUEST_INSTALL_LIVE_FILE) &&
-          write_bytes(live, "old-rootfs"),
+          write_buffer(live, fixture, sizeof fixture),
           "could not seed builder live disk");
     CHECK(vm_guest_install_build_from_directory(
               FIXTURE_DIR, NULL, NULL, NULL, &result,
@@ -1253,6 +1258,89 @@ static void test_committed_maintenance_cleanup_blocks_new_transaction(void) {
           vm_guest_install_build_status_text(status), detail);
     (void)remove(residue_member);
     (void)remove_directory(residue);
+}
+
+static void test_fresh_install_checks_shutdown_before_packages(void) {
+    clear_fixture();
+    CHECK(make_directory(FIXTURE_DIR), "could not create fresh fixture");
+    char live[VM_GUEST_INSTALL_PATH_CAPACITY];
+    char marker[VM_GUEST_INSTALL_PATH_CAPACITY];
+    char stage[VM_GUEST_INSTALL_PATH_CAPACITY];
+    uint8_t fixture[HFS_FIXTURE_SIZE], observed[HFS_FIXTURE_SIZE];
+    make_dirty_hfs_fixture(fixture);
+    CHECK(join_path(live, sizeof live, FIXTURE_DIR,
+                    VM_GUEST_INSTALL_LIVE_FILE) &&
+          join_path(marker, sizeof marker, FIXTURE_DIR,
+                    VM_FW_BOOT_RESTORE_ONCE_FILE) &&
+          join_path(stage, sizeof stage, FIXTURE_DIR,
+                    VM_GUEST_INSTALL_STAGE_DIRECTORY) &&
+          write_buffer(live, fixture, sizeof fixture),
+          "could not seed fresh dirty disk");
+
+    char detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+    vm_guest_install_build_result_t result;
+    progress_log_t progress;
+    const char *packages[] = {NULL, "packages-do-not-exist"};
+    for (unsigned i = 0u; i < 2u; i++) {
+        CHECK(save_automatic_checkpoint(false, HFS_FIXTURE_SIZE,
+                                        detail, sizeof detail),
+              "could not save suspended fresh machine: %s", detail);
+        memset(&progress, 0, sizeof progress);
+        vm_guest_install_build_status_t status =
+            vm_guest_install_build_from_directory(
+                FIXTURE_DIR, packages[i], capture_progress, &progress,
+                &result, detail, sizeof detail);
+        CHECK(status == VM_GUEST_INSTALL_BUILD_ERR_STORAGE_NOT_CLEAN &&
+              !result.already_installed && !result.transaction.committed &&
+              !result.powered_off_checkpoint_witnessed &&
+              strstr(detail, "clean guest shutdown") != NULL &&
+              !progress.staging_seen && !exists(stage) && exists(marker),
+              "fresh dirty disk did not refuse before packages/staging: %s / %s",
+              vm_guest_install_build_status_text(status), detail);
+    }
+
+    CHECK(save_automatic_checkpoint(true, HFS_FIXTURE_SIZE,
+                                    detail, sizeof detail),
+          "could not save powered-off fresh machine: %s", detail);
+    vm_guest_install_build_status_t status =
+        vm_guest_install_build_from_directory(
+            FIXTURE_DIR, NULL, NULL, NULL, &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_ERR_ARGUMENT &&
+          result.powered_off_checkpoint_witnessed &&
+          result.rootfs.status == ROOTFS_WORK_OK &&
+          result.rootfs.source_unclean_accepted &&
+          !exists(stage) && exists(marker),
+          "fresh powered-off witness did not reach package preflight: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+
+    /* Power-off authorizes only the dirty bit, never a geometry error. */
+    write_be32(fixture + HFS_VOLUME_HEADER_OFFSET + 44u,
+               HFS_FIXTURE_BLOCKS + 1u);
+    CHECK(write_buffer(live, fixture, sizeof fixture),
+          "could not write malformed fresh disk");
+    status = vm_guest_install_build_from_directory(
+        FIXTURE_DIR, NULL, NULL, NULL, &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_ERR_ROOTFS &&
+          !result.powered_off_checkpoint_witnessed &&
+          !exists(stage) && exists(marker),
+          "fresh powered-off witness bypassed geometry validation: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+    make_dirty_hfs_fixture(fixture);
+    CHECK(write_buffer(live, fixture, sizeof fixture) &&
+          save_automatic_checkpoint(true, HFS_FIXTURE_SIZE + 512u,
+                                    detail, sizeof detail),
+          "could not save mismatched fresh checkpoint");
+    status = vm_guest_install_build_from_directory(
+        FIXTURE_DIR, NULL, NULL, NULL, &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_ERR_STORAGE_NOT_CLEAN &&
+          !result.powered_off_checkpoint_witnessed &&
+          !exists(stage) && exists(marker),
+          "fresh install trusted a mismatched disk sidecar: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+    CHECK(read_buffer(live, observed, sizeof observed) &&
+          memcmp(observed, fixture, sizeof fixture) == 0 &&
+          file_size_or_zero(live) == HFS_FIXTURE_SIZE,
+          "fresh preflight changed its source disk");
 }
 
 static void test_dirty_existing_install_refuses_before_stage(void) {
@@ -2426,6 +2514,7 @@ int main(void) {
     test_existing_install_is_idempotent();
     test_snapshot_blocks_free_count_recovery();
     test_committed_maintenance_cleanup_blocks_new_transaction();
+    test_fresh_install_checks_shutdown_before_packages();
     test_dirty_existing_install_refuses_before_stage();
     test_powered_off_checkpoint_allows_only_dirty_bit();
     test_real_storage_upgrade_when_supplied();
