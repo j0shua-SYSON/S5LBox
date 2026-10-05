@@ -27,4 +27,8 @@
  */
 @property (nonatomic, copy) NSString *instanceID;
 
+/* Optional install workflow. Once opened, shut down the guest, close its disk,
+ * return to Machines and invoke this block. Never invoked on failure/cancel. */
+@property (nonatomic, copy) void (^guestShutdownCompletion)(void);
+
 @end

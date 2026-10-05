@@ -16,6 +16,11 @@
 static NSString *const kCell = @"machine";
 static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
 
+@interface VMInstanceListViewController ()
+- (BOOL)openInstanceAtIndex:(NSUInteger)index animated:(BOOL)animated
+             afterShutdown:(void (^)(void))afterShutdown;
+@end
+
 @implementation VMInstanceListViewController
 
 - (instancetype)init {
@@ -180,7 +185,25 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
             [list showError:missing
                       doing:@"The installed machine no longer exists"];
         };
-        [navigation pushViewController:install animated:YES];
+        /* Use the ordinary visible machine lifecycle for shutdown. On failure
+         * it stays open and usable; no hidden engine can outlive an error page
+         * and no installer runs against an open disk. */
+        VMInstanceStore *store = [VMInstanceStore sharedStore];
+        for (NSUInteger index = 0u; index < store.count; index++) {
+            if ([[store instanceAtIndex:index][@"id"] isEqualToString:identifier]) {
+                [self_ openInstanceAtIndex:index animated:YES afterShutdown:^{
+                    VMInstanceListViewController *list = weakSelf;
+                    if (list && list.navigationController.topViewController == list)
+                        [list.navigationController pushViewController:install
+                                                             animated:YES];
+                }];
+                return;
+            }
+        }
+        NSError *missing = [NSError errorWithDomain:@"com.j0shua.S5LBox.GuestInstall"
+            code:1 userInfo:@{ NSLocalizedDescriptionKey:
+                @"The selected machine no longer exists. No jailbreak was started." }];
+        [self_ showError:missing doing:@"Could not open the machine"];
     };
     UINavigationController *nav = [[UINavigationController alloc]
         initWithRootViewController:settings];
@@ -332,6 +355,11 @@ titleForFooterInSection:(NSInteger)section {
 }
 
 - (BOOL)openInstanceAtIndex:(NSUInteger)index animated:(BOOL)animated {
+    return [self openInstanceAtIndex:index animated:animated afterShutdown:nil];
+}
+
+- (BOOL)openInstanceAtIndex:(NSUInteger)index animated:(BOOL)animated
+             afterShutdown:(void (^)(void))afterShutdown {
     NSDictionary *row = [[VMInstanceStore sharedStore] instanceAtIndex:index];
     UINavigationController *navigation = self.navigationController;
 
@@ -371,6 +399,7 @@ titleForFooterInSection:(NSInteger)section {
      * firmware at all, which is deliberate -- see -[VMEngine
      * initWithInstanceID:]. */
     vc.instanceID = row[@"id"];
+    vc.guestShutdownCompletion = afterShutdown;
     [navigation pushViewController:vc animated:animated];
     return YES;
 }

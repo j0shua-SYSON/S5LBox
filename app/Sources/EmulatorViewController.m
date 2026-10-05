@@ -116,6 +116,8 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 - (void)settingsTapped:(id)sender;
 - (void)consoleTapped:(id)sender;
 - (void)backTapped:(id)sender;
+- (void)saveAndCloseTapped:(id)sender;
+- (void)shutDownTapped:(id)sender;
 @end
 
 @implementation VMDisplayLinkProxy {
@@ -179,6 +181,9 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     BOOL               _inBackground;
     BOOL               _savingCheckpoint;
     BOOL               _restarting;
+    BOOL               _shuttingDown;
+    BOOL               _restoreIdleTimer;
+    BOOL               _previousIdleTimerDisabled;
     UIBackgroundTaskIdentifier _checkpointBackgroundTask;
 
     /* What the toolbar is currently showing, so it is only rebuilt when the
@@ -446,6 +451,11 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
         _lastBringUpNote = note;      /* -tick: watches for it to CHANGE */
         [self reportBringUpProblem:note];
     }
+    if (self.guestShutdownCompletion && [_engine isRunningFirmware]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self.guestShutdownCompletion) [self shutDownTapped:nil];
+        });
+    }
 }
 
 /* One place, so every reason reaches the user the same way. */
@@ -477,6 +487,9 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 }
 
 - (void)dealloc {
+    if (_restoreIdleTimer)
+        [UIApplication sharedApplication].idleTimerDisabled =
+            _previousIdleTimerDisabled;
     [self restoreSystemPopGestures];
     [self endCheckpointBackgroundTask];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
@@ -520,7 +533,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
 - (void)setCheckpointSaving:(BOOL)saving {
     _savingCheckpoint = saving;
-    const BOOL busy = _savingCheckpoint || _restarting;
+    const BOOL busy = _savingCheckpoint || _restarting || _shuttingDown;
     self.navigationItem.leftBarButtonItem.enabled = !busy;
     _screen.userInteractionEnabled = !busy;
     _keys.userInteractionEnabled = !busy;
@@ -530,7 +543,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
 - (void)setRestarting:(BOOL)restarting {
     _restarting = restarting;
-    const BOOL busy = _savingCheckpoint || _restarting;
+    const BOOL busy = _savingCheckpoint || _restarting || _shuttingDown;
     self.navigationItem.leftBarButtonItem.enabled = !busy;
     _screen.userInteractionEnabled = !busy;
     _keys.userInteractionEnabled = !busy;
@@ -539,8 +552,72 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 }
 
 - (void)backTapped:(id)sender {
+    if (_savingCheckpoint || _restarting || _shuttingDown) return;
+    if (!_engine || ![_engine isRunning] || ![_engine isRunningFirmware]) {
+        [self saveAndCloseTapped:sender];
+        return;
+    }
+    UIAlertController *choice = [UIAlertController
+        alertControllerWithTitle:@"Close this machine"
+                         message:@"Save to resume where you left off, or shut down iPhone OS for a fresh boot next time."
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak EmulatorViewController *weakSelf = self;
+    [choice addAction:[UIAlertAction actionWithTitle:@"Save & close"
+        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+            [weakSelf saveAndCloseTapped:nil];
+        }]];
+    [choice addAction:[UIAlertAction actionWithTitle:@"Shut down"
+        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+            [weakSelf shutDownTapped:nil];
+        }]];
+    [choice addAction:[UIAlertAction actionWithTitle:@"Cancel"
+        style:UIAlertActionStyleCancel handler:nil]];
+    choice.popoverPresentationController.barButtonItem =
+        self.navigationItem.leftBarButtonItem;
+    [self presentViewController:choice animated:YES completion:nil];
+}
+
+- (void)shutDownTapped:(id)sender {
     (void)sender;
-    if (_savingCheckpoint || _restarting) return;
+    if (_savingCheckpoint || _restarting || _shuttingDown) return;
+    _shuttingDown = YES;
+    _userPaused = NO;
+    [self applyPauseState];
+    [self setCheckpointSaving:NO]; /* update all busy controls and overlay */
+    _previousIdleTimerDisabled =
+        [UIApplication sharedApplication].idleTimerDisabled;
+    _restoreIdleTimer = YES;
+    [UIApplication sharedApplication].idleTimerDisabled = YES;
+    __weak EmulatorViewController *weakSelf = self;
+    [_engine shutDownAndStopWithCompletion:^(BOOL finished, NSString *message) {
+        EmulatorViewController *screen = weakSelf;
+        if (!screen) return;
+        [UIApplication sharedApplication].idleTimerDisabled =
+            screen->_previousIdleTimerDisabled;
+        screen->_restoreIdleTimer = NO;
+        screen->_shuttingDown = NO;
+        [screen setCheckpointSaving:NO];
+        if (finished) {
+            void (^afterShutdown)(void) = [screen.guestShutdownCompletion copy];
+            screen.guestShutdownCompletion = nil;
+            [screen.navigationController popViewControllerAnimated:!afterShutdown];
+            if (afterShutdown) afterShutdown();
+            return;
+        }
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"Shutdown not completed"
+                             message:message
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+            style:UIAlertActionStyleDefault handler:nil]];
+        [screen presentViewController:alert animated:YES completion:nil];
+    }];
+}
+
+- (void)saveAndCloseTapped:(id)sender {
+    (void)sender;
+    if (_savingCheckpoint || _restarting || _shuttingDown) return;
+    self.guestShutdownCompletion = nil; /* saving cancels a pending install */
 
     /* A halted machine has already released its s5l8900_t, so there is no
      * state left to serialize. Leaving is still safe and must not trap the
@@ -638,7 +715,8 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
  */
 - (void)applyPauseState {
     const BOOL backgroundPause =
-        _inBackground && [[VMSettings sharedSettings] pausesInBackground];
+        _inBackground && (_shuttingDown ||
+                         [[VMSettings sharedSettings] pausesInBackground]);
     const BOOL paused = _userPaused || backgroundPause;
 
     NSString *reason = _userPaused ? @"user"
@@ -901,6 +979,12 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
  * a user can see it moving even when the bar is only a few pixels along.
  */
 - (void)refreshPrepareOverlay {
+    if (_shuttingDown) {
+        _prepareScrim.hidden = NO;
+        _prepareBar.hidden = YES;
+        _prepareLabel.text = @"Shutting down iPhone OS...\nPlease keep S5LBox open.";
+        return;
+    }
     if (_savingCheckpoint) {
         _prepareScrim.hidden = NO;
         _prepareBar.hidden = YES;

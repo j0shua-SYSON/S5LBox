@@ -42,8 +42,9 @@ temporary installation copies.
 3. Keep **Graphics for new machines** set to **CPU software** for the default
    configuration. Return to Machines and open a machine. Initial disk preparation
    and a cold boot take longer than reopening a saved session.
-4. Use the app's **Back** button to save and return to Machines. Wait for that to
-   finish before force-quitting or copying machine files.
+4. Use **Back** and choose **Save & close** to resume later, or **Shut down** to
+   power off iPhone OS and cold-boot next time. Keep S5LBox open until it returns
+   to Machines before force-quitting or copying machine files.
 
 Without supported firmware, the app runs a built-in test program—not iPhone OS.
 
@@ -57,6 +58,8 @@ retrofit an existing disk.
 To install Cydia, prepare a machine first, return to Machines, then open
 **Settings → Jailbreak** and follow its prompts. This affects the **guest only**,
 not your host iPhone. Packages are downloaded separately; they are not bundled.
+S5LBox shuts down the selected guest before installing. If shutdown cannot be
+confirmed, it leaves the machine open and does not start installation.
 Back up guest data first: a new installation replaces the selected guest disk,
 while supported upgrades use a separate migration path.
 

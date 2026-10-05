@@ -866,7 +866,9 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
            @"is disabled so Cydia and tweaks can run; APT repository signature "
            @"verification remains enabled. Cydia is installed on the next cold "
            @"boot. It does not modify or jailbreak the host iPhone. Historical "
-           @"snapshots of that machine must be removed first. Continue?"
+           @"snapshots of that machine must be removed first. S5LBox will "
+           @"shut down the selected guest before changing its disk. Keep "
+           @"the app open until this finishes. Continue?"
         : @"A running virtual machine cannot have its disk replaced safely. "
            @"Close this Settings screen, leave the machine with Back, then "
            @"open Settings from the Machines screen.";

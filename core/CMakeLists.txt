@@ -504,6 +504,21 @@ add_test(NAME app_resume_checkpoint COMMAND test_vmresumecheckpoint)
 set_tests_properties(app_resume_checkpoint PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
+# Graceful shutdown requires recognized guest UI followed by real PMU power-off.
+add_executable(test_vmguestshutdown
+    ../app/Tests/test_vmguestshutdown.c
+    ../app/Sources/VMGuestShutdown.c)
+target_include_directories(test_vmguestshutdown PRIVATE ../app/Sources)
+set_target_properties(test_vmguestshutdown PROPERTIES
+    C_STANDARD 11 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_vmguestshutdown PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_vmguestshutdown PRIVATE
+        -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
+endif()
+add_test(NAME app_guest_shutdown COMMAND test_vmguestshutdown)
+
 # Publishing a prepared guest filesystem is a journalled rename transaction.
 # Tiny files exercise every crash boundary precisely; a full HFS image would
 # make this test hundreds of megabytes slower without changing the state graph.

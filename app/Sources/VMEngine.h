@@ -82,6 +82,11 @@ typedef void (^VMEngineStopCompletion)(void);
 - (void)saveCheckpointAndStopWithCompletion:
     (VMEngineCheckpointCompletion)completion;
 
+/* Drive the guest's own Power/slide sequence, require PMU full power-off,
+ * then save its durable shutdown witness and close the disk. Failure leaves
+ * the guest running; it never converts a timeout into a forced stop. */
+- (void)shutDownAndStopWithCompletion:(VMEngineCheckpointCompletion)completion;
+
 /* Suspend interpretation (used when the app leaves the foreground: burning a
  * core in the background is the fastest way to be terminated). */
 - (void)setPaused:(BOOL)paused;

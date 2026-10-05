@@ -33,6 +33,7 @@
 #import "VMEngine.h"
 #import "VMTouchQueue.h"
 #import "VMButtonQueue.h"
+#import "VMGuestShutdown.h"
 #import <dispatch/dispatch.h>
 #import "VMFirmwareBoot.h"
 #import "VMInstancePaths.h"
@@ -221,6 +222,8 @@ static double vm_engine_now_seconds(void) {
     VMEngineStopCompletion _stopCompletion;
     BOOL             _checkpointRequested;
     VMEngineCheckpointCompletion _checkpointCompletion;
+    BOOL             _shutdownRequested;
+    VMEngineCheckpointCompletion _shutdownCompletion;
     BOOL             _paused;
     NSString        *_pauseReason;
     uint64_t         _instructionCap; // 0: run until stopped or halted
@@ -746,6 +749,8 @@ static double vm_engine_now_seconds(void) {
     _stopCompletion = nil;
     _checkpointRequested = NO;
     _checkpointCompletion = nil;
+    _shutdownRequested = NO;
+    _shutdownCompletion = nil;
     _paused = NO;
     _pauseReason = nil;
     _snapshotFresh = NO;
@@ -943,6 +948,8 @@ static double vm_engine_now_seconds(void) {
     pthread_mutex_lock(&_lock);
     if (_state == VMEngineStateCheckpointing || _checkpointRequested) {
         refusal = @"A machine checkpoint is already being saved.";
+    } else if (_shutdownRequested) {
+        refusal = @"Wait for iPhone OS to finish shutting down.";
     } else if (_state != VMEngineStateRunning || !_machineReady) {
         refusal = @"The machine stopped before it could be saved.";
     } else if (!_firmwareBoot) {
@@ -965,6 +972,23 @@ static double vm_engine_now_seconds(void) {
             rejected(NO, refusal);
         });
     }
+}
+
+- (void)shutDownAndStopWithCompletion:(VMEngineCheckpointCompletion)completion {
+    NSString *refusal = nil;
+    pthread_mutex_lock(&_lock);
+    if (_shutdownRequested || _checkpointRequested ||
+        _state != VMEngineStateRunning || !_machineReady || !_firmwareBoot) {
+        refusal = @"A running iPhone OS machine is required for guest shutdown.";
+    } else {
+        _shutdownRequested = YES;
+        _shutdownCompletion = [completion copy];
+        _paused = NO;
+        _pauseReason = nil;
+    }
+    pthread_mutex_unlock(&_lock);
+    if (refusal && completion)
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, refusal); });
 }
 
 - (void)setPaused:(BOOL)paused {
@@ -1705,12 +1729,15 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
      * read it and no lock can be forgotten. */
     vm_spin_t spin;
     memset(&spin, 0, sizeof spin);
+    vm_guest_shutdown_t shutdown;
+    BOOL shutdownPrepared = NO, shutdownQuiescent = NO;
 
     while (YES) {
         @autoreleasepool {
             pthread_mutex_lock(&_lock);
             BOOL stop = _stopRequested;
             BOOL checkpoint = _checkpointRequested;
+            BOOL shutdownRequested = _shutdownRequested;
             BOOL paused = _paused;
             pthread_mutex_unlock(&_lock);
 
@@ -1732,6 +1759,9 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
                 vm_button_holds_resume(&_powerHold, &_momentaryHolds,
                                        hostPauseStartNS, resumedNS);
                 pthread_mutex_unlock(&_lock);
+                if (shutdownPrepared && resumedNS >= hostPauseStartNS)
+                    vm_guest_shutdown_resume(&shutdown,
+                        (resumedNS - hostPauseStartNS) / UINT64_C(1000000));
                 hostPausePending = NO;
             }
             if (checkpoint) {
@@ -1743,6 +1773,7 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
                 }
 
                 BOOL inputReady =
+                    s5l_pcf50635_in_standby(&_machine.pmu) ||
                     [self checkpointInputIsQuiescent_emulatorThread];
                 uint64_t nowNS = vm_now_ns();
                 BOOL hostTimedOut =
@@ -1826,6 +1857,83 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
                 continue;
             }
             profilePauseExported = NO;
+
+            if (shutdownRequested && !checkpoint) {
+                uint64_t nowMS = vm_now_ns() / UINT64_C(1000000);
+                if (!shutdownPrepared) {
+                    [self beginCheckpointInputQuiesce_emulatorThread];
+                    vm_guest_shutdown_init(&shutdown, nowMS);
+                    shutdownPrepared = YES;
+                    shutdownQuiescent = NO;
+                }
+                if (!shutdownQuiescent)
+                    shutdownQuiescent =
+                        [self checkpointInputIsQuiescent_emulatorThread];
+                pthread_mutex_lock(&_lock);
+                BOOL idle = shutdownQuiescent && _touch.count == 0u &&
+                            _buttonQueue.count == 0u;
+                pthread_mutex_unlock(&_lock);
+                idle = idle && !s5l_mtz2_irq(&_machine.mtz2);
+                uint32_t w = 0u, h = 0u, stride = 0u;
+                vm_pixel_order_t order = VM_ORDER_BGRA;
+                const uint8_t *pixels = vm_guest_display(
+                    &_machine, &w, &h, &stride, &order);
+                bool slider = order == VM_ORDER_BGRA &&
+                    s5l_clcd_running(&_machine.clcd) &&
+                    vm_guest_shutdown_power_slider(pixels, VM_FB_BYTES,
+                                                    w, h, stride);
+                vm_shutdown_action_t action = vm_guest_shutdown_step(
+                    &shutdown, nowMS, idle,
+                    s5l_buttons_held(&_machine.buttons, S5L_BUTTON_HOLD),
+                    s5l_pcf50635_in_standby(&_machine.pmu), slider);
+                BOOL accepted = YES;
+                switch (action) {
+                case VM_SHUTDOWN_HOME_DOWN:
+                case VM_SHUTDOWN_HOME_UP:
+                    accepted = [self setButton:VMButtonHome
+                        pressed:action == VM_SHUTDOWN_HOME_DOWN];
+                    break;
+                case VM_SHUTDOWN_POWER_DOWN:
+                case VM_SHUTDOWN_POWER_UP:
+                    accepted = [self setButton:VMButtonPower
+                        pressed:action == VM_SHUTDOWN_POWER_DOWN];
+                    break;
+                case VM_SHUTDOWN_TOUCH_DOWN:
+                case VM_SHUTDOWN_TOUCH_MOVE:
+                case VM_SHUTDOWN_TOUCH_UP:
+                    accepted = [self sendTouchAtGuestX:
+                        vm_guest_shutdown_touch_x(&shutdown) y:66
+                        phase:action == VM_SHUTDOWN_TOUCH_DOWN ? VM_TOUCH_BEGAN :
+                              action == VM_SHUTDOWN_TOUCH_UP ? VM_TOUCH_ENDED :
+                                                             VM_TOUCH_MOVED];
+                    break;
+                default: break;
+                }
+                if (!accepted || action == VM_SHUTDOWN_TIMEOUT ||
+                    action == VM_SHUTDOWN_COMPLETE) {
+                    pthread_mutex_lock(&_lock);
+                    VMEngineCheckpointCompletion finished = _shutdownCompletion;
+                    _shutdownCompletion = nil;
+                    _shutdownRequested = NO;
+                    pthread_mutex_unlock(&_lock);
+                    shutdownPrepared = NO;
+                    if (action == VM_SHUTDOWN_COMPLETE) {
+                        [self appendConsole:@"[vm] guest power-off confirmed; saving shutdown witness\n"];
+                        [self saveCheckpointAndStopWithCompletion:finished];
+                        continue;
+                    }
+                    /* Timeout is not permission to cut power. Release anything
+                     * this request held and keep the machine available. */
+                    [self setButton:VMButtonHome pressed:NO];
+                    [self setButton:VMButtonPower pressed:NO];
+                    [self sendTouchAtGuestX:vm_guest_shutdown_touch_x(&shutdown)
+                        y:66 phase:VM_TOUCH_CANCELLED];
+                    if (finished)
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            finished(NO, @"iPhone OS did not complete shutdown. The machine is still open and its disk has not been replaced. You can retry, or use Power and slide to power off.");
+                        });
+                }
+            }
 
             /* The only place ordinary UI input reaches the machine, and it is
              * on this thread, between chunks, with nothing executing. During a
@@ -2006,8 +2114,11 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
      * machine instead of returning a false success for a dead worker. */
     pthread_mutex_lock(&_lock);
     VMEngineCheckpointCompletion checkpointCompletion = _checkpointCompletion;
+    VMEngineCheckpointCompletion shutdownCompletion = _shutdownCompletion;
     VMEngineStopCompletion stopCompletion = _stopCompletion;
     _checkpointCompletion = nil;
+    _shutdownCompletion = nil;
+    _shutdownRequested = NO;
     _stopCompletion = nil;
     _checkpointRequested = NO;
     _machineReady = NO;
@@ -2043,6 +2154,10 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
             checkpointCompletion(saved, message);
         });
     }
+    if (shutdownCompletion)
+        dispatch_async(dispatch_get_main_queue(), ^{
+            shutdownCompletion(NO, @"The emulator stopped before guest shutdown was confirmed. No jailbreak was started.");
+        });
     if (stopCompletion)
         dispatch_async(dispatch_get_main_queue(), stopCompletion);
 }
