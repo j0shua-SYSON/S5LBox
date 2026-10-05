@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-bool ios3_bringup_gate(void *context,
+static bool apply_gate(bool extended, void *context,
                        const uint8_t *kernel_file,
                        size_t kernel_file_size,
                        uint8_t *ram,
@@ -26,6 +26,7 @@ bool ios3_bringup_gate(void *context,
     request.ram_size = ram_size;
     request.ram_base = ram_base;
     request.virt_base = virt_base;
+    request.extended_md_geometry = extended;
 
     status = ios3_kernel_patch_apply(&request, &report);
     if (out != NULL) {
@@ -53,6 +54,20 @@ bool ios3_bringup_gate(void *context,
     return false;
 }
 
+bool ios3_bringup_gate(void *context, const uint8_t *file, size_t file_size,
+                      uint8_t *ram, size_t ram_size, uint64_t ram_base,
+                      uint32_t virt_base, char *detail, size_t capacity) {
+    return apply_gate(false, context, file, file_size, ram, ram_size, ram_base,
+                      virt_base, detail, capacity);
+}
+
+static bool extended_gate(void *context, const uint8_t *file, size_t file_size,
+                          uint8_t *ram, size_t ram_size, uint64_t ram_base,
+                          uint32_t virt_base, char *detail, size_t capacity) {
+    return apply_gate(true, context, file, file_size, ram, ram_size, ram_base,
+                      virt_base, detail, capacity);
+}
+
 void ios3_bringup_gate_configure(s5l_bringup_request_t *request,
                                  ios3_bringup_gate_report_t *gate_report) {
     if (request == NULL) return;
@@ -62,6 +77,24 @@ void ios3_bringup_gate_configure(s5l_bringup_request_t *request,
     request->md_write_site_pc = IOS3_KERNEL_PATCH_MD_WRITE_VA;
     request->md_raw_site_pc = IOS3_KERNEL_PATCH_RAW_WATCHER_VA;
     request->uiomove_pc = IOS3_KERNEL_UIOMOVE_VA;
+    request->md_geometry_sites = (md_geometry_sites_t){0};
+    if (request->root_media &&
+        request->root_media->size > MD_GEOMETRY_BOOTSTRAP_SIZE) {
+        request->kernel_gate = extended_gate;
+        request->md_geometry_sites = (md_geometry_sites_t){
+            .register_pc = IOS3_KERNEL_PATCH_MD_REGISTER_VA,
+            .bounds_pc = IOS3_KERNEL_PATCH_MD_BOUNDS_VA,
+            .count64_pc = IOS3_KERNEL_PATCH_MD_COUNT64_VA,
+            .count32_pc = IOS3_KERNEL_PATCH_MD_COUNT32_VA,
+            .device_va = UINT32_C(0xc022d434),
+            .map_pc = UINT32_C(0xc00740c2),
+            .trim_pc = UINT32_C(0xc007428c),
+            .eof_pc = UINT32_C(0xc007409e),
+            .invalid_pc = UINT32_C(0xc0074096),
+            .count64_done_pc = UINT32_C(0xc0073ebe),
+            .count32_done_pc = UINT32_C(0xc0073f2c)
+        };
+    }
     request->packet_sites = (guest_packet_sites_t){
         .rx_pc = IOS3_KERNEL_PATCH_PACKET_RX_VA,
         .tx_pc = IOS3_KERNEL_PATCH_PACKET_TX_VA,

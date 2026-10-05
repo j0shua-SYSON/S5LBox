@@ -35,6 +35,7 @@
 
 #include "macho.h"
 #include "md_bridge.h"
+#include "md_geometry_bridge.h"
 #include "md_raw_bridge.h"
 #include "guest_packet_bridge.h"
 #include "soc.h"
@@ -153,10 +154,12 @@
  * audited iPhone OS 3 mdevstrategy path expands the page-number base and byte
  * offset into the split 64-bit bcopy_phys ABI, so token arithmetic may cross
  * 4 GiB even though the published base and device-tree length remain 32-bit.
- * Two GiB is a deliberate volume cap, not guest RAM.
+ * Above 2 GiB the gate must additionally install the 64-bit geometry seam;
+ * the 32-bit device tree retains a bounded bootstrap length, and the seam
+ * publishes the real capacity to mdevadd in pages.
  */
 #define S5L_BRINGUP_MD_TOKEN_BASE        UINT64_C(0xe0000000)
-#define S5L_BRINGUP_MD_MAX_SIZE          UINT64_C(0x80000000)
+#define S5L_BRINGUP_MD_MAX_SIZE          MD_GEOMETRY_MAX_SIZE
 #define S5L_BRINGUP_MD_RAW_SLOT_COUNT    UINT32_C(4)
 #define S5L_BRINGUP_MD_RAW_RESERVE_SIZE \
     (S5L_BRINGUP_MD_RAW_SLOT_COUNT * MD_RAW_BRIDGE_MAX_TRANSFER)
@@ -310,6 +313,8 @@ typedef struct {
     uint32_t md_write_site_pc;
     uint32_t md_raw_site_pc;
     uint32_t uiomove_pc;
+    /* Required above 2 GiB; all-zero retains the legacy geometry path. */
+    md_geometry_sites_t md_geometry_sites;
     /* Optional packet-copy sites, supplied only by an exact firmware gate. */
     guest_packet_sites_t packet_sites;
 
@@ -385,6 +390,7 @@ typedef struct {
 typedef struct {
     md_bridge_t     strategy;
     md_raw_bridge_t raw;
+    md_geometry_bridge_t geometry;
     guest_packet_bridge_t packet;
     bool            installed;
 } s5l_bringup_md_t;

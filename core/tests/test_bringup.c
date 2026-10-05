@@ -86,7 +86,9 @@ static uint8_t *slurp(const char *path, size_t *out_len) {
 
 static char *firmware_path(const char *name) {
     static char path[1024];
-    int n = snprintf(path, sizeof path, "%s/%s", S5LBOX_FIRMWARE_DIR, name);
+    const char *directory = getenv("S5LBOX_TEST_FIRMWARE_DIR");
+    if (!directory || !*directory) directory = S5LBOX_FIRMWARE_DIR;
+    int n = snprintf(path, sizeof path, "%s/%s", directory, name);
     if (n < 0 || (size_t)n >= sizeof path) return NULL;
     return path;
 }
@@ -667,15 +669,20 @@ static void test_refusals(const uint8_t *kernel, size_t kernel_len,
                   s5l_bringup_status_name(status));
             s5l8900_free(&machine);
 
-            /* The supported 2 GiB endpoint crosses 4 GiB in synthetic token
-             * arithmetic, but mdevstrategy passes it through the split 64-bit
-             * bcopy_phys ABI. This sparse backend proves geometry without a
-             * 2 GiB test allocation. */
+            /* Large media must not bypass the additional exact-build gate. */
             CHECK(build_machine(&machine), "s5l8900_init failed");
             media = sparse_media(S5L_BRINGUP_MD_MAX_SIZE);
             status = s5l_bringup(&machine, &request, md, &result);
+            CHECK(status == S5L_BRINGUP_ROOT_MEDIA_INVALID,
+                  "8 GiB medium was accepted without its geometry seam");
+            s5l8900_free(&machine);
+
+            /* Sparse geometry proof, without an 8 GiB allocation. */
+            CHECK(build_machine(&machine), "s5l8900_init failed");
+            ios3_bringup_gate_configure(&request, NULL);
+            status = s5l_bringup(&machine, &request, md, &result);
             CHECK(status == S5L_BRINGUP_OK,
-                  "the exact 2 GiB medium gave %s at %s (%s)",
+                  "the exact 8 GiB medium gave %s at %s (%s)",
                   s5l_bringup_status_name(status),
                   s5l_bringup_stage_name(result.stage), result.detail);
             if (status == S5L_BRINGUP_OK) {
@@ -683,14 +690,16 @@ static void test_refusals(const uint8_t *kernel, size_t kernel_len,
                       result.root_dt_address ==
                           (uint32_t)S5L_BRINGUP_MD_TOKEN_BASE &&
                       result.root_dt_size ==
-                          (uint32_t)S5L_BRINGUP_MD_MAX_SIZE,
-                      "2 GiB root geometry was published incorrectly");
+                          MD_GEOMETRY_BOOTSTRAP_SIZE,
+                      "8 GiB root geometry was published incorrectly");
                 CHECK(result.md_bridge_installed && md->installed &&
                       md->strategy.config.token_base ==
                           S5L_BRINGUP_MD_TOKEN_BASE &&
                       md->strategy.config.media_size ==
                           S5L_BRINGUP_MD_MAX_SIZE,
-                      "2 GiB strategy bridge geometry was not installed");
+                      "8 GiB strategy bridge geometry was not installed");
+                CHECK(md_geometry_bridge_valid(&md->geometry),
+                      "8 GiB arithmetic seam was not installed");
             }
             s5l8900_free(&machine);
 
@@ -912,17 +921,113 @@ static void test_executes(const uint8_t *kernel, size_t kernel_len,
     s5l8900_free(&machine);
 }
 
-/*
- * UN-MATCHING, verified by diffing the published tree against the same
- * bring-up without it.
- *
- * Counting struck nodes would pass just as happily if the code overwrote the
- * wrong byte, moved a node, or rebuilt the blob a little shorter. What must be
- * true is much narrower: the tree is the same size, and EXACTLY one byte per
- * named node is different, and each of those became 'x'. Nothing is deleted,
- * no phandle moves, and everything that indexes the tree by offset still
- * finds what it found before.
- */
+static void geometry_store(s5l8900_t *m, uint32_t va, uint32_t value) {
+    uint8_t *p = m->ram + (va - S5L_BRINGUP_VIRT_BASE);
+    for (unsigned i = 0; i < 4; ++i) p[i] = (uint8_t)(value >> (8u * i));
+}
+
+static uint32_t geometry_load(const s5l8900_t *m, uint32_t va) {
+    const uint8_t *p = m->ram + (va - S5L_BRINGUP_VIRT_BASE);
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void geometry_run_to(s5l8900_t *m, uint32_t start, uint32_t end) {
+    m->cpu.r[15] = start;
+    m->cpu.cpsr = ARM_MODE_SVC | ARM_CPSR_T;
+    unsigned steps = 0;
+    arm_status_t status = ARM_OK;
+    while (m->cpu.r[15] != end && steps++ < 32 && status == ARM_OK)
+        status = arm_step(&m->cpu);
+    CHECK(status == ARM_OK && m->cpu.r[15] == end,
+          "native geometry %08x -> %08x stopped at %08x, status %d",
+          start, end, m->cpu.r[15], (int)status);
+}
+
+/* Execute the actual authenticated kernel instructions around every added
+ * seam. This catches wrong stack offsets/register liveness and continuation
+ * addresses which direct helper tests cannot. It is not a full guest boot. */
+static void test_extended_geometry(const uint8_t *kernel, size_t kernel_len,
+                                   const uint8_t *tree, size_t tree_len) {
+    printf("exact-kernel 4/8 GiB arithmetic and continuations\n");
+    const uint64_t sizes[] = {UINT64_C(0x100000000), MD_GEOMETRY_MAX_SIZE};
+    for (unsigned index = 0; index < 2; ++index) {
+        s5l8900_t m;
+        s5l_bringup_md_t *md = calloc(1, sizeof *md);
+        CHECK(md != NULL, "geometry bridge allocation");
+        if (!md) return;
+        if (!build_machine(&m)) { CHECK(false, "geometry machine allocation"); free(md); return; }
+        vm_block_t media = sparse_media(sizes[index]);
+        s5l_bringup_request_t request = {.kernel=kernel, .kernel_size=kernel_len,
+            .devicetree=tree, .devicetree_size=tree_len, .root_media=&media};
+        s5l_bringup_result_t result;
+        ios3_bringup_gate_configure(&request, NULL);
+        s5l_bringup_status_t st = s5l_bringup(&m, &request, md, &result);
+        CHECK(st == S5L_BRINGUP_OK, "large-media exact gate: %s", result.detail);
+        if (st != S5L_BRINGUP_OK) { s5l8900_free(&m); free(md); continue; }
+
+        /* Dedicated test page table maps the kernel's 128 MiB linear aperture. */
+        const uint32_t table_va=0xc7ffc000u, sp=0xc7000000u, bp=0xc7001000u;
+        const uint32_t out=0xc7002000u, dev=md->geometry.sites.device_va;
+        for (unsigned n=0; n<128; ++n)
+            geometry_store(&m, table_va + (0xc00u+n)*4u,
+                           (0x08000000u+n*0x100000u)|0xc02u);
+        m.cpu.cp15.ttbr0=0x0fffc000u;
+        m.cpu.cp15.dacr=3;
+        m.cpu.cp15.sctlr=ARM_SCTLR_M;
+        m.cpu.r[13]=sp;
+        m.cpu.r[1]=(uint32_t)S5L_BRINGUP_MD_TOKEN_BASE;
+        m.cpu.r[2]=MD_GEOMETRY_BOOTSTRAP_SIZE;
+        m.cpu.r[3]=1;
+        geometry_run_to(&m, 0xc01a1b62u, 0xc01a1b6au);
+        CHECK(m.cpu.r[0]==UINT32_MAX && m.cpu.r[1]==0xe0000u &&
+              m.cpu.r[2]==sizes[index]/4096, "native mdevadd arguments truncated");
+
+        geometry_store(&m, dev, 0xe0000u); geometry_store(&m, dev+4, 0);
+        geometry_store(&m, dev+8, (uint32_t)(sizes[index]>>12));
+        geometry_store(&m, dev+12, 5); geometry_store(&m, dev+16, 512);
+        for (unsigned legacy=0; legacy<2; ++legacy) {
+            m.cpu.r[0]=dev; m.cpu.r[5]=0; m.cpu.r[6]=0; m.cpu.r[8]=out;
+            geometry_store(&m,out,UINT32_MAX); geometry_store(&m,out+4,0);
+            geometry_run_to(&m, legacy?0xc0073f1eu:0xc0073eb0u,
+                                legacy?0xc0073f30u:0xc0073ec4u);
+            CHECK(geometry_load(&m,out)==sizes[index]/512,
+                  "native ioctl capacity was truncated");
+            CHECK(geometry_load(&m,out+4)==0,
+                  "native ioctl high capacity word changed");
+        }
+        const uint64_t offsets[]={UINT64_C(0xfffff000),UINT64_C(0x100000000),
+                                   sizes[index]-512,sizes[index],sizes[index]+512};
+        for (unsigned n=0; n<5; ++n) {
+            uint64_t off=offsets[n];
+            m.cpu.r[0]=(uint32_t)off; m.cpu.r[1]=(uint32_t)(off>>32);
+            m.cpu.r[5]=dev; m.cpu.r[8]=bp;
+            geometry_store(&m,bp+0x30,4096);
+            uint32_t target=off>sizes[index]?0xc0074096u:
+                off==sizes[index]?0xc007409eu:
+                sizes[index]-off<4096?0xc007428cu:0xc00740c2u;
+            geometry_run_to(&m,0xc0074084u,target);
+            if (target==0xc007428cu) {
+                geometry_run_to(&m,target,0xc00740c2u);
+                CHECK(geometry_load(&m,bp+0x30)==512,
+                      "native EOF trimming did not keep 512 bytes");
+            }
+            if (off<sizes[index]) {
+                /* Original token construction, with only movs r3,#0 replaced
+                 * by ldr r3,[sp,#0x14]. Stop before the next helper call. */
+                geometry_run_to(&m,0xc00740d0u,0xc00740eeu);
+                uint64_t token=(uint64_t)geometry_load(&m,sp+0x18) |
+                    ((uint64_t)geometry_load(&m,sp+0x1c)<<32);
+                CHECK(token==S5L_BRINGUP_MD_TOKEN_BASE+off,
+                      "native token arithmetic lost the high offset");
+            }
+        }
+        s5l8900_free(&m); free(md);
+    }
+}
+
+/* The published tree must differ only in the first byte of each requested
+ * compatible property: no node, offset, phandle or unrelated byte changes. */
 static void test_unmatch(const uint8_t *kernel, size_t kernel_len,
                          const uint8_t *tree, size_t tree_len) {
     static const char *const PATHS[] = { "arm-io/mbx", "arm-io/sha1" };
@@ -1026,6 +1131,7 @@ int main(void) {
         test_guest_codesign_policy(kernel, kernel_len, tree, tree_len);
         test_unmatch(kernel, kernel_len, tree, tree_len);
         test_executes(kernel, kernel_len, tree, tree_len);
+        test_extended_geometry(kernel, kernel_len, tree, tree_len);
     } else {
         printf("SKIP: no firmware in %s -- the firmware-backed cases need "
                "Apple's kernelcache and device tree, which cannot be "
