@@ -10,6 +10,7 @@
 #include "s5l8920_dart.h"
 #include "s5l8920_spi.h"
 #include "s5l8920_spi_flash.h"
+#include "s5l8920_dsim.h"
 #include "lis331dl.h"
 #include "ak8973.h"
 #include <stddef.h>
@@ -22,6 +23,7 @@
 #define S5L8920_VIC_STRIDE UINT32_C(0x10000)
 #define S5L8920_VIC_COUNT 3u
 #define S5L8920_IRQ_COUNT (32u * S5L8920_VIC_COUNT)
+#define S5L8920_DSIM_GATE 0x19u
 #define S5L8920_UART0_BASE UINT32_C(0x82500000)
 #define S5L8920_UART0_IRQ 24u
 #define S5L8920_UART_COUNT 5u
@@ -259,6 +261,7 @@ typedef struct {
     sst25vf080b_t *spi_flash[S5L8920_SPI_COUNT];
     unsigned spi_flash_cs[S5L8920_SPI_COUNT], spi_flash_gate[S5L8920_SPI_COUNT];
     uint8_t spi_flash_bias[S5L8920_SPI_COUNT], spi_flash_bias_known[S5L8920_SPI_COUNT];
+    s5l8920_dsim_t *dsim;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -268,6 +271,21 @@ typedef struct {
  * is not redirected into a fabricated boot image. No S5L8900 HLE is installed. */
 bool s5l8920_init(s5l8920_t *m);
 void s5l8920_free(s5l8920_t *m);
+
+/* Explicitly attach a caller-owned, configured DSIM to its physical aperture
+ * and raw gate19. The gate must have an explicit initial observation. Keep the
+ * peer alive and exclusively owned by this connection. Identical attachment
+ * preserves state; replacement refuses. Board reset/free detach without
+ * resetting or freeing the peer. No attachment is installed by default.
+ * Only aligned words00..7c are routed; component refusals remain checked bus
+ * failures. Closed gates refuse MMIO rather than supplying invented values.
+ * IRQ, panel and clock-source/divider routing are not established here. */
+bool s5l8920_dsim_attach(s5l8920_t *m, s5l8920_dsim_t *dsim);
+/* Supply independent elapsed source cycles. Gate nibble0 pauses progress,
+ * f permits it; unknown/intermediate gate state refuses without advancing.
+ * Register reads and CPU steps never call either clock automatically. */
+bool s5l8920_dsim_board_system_clock(s5l8920_t *m, uint64_t cycles);
+bool s5l8920_dsim_board_phy_clock(s5l8920_t *m, uint64_t cycles);
 
 /* Reset CPU/controller/UART/timer/I2C state and clear diagnostics, preserving RAM
  * and externally supplied interrupt levels/GPIO samples and configured PMU

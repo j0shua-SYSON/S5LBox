@@ -3835,7 +3835,107 @@ static void test_uart_banks(s5l8920_t *m) {
     }
 }
 
+static void test_dsim_board(void) {
+    s5l8920_t m={0}; s5l8920_dsim_t d={0},other={0},before;
+    const s5l8920_dsim_input_t input={{24000000u,0x10010fu,0xffffu,0u,UINT32_MAX},3u,2u,5u,7u,24u};
+    const uint32_t base=S5L8920_DSIM_BASE,gate=S5L8920_CLOCK_GATE_BASE+4u*S5L8920_DSIM_GATE;
+    CHECK(!s5l8920_dsim_attach(NULL,&d) && !s5l8920_dsim_attach(&m,&d) &&
+        !s5l8920_dsim_board_system_clock(NULL,1u) && !s5l8920_dsim_board_phy_clock(&m,1u),"DSIM invalid host inputs");
+    CHECK(s5l8920_init(&m),"DSIM board initialization");
+    if (!m.ram) return;
+    CHECK(!m.dsim && !s5l8920_dsim_attach(&m,NULL) && !s5l8920_dsim_attach(&m,&d),"DSIM not attached implicitly");
+    (void)m.bus.read32(&m,base);
+    CHECK(m.bus_failure.reason==S5L8920_BUS_UNMAPPED,"unattached DSIM changed old bus policy");
+    s5l8920_clear_bus_failure(&m);
+    CHECK(s5l8920_dsim_configure(&d,&input) && s5l8920_dsim_configure(&other,&input),"DSIM explicit idle inputs");
+    CHECK(!s5l8920_dsim_attach(&m,&d) && !m.dsim,"DSIM accepted unknown physical gate");
+    CHECK(s5l8920_clock_gate_configure(&m,S5L8920_DSIM_GATE,0x5010u) &&
+        s5l8920_dsim_attach(&m,&d) && s5l8920_dsim_attach(&m,&d),"DSIM attach/idempotence");
+    before=d;
+    CHECK(!s5l8920_dsim_attach(&m,&other) && m.dsim==&d && !memcmp(&d,&before,sizeof d),"DSIM replaced borrowed peer");
+    CHECK(s5l8920_dsim_board_system_clock(&m,UINT64_MAX) && s5l8920_dsim_board_phy_clock(&m,UINT64_MAX) &&
+        !memcmp(&d,&before,sizeof d),"closed DSIM gate advanced state");
+    m.bus.write32(&m,base+8u,0x10000004u);
+    CHECK(m.bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && m.bus_failure.address==base+8u &&
+        m.bus_failure.write && !memcmp(&d,&before,sizeof d),"closed DSIM accepted MMIO");
+    s5l8920_clear_bus_failure(&m);m.bus.write32(&m,gate,0x501fu);
+    CHECK(!m.bus_failure.reason && m.bus.read32(&m,base)==0x10010fu,"open DSIM physical mapping");
+    for (unsigned width=1u;width<=4u;width*=2u) for (unsigned align=0u;align<4u;++align) {
+        if (width==4u && !align) continue;
+        before=d;
+        if (width==1u) m.bus.write8(&m,base+8u+align,0u);
+        else if (width==2u) m.bus.write16(&m,base+8u+align,0u);
+        else m.bus.write32(&m,base+8u+align,0u);
+        CHECK(m.bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED && m.bus_failure.size==width &&
+            !memcmp(&d,&before,sizeof d),"DSIM unsupported write width/alignment changed state");
+        s5l8920_clear_bus_failure(&m);
+        if (width==1u) (void)m.bus.read8(&m,base+align);
+        else if (width==2u) (void)m.bus.read16(&m,base+align);
+        else (void)m.bus.read32(&m,base+align);
+        CHECK(m.bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED &&
+            !memcmp(&d,&before,sizeof d),"DSIM unsupported read width/alignment accepted");
+        s5l8920_clear_bus_failure(&m);
+    }
+    const uint32_t refused[]={4u,0x34u,0x3cu,0x54u,0x6cu,0x7cu,0x80u,0xffcu,0x1000u};
+    for (unsigned i=0;i<sizeof refused/sizeof refused[0];++i) {
+        before=d;(void)m.bus.read32(&m,base+refused[i]);
+        CHECK(m.bus_failure.reason==(refused[i]<0x80u?S5L8920_BUS_REGISTER_REFUSED:S5L8920_BUS_UNMAPPED) &&
+            m.bus_failure.address==base+refused[i],"DSIM unknown offset lost checked refusal");
+        m.bus.write32(&m,base+8u,0u);
+        CHECK(m.bus_failure.address==base+refused[i] && !memcmp(&d,&before,sizeof d),"DSIM first failure did not stop later access");
+        s5l8920_clear_bus_failure(&m);
+    }
+    m.bus.write32(&m,base+0x4cu,0x06031572u);m.bus.write32(&m,base+0x50u,5u);
+    m.bus.write32(&m,base+0x4cu,0x06831572u);before=d;
+    for (unsigned i=0;i<256u;++i) (void)m.bus.read32(&m,base);
+    CHECK(!m.bus_failure.reason && !memcmp(&d,&before,sizeof d),"DSIM polling advanced PLL");
+    CHECK(s5l8920_dsim_board_phy_clock(&m,UINT64_MAX) && !memcmp(&d,&before,sizeof d),"PHY clocks advanced system timer");
+    m.bus.write32(&m,gate,0x5010u);
+    CHECK(s5l8920_dsim_board_system_clock(&m,UINT64_MAX) && !memcmp(&d,&before,sizeof d),"closed gate advanced active PLL");
+    m.bus.write32(&m,gate,0x501fu);
+    CHECK(s5l8920_dsim_board_system_clock(&m,4u) && !d.clock.stable && d.clock.remaining==1u &&
+        s5l8920_dsim_board_system_clock(&m,1u) && d.clock.stable,"board PLL completion boundary");
+    m.bus.write32(&m,base+4u,1u);
+    CHECK(s5l8920_dsim_board_system_clock(&m,2u) && d.reset_pending &&
+        s5l8920_dsim_board_system_clock(&m,1u) && d.reset_released,"board reset completion boundary");
+    m.bus.write32(&m,base+0x10u,0x07807027u);m.bus.write32(&m,base+8u,0x11380004u);
+    m.bus.write32(&m,base+0x14u,0x8au);
+    CHECK(s5l8920_dsim_board_phy_clock(&m,4u) && d.lane[0].remaining==1u,"board ULPS entry timing");
+    m.bus.write32(&m,gate,0x5010u);before=d;
+    CHECK(s5l8920_dsim_board_phy_clock(&m,UINT64_MAX) && !memcmp(&d,&before,sizeof d),"closed gate advanced ULPS entry");
+    m.bus.write32(&m,gate,0x501fu);
+    CHECK(s5l8920_dsim_board_phy_clock(&m,1u) && (m.bus.read32(&m,base)&0x330u)==0x230u &&
+        !m.bus_failure.reason,"board ULPS status did not derive from clocked lanes");
+    CHECK(!m.cpu.irq_line && !m.cpu.fiq_line,"DSIM connection inferred IRQ wiring");
+    before=d;
+    for (unsigned nibble=1u;nibble<15u;++nibble) {
+        m.clock_gate[S5L8920_DSIM_GATE].value=0x5010u|nibble;
+        CHECK(!s5l8920_dsim_board_system_clock(&m,1u) && !s5l8920_dsim_board_phy_clock(&m,1u) &&
+            !memcmp(&d,&before,sizeof d),"intermediate DSIM gate accepted elapsed clocks");
+    }
+    m.clock_gate[S5L8920_DSIM_GATE].value=0x501fu;
+    m.clock_gate[S5L8920_DSIM_GATE].configured=false;
+    CHECK(!s5l8920_dsim_board_system_clock(&m,1u) && !s5l8920_dsim_board_phy_clock(&m,1u) &&
+        !memcmp(&d,&before,sizeof d),"unknown DSIM gate accepted clocks");
+    m.clock_gate[S5L8920_DSIM_GATE].configured=true;
+    /* The actual CPU must retain its instruction/destination on unknown MMIO,
+     * then retry a repaired address through its already warmed fetch cache. */
+    put(&m,0u,0xe5912000u);m.cpu.r[15]=S5L8920_RAM_BASE;m.cpu.r[1]=base+4u;m.cpu.r[2]=0xaabbccddu;
+    CHECK(arm_step(&m.cpu)==ARM_HALT && !m.cpu.cycles && m.cpu.r[15]==S5L8920_RAM_BASE &&
+        m.cpu.r[2]==0xaabbccddu && !memcmp(&d,&before,sizeof d),"CPU consumed DSIM refusal sentinel");
+    s5l8920_clear_bus_failure(&m);m.cpu.r[1]=base;
+    CHECK(arm_step(&m.cpu)==ARM_OK && m.cpu.cycles==1u && (m.cpu.r[2]&0x330u)==0x230u,
+        "CPU could not retry supported DSIM register");
+    CHECK(s5l8920_reset(&m) && !m.dsim && !memcmp(&d,&before,sizeof d) &&
+        !s5l8920_dsim_board_system_clock(&m,1u),"board reset mutated or retained borrowed DSIM");
+    CHECK(s5l8920_dsim_attach(&m,&d) && !memcmp(&d,&before,sizeof d),"reattachment changed peer state");
+    s5l8920_free(&m);
+    CHECK(!m.dsim && !memcmp(&d,&before,sizeof d) && !s5l8920_dsim_attach(&m,&d) &&
+        !s5l8920_dsim_board_phy_clock(&m,1u),"board free changed peer or retained connection");
+}
+
 int main(void) {
+    test_dsim_board();
     test_empty_nvram_proxy();
     s5l8920_t m = {0};
     CHECK(s5l8920_init(&m), "initialization");

@@ -27,6 +27,15 @@ static bool dmc_address(uint32_t address) {
     return address>=S5L8920_DMC_BASE && address-S5L8920_DMC_BASE<0x1000u;
 }
 
+static bool dsim_address(uint32_t address) {
+    return address>=S5L8920_DSIM_BASE && address-S5L8920_DSIM_BASE<0x1000u;
+}
+
+static bool dsim_enabled(const s5l8920_t *m) {
+    return m->dsim && m->clock_gate[S5L8920_DSIM_GATE].configured &&
+        (m->clock_gate[S5L8920_DSIM_GATE].value&15u)==15u;
+}
+
 static bool dart_address(uint32_t address, unsigned *bank, uint32_t *offset) {
     if (address<S5L8920_DART_BASE) return false;
     uint32_t relative=address-S5L8920_DART_BASE;
@@ -292,6 +301,17 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         for (unsigned n = 0; n < size; n++) value |= (uint32_t)p[n] << (8u * n);
         return value;
     }
+    if (dsim_address(address)) {
+        uint32_t offset=address-S5L8920_DSIM_BASE,value;
+        if (!m->dsim || offset>=0x80u)
+            fail(m,S5L8920_BUS_UNMAPPED,address,size,false,0u);
+        else if (size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
+        else if (!dsim_enabled(m) || !s5l8920_dsim_read(m->dsim,offset,&value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        else return value;
+        return 0u;
+    }
     unsigned spi_bank; uint32_t spi_offset;
     if (spi_address(address,&spi_bank,&spi_offset)) {
         uint32_t value;
@@ -441,6 +461,16 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
     if (ram_offset(m,address,size,&ram_at)) {
         uint8_t *p = m->ram + ram_at;
         for (unsigned n = 0; n < size; n++) p[n] = (uint8_t)(value >> (8u * n));
+        return;
+    }
+    if (dsim_address(address)) {
+        uint32_t offset=address-S5L8920_DSIM_BASE;
+        if (!m->dsim || offset>=0x80u)
+            fail(m,S5L8920_BUS_UNMAPPED,address,size,true,value);
+        else if (size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        else if (!dsim_enabled(m) || !s5l8920_dsim_write(m->dsim,offset,value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
         return;
     }
     unsigned spi_bank; uint32_t spi_offset;
@@ -1282,6 +1312,31 @@ bool s5l8920_usb_control_configure(s5l8920_t *m, uint32_t address, uint32_t init
     return true;
 }
 
+bool s5l8920_dsim_attach(s5l8920_t *m,s5l8920_dsim_t *dsim) {
+    if (!m || !m->ram || !dsim || !dsim->configured ||
+        !m->clock_gate[S5L8920_DSIM_GATE].configured) return false;
+    if (m->dsim) return m->dsim==dsim;
+    m->dsim=dsim;return true;
+}
+
+static bool dsim_board_clock(s5l8920_t *m,uint64_t cycles,bool phy) {
+    if (!m || !m->ram || !m->dsim || !m->dsim->configured ||
+        !m->clock_gate[S5L8920_DSIM_GATE].configured) return false;
+    unsigned enabled=m->clock_gate[S5L8920_DSIM_GATE].value&15u;
+    if (!enabled) return true;
+    if (enabled!=15u) return false;
+    return phy?s5l8920_dsim_phy_clock(m->dsim,cycles):
+        s5l8920_dsim_system_clock(m->dsim,cycles);
+}
+
+bool s5l8920_dsim_board_system_clock(s5l8920_t *m,uint64_t cycles) {
+    return dsim_board_clock(m,cycles,false);
+}
+
+bool s5l8920_dsim_board_phy_clock(s5l8920_t *m,uint64_t cycles) {
+    return dsim_board_clock(m,cycles,true);
+}
+
 bool s5l8920_reset(s5l8920_t *m) {
     if (!m || !m->ram) return false;
     if (!arm_reset_profile(&m->cpu,&m->bus,ARM_ARCH_V7_CORTEX_A8)) return false;
@@ -1295,6 +1350,7 @@ bool s5l8920_reset(s5l8920_t *m) {
         }
     }
     m->timebase_ticks=0u;
+    m->dsim=NULL;
     memset(&m->deadline,0,sizeof m->deadline);
     for (unsigned gate=0;gate<S5L8920_CLOCK_GATE_COUNT;gate++)
         m->clock_gate[gate].value=m->clock_gate[gate].initial;

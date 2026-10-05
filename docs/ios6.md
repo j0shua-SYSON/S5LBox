@@ -84,11 +84,27 @@ one-lane configuration and ready-global store. Neither substitutes a call,
 instruction or successful return. Independent missing-system, missing-PHY and
 missing-timebase cases remain waiting in their corresponding poll or delay.
 
+An explicitly attached controller now receives aligned word accesses through
+the board's checked bus at `0x89000000`, with raw physical gate `0x19` as used
+by the original iBoot helper. The caller supplies and owns the configured
+controller and its clock inputs. A closed gate pauses both supplied clock
+domains and refuses MMIO. Missing attachment retains the unmapped bus behavior;
+unsupported widths, registers and aperture tails remain checked failures.
+Board reset/free detach the peer without changing its state. IRQ wiring and
+automatic clock-source/divider conversion remain unavailable.
+
+The unchanged body/dependency witness also runs through this board connection,
+with the same return counts and missing-clock waits. Before attachment it stops
+after48 retired instructions at its first DSIM write, `0x4ff0961c`, targeting
+`0x89000008`. Board tests cover gate pauses during PLL and ULPS transitions,
+first-failure preservation, and a real CPU load that halts without consuming a
+refusal value and then retries a supported register through a warmed fetch.
+
 This establishes the body under the stated inputs, not the logger/prologue,
-complete boot chain, packet transport, panel or displayed image. The controller
-is not yet attached to the board bus. SWRST command readback, post-enable
-PLLTMR, write-only/empty-data ports, PHY tuning and remaining snapshot offsets
-are still unavailable, so the full-kernel stop has not moved.
+complete boot chain, packet transport, panel or displayed image. SWRST command
+readback, post-enable PLLTMR, write-only/empty-data ports, PHY tuning and remaining
+snapshot offsets are still unavailable. The full-kernel harness has not yet
+installed this connection, and its last observed stop remains unchanged.
 
 ## Accelerometer configuration
 
