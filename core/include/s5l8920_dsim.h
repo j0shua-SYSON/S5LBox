@@ -58,4 +58,67 @@ bool s5l8920_dsim_clock_advance(s5l8920_dsim_clock_t *d, uint64_t cycles);
  * frequency is used for timing. Failure preserves both outputs. */
 bool s5l8920_dsim_clock_rate(const s5l8920_dsim_clock_t *d,
     uint64_t *numerator, uint32_t *denominator);
+
+typedef enum {
+    S5L8920_DSIM_STOP = 0,
+    S5L8920_DSIM_ENTERING_ULPS,
+    S5L8920_DSIM_ULPS,
+    S5L8920_DSIM_EXITING_ULPS,
+    S5L8920_DSIM_WAKEUP,
+    S5L8920_DSIM_STOPPING
+} s5l8920_dsim_lane_state_t;
+
+typedef struct {
+    s5l8920_dsim_clock_input_t clock;
+    uint32_t reset_cycles; /* DSIM system clock, with stable internal PLL. */
+    uint32_t stop_cycles, entry_cycles, exit_cycles, wakeup_cycles; /* PHY clock. */
+} s5l8920_dsim_input_t;
+
+typedef struct {
+    s5l8920_dsim_lane_state_t state;
+    uint32_t remaining;
+} s5l8920_dsim_lane_t;
+
+typedef struct {
+    s5l8920_dsim_input_t initial;
+    s5l8920_dsim_clock_t clock;
+    uint32_t reg[19], known, events, reset_remaining;
+    s5l8920_dsim_lane_t lane[3]; /* Clock, data0, data1. */
+    bool configured, reset_pending, reset_released, events_known, fifos_empty;
+} s5l8920_dsim_t;
+
+/* Idle two-data-lane control model, independent of a board attachment. Inputs
+ * must explicitly place clock/data0/data1 in stop state with reset released. All durations must
+ * be nonzero; they are supplied timing parameters, not measured S5L8920
+ * constants. Other initial configuration, FIFO and interrupt words are unknown.
+ * Identical configuration preserves progress; conflicting input refuses.
+ * Host reset restores these observations, not a software-reset register image. */
+bool s5l8920_dsim_configure(s5l8920_dsim_t *d, const s5l8920_dsim_input_t *input);
+void s5l8920_dsim_reset(s5l8920_dsim_t *d);
+
+/* Word offsets only. Software reset1 is supported from stop state; functional
+ * reset10000 preserves programmed configuration except escape requests. Both
+ * clear FIFOs/events and release only after supplied system clocks with a
+ * stable internal PLL. Software reset invalidates changed register values:
+ * their silicon defaults are not guessed. Subsequent supported writes establish
+ * readable latches. SWRST command readback remains unknown.
+ *
+ * Two data lanes support stop, ULPS entry, exit and wakeup. Gated lanes retain
+ * their internal state; re-enabling resumes it. Duplicate requests preserve
+ * progress; conflicting commands during transitions refuse. No HS clock,
+ * external clock, active image, packet, BTA or remote-reset operation is
+ * accepted. Empty FIFO status requires reset or all FIFO init inputs low.
+ * PLL/reset interrupt causes latch and support W1C; masks/IRQ wiring remain
+ * unavailable. Post-enable PLLTMR and unimplemented offsets still refuse.
+ * Rejections preserve the entire component and read output. */
+bool s5l8920_dsim_read(const s5l8920_dsim_t *d, uint32_t offset, uint32_t *value);
+bool s5l8920_dsim_write(s5l8920_dsim_t *d, uint32_t offset, uint32_t value);
+
+/* Independent clock-domain input. No CPU step or register read advances time.
+ * System cycles drive PLL/reset. PHY cycles drive enabled lanes only while
+ * internal PLL, byte, escape and the lane's escape clocks are enabled with a
+ * nonzero prescaler. PHY clock routing/division and relative phase are the
+ * caller's responsibility; no related-silicon divider is silently adopted. */
+bool s5l8920_dsim_system_clock(s5l8920_dsim_t *d, uint64_t cycles);
+bool s5l8920_dsim_phy_clock(s5l8920_dsim_t *d, uint64_t cycles);
 #endif

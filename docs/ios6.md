@@ -55,14 +55,40 @@ reference, the rational output is 343MHz. The table selects one data lane;
 the later initializer first enables two lanes and then narrows to that value.
 The kernel tree's two-lane property is not substituted for this firmware input.
 
-An isolated firmware test starts after the logger call, supplies idle state,
-and advances explicit system cycles per retired instruction. With no cycles,
-the original PLL polling remains pending. With cycles, it reaches the next
-unsupported write: `SWRST=1` at `0x89000004`. No guest instruction or call is
-replaced. This is a prefix test, not the complete initializer. Software reset,
-lane transitions, FIFO/packet handling, panel support and the kernel's complete
-register snapshot remain unimplemented. The component is not yet attached to
-the board bus, and it does not move the full-kernel stop or render a display.
+The controller now also supports software and functional reset from stop state,
+programmed display configuration, FIFO initialization, latched PLL/reset causes
+with write-one-to-clear acknowledgement, and two data lanes entering/exiting
+ULPS. Reset behavior follows the register groups described in Samsung's
+[reset register reference](https://www.manualslib.com/manual/1231975/Samsung-S5pc100.html?page=774);
+the [escape requests](https://www.manualslib.com/manual/1231975/Samsung-S5pc100.html?page=779)
+remain asserted until the guest clears them. Changed reset values stay unknown
+until programmed, rather than receiving guessed silicon defaults. Functional
+reset preserves supported configuration and clears escape requests. Reset
+completion requires a stable internal PLL and supplied system cycles. Lane
+transitions require supplied PHY cycles and their enabled clocks.
+
+Reset, stop, entry, exit and wakeup durations are explicit functional-model
+inputs. Gated lanes retain their internal state; this is an inference from the
+original firmware's temporary gating during ULPS reconfiguration, not a target
+measurement. The precise PHY divider, clock-domain phase and analog timing
+remain unverified. Initial observations require a released, idle controller;
+active-image, HS-clock, packet, BTA and remote-reset operations still refuse.
+
+An isolated firmware test starts after the logger call with a prepared caller
+frame and executes the unchanged initializer body through its epilogue. It
+includes the real gate helper and both complete 1000us delays, with original
+timebase reads and unsigned64 division. The body returns zero after356,572
+instructions with one supplied cycle per instruction in each clock domain;
+a coarser independent schedule returns after11,774. Both produce the original
+one-lane configuration and ready-global store. Neither substitutes a call,
+instruction or successful return. Independent missing-system, missing-PHY and
+missing-timebase cases remain waiting in their corresponding poll or delay.
+
+This establishes the body under the stated inputs, not the logger/prologue,
+complete boot chain, packet transport, panel or displayed image. The controller
+is not yet attached to the board bus. SWRST command readback, post-enable
+PLLTMR, write-only/empty-data ports, PHY tuning and remaining snapshot offsets
+are still unavailable, so the full-kernel stop has not moved.
 
 ## Accelerometer configuration
 

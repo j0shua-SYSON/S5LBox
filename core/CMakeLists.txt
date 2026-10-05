@@ -33,6 +33,7 @@ add_library(emucore STATIC
     src/soc/s5l8920_uart.c
     src/soc/s5l8920_dart.c
     src/soc/s5l8920_dsim.c
+    src/soc/s5l8920_dsim_control.c
     src/soc/s5l8920_spi.c
     src/soc/sst25vf080b.c
     src/soc/lis331dl.c
@@ -239,6 +240,10 @@ add_test(NAME s5l8920_dart COMMAND test_s5l8920_dart)
 add_executable(test_s5l8920_dsim tests/test_s5l8920_dsim.c)
 target_link_libraries(test_s5l8920_dsim PRIVATE emucore)
 add_test(NAME s5l8920_dsim COMMAND test_s5l8920_dsim)
+
+add_executable(test_s5l8920_dsim_control tests/test_s5l8920_dsim_control.c)
+target_link_libraries(test_s5l8920_dsim_control PRIVATE emucore)
+add_test(NAME s5l8920_dsim_control COMMAND test_s5l8920_dsim_control)
 
 add_executable(test_sst25vf080b tests/test_sst25vf080b.c)
 target_link_libraries(test_sst25vf080b PRIVATE emucore)
