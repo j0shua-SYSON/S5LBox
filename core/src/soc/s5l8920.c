@@ -36,6 +36,14 @@ static bool dsim_enabled(const s5l8920_t *m) {
         (m->clock_gate[S5L8920_DSIM_GATE].value&15u)==15u;
 }
 
+static bool swi_address(uint32_t address) {
+    return address>=S5L8920_SWI_BASE && address-S5L8920_SWI_BASE<0x1000u;
+}
+static bool swi_enabled(const s5l8920_t *m) {
+    return m->swi && m->clock_gate[S5L8920_SWI_GATE].configured &&
+        (m->clock_gate[S5L8920_SWI_GATE].value&15u)==15u;
+}
+
 static bool dart_address(uint32_t address, unsigned *bank, uint32_t *offset) {
     if (address<S5L8920_DART_BASE) return false;
     uint32_t relative=address-S5L8920_DART_BASE;
@@ -312,6 +320,17 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         else return value;
         return 0u;
     }
+    if (swi_address(address)) {
+        uint32_t value,offset=address-S5L8920_SWI_BASE;
+        if (!m->swi || offset>=0x28u)
+            fail(m,S5L8920_BUS_UNMAPPED,address,size,false,0u);
+        else if (size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
+        else if (!swi_enabled(m) || !s5l8920_swi_read(m->swi,offset,&value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        else return value;
+        return 0u;
+    }
     unsigned spi_bank; uint32_t spi_offset;
     if (spi_address(address,&spi_bank,&spi_offset)) {
         uint32_t value;
@@ -470,6 +489,16 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         else if (size!=4u || (address&3u))
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
         else if (!dsim_enabled(m) || !s5l8920_dsim_write(m->dsim,offset,value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+        return;
+    }
+    if (swi_address(address)) {
+        uint32_t offset=address-S5L8920_SWI_BASE;
+        if (!m->swi || offset>=0x28u)
+            fail(m,S5L8920_BUS_UNMAPPED,address,size,true,value);
+        else if (size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        else if (!swi_enabled(m) || !s5l8920_swi_write(m->swi,offset,value))
             fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
         return;
     }
@@ -1367,6 +1396,18 @@ bool s5l8920_pinot_service(s5l8920_t *m) {
     return gate==15u && pinot_panel_service(m->pinot,m->dsim);
 }
 
+bool s5l8920_swi_attach(s5l8920_t *m,s5l8920_swi_t *swi) {
+    if (!m || !m->ram || !swi || !swi->configured || !m->clock_gate[S5L8920_SWI_GATE].configured) return false;
+    if (m->swi) return m->swi==swi;
+    m->swi=swi;return true;
+}
+bool s5l8920_swi_board_source_clock(s5l8920_t *m,uint64_t cycles) {
+    if (!m || !m->ram || !m->swi || !m->swi->configured || !m->clock_gate[S5L8920_SWI_GATE].configured) return false;
+    unsigned gate=m->clock_gate[S5L8920_SWI_GATE].value&15u;
+    if (!gate) return true;
+    return gate==15u && s5l8920_swi_source_clock(m->swi,cycles);
+}
+
 bool s5l8920_reset(s5l8920_t *m) {
     if (!m || !m->ram) return false;
     if (!arm_reset_profile(&m->cpu,&m->bus,ARM_ARCH_V7_CORTEX_A8)) return false;
@@ -1382,6 +1423,7 @@ bool s5l8920_reset(s5l8920_t *m) {
     m->timebase_ticks=0u;
     m->dsim=NULL;
     m->pinot=NULL;
+    m->swi=NULL;
     memset(&m->deadline,0,sizeof m->deadline);
     for (unsigned gate=0;gate<S5L8920_CLOCK_GATE_COUNT;gate++)
         m->clock_gate[gate].value=m->clock_gate[gate].initial;

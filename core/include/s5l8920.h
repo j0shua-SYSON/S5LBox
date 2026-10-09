@@ -12,6 +12,7 @@
 #include "s5l8920_spi_flash.h"
 #include "s5l8920_dsim.h"
 #include "pinot_panel.h"
+#include "s5l8920_swi.h"
 #include "lis331dl.h"
 #include "ak8973.h"
 #include <stddef.h>
@@ -25,6 +26,7 @@
 #define S5L8920_VIC_COUNT 3u
 #define S5L8920_IRQ_COUNT (32u * S5L8920_VIC_COUNT)
 #define S5L8920_DSIM_GATE 0x19u
+#define S5L8920_SWI_GATE 0x0eu /* Actual provider mapping of logical DT gate0x35. */
 #define S5L8920_PINOT_RESET_PIN 40u /* Original GPIO identifier0x500. */
 #define S5L8920_UART0_BASE UINT32_C(0x82500000)
 #define S5L8920_UART0_IRQ 24u
@@ -265,6 +267,7 @@ typedef struct {
     uint8_t spi_flash_bias[S5L8920_SPI_COUNT], spi_flash_bias_known[S5L8920_SPI_COUNT];
     s5l8920_dsim_t *dsim;
     pinot_panel_t *pinot;
+    s5l8920_swi_t *swi;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -303,6 +306,14 @@ bool s5l8920_dsim_board_escape_clock(s5l8920_t *m, uint64_t cycles);
  * Neither a CPU step, read, service nor GPIO write advances panel time. */
 bool s5l8920_pinot_attach(s5l8920_t *m, pinot_panel_t *panel);
 bool s5l8920_pinot_service(s5l8920_t *m);
+
+/* Optional borrowed SWI controller on raw physical gate0e. Attachment needs
+ * explicit controller and gate configuration; duplicate preserves progress,
+ * replacement refuses. Closed gate pauses clocks and refuses MMIO. Intermediate
+ * gate states refuse. Reset/free detach without changing the borrowed peer.
+ * Source cycles are explicit NCLK input; no CPU-step or clock-source inference. */
+bool s5l8920_swi_attach(s5l8920_t *m, s5l8920_swi_t *swi);
+bool s5l8920_swi_board_source_clock(s5l8920_t *m, uint64_t cycles);
 
 /* Reset CPU/controller/UART/timer/I2C state and clear diagnostics, preserving RAM
  * and externally supplied interrupt levels/GPIO samples and configured PMU

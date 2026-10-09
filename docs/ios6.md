@@ -22,11 +22,12 @@ OS 3 machine and application defaults remain ARM1176/S5L8900.
 
 ## Display clock setup
 
-The prepared kernel now reads AppleSamsungMIPIDSI's complete32-word register
-snapshot and reaches ApplePinotLCD. It stops at an unprepared `lcd-panel-id`
-property, physical `0x4110bc9c`, PC `0x8093f860`, after280,220,747 retired
-instructions. The original panel driver subsequently rejects a zero ID; no
-panel identity or successful response has been invented to pass that check.
+The prepared kernel reads AppleSamsungMIPIDSI's complete32-word register
+snapshot and consumes the panel identity produced by the original iBoot
+query and device-tree routines under the explicit inputs below. The latest
+whole-kernel run stops in AppleSamsungSWI at PC `0x808ad4c2`, writing
+`0x00003e80` to unavailable register `0x89100024`, after283,065,264 retired
+instructions. It has not reached launchd, SpringBoard or displayed pixels.
 
 This run transplants the controller state produced by the original iBoot
 initialization body, enables its physical gate, and supplies explicit idle
@@ -186,9 +187,8 @@ physical panel or an automatically populated kernel device-tree property.
 A19-byte reply is fully drained while the caller stores only its15-byte
 capacity. Missing PHY/escape clocks or a missing consumer leave the original
 polls pending; absent direction changes, missing replies and error reports
-reach original failure logging with ID0. The full kernel has not yet been rerun
-with the stateful panel and original handoff below: its last stop remains
-`lcd-panel-id`.
+reach original failure logging with ID0. The subsequent full-kernel witness
+uses the stateful panel and original handoff described below.
 
 ### Panel reset, commands and firmware handoff
 
@@ -239,8 +239,62 @@ The initial witness guard omitted the memory-copy function's final `BX LR` at
 `0x4ff22ecc`; including that original instruction completed the witness. The
 failed run is retained. The full Pinot entry, PMU power coupling, calibration
 commands, long packet transmission, active scanout and a connected boot chain
-remain unverified or unimplemented. This isolated handoff does not establish
-new full-kernel progress, launchd or SpringBoard.
+remain unverified or unimplemented.
+
+A subsequent prepared kernel run uses the original-produced controller,
+panel, GPIO and matching device-tree state. Only the four ID bytes and15 raw
+identity bytes lose their diagnostic read guards; unrelated guards and the
+raw field's trailing byte remain. Independent link clocks, stable power and
+panel time are explicit inputs, retaining the earlier boot assumptions. The
+kernel loads `0x00e50486` at `0x8093f860..0x8093f862`. Its later zero check and
+panel-start return were not observed before the SWI stop. A register-only
+observation repeat has the same remaining complete trace. This proves actual
+identity consumption, not completed panel startup or a connected boot chain.
+
+## SWI foreground request transport
+
+The matching kernel's AppleSamsungSWI setup writes STR-delay at `0x89100024`
+and control at `0x89100000`. Its device-tree logical gate `0x35` maps to raw
+physical gate `0x0e`: observation around the original provider call shows
+only that gate changing from0 to15. The tree supplies divider12, delay8000,
+four command bits, current command1 and voltage command10. The original
+arithmetic programs delay16000 and control `0x00000b03`.
+
+An optional controller now supports those programming words, bounded15-bit
+primary/secondary data and foreground command1/3. The caller explicitly
+supplies an initially powered idle controller, nonbusy status readbacks and
+a nonzero eligibility interval in divided NCLK cycles. These are functional
+inputs, not inferred silicon reset values or measured serial timing. A
+foreground request captures its data, command, control and STR-delay. Busy
+persists until an external receiver accepts that exact request after its
+supplied interval. Polling cannot advance time or complete a request; elapsed
+time alone cannot clear busy. Reset cancels pending work and preserves the
+sequence counter so stale acceptance cannot consume a subsequent request.
+
+The board's checked word accesses use raw gate `0x0e`; a closed gate refuses
+MMIO and pauses the explicit clock input. Missing attachment remains unmapped.
+Unsupported widths, registers and aperture tails still fail. Board reset/free
+detach the borrowed controller without changing it. Secondary activation and
+arbitration, IRQ handling, wire serialization, STR-delay/mode interpretation
+and regulator/backlight effects remain unavailable. A qualified receiver must
+implement those relevant semantics before acknowledging a real transfer.
+
+A bounded witness executes unchanged original setup arithmetic, including its
+ARM division helper, through board MMIO. Before attachment it stops at the
+first STR-delay write after81 instruction attempts. With the component it
+reaches the setup boundary after87 attempts. The original foreground helper
+returns after35 instructions with packed word `0x0da5` and command3. A declared
+diagnostic receiver can accept it after924 supplied NCLK cycles, using divider12
+and the explicit77-cycle interval; this is not physical timing or a PMU model.
+The original busy test then returns idle, and its idle wait completes.
+
+Without clocks acceptance fails. Without a receiver even arbitrarily many
+cycles leave busy asserted, and the original wait reaches its actual time
+helper. The original secondary submission refuses at `0x808ad6a2`; a closed
+gate refuses the setup write. Prepared objects, MMU and tree scalars are
+explicit witness inputs; no instruction or return is replaced. This new
+component has not yet been exercised by a full-kernel continuation, whose
+last proven stop remains the setup write above.
 
 ## Accelerometer configuration
 
