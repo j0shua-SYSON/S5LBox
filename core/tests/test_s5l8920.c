@@ -3876,7 +3876,7 @@ static void test_dsim_board(void) {
             !memcmp(&d,&before,sizeof d),"DSIM unsupported read width/alignment accepted");
         s5l8920_clear_bus_failure(&m);
     }
-    const uint32_t refused[]={4u,0x34u,0x3cu,0x54u,0x6cu,0x7cu,0x80u,0xffcu,0x1000u};
+    const uint32_t refused[]={0xcu,0x34u,0x3cu,0x54u,0x6cu,0x7cu,0x80u,0xffcu,0x1000u};
     for (unsigned i=0;i<sizeof refused/sizeof refused[0];++i) {
         before=d;(void)m.bus.read32(&m,base+refused[i]);
         CHECK(m.bus_failure.reason==(refused[i]<0x80u?S5L8920_BUS_REGISTER_REFUSED:S5L8920_BUS_UNMAPPED) &&
@@ -3920,7 +3920,7 @@ static void test_dsim_board(void) {
     m.clock_gate[S5L8920_DSIM_GATE].configured=true;
     /* The actual CPU must retain its instruction/destination on unknown MMIO,
      * then retry a repaired address through its already warmed fetch cache. */
-    put(&m,0u,0xe5912000u);m.cpu.r[15]=S5L8920_RAM_BASE;m.cpu.r[1]=base+4u;m.cpu.r[2]=0xaabbccddu;
+    put(&m,0u,0xe5912000u);m.cpu.r[15]=S5L8920_RAM_BASE;m.cpu.r[1]=base+0xcu;m.cpu.r[2]=0xaabbccddu;
     CHECK(arm_step(&m.cpu)==ARM_HALT && !m.cpu.cycles && m.cpu.r[15]==S5L8920_RAM_BASE &&
         m.cpu.r[2]==0xaabbccddu && !memcmp(&d,&before,sizeof d),"CPU consumed DSIM refusal sentinel");
     s5l8920_clear_bus_failure(&m);m.cpu.r[1]=base;

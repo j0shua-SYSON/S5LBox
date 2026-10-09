@@ -36,10 +36,16 @@ void s5l8920_dsim_reset(s5l8920_dsim_t *d) {
     if (!d) return;
     if (!d->configured) { memset(d,0,sizeof *d); return; }
     s5l8920_dsim_input_t input=d->initial;
+    s5l8920_dsim_readback_input_t readback=d->readback_initial;
+    bool readback_configured=d->readback_configured;
     memset(d,0,sizeof *d); d->initial=input; d->configured=true;
+    d->readback_initial=readback;d->readback_configured=readback_configured;
     d->clock.initial=input.clock; d->clock.configured=true;
     s5l8920_dsim_clock_reset(&d->clock);
     d->reg[2]=input.clock.clkctrl; d->known=KNOWN(8u);
+    if (readback_configured && (readback.known&KNOWN(0x0cu))) {
+        d->reg[3]=readback.word[3];d->known|=KNOWN(0x0cu);
+    }
     d->reset_released=(input.clock.idle_status&0x100000u)!=0u;
 }
 bool s5l8920_dsim_configure(s5l8920_dsim_t *d,const s5l8920_dsim_input_t *input) {
@@ -51,6 +57,28 @@ bool s5l8920_dsim_configure(s5l8920_dsim_t *d,const s5l8920_dsim_input_t *input)
     if (!s5l8920_dsim_clock_configure(&next.clock,&input->clock)) return false;
     next.initial=*input; next.configured=true;
     s5l8920_dsim_reset(&next); *d=next; return true;
+}
+static bool passive_offset(uint32_t offset) {
+    return offset==0x0cu || offset==0x30u || offset==0x34u || offset==0x38u ||
+        offset==0x3cu || offset==0x48u || (offset>=0x54u && offset<=0x7cu);
+}
+bool s5l8920_dsim_configure_readback(s5l8920_dsim_t *d,const s5l8920_dsim_readback_input_t *input) {
+    if (!d || !input || !d->configured || input->timer<S5L8920_DSIM_TIMER_UNKNOWN ||
+        input->timer>S5L8920_DSIM_TIMER_REMAINING) return false;
+    for (unsigned i=0;i<32u;++i) {
+        bool known=(input->known&(UINT32_C(1)<<i))!=0u;
+        if ((known && !passive_offset(4u*i)) || (!known && input->word[i])) return false;
+    }
+    if ((input->word[3]&0xff000000u) || (input->word[18]&0xffff8080u)) return false;
+    if (d->readback_configured) {
+        if (input->known!=d->readback_initial.known || input->timer!=d->readback_initial.timer) return false;
+        for (unsigned i=0;i<32u;++i) if (input->word[i]!=d->readback_initial.word[i]) return false;
+        return true;
+    }
+    if (d->readback_locked) return false;
+    d->readback_initial=*input;d->readback_configured=true;
+    if (input->known&KNOWN(0x0cu)) { d->reg[3]=input->word[3];d->known|=KNOWN(0x0cu); }
+    return true;
 }
 static bool latch_mask(uint32_t offset,uint32_t *mask) {
     switch (offset) {
@@ -67,7 +95,7 @@ static bool latch_mask(uint32_t offset,uint32_t *mask) {
     }
 }
 bool s5l8920_dsim_read(const s5l8920_dsim_t *d,uint32_t offset,uint32_t *value) {
-    if (!d || !value || !d->configured) return false;
+    if (!d || !value || !d->configured || (offset&3u) || offset>=0x80u) return false;
     if (!offset) {
         uint32_t result=d->initial.clock.idle_status&0xcu;
         if (d->clock.stable) result|=0x80000000u;
@@ -79,13 +107,22 @@ bool s5l8920_dsim_read(const s5l8920_dsim_t *d,uint32_t offset,uint32_t *value) 
         }
         *value=result; return true;
     }
+    if (offset==4u) { *value=d->reset_request;return true; }
+    if (offset==0x50u && !d->clock.timer_readable && d->readback_configured) {
+        if (d->readback_initial.timer==S5L8920_DSIM_TIMER_RELOAD) { *value=d->clock.plltmr;return true; }
+        if (d->readback_initial.timer==S5L8920_DSIM_TIMER_REMAINING) { *value=d->clock.remaining;return true; }
+    }
     if (offset==0x4cu || offset==0x50u) return s5l8920_dsim_clock_read(&d->clock,offset,value);
     if (offset==0x2cu) {
         if (!d->events_known) return false;
         *value=d->events; return true;
     }
     uint32_t mask;
-    if (offset!=8u && !latch_mask(offset,&mask)) return false;
+    if (offset!=8u && !latch_mask(offset,&mask)) {
+        if (!d->readback_configured || !(d->readback_initial.known&KNOWN(offset)) ||
+            (offset==0x3cu && !d->fifos_empty)) return false;
+        *value=d->readback_initial.word[offset/4u];return true;
+    }
     if (!(d->known&KNOWN(offset))) return false;
     if (offset==0x44u && !d->fifos_empty) return false;
     *value=d->reg[offset/4u]|(offset==0x44u?0x01555500u:0u); return true;
@@ -94,24 +131,31 @@ bool s5l8920_dsim_write(s5l8920_dsim_t *d,uint32_t offset,uint32_t value) {
     if (!d || !d->configured) return false;
     if (offset==0x4cu || offset==0x50u) {
         if (!s5l8920_dsim_clock_write(&d->clock,offset,value)) return false;
-        clock_event(d); return true;
+        clock_event(d); d->readback_locked=true;return true;
     }
     if (offset==8u) {
         if (value&~CLK_FIELDS) return false;
         if (!s5l8920_dsim_clock_write(&d->clock,offset,value&0x1000ffffu)) return false;
-        d->reg[2]=value; return true;
+        d->reg[2]=value; d->readback_locked=true;return true;
     }
     if (offset==0x2cu) {
         d->events&=~value;
+        d->readback_locked=true;
         return true;
     }
     if (offset==4u) {
         if ((value!=1u && value!=0x10000u) || d->reset_pending || !stopped(d)) return false;
-        if (value==1u) d->known=KNOWN(8u);
+        if (value==1u) {
+            d->known=KNOWN(8u);
+            if (d->readback_configured && (d->readback_initial.known&KNOWN(0x0cu))) {
+                d->reg[3]=d->readback_initial.word[3];d->known|=KNOWN(0x0cu);
+            }
+        }
         else if (d->known&KNOWN(0x14u)) d->reg[5]&=0x001000c0u;
         d->events=0u; d->events_known=true; d->clock.stable_event=false;
         d->fifos_empty=true; d->reset_released=false; d->reset_pending=true;
         d->reset_remaining=d->initial.reset_cycles;
+        d->reset_request=value;d->readback_locked=true;
         return true;
     }
     uint32_t mask;
@@ -121,7 +165,7 @@ bool s5l8920_dsim_write(s5l8920_dsim_t *d,uint32_t offset,uint32_t value) {
     }
     if (offset==0x14u && transitioning(d) && ((value^d->reg[5])&0x0010000fu)) return false;
     if (offset==0x44u && !value) d->fifos_empty=true;
-    d->reg[offset/4u]=value; d->known|=KNOWN(offset); return true;
+    d->reg[offset/4u]=value; d->known|=KNOWN(offset); d->readback_locked=true;return true;
 }
 bool s5l8920_dsim_system_clock(s5l8920_dsim_t *d,uint64_t cycles) {
     if (!d || !d->configured) return false;
@@ -136,6 +180,7 @@ bool s5l8920_dsim_system_clock(s5l8920_dsim_t *d,uint64_t cycles) {
         if (reset_cycles<d->reset_remaining) d->reset_remaining-=(uint32_t)reset_cycles;
         else {
             d->reset_remaining=0u; d->reset_pending=false; d->reset_released=true;
+            d->reset_request=0u;
             d->events|=0x40000000u;
         }
     }

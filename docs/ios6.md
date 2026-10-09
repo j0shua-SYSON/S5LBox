@@ -22,13 +22,27 @@ OS 3 machine and application defaults remain ARM1176/S5L8900.
 
 ## Display clock setup
 
-The prepared kernel now reaches AppleSamsungMIPIDSI, stopping on its first
-register-snapshot read at physical `0x89000000`, PC `0x8087ad7e`, after
-282,534,650 retired instructions. That run selects one compass at `0x1e` and
-an absent responder at `0x1f`; the original probe rejects the absent address.
-It transfers both explicitly empty NVRAM banks, without proving final bank
-selection or completion of the NVRAM driver's start method. The earlier
-prepared boot and clock assumptions still apply.
+The prepared kernel now reads AppleSamsungMIPIDSI's complete32-word register
+snapshot and reaches ApplePinotLCD. It stops at an unprepared `lcd-panel-id`
+property, physical `0x4110bc9c`, PC `0x8093f860`, after280,220,747 retired
+instructions. The original panel driver subsequently rejects a zero ID; no
+panel identity or successful response has been invented to pass that check.
+
+This run transplants the controller state produced by the original iBoot
+initialization body, enables its physical gate, and supplies explicit idle
+observations and a reload-latch timer view. Passive PHY/tail/port read values
+are assumed zero; TIMEOUT, INTMSK and MEMACCHR use stated related-family values.
+One system and one independent PHY cycle are supplied per existing diagnostic
+timebase tick. These are functional inputs, not a measured complete bootloader
+handoff. The kernel reads all32 words without refusal and disables raw gate19
+through its original provider method before reaching the panel-property guard.
+
+The earlier run stopped at the first DSIM read after282,534,650 instructions
+and transferred both explicitly empty NVRAM banks. The new scenario reaches
+the display driver earlier and transfers only the first4096-byte bank portion
+before its stop; instruction totals and unrelated driver completion are not
+monotonic progress measures. The earlier prepared boot, storage and clock
+assumptions still apply. Neither run establishes complete NVRAM initialization.
 
 An independent DSIM clock component implements the idle clock-control fields,
 PLL band/P/M/S programming, a system-clock stability timer, and exact rational
@@ -36,8 +50,10 @@ PLL output frequency. It requires explicit initial idle observations and a
 continuously present reference clock. No board reset values or clock routing
 are inferred. Polling cannot advance the timer. Live PLL retuning, non-idle
 output-clock requests, and unsupported registers refuse without state changes.
-After enabling the PLL, timer-register readback remains unavailable: the
-evidence does not distinguish a live counter from a reload latch.
+After enabling the PLL, timer-register readback remains unavailable by default:
+the evidence does not distinguish a live counter from a reload latch. The full
+controller can explicitly select either view for a modeled input scenario;
+neither choice is asserted as measured target behavior.
 
 The register fields and timer behavior are corroborated by Samsung's
 [S5PC100 manual, sections 3.2.20-21](https://www.manualslib.com/manual/1231975/Samsung-S5pc100.html?page=788)
@@ -62,7 +78,7 @@ ULPS. Reset behavior follows the register groups described in Samsung's
 [reset register reference](https://www.manualslib.com/manual/1231975/Samsung-S5pc100.html?page=774);
 the [escape requests](https://www.manualslib.com/manual/1231975/Samsung-S5pc100.html?page=779)
 remain asserted until the guest clears them. Changed reset values stay unknown
-until programmed, rather than receiving guessed silicon defaults. Functional
+until programmed or explicitly supplied as reset inputs. Functional
 reset preserves supported configuration and clears escape requests. Reset
 completion requires a stable internal PLL and supplied system cycles. Lane
 transitions require supplied PHY cycles and their enabled clocks.
@@ -100,11 +116,32 @@ after48 retired instructions at its first DSIM write, `0x4ff0961c`, targeting
 first-failure preservation, and a real CPU load that halts without consuming a
 refusal value and then retries a supported register through a warmed fetch.
 
-This establishes the body under the stated inputs, not the logger/prologue,
-complete boot chain, packet transport, panel or displayed image. SWRST command
-readback, post-enable PLLTMR, write-only/empty-data ports, PHY tuning and remaining
-snapshot offsets are still unavailable. The full-kernel harness has not yet
-installed this connection, and its last observed stop remains unchanged.
+SWRST now reads the pending request and clears when modeled reset release
+completes. Reads cannot complete it. This self-clearing command is a functional
+inference from the original firmware's release wait without a clearing write
+and a [later Samsung DSIM implementation](https://android.googlesource.com/kernel/google-modules/display/+/661047c0c1c4939aa81fcc822bb21dc5a484f913/samsung/cal_9845/dsim_reg.c).
+That later generation has a different register map; it is supporting family
+evidence, not proof of the exact older readback.
+
+Optional idle observations cover TIMEOUT, INTMSK, write-only port read responses,
+empty RXFIFO data, memory characteristics and PHY/additional words through7c.
+They must be supplied before guest writes; missing words stay unavailable.
+They cannot override status, event, reset, clock-ready or programmed display
+values. TIMEOUT follows guest writes and its supplied reset value. Other
+observations are fixed across the supported idle control operations; their
+writes remain unsupported. An empty RXFIFO response requires known emptiness.
+The caller explicitly chooses any otherwise unspecified bus response and timer
+view. These inputs do not establish physical reset values or implement packet,
+analog tuning, interrupt-mask or panel operations.
+
+A bounded test first executes the original initializer, then the kernel's
+unchanged32-word snapshot loop with a prepared object and MMU. Before these
+reads were supported, it stopped after9 retired instructions at SWRST04.
+With explicit idle observations it completes194 instructions and stores all32
+words, with no peripheral mutation from reading. Separate cases use reload
+versus remaining timer values and varied passive PHY/tail words. This proves
+the snapshot loop under those inputs, not the complete driver or boot chain.
+The logger/prologue, packet transport, panel and displayed image remain open.
 
 ## Accelerometer configuration
 

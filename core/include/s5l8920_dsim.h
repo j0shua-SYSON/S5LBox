@@ -79,12 +79,26 @@ typedef struct {
     uint32_t remaining;
 } s5l8920_dsim_lane_t;
 
+typedef enum {
+    S5L8920_DSIM_TIMER_UNKNOWN = 0,
+    S5L8920_DSIM_TIMER_RELOAD,
+    S5L8920_DSIM_TIMER_REMAINING
+} s5l8920_dsim_timer_readback_t;
+
+typedef struct {
+    uint32_t known, word[32]; /* Bit n supplies the idle read at offset4*n. */
+    s5l8920_dsim_timer_readback_t timer;
+} s5l8920_dsim_readback_input_t;
+
 typedef struct {
     s5l8920_dsim_input_t initial;
     s5l8920_dsim_clock_t clock;
     uint32_t reg[19], known, events, reset_remaining;
     s5l8920_dsim_lane_t lane[3]; /* Clock, data0, data1. */
     bool configured, reset_pending, reset_released, events_known, fifos_empty;
+    uint32_t reset_request;
+    s5l8920_dsim_readback_input_t readback_initial;
+    bool readback_configured, readback_locked;
 } s5l8920_dsim_t;
 
 /* Idle two-data-lane control model, independent of a board attachment. Inputs
@@ -96,12 +110,33 @@ typedef struct {
 bool s5l8920_dsim_configure(s5l8920_dsim_t *d, const s5l8920_dsim_input_t *input);
 void s5l8920_dsim_reset(s5l8920_dsim_t *d);
 
+/* Optional explicit idle/reset observations for the kernel's register snapshot.
+ * Call before any accepted write. Identical repeats preserve running state;
+ * conflicting or late inputs refuse. Unknown words must be zero in the input.
+ * Allowed offsets: TIMEOUT0c, INTMSK30, write-only port read responses34/38,
+ * empty RXFIFO response3c, MEMACCHR48, PHY/additional readbacks54..7c.
+ * No status, event, reset, clock-ready or programmed display value can be
+ * supplied here. TIMEOUT follows guest writes and returns to this supplied
+ * reset value on software reset. Other supplied observations remain constant
+ * across supported idle control/reset operations; their writes still refuse.
+ * RXFIFO read response requires a known-empty FIFO. MEMACCHR must keep both
+ * display memories powered; no analog timing or power-gating effect is inferred.
+ * Host reset retains these inputs. Unspecified reads remain unavailable.
+ *
+ * Timer readback after enable is explicitly selected: programmed reload latch
+ * or internal remaining cycles. UNKNOWN preserves the prior refusal. This is
+ * a caller-selected functional model, not an inferred silicon observation. */
+bool s5l8920_dsim_configure_readback(s5l8920_dsim_t *d,
+    const s5l8920_dsim_readback_input_t *input);
+
 /* Word offsets only. Software reset1 is supported from stop state; functional
  * reset10000 preserves programmed configuration except escape requests. Both
  * clear FIFOs/events and release only after supplied system clocks with a
  * stable internal PLL. Software reset invalidates changed register values:
  * their silicon defaults are not guessed. Subsequent supported writes establish
- * readable latches. SWRST command readback remains unknown.
+ * readable latches. SWRST reads the pending command and clears it on modeled
+ * reset release. This self-clearing request is a functional family inference;
+ * reading the command does not advance or complete the reset.
  *
  * Two data lanes support stop, ULPS entry, exit and wakeup. Gated lanes retain
  * their internal state; re-enabling resumes it. Duplicate requests preserve
@@ -109,7 +144,8 @@ void s5l8920_dsim_reset(s5l8920_dsim_t *d);
  * external clock, active image, packet, BTA or remote-reset operation is
  * accepted. Empty FIFO status requires reset or all FIFO init inputs low.
  * PLL/reset interrupt causes latch and support W1C; masks/IRQ wiring remain
- * unavailable. Post-enable PLLTMR and unimplemented offsets still refuse.
+ * unavailable. Post-enable PLLTMR and passive snapshot words require explicit
+ * readback inputs; otherwise they still refuse.
  * Rejections preserve the entire component and read output. */
 bool s5l8920_dsim_read(const s5l8920_dsim_t *d, uint32_t offset, uint32_t *value);
 bool s5l8920_dsim_write(s5l8920_dsim_t *d, uint32_t offset, uint32_t value);
