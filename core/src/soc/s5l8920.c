@@ -23,6 +23,11 @@ static bool audio_nco_address(uint32_t address) {
     return address>=S5L8920_AUDIO_NCO_BASE && address-S5L8920_AUDIO_NCO_BASE<12u;
 }
 
+static bool audio_nco_enabled(const s5l8920_t *m) {
+    return m->clock_gate[S5L8920_AUDIO_GATE].configured &&
+        (m->clock_gate[S5L8920_AUDIO_GATE].value&15u)==15u;
+}
+
 static bool dmc_address(uint32_t address) {
     return address>=S5L8920_DMC_BASE && address-S5L8920_DMC_BASE<0x1000u;
 }
@@ -374,7 +379,7 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         unsigned index=(address-S5L8920_AUDIO_NCO_BASE)/4u;
         if (size!=4u || (address&3u))
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
-        else if (!index || !(m->audio_nco.programmed&(1u<<index)))
+        else if (!audio_nco_enabled(m) || !index || !(m->audio_nco.programmed&(1u<<index)))
             fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
         else return m->audio_nco.coefficient[index-1u];
         return 0u;
@@ -546,7 +551,7 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         unsigned index=(address-S5L8920_AUDIO_NCO_BASE)/4u;
         if (size!=4u || (address&3u))
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
-        else if (!index && value!=0u && value!=0xd00u)
+        else if (!audio_nco_enabled(m) || (!index && value!=0u && value!=0xd00u))
             fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
         else {
             if (!index) m->audio_nco.control=value;

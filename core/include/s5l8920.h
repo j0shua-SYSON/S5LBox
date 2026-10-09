@@ -73,6 +73,7 @@
 #define S5L8920_USB_BASE UINT32_C(0x86100000)
 #define S5L8920_USB_CONTROL_COUNT 6u
 #define S5L8920_AUDIO_NCO_BASE UINT32_C(0x84300014)
+#define S5L8920_AUDIO_GATE 0x18u
 #define S5L8920_DMC_BASE UINT32_C(0xbfc00000)
 #define S5L8920_DMC_CONFIG_COUNT 36u
 
@@ -179,10 +180,12 @@ typedef struct {
     uint8_t configured, programmed;
 } s5l8920_pmu_saved_t;
 
-/* Observed NCO configuration only: control writes 0/d00 and two full-width
+/* Observed NCO configuration only: the configured raw audio gate must be
+ * fully open for access. Control writes 0/d00 and two full-width
  * coefficient words with readback after programming. Control/status reads
  * remain unavailable. No source frequency, output clock, readiness or DMA
- * behavior is inferred. Functional reset invalidates all programming. */
+ * behavior is inferred. Closing the gate preserves programming; functional
+ * reset invalidates it and restores the supplied gate state. */
 typedef struct {
     uint32_t control, coefficient[2];
     uint8_t programmed; /* Control bit0, coefficient A bit1, B bit2. */

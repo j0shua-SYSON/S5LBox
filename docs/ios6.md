@@ -24,9 +24,10 @@ OS 3 machine and application defaults remain ARM1176/S5L8900.
 
 The prepared kernel reads AppleSamsungMIPIDSI's complete32-word register
 snapshot and consumes the panel identity produced by the original iBoot
-query and device-tree routines under the explicit inputs below. The latest
-whole-kernel run stops in AppleSamsungSWI at PC `0x808ad4c2`, writing
-`0x00003e80` to unavailable register `0x89100024`, after283,065,264 retired
+query and device-tree routines under the explicit inputs below. With the SWI
+controller attached and the original audio-reference property produced, the
+whole-kernel diagnostic stops in AppleS5L8920XAudioComplex at PC `0x8078b4d6`,
+writing `7` to unavailable register `0x84304000`, after283,830,458 retired
 instructions. It has not reached launchd, SpringBoard or displayed pixels.
 
 This run transplants the controller state produced by the original iBoot
@@ -292,9 +293,11 @@ Without clocks acceptance fails. Without a receiver even arbitrarily many
 cycles leave busy asserted, and the original wait reaches its actual time
 helper. The original secondary submission refuses at `0x808ad6a2`; a closed
 gate refuses the setup write. Prepared objects, MMU and tree scalars are
-explicit witness inputs; no instruction or return is replaced. This new
-component has not yet been exercised by a full-kernel continuation, whose
-last proven stop remains the setup write above.
+explicit witness inputs; no instruction or return is replaced. In the prepared
+whole-kernel continuation, the original provider opens raw gate `0x0e`, both
+setup writes complete, and the provider closes the gate. No SWI request or
+transfer occurs before the later audio-complex stop. This proves setup with
+the explicit controller inputs, not communication with a regulator.
 
 ## Accelerometer configuration
 
@@ -453,6 +456,10 @@ controller commands, PHY and memory timing to be connected.
 
 Aligned word accesses at `0x84300014/18/1c` retain the audio NCO control and
 two coefficients. Control accepts the observed values `0` and `0xd00`.
+Access requires configured raw audio gate `0x18` with all four low bits set.
+Missing, closed or intermediate gate state refuses the transaction without
+changing programming. Closing and reopening the gate preserves coefficients;
+no clock edge or frequency is inferred from opening it.
 Coefficient writes establish independent full-width values; reads require
 prior programming. Control/status reads, other control values and unsupported
 widths or alignments fail without altering configuration. Functional SoC reset
@@ -468,15 +475,35 @@ coefficients and uses the original division helpers to recover the configured
 value. The whole setter rejects a zero request before programming; entering
 the internal programming block with zero tests arithmetic only.
 
-Ninety-three isolated original-kernel cases passed against these production
+The original setter and getter bracket their register accesses with the same
+provider gate calls used by AudioComplex startup. A whole-kernel observation
+around the startup call at `0x8078b4cc/ce` establishes that logical device-tree
+gate `0x37` changes raw gate `0x18` from `0` to `0xf`; the other51 gates are
+unchanged. Removing only the two observer lines reproduces the preceding
+complete trace, including the same unsupported shared-control write.
+
+Ninety-five isolated original-kernel cases passed against these production
 registers, including wrapped coefficients, the original division routines and
-three withheld writes. Objects and block entry points are explicit; complete
-IOKit methods and gate callbacks are outside this witness. All eighteen
+three withheld writes. The normal cases explicitly open raw gate `0x18`;
+missing or closed gate cases stop at the original first coefficient store,
+PC `0x8078b7cc`, without programming a word. Objects and block entry points
+are explicit; complete IOKit methods and gate callbacks are outside this
+witness. All eighteen
 connected LLB scenarios passed, preserving pending transfers when responses
 are unavailable. With the existing explicit zero saved-state inputs, LLB
 advances three instructions to 1,192,354 steps, PC `0x8400989c`, where the
 write of `7` to `0x84304000` still fails. This is configuration support, not
 audio output or a complete bootloader/kernel handoff.
+
+The audio-reference handoff is separately executed using the original iBoot
+BSS clear, clock calculation, node/property lookup, index15 getter and store.
+The previously supplied PLL/selectors and explicit24MHz reference yield
+162MHz at `audio-complex/ncoref-frequency`. Five cases cover normal execution,
+missing property/root, a changed PLL multiplier and a disabled PLL. Only the
+four property bytes change. The prepared kernel then loads that value at
+`0x8078b404` and stores it in its audio object before reaching `0x84304000`.
+This is an original-firmware calculation from diagnostic clock inputs, not a
+physical frequency measurement or a connected bootloader chain.
 
 Strict host tests passed 79/79 and shipping tests 74/74. The separate
 prepared-kernel trace remains unchanged: 182,680,916 steps, stopped at

@@ -2627,7 +2627,20 @@ static void test_dmc_configuration(s5l8920_t *m) {
 
 static void test_audio_nco(s5l8920_t *m) {
     const uint32_t base=0x84300014u;
+    const unsigned gate=0x18u;
+    const uint32_t gate_address=S5L8920_CLOCK_GATE_BASE+4u*gate;
     CHECK(s5l8920_reset(m),"NCO cold reset");
+    CHECK(!m->clock_gate[gate].configured,"NCO test requires absent gate input");
+    for (unsigned n=0;n<3u;n++) {
+        s5l8920_audio_nco_t before=m->audio_nco;
+        m->bus.write32(m,base+4u*n,n ? 123u : 0xd00u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+              !memcmp(&before,&m->audio_nco,sizeof before),"NCO programmed with no gate input");
+        s5l8920_clear_bus_failure(m);
+    }
+    CHECK(s5l8920_reset(m) && s5l8920_clock_gate_configure(m,gate,0x5000u),"NCO explicit closed gate");
+    m->bus.write32(m,gate_address,0x500fu);
+    CHECK(!m->bus_failure.reason,"NCO enable gate");
     for (unsigned n=0;n<3u;n++) {
         (void)m->bus.read32(m,base+4u*n);
         CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"NCO invented initial read");
@@ -2677,6 +2690,36 @@ static void test_audio_nco(s5l8920_t *m) {
     }
     s5l8920_clear_bus_failure(m);
     CHECK(m->bus.read32(m,base+4u)==0x12345678u && m->bus.read32(m,base+8u)==0x9abcdef0u,"invalid NCO accesses changed coefficients");
+    for (unsigned mode=0;mode<15u;mode++) {
+        if (!mode) m->bus.write32(m,gate_address,0x5000u);
+        else {
+            m->bus.write32(m,gate_address,0x5000u|mode);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"NCO test accepted intermediate gate programming");
+            s5l8920_clear_bus_failure(m);
+            /* Explicit observation of an unresolved gate transition. */
+            m->clock_gate[gate].value=0x5000u|mode;
+        }
+        s5l8920_audio_nco_t before=m->audio_nco;
+        arm_cpu_t before_cpu=m->cpu;
+        for (unsigned n=0;n<3u;n++) {
+            uint32_t at=base+4u*n;
+            m->bus.write32(m,at,n ? ~m->audio_nco.coefficient[n-1u] : 0xd00u);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+                  m->bus_failure.address==at && m->bus_failure.write,
+                  "NCO write accepted while gate not fully open");
+            s5l8920_clear_bus_failure(m);
+            (void)m->bus.read32(m,at);
+            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+                  m->bus_failure.address==at && !m->bus_failure.write,
+                  "NCO read accepted while gate not fully open");
+            s5l8920_clear_bus_failure(m);
+        }
+        CHECK(!memcmp(&before,&m->audio_nco,sizeof before) && !memcmp(&before_cpu,&m->cpu,sizeof before_cpu),
+              "closed audio gate changed programming or CPU");
+        m->bus.write32(m,gate_address,0x500fu);
+        CHECK(!m->bus_failure.reason && m->bus.read32(m,base+4u)==0x12345678u &&
+              m->bus.read32(m,base+8u)==0x9abcdef0u,"audio gate reopen lost coefficients");
+    }
     const uint32_t neighbors[]={0x84300010u,0x84300020u,0x84304000u,0x84400000u};
     for(unsigned n=0;n<sizeof neighbors/sizeof neighbors[0];n++) {
         m->bus.write32(m,neighbors[n],7u);
@@ -2684,6 +2727,12 @@ static void test_audio_nco(s5l8920_t *m) {
         s5l8920_clear_bus_failure(m);
     }
     CHECK(s5l8920_reset(m),"NCO invalidate on reset");
+    CHECK(m->clock_gate[gate].value==0x5000u && !m->audio_nco.programmed,"NCO reset gate/programming state");
+    m->bus.write32(m,base+4u,123u);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !m->audio_nco.programmed,
+          "NCO reset allowed programming through closed gate");
+    s5l8920_clear_bus_failure(m);
+    m->bus.write32(m,gate_address,0x500fu);
     m->bus.write32(m,base+4u,123u);
     CHECK(!m->bus_failure.reason && m->bus.read32(m,base+4u)==123u,"NCO write required invented initial state");
     (void)m->bus.read32(m,base+8u);
