@@ -87,7 +87,7 @@ Physical iPhone8,2 / iOS 15.8.5, clean jailbroken `rc-ipa-validation` guest:
   and registered but did not stay open. It links CoreMotion, which is not an
   iPhone OS 3 framework; it is not the app-compatibility acceptance fixture.
 - An authored minimal ARMv6 UIKit fixture (`com.s5lbox.tests.liveipa`) installed
-  through the same live UI. Version 1.0 exposed a fixture ivar-layout problem;
+  through the same live UI. Version 1.0 launched but failed when its button was tapped;
   updating to corrected version 1.1 through virtual USB succeeded. Its icon
   opened the app, and tapping its button changed the label from "Installed over
   virtual USB" to "Tap received in the guest!". No reboot/respring was needed.
@@ -101,9 +101,28 @@ an install-speed benchmark, or proof of preserving arbitrary app data on update.
 Unsigned homebrew still needs a compatible guest signing setup; the emulator
 does not silently replace guest policy or fall back to direct HFS writes.
 
-Pending final-candidate checks: physical revalidation after the default/copy/
-cancellation changes, and the exact-SHA CI build. Cancellation after submitting
-Install explicitly has an unknown outcome because the guest may keep working.
+Final candidate `c476d72`:
+
+- All 77 Windows CTests pass. iOS build 37888846698 passes, including 41 native
+  USB service/identity checks and the stock-host policy check. All nine jobs in
+  core CI 37888846690 pass, including both macOS JIT variants and ASan/UBSan.
+  Physical testing
+  uses the resulting 2281692-byte IPA, SHA-256
+  `a73859c6c8d788748c8ae53d9d9707b242296feaf468c1ebf45336297d0f8e3b`.
+- Installed the candidate on the physical iPhone, restored the 31468.9-million-
+  instruction checkpoint, and repeated a live install of the UIKit fixture.
+  Status=Complete, app launch, and the button's label change all passed again.
+- Put the guest display to sleep and canceled during TLS setup. The UI reported
+  "Installation canceled." at the next observation, 1.364 seconds after issuing
+  the cancel tap (includes automation overhead, not a precise UI benchmark).
+  Immediate retry succeeded. Sleep itself did not prevent subsequent installs
+  on this guest; the earlier first-connection timeout is not a universal rule.
+- Invalid-Test.ipa was rejected during inspection, with Install disabled.
+  Saved and closed the validation guest after testing; other machines untouched.
+
+Cancellation after submitting Install explicitly has an unknown outcome because
+the guest may keep working. That post-submission race is not covered by the
+successful pre-submission cancellation test above.
 Staging cleanup is bounded best effort; failed cleanup can leave that attempt's
 unique `PublicStaging/S5LBox-*.ipa`, never a reason to remove unrelated files.
 
