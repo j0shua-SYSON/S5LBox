@@ -752,7 +752,12 @@ rootfs_work_status_t rootfs_work_repair_powered_off_catalog_clone(
  * allocated block only when an exact binary-property-list parser finds one and
  * only one complete assignment compatible with both catalog logical sizes.
  * Referenced-but-free bits and redundant freeBlocks accounting are then
- * derived from the proven final reference set.  The same unpublished-clone,
+ * derived from the proven final reference set. A zero file-fork totalBlocks
+ * may be reconstructed only from complete, already-allocated inline extents,
+ * a nonempty logical size within them, an empty overflow tree, and a complete
+ * collision-free ownership audit. Logical sizes and payload bytes stay intact.
+ * Nonzero count disagreements and unallocated extent evidence are refused.
+ * The same unpublished-clone,
  * exclusive-open, write-plan, fsync, and no-publication contract applies.
  */
 rootfs_work_status_t rootfs_work_repair_powered_off_clone(

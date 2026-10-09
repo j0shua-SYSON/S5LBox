@@ -6469,6 +6469,74 @@ done:
     sx_release(sx);
 }
 
+static void test_zero_fork_block_count_recovery(void) {
+    for (unsigned mode = 0; mode < 7; mode++) {
+        fixture_t *fx = fx_create(FX_DATA_BLOCKS - 1u);
+        tr_volume_t vol;
+        tr_record_t record;
+        if (!fx || !tr_open(fx->image, FX_SIZE, &vol)) {
+            CHECK(0, "fork count fixture allocation"); free(fx); return;
+        }
+        if (!tr_find(&vol, FX_BETA, "note.txt", &record)) {
+            CHECK(0, "fork count fixture file missing"); tr_close(&vol); free(fx); return;
+        }
+        /* fx_records places note.txt at record 7 of leaf 1. The independent
+         * reader returns a copy, not a pointer into the fixture image. */
+        const uint8_t *leaf = fx_node(fx, 1u);
+        size_t offset = get_be16(leaf + fx->node_size - 2u * 8u);
+        size_t key_bytes = (2u + get_be16(leaf + offset) + 1u) & ~(size_t)1u;
+        size_t data = (size_t)(leaf - fx->image) + offset + key_bytes;
+        size_t field = data + 100u;
+        tr_close(&vol);
+        put_be32(fx->image + field, mode == 3 ? 2u : 0u);
+        if (mode == 1) put_be64(fx->image + field - 12u, FX_BLOCK_SIZE + 1u);
+        if (mode == 2) fx_bitmap_set(fx, FX_DATA_FIRST, 0);
+        if (mode == 4) {
+            /* Three noncontiguous extents, shaped like the observed journal. */
+            put_be64(fx->image + data + 88u, 3u * FX_BLOCK_SIZE + 536u);
+            put_be32(fx->image + data + 112u, FX_DATA_FIRST + 2u);
+            put_be32(fx->image + data + 116u, 2u);
+            put_be32(fx->image + data + 120u, FX_DATA_FIRST + 4u);
+            put_be32(fx->image + data + 124u, 1u);
+            for (uint32_t block = FX_DATA_FIRST + 2u; block <= FX_DATA_FIRST + 4u; block++)
+                fx_bitmap_set(fx, block, 1);
+            put_be32(fx->image + VH_OFF + 48u, 1u);
+            put_be32(fx->image + FX_SIZE - VH_OFF + 48u, 1u);
+        }
+        if (mode == 5) {
+            /* Individually allocated, but not exclusively owned. */
+            put_be64(fx->image + data + 168u, 1u);
+            put_be32(fx->image + data + 180u, 1u);
+            put_be32(fx->image + data + 184u, FX_DATA_FIRST);
+            put_be32(fx->image + data + 188u, 1u);
+        }
+        if (mode == 6) put_be64(fx->image + data + 88u, 0u);
+        run_t run;
+        if (run_powered_off_in_place(&run, fx->image, FX_SIZE, "zero-fork-count")) {
+            if (mode == 0 || mode == 4) {
+                CHECK(run.status == ROOTFS_WORK_OK && run.output && run.output_size == FX_SIZE &&
+                      run.result.catalog_extent_records_repaired == 1u,
+                      "zero fork count not reconstructed: %s", run.result.detail);
+                put_be32(fx->image + field, mode == 4 ? 4u : 1u);
+                CHECK(run.output && !memcmp(run.output, fx->image, FX_SIZE),
+                      "fork count repair changed more than the four-byte counter");
+                rootfs_work_result_t strict;
+                CHECK(rootfs_work_repair_powered_off_clone(run.source, &strict) == ROOTFS_WORK_OK &&
+                      strict.catalog_extent_records_repaired == 0u, "fork count repair not idempotent");
+            } else {
+                CHECK(run.status != ROOTFS_WORK_OK, "unsafe fork count mode %u accepted", mode);
+                size_t length = 0;
+                uint8_t *bytes = read_file(run.source, &length);
+                CHECK(bytes && length == FX_SIZE && !memcmp(bytes, fx->image, FX_SIZE),
+                      "refused fork-count repair wrote bytes, mode %u", mode);
+                free(bytes);
+            }
+            run_release(&run);
+        } else CHECK(0, "fork count fixture write");
+        free(fx);
+    }
+}
+
 static void test_provision_unpublished_clone(void) {
     fixture_t *fx = fx_create(FX_DATA_BLOCKS - 1u);
     char path[256];
@@ -6520,6 +6588,7 @@ int main(void) {
     printf("HFS+ catalog provisioning tests\n");
     test_status_and_stage_names();
     test_provision_unpublished_clone();
+    test_zero_fork_block_count_recovery();
     test_fixture_is_a_valid_volume();
     test_create_directory();
     test_create_file();

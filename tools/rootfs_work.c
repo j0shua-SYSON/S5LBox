@@ -4621,6 +4621,7 @@ typedef struct recovery_allocation_plan {
     uint32_t orphan_block;
     uint32_t bitmap_changes;
     uint32_t extent_changes;
+    uint32_t fork_count_changes;
     uint32_t final_free_blocks;
 } recovery_allocation_plan_t;
 
@@ -5172,7 +5173,7 @@ static bool recovery_plan_mark_special_fork(
     return true;
 }
 
-static bool recovery_plan_catalog_forks(catalog_ctx_t *ctx,
+static bool recovery_plan_catalog_forks(catalog_ctx_t *ctx, bool repair,
                                         recovery_allocation_plan_t *plan,
                                         rootfs_work_stage_t stage,
                                         rootfs_work_result_t *result) {
@@ -5209,13 +5210,6 @@ static bool recovery_plan_catalog_forks(catalog_ctx_t *ctx,
                 bool saw_empty = false;
                 unsigned extent;
 
-                if (logical > (uint64_t)total * ctx->block_size) {
-                    result_fail(result,
-                                ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage,
-                                0, "catalog file fork logicalSize exceeds its "
-                                "physical blocks");
-                    return false;
-                }
                 for (extent = 0u; extent < 8u; extent++) {
                     uint16_t field = (uint16_t)(start + data_offset +
                                                fork_offset + 16u +
@@ -5252,9 +5246,41 @@ static bool recovery_plan_catalog_forks(catalog_ctx_t *ctx,
                     }
                 }
                 if (inline_blocks != total) {
-                    result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED,
-                                stage, 0, "catalog file fork needs "
-                                "extents-overflow records");
+                    /* A stopped guest can leave totalBlocks zero while its
+                     * nonempty fork retains complete, allocated extents. The
+                     * overflow tree has already been proved empty. Derive
+                     * only this redundant zero counter; never truncate data,
+                     * invent extents, or reinterpret a nonzero disagreement.
+                     * Every block must already be allocated, and the complete
+                     * owner audit below must prove no collisions anywhere. */
+                    if (!repair || total != 0u || logical == 0u ||
+                        inline_blocks == 0u || inline_blocks > UINT32_MAX ||
+                        logical > inline_blocks * ctx->block_size) {
+                        result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED,
+                                    stage, 0, "catalog file fork block count "
+                                    "does not match its complete inline extents");
+                        return false;
+                    }
+                    for (extent = 0u; extent < 8u; extent++) {
+                        uint32_t first = read_be32(data + fork_offset + 16u + extent * 8u);
+                        uint32_t blocks = read_be32(data + fork_offset + 20u + extent * 8u);
+                        for (uint32_t index = 0u; index < blocks; index++) {
+                            if (!recovery_bitmap_test(ctx->bitmap, first + index)) {
+                                result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                                    stage, 0, "zero fork block count lacks allocated extent evidence");
+                                return false;
+                            }
+                        }
+                    }
+                    total = (uint32_t)inline_blocks;
+                    write_be32(data + fork_offset + 12u, total);
+                    catalog_node_dirty(ctx, node_index);
+                    plan->fork_count_changes++;
+                    plan->extent_changes++;
+                }
+                if (logical > (uint64_t)total * ctx->block_size) {
+                    result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                                stage, 0, "catalog file fork logicalSize exceeds its physical blocks");
                     return false;
                 }
                 for (extent = 0u; extent < 8u; extent++) {
@@ -5631,8 +5657,13 @@ static bool catalog_repair_powered_off_allocation(
             goto done;
     if (!recovery_extents_tree_is_empty(ctx, stage, result) ||
         !recovery_attributes_are_inline(ctx, stage, result) ||
-        !recovery_plan_catalog_forks(ctx, plan, stage, result))
+        !recovery_plan_catalog_forks(ctx, repair, plan, stage, result))
         goto done;
+    if (plan->fork_count_changes && plan->collision_count) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "zero fork block count cannot be repaired alongside allocation collisions");
+        goto done;
+    }
 
     for (block = 0u; block < ctx->total_blocks; block++) {
         bool target = recovery_bitmap_test(plan->target_bitmap, block);
