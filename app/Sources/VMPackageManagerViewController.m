@@ -36,7 +36,8 @@ static UIImage *Tile(NSString *symbol) {
         (void)context;
         [[UIColor colorWithRed:0.58 green:0.42 blue:0.29 alpha:0.13] setFill];
         [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0,0,44,44) cornerRadius:10] fill];
-        UIImage *icon=[UIImage systemImageNamed:symbol withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:23 weight:UIImageSymbolWeightRegular]];
+        UIImageSymbolConfiguration *config=[UIImageSymbolConfiguration configurationWithPointSize:23 weight:UIImageSymbolWeightRegular];
+        UIImage *icon=[UIImage systemImageNamed:symbol withConfiguration:config] ?: [UIImage systemImageNamed:@"shippingbox.fill" withConfiguration:config];
         icon=[icon imageWithTintColor:[UIColor colorWithRed:0.58 green:0.42 blue:0.29 alpha:1] renderingMode:UIImageRenderingModeAlwaysOriginal];
         CGFloat scale=MIN(26/icon.size.width,26/icon.size.height);
         CGSize size=CGSizeMake(icon.size.width*scale,icon.size.height*scale);
@@ -269,7 +270,7 @@ static UIImage *Tile(NSString *symbol) {
         [sections addObject:Section(@"Repositories",rows.count ? rows : @[Row(@"No sources yet",@"Tap + to add a repository.",@"tray",nil)],nil)];
         [sections addObject:Section(@"More sources",@[Row(@"BigBoss",@"Legacy HTTP repository",@"globe",@"bigboss")],
             @"Only add sources you trust. Repository signatures are not verified; HTTP sources can be altered in transit.")];
-        if (_busy || !_refreshed) [sections addObject:Section(nil,@[Row(_message,nil,nil,nil)],nil)];
+        [sections addObject:Section(nil,@[Row(_busy ? @"Refreshing sources" : @"Last refresh",_message,nil,nil)],nil)];
     } else if ([kind isEqual:@"categories"]) {
         NSMutableDictionary *counts=[NSMutableDictionary dictionary]; NSMutableSet *seen=[NSMutableSet set];
         for (NSDictionary *p in _catalog.packages) {
@@ -411,7 +412,8 @@ static UIImage *Tile(NSString *symbol) {
 - (BOOL)readInstalled:(NSError **)error {
     NSData *status=[_bridge status:error]; if (!status) return NO;
     NSArray *records=[VMPackageCatalog parse:status error:error]; if (!records) return NO;
-    _status=status; _catalog.installed=records; return YES;
+    dispatch_sync(dispatch_get_main_queue(),^{ self->_status=status; self->_catalog.installed=records; });
+    return YES;
 }
 - (void)refresh {
     if (_busy) return; _operation=nil; [self setWorking:YES]; [self report:@"Loading repositories…"];
@@ -419,7 +421,7 @@ static UIImage *Tile(NSString *symbol) {
     dispatch_async(_queue,^{
         NSError *guestError=nil,*repoError=nil;
         NSArray *packages=[self->_repository refresh:sources error:&repoError];
-        if (packages) self->_catalog.packages=packages;
+        if (packages) dispatch_sync(dispatch_get_main_queue(),^{ self->_catalog.packages=packages; });
         [self report:@"Connecting to your guest…"];
         BOOL guest=[self readInstalled:&guestError];
         dispatch_async(dispatch_get_main_queue(),^{
@@ -507,9 +509,9 @@ static UIImage *Tile(NSString *symbol) {
                 (removing || [p[@"Version"] isEqual:wanted[@"Version"]])) found=YES;
             if (found==removing) { error=VMPackageError(@"The installed state does not match the plan. Refresh Installed and check Cydia."); break; }
         }
-        if (installed) { self->_catalog.installed=installed; self->_status=result; }
         for (NSURL *url in archives) [NSFileManager.defaultManager removeItemAtURL:url error:NULL];
         dispatch_async(dispatch_get_main_queue(),^{
+            if (installed) { self->_catalog.installed=installed; self->_status=result; }
             [self setWorking:NO]; op.outcome=error ? -1 : 1;
             op.operationState=error ? @"Needs attention" : removing ? @"Removal complete" : @"Installation complete";
             op.operationDetail=error.localizedDescription ?: @"Verified in your guest. Restart the guest if the tweak requires it.";

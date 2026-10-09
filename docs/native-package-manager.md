@@ -17,16 +17,29 @@ It does not rerun Cydia repair. Important: historical snapshots block setup;
 back up important machine data first. Strict filesystem errors are not repaired
 or ignored by helper setup.
 
-Then open the machine and use **Machine Settings > Packages**:
+Then open the machine and use **Machine Settings > Packages**. A dedicated
+full-screen, five-tab workspace opens; it does not redesign the rest of S5LBox:
 
-- **Browse:** search names/descriptions; select a version and review every
-  dependency before Install. Merely browsing/downloading never installs a tweak.
-- **Installed:** read the running guest's dpkg status; remove one nonessential
-  package only if its reverse dependencies remain satisfied. Configuration
-  files are retained.
-- **Sources:** iOS 3 Party and Saurik initially; add flat HTTP/HTTPS repository
-  directories, remove a source, or explicitly add BigBoss's legacy HTTP source.
-  Removing a source never uninstalls guest packages.
+- **Packages:** connection status, all packages, and category browsing.
+- **Sources:** iOS 3 Party and Saurik initially. Open a source to browse its
+  packages; add flat HTTP/HTTPS repositories or explicitly add legacy BigBoss
+  HTTP. Removing a source never uninstalls packages.
+- **Changes:** available newer versions of installed, nonprotected packages.
+  Choose one to check its dependencies; an update listing alone is not a
+  compatibility promise. There is deliberately no automatic update-all.
+- **Installed:** the running guest's dpkg database. Remove a nonessential
+  package only if its reverse dependencies remain satisfied; keep conffiles.
+- **Search:** native name, author, identifier and description search.
+
+Lists open a package detail page with description, author, version, source,
+download size and dependencies. **Other versions** retains access to older
+releases. Install or Remove prepares one dependency-resolved transaction;
+**Confirm changes** shows every affected package and download size. There is
+no hidden background installation or persistent multi-operation queue.
+The activity screen shows the current stage and a verified result; raw guest
+installer output is behind **Show details**. Native Dynamic Type, system
+light/dark colors and local category icons keep the interface readable without
+loading repository web depictions or remote tracking artwork.
 
 Close Cydia during package operations. Keep S5LBox foregrounded. Stop waiting
 cancels host work, not a running guest dpkg process. A disconnect after submission
@@ -90,11 +103,25 @@ The included 50 KiB ARMv6 helper is built from the checked-in C source and
 `common-3.0.sdk`. `tools/build_guest_package_service.ps1` records the build
 command and enforces project-local intermediate outputs. It links to the guest's
 libSystem; omitted SDK stub imports use dynamic lookup. It is not a host binary.
+The SDK's unmodified Apple Csu startup object has its own APSL license; the app
+ships [notices and source links](../app/Resources/GuestPackages/GuestPackageNotices.txt)
+and [APSL 2.0](../app/Resources/GuestPackages/APSL-2.0.txt). It is not MIT code.
 
 At `655b9ef`: 45 native planning checks, 15 synthetic executor protocol checks,
 77 Windows CTests, and iOS build 37896428525 passed. Synthetic executor tests
 substitute a fake dpkg, so they do not prove firmware execution. Subsequent
 device acceptance and final-SHA results are recorded below when established.
+
+Physical iPhone 6s Plus / iOS 15.8.5, disposable `rc-ipa-validation` guest:
+the ARMv6 helper was provisioned through App Settings, then read live installed
+state over virtual USB. Both sources loaded 375 versions. At `e1de61b`, the
+native screen downloaded and installed Saurik's `p7zip` 4.57-3p (1,595,788 bytes),
+with a verified guest-database result observed within 11 seconds of Install.
+Removal then exposed a legitimate versionless dpkg selection tombstone, which
+the parser incorrectly rejected. `6dbf077` fixes that with five regression
+checks: 55 native checks and 15 synthetic protocol checks passed in iOS build
+37899384197. Core matrix 37898385090 at `e1de61b` passed all nine jobs. These
+results predate the five-tab UI and do not yet establish its device acceptance.
 
 The first physical setup attempt exposed a pre-existing Cydia-repair assumption:
 after Cydia reorganizes Applications into a symlink, its old repair probe reports

@@ -135,5 +135,7 @@ packaging steps.
 ## License
 
 [MIT](LICENSE). Created by [j0shua-SYSON](https://github.com/j0shua-SYSON).
+The optional guest package helper includes Apple Csu startup code under
+[APSL; notices and source links](app/Resources/GuestPackages/GuestPackageNotices.txt).
 Supply only firmware you are entitled to use. S5LBox is independent of Apple
 and is not affiliated with or endorsed by Apple.
