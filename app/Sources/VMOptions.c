@@ -35,8 +35,8 @@ static const vm_option_t VM_OPTIONS[] = {
       "that failure can be reproduced on its own.",
       false, VM_OPT_GROUP_HARDWARE, VM_OPT_IMPL_HARNESS },
     { "usb-otg", "USB OTG  ·  /arm-io/usb-otg",
-      "Experimental virtual USB transport. Requires a full shutdown and "
-      "fresh boot. Live app installation is not yet validated.",
+      "Virtual USB for live IPA installation. On for new boots unless explicitly "
+      "disabled. An older saved session needs a full shutdown and fresh boot.",
       false, VM_OPT_GROUP_HARDWARE, VM_OPT_IMPL_HARNESS },
     { "multitouch", "Touchscreen  ·  /arm-io/spi1/multi-touch",
       "On. The digitizer is bootloaded exactly as the real part is -- Apple's "
@@ -106,7 +106,7 @@ static const char *const VM_OPTION_GROUP_TITLE[VM_OPT_GROUP_COUNT] = {
 static const char *const VM_OPTION_GROUP_NOTE[VM_OPT_GROUP_COUNT] = {
     "Device-tree hardware presented to the guest. Touch is present by default. "
     "MBX is now a working but not finally accepted experiment; SHA-1, baseband, "
-    "SPI2 and USB remain hidden because their individual rows name measured "
+    "SPI2 remain hidden because their individual rows name measured "
     "boot failures. The guest therefore still sees less hardware than a real "
     "iPhone in the default configuration.",
 
@@ -195,7 +195,8 @@ bool vm_option_new_machine_value(unsigned index, bool has_saved_value,
     const vm_option_t *option = vm_option_at(index);
     if (!option) return false;
     if (has_saved_value) return saved_value;
-    if (!strcmp(option->name, "mbx") || !strcmp(option->name, "ppp"))
+    if (!strcmp(option->name, "mbx") || !strcmp(option->name, "ppp") ||
+        !strcmp(option->name, "usb-otg"))
         return true;
     if (!strcmp(option->name, "ca-software-render")) return false;
     return option->def;

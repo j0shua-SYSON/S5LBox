@@ -83,7 +83,7 @@
 }
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section != 0) return nil;
-    if (_liveTransport) return @"Installs over virtual USB while this machine runs. The guest checks signing and compatibility and registers the app itself.";
+    if (_liveTransport) return @"Installs over virtual USB while this machine runs. The guest checks signing and compatibility. An existing app with the same ID may be updated.";
     return @"ARMv6 apps for iPhone OS 3.1.3 or earlier. Adds to /Applications; encrypted apps, updates and App Store-style sandbox installation are not supported.";
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {

@@ -139,18 +139,24 @@ typedef struct {
               @"jailbreak and new-machine setup stay in App Settings." }];
 
     [e addObject:@{ @"h": @"Install a guest app",
-        @"b": @"From Machines, open App Settings → Install IPA and choose a "
-              @"jailbroken machine. Copy IPAs into Files → On My iPhone → "
+        @"b": @"Inside a running machine, open Settings → Install IPA. "
+              @"Copy IPAs into Files → On My iPhone → "
               @"S5LBox → IPAs, or use Import in the library. Each app has its "
               @"own Install button; adding files never installs them automatically. "
               @"Select an unencrypted ARMv6 IPA built for "
-              @"iPhone OS 3.1.3 or earlier. The app is checked before the guest "
-              @"shuts down; installation changes a recoverable disk copy.\n\n"
-              @"Start the machine afterward to refresh its Home screen icon. "
-              @"Apps go in /Applications, not an App Store sandbox. Existing "
-              @"apps are never overwritten, historical snapshots must be "
-              @"resolved first, and a successful install does not guarantee "
-              @"app compatibility. Your host iPhone is not modified.\n\n"
+              @"iPhone OS 3.1.3 or earlier. Virtual USB sends it to the guest's "
+              @"built-in installer without shutting down. The guest registers "
+              @"the app and may update an existing app with the same ID.\n\n"
+              @"Unsigned homebrew needs compatible AppSync inside the guest "
+              @"(AppSync for OS 3.1 on iPhone OS 3.1.3). Virtual USB is on for "
+              @"fresh boots unless explicitly disabled; older saved sessions "
+              @"may need a full shutdown and fresh boot. A successful install "
+              @"does not guarantee app compatibility or grant jailbreak tools "
+              @"extra privileges in an app sandbox.\n\n"
+              @"From Machines, App Settings → Install IPA retains the offline "
+              @"installer for a jailbroken guest: it shuts down first and adds "
+              @"to /Applications without replacing existing apps. Your host "
+              @"iPhone is not modified.\n\n"
               @"If Files cannot provide a selected IPA or IPSW, download it "
               @"in Files first, then choose the local copy." }];
 

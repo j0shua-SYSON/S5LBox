@@ -142,8 +142,11 @@ static NSError *InstallError(NSString *message) {
             if (!reply) break;
             if (reply[@"Error"]) {
                 terminal = YES;
+                NSString *guidance = [reply[@"Error"] isEqual:@"ApplicationVerificationFailed"]
+                    ? @"The guest did not accept its signature. Unsigned homebrew needs compatible AppSync installed inside the guest; on iPhone OS 3.1.3, use AppSync for OS 3.1."
+                    : @"Its signing and iPhone OS compatibility must be accepted by the guest.";
                 failure = InstallError([NSString stringWithFormat:@"The guest rejected this IPA: %@. %@",
-                    reply[@"Error"], reply[@"ErrorDescription"] ?: @"Its signing and iPhone OS compatibility must be accepted by the guest."]);
+                    reply[@"Error"], reply[@"ErrorDescription"] ?: guidance]);
                 break;
             }
             if ([reply[@"Status"] isEqual:@"Complete"]) { complete = terminal = YES; break; }
@@ -158,7 +161,10 @@ static NSError *InstallError(NSString *message) {
     // Only this attempt's unique file, and never while installation may still
     // be running. An interrupted request is explicitly an unknown outcome.
     if (staged && (!submitted || terminal)) {
-        files.canceled = nil;
+        // Best-effort cleanup must not turn Cancel into another two-minute
+        // service wait, especially after a partial/unsynchronized AFC reply.
+        NSTimeInterval cleanupDeadline = NSProcessInfo.processInfo.systemUptime + 2.0;
+        files.canceled = ^BOOL{ return NSProcessInfo.processInfo.systemUptime >= cleanupDeadline; };
         [afc removePath:path error:NULL];
     }
     [lockdown close]; [files close]; [installer close];

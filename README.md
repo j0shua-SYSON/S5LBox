@@ -70,10 +70,21 @@ Back up guest data first: a new installation replaces the selected guest disk,
 while supported upgrades use a separate migration path.
 
 Put `.ipa` files in **Files → On My iPhone → S5LBox → IPAs**, or use **Import**
-in **App Settings → Install IPA**. The library has a separate **Install** button
-for each app; adding files never installs everything. Compatible, unencrypted
-ARMv6 apps install into the selected jailbroken guest, not your host iPhone.
-Newer-iOS apps, encrypted apps and replacing existing apps are not supported.
+in the IPA Library. Inside a running machine, open **Settings → Install IPA**
+and choose one app. The guest's built-in installer receives it over virtual
+USB, registers its icon, and can update an existing app without shutting down.
+Adding files to the library never installs them automatically.
+
+Use compatible, unencrypted ARMv6 apps for iPhone OS 3.1.3 or earlier. The guest
+still checks signing; unsigned homebrew needs a compatible guest setup such as
+**AppSync for OS 3.1**, installed through guest Cydia. Virtual USB defaults on
+for fresh boots unless explicitly disabled. Older saved sessions may need a
+full shutdown and fresh boot. Successful installation does not guarantee that
+an app runs; jailbreak utilities may not work inside a normal app sandbox.
+
+**App Settings → Install IPA** on Machines retains the older offline path:
+it shuts down the selected jailbroken guest and adds to `/Applications`, with
+no replacement of existing apps. Neither path installs apps on your host iPhone.
 
 ### Keep your data safe
 

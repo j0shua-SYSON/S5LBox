@@ -229,7 +229,8 @@ static void test_new_machine_defaults(void) {
     for (unsigned i = 0; i < vm_option_count(); i++) {
         const vm_option_t *row = vm_option_at(i);
         bool expected = row->def;
-        if (!strcmp(row->name, "mbx") || !strcmp(row->name, "ppp"))
+        if (!strcmp(row->name, "mbx") || !strcmp(row->name, "ppp") ||
+            !strcmp(row->name, "usb-otg"))
             expected = true;
         else if (!strcmp(row->name, "ca-software-render")) expected = false;
         values[i] = vm_option_new_machine_value(i, false, false);
@@ -242,7 +243,8 @@ static void test_new_machine_defaults(void) {
               "%s ignored an explicit saved on choice", row->name);
     }
     CHECK(values[vm_option_index("nat")], "guest internet routing must default on");
-    expect_command_line(values, "--mbx --no-ca-software-render --ppp",
+    CHECK(values[vm_option_index("usb-otg")], "live IPA transport must default on");
+    expect_command_line(values, "--mbx --usb-otg --no-ca-software-render --ppp",
                         "product defaults render exact desktop replay flags");
     CHECK(!vm_option_new_machine_value(vm_option_count(), false, true),
           "invalid default index resolved");

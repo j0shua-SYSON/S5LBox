@@ -1,21 +1,22 @@
 # Live IPA installation
 
-Work branch: `feature/live-ipa-usb`. Experimental candidate, not merged to main.
+Work branch: `feature/live-ipa-usb`. Device-validated candidate, not merged to main.
 The IPA library remains in `Documents/IPAs`; importing a file must never
 automatically install it. The target is one app at a time, through the running
 guest's own AFC and `com.apple.mobile.installation_proxy` services.
 
 ## Current boundary
 
-- The old USB model only supplied configuration registers. The new opt-in
+- The old USB model only supplied configuration registers. The new
   device-mode DWC2 model handles RAM DMA, EP0 SETUP/data/status, bulk packets,
   short transfers, ZLPs, NAK/STALL, endpoint interrupts and VIC0 line 19.
 - `usb_host` requests descriptors from the guest and selects its usbmux
   interface. It contains no fabricated descriptors and does not edit HFS.
 - The virtual cable drives both DWC2 B-session-valid and PCF50635 USB supply
   status/insertion/removal events. No physical USB or global host driver is used.
-- The app's existing experimental USB OTG option enables this only on a fresh
-  boot. Default remains off while firmware validation is incomplete.
+- Virtual USB is enabled for new app boots unless explicitly disabled in saved
+  options. The desktop harness baseline remains off for reproducible replay.
+  Older saved sessions need a full shutdown and fresh boot to acquire the nub.
 - Snapshot v33 includes all modeled USB registers and DMA cursors. V32 has an
   exact migration: its sole USB register is retained, all new state is disabled.
   Restoring an old running guest does not acquire a new device tree.
@@ -75,10 +76,36 @@ Physical iPhone8,2 / iOS 15.8.5, clean jailbroken `rc-ipa-validation` guest:
   installation_proxy request all completed far enough for the guest to return
   `ApplicationVerificationFailed`. This is an honest rejection, not an install.
 
-Next gate: install a compatible, guest-accepted IPA; require Status=Complete,
-then verify the guest icon and launch. Unsigned homebrew needs a compatible
-guest signing setup (such as AppSync for OS 3.1); the emulator must not silently
-replace the guest's policy or fall back to direct HFS writes.
+- On the same `c8edf29` build, installed `us.hackulo.appsync31` 1.0.2 normally
+  through guest Cydia. No raw guest filesystem edits were used. Retrying the
+  identical MobileTerminal IPA reached Status=Complete, with its icon visible
+  immediately. Launch reached Terminal's UI, but `fork` was denied by the guest
+  container sandbox (also reported on the guest serial console). This is not
+  proof of a working terminal: an IPA install does not grant a jailbreak utility
+  the privileges it expects from a system/Cydia installation.
+- The upstream touchHLE TestApp (`d34530b`, CI artifact 11319841548) also installed
+  and registered but did not stay open. It links CoreMotion, which is not an
+  iPhone OS 3 framework; it is not the app-compatibility acceptance fixture.
+- An authored minimal ARMv6 UIKit fixture (`com.s5lbox.tests.liveipa`) installed
+  through the same live UI. Version 1.0 exposed a fixture ivar-layout problem;
+  updating to corrected version 1.1 through virtual USB succeeded. Its icon
+  opened the app, and tapping its button changed the label from "Installed over
+  virtual USB" to "Tap received in the guest!". No reboot/respring was needed.
+  Fixture sources and build outputs are local under `work/ipa-install-validation`;
+  the 3236-byte `LiveIPATest-v2.ipa` SHA-256 is
+  `6bfdf09bdff0373c7a83709c4063902635ce5c08e91374ef119c37333480e824`.
+
+This closes the live install → registration → launch → interaction gate on the
+physical iPhone, including a same-bundle update. It is not blanket app support,
+an install-speed benchmark, or proof of preserving arbitrary app data on update.
+Unsigned homebrew still needs a compatible guest signing setup; the emulator
+does not silently replace guest policy or fall back to direct HFS writes.
+
+Pending final-candidate checks: physical revalidation after the default/copy/
+cancellation changes, and the exact-SHA CI build. Cancellation after submitting
+Install explicitly has an unknown outcome because the guest may keep working.
+Staging cleanup is bounded best effort; failed cleanup can leave that attempt's
+unique `PublicStaging/S5LBox-*.ipa`, never a reason to remove unrelated files.
 
 ## References
 
