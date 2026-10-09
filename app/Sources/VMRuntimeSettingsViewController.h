@@ -17,6 +17,9 @@ typedef NS_ENUM(NSInteger, VMRuntimeAction) {
 - (BOOL)runtimeCanForcePowerOff;
 - (BOOL)runtimePaused;
 - (void)setRuntimePaused:(BOOL)paused;
+- (BOOL)runtimeMicrophoneEnabled;
+- (NSString *)runtimeAudioStatus;
+- (void)setRuntimeMicrophoneEnabled:(BOOL)enabled completion:(void (^)(BOOL, NSString *))completion;
 - (BOOL)runtimePausesInBackground;
 - (void)setRuntimePausesInBackground:(BOOL)pauses;
 - (BOOL)runtimeInlineConsole;

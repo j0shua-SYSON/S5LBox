@@ -443,7 +443,7 @@ static uint32_t bus_read(void *ctx, uint32_t addr, unsigned bytes) {
     } else if (mmio_data(addr, bytes, S5L8900_I2S0_BASE, S5L8900_DEV_SIZE)) {
         /* Word accesses only, as for the I2C controllers: the stock accessors
          * are a bare `ldr`/`str` of a 32-bit word at a byte offset. */
-        v = s5l_i2s_read(&m->i2s[0], addr - S5L8900_I2S0_BASE);
+        v = s5l_i2s_read_width(&m->i2s[0], addr - S5L8900_I2S0_BASE, bytes);
     } else if (mmio_data(addr, bytes, S5L8900_I2S1_BASE, S5L8900_DEV_SIZE)) {
         v = s5l_i2s_read(&m->i2s[1], addr - S5L8900_I2S1_BASE);
     } else if (mmio_data(addr, bytes, S5L8900_SPI0_BASE, S5L8900_DEV_SIZE)) {
@@ -614,7 +614,7 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
     }
     if (mmio_data(addr, bytes, S5L8900_I2S0_BASE, S5L8900_DEV_SIZE)) {
         note_device(m, addr, val, true);
-        s5l_i2s_write(&m->i2s[0], addr - S5L8900_I2S0_BASE, val);
+        s5l_i2s_write_width(&m->i2s[0], addr - S5L8900_I2S0_BASE, val, bytes);
         return;
     }
     if (mmio_data(addr, bytes, S5L8900_I2S1_BASE, S5L8900_DEV_SIZE)) {
@@ -701,7 +701,9 @@ static uint8_t  r8 (void *c, uint32_t a) { return (uint8_t) bus_read(c, a, 1); }
 static bool dma_request_ready(void *ctx, uint32_t address, unsigned width,
                               bool source) {
     s5l8900_t *m = ctx;
-    (void)width;
+    if (address == S5L8900_I2S0_BASE +
+        (source ? S5L_I2S_RX_FIFO_OFF : S5L_I2S_TX_FIFO_OFF))
+        return s5l_i2s_dma_ready(&m->i2s[0], width, source);
     if (source) {
         if (address == S5L8900_UART0_BASE + UART_URXH)
             return s5l_uart_rx_dma_ready(&m->uart0);
@@ -1149,30 +1151,12 @@ static s5l_wake_kind_t wake_edge_uart4(const s5l8900_t *m, uint32_t *ticks) {
     return S5L_WAKE_NEVER;
 }
 
-/*
- * The two PL080 DMA controllers, and the answer is NEVER for the same reason
- * the SPI controllers' is — but the reasoning has one extra step, because a DMA
- * transfer is the one thing in this machine that looks like it might complete
- * on its own schedule.
- *
- * It does not, here. A channel becomes runnable only when a guest store sets
- * its enable bit, that store sets `level_dirty`, and the very next
- * s5l8900_tick() — which cannot early-out while `level_dirty` is set — runs
- * s5l_pl080_run() to the END of the chain and latches any terminal count. So by
- * the time a core could reach WFI, either the interrupt is already asserted (in
- * which case machine_wait_for_interrupt()'s own pre-check ends the wait before
- * any source is consulted) or there is no transfer in flight at all. There is
- * no future edge to name.
- *
- * That would stop being true the day this model paces transfers against a
- * peripheral's DMA request line instead of completing them in one call, which
- * is exactly the change the burst note in soc.h says has not been made. This
- * entry is where that change would be felt: it would have to start answering
- * S5L_WAKE_AT with the remaining distance, or the machine would fast-forward
- * straight over the completion.
- */
+/* I2S changes DMA requests at each serial sample edge. WFI may sleep up to
+ * that edge, not over an entire buffer's eventual terminal-count interrupt.
+ * Other current DMA request sources are synchronous or host-fed. */
 static s5l_wake_kind_t wake_edge_dmac(const s5l8900_t *m, uint32_t *ticks) {
-    (void)m; (void)ticks;
+    uint32_t next = s5l_i2s_audio_next(&m->i2s[0], m->tb_hz);
+    if (next) { *ticks = next; return S5L_WAKE_AT; }
     return S5L_WAKE_NEVER;
 }
 
@@ -2212,15 +2196,34 @@ static void s5l8900_refresh(s5l8900_t *m, uint32_t tb) {
      * request line below reads true rather than stale. */
     for (unsigned i = 0; i < S5L8900_SPI_COUNT; i++) s5l_spi_step(&m->spi[i]);
 
-    for (unsigned i = 0; i < S5L8900_DMAC_COUNT; i++) {
-        m->dma_access_active = true;
-        bool dmac_irq = s5l_pl080_run(&m->dmac[i], &m->bus,
-                                      dma_request_ready, m);
-        m->dma_access_active = false;
-        s5l_vic_set_line(&m->vic[0],
-                         i == 0u ? S5L8900_IRQ_DMAC0 : S5L8900_IRQ_DMAC1,
-                         dmac_irq);
-    }
+    /* Active-host-clock catch-up can span many samples, even with DMA IRQs
+     * masked. Interleave ONLY PCM and DMA at sample edges; advancing the FIFO
+     * for the whole interval before servicing DMA would manufacture underruns.
+     * The rest of the device graph still advances once per refresh. */
+    s5l_i2s_audio_tick(&m->i2s[0], &m->codec, 0, m->tb_hz);
+    uint32_t audio_remaining = tb;
+    unsigned audio_slices = 0;
+    do {
+        for (unsigned i = 0; i < S5L8900_DMAC_COUNT; i++) {
+            m->dma_access_active = true;
+            bool dmac_irq = s5l_pl080_run(&m->dmac[i], &m->bus,
+                                          dma_request_ready, m);
+            m->dma_access_active = false;
+            s5l_vic_set_line(&m->vic[0],
+                             i == 0u ? S5L8900_IRQ_DMAC0 : S5L8900_IRQ_DMAC1,
+                             dmac_irq);
+        }
+        if (!audio_remaining) break;
+        uint32_t step = s5l_i2s_audio_next(&m->i2s[0], m->tb_hz);
+        if (!step || step > audio_remaining) {
+            s5l_i2s_audio_tick(&m->i2s[0], &m->codec, audio_remaining, m->tb_hz);
+            break; /* no sample edge, so no new DMA request */
+        }
+        if (audio_slices++ >= 4096u)
+            step = audio_remaining;
+        s5l_i2s_audio_tick(&m->i2s[0], &m->codec, step, m->tb_hz);
+        audio_remaining -= step;
+    } while (true);
 
     s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_UART4,
                      s5l_uart_rx_irq(&m->uart4));

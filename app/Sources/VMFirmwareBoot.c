@@ -1,5 +1,6 @@
 /* See VMFirmwareBoot.h. Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "VMFirmwareBoot.h"
+#include "VMDiskSize.h"
 
 #include "file_block.h"
 #include "md_snapshot.h"
@@ -1073,6 +1074,13 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
      * inspects which one currently owns that pathname and runs it first; a
      * fixed order is wrong once any transaction can stop between the two
      * renames. */
+    uint64_t requested_capacity = 0;
+    if (!vm_disk_size_read(paths->work, &requested_capacity)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The machine's disk-size record is invalid or unreadable.");
+        return false;
+    }
+    (void)requested_capacity; /* Existing media is never resized during boot. */
     vm_guest_install_result_t guest_privilege;
     vm_guest_install_result_t guest_storage;
     vm_guest_install_result_t guest_sources;
@@ -1981,12 +1989,19 @@ bool vm_firmware_boot_provision(const vm_firmware_boot_paths_t *paths,
 
     vm_boot_options_for_provisioning(values, value_count, &wanted);
 
+    uint64_t disk_capacity = 0;
+    if (!vm_disk_size_read(paths->work, &disk_capacity)) {
+        set_detail(detail, detail_capacity, "The machine's disk-size record is invalid or unreadable. No disk was created.");
+        return false;
+    }
+
     memset(&options, 0, sizeof options);
     memset(&result, 0, sizeof result);
     /* The stock image names /dev/disk0s1, which is NAND this machine does not
      * model; without this line launchd fails fsck and halts. */
     options.fstab_line = ROOTFS_WORK_DEFAULT_FSTAB;
     options.growth_bytes = VM_FW_BOOT_GROWTH_BYTES;
+    options.minimum_volume_bytes = disk_capacity;
     /*
      * The QuartzCore software renderer used to be forced on here regardless of
      * the switch, which meant the settings screen could show it OFF while

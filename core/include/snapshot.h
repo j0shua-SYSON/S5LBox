@@ -190,7 +190,10 @@
 /* v33 adds opt-in DWC2 device DMA state. v32 remains readable: its USB model
  * had only PCGCCTL, so all new state is exactly the disabled model's reset
  * state. This does NOT enable USB in a guest booted without its device tree. */
-#define SNAPSHOT_VERSION   33u
+/* v34: append timed I2S FIFO/clock state to MACH. v32/v33 migrate with empty
+ * FIFOs because those versions had no sample transport. Host audio callbacks
+ * and derived codec gains remain local to the destination. */
+#define SNAPSHOT_VERSION   34u
 
 typedef enum {
     SNAP_OK = 0,

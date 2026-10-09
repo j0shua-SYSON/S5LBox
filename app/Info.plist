@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Allow guest apps such as Voice Memos to use the microphone when you enable it in Machine Settings.</string>
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <!-- What the home screen shows under the icon.

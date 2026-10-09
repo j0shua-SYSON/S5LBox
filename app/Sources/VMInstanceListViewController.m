@@ -140,7 +140,7 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
          * field is where trailing spaces come from. */
         NSString *name = [raw stringByTrimmingCharactersInSet:
             [NSCharacterSet whitespaceCharacterSet]];
-        handler(name);
+        [a dismissViewControllerAnimated:YES completion:^{ handler(name); }];
     }]];
     [self presentViewController:a animated:YES completion:nil];
 }
@@ -150,11 +150,26 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
 - (void)addTapped {
     [self promptWithTitle:@"New Machine"
                      text:@""
-                   accept:@"Create"
+                   accept:@"Next"
                   handler:^(NSString *name) {
-        NSError *err = nil;
-        if (![[VMInstanceStore sharedStore] createInstanceNamed:name error:&err])
-            [self showError:err doing:@"Could not create the machine"];
+        UIAlertController *sizes = [UIAlertController alertControllerWithTitle:@"Disk Size"
+            message:@"Maximum guest capacity. Host storage grows as files are added. This choice applies only to the new machine."
+            preferredStyle:UIAlertControllerStyleActionSheet];
+        for (NSNumber *value in @[@2, @4, @8]) {
+            NSString *title = [NSString stringWithFormat:@"%@ GiB%@", value,
+                value.unsignedIntegerValue == 2 ? @" (Default)" : @""];
+            [sizes addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault
+                handler:^(UIAlertAction *action) {
+                    (void)action;
+                    NSError *err = nil;
+                    if (![[VMInstanceStore sharedStore] createInstanceNamed:name
+                        diskSizeGiB:value.unsignedIntegerValue error:&err])
+                        [self showError:err doing:@"Could not create the machine"];
+                }]];
+        }
+        [sizes addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+        sizes.popoverPresentationController.barButtonItem = self.navigationItem.rightBarButtonItems.firstObject;
+        [self presentViewController:sizes animated:YES completion:nil];
     }];
 }
 
@@ -476,6 +491,9 @@ titleForFooterInSection:(NSInteger)section {
         : [NSString stringWithFormat:@" · %.2f B instructions",
            (double)retired / 1e9];
     cell.detailTextLabel.text = [when stringByAppendingString:work];
+    if ([row[@"diskSizeGiB"] unsignedIntegerValue])
+        cell.detailTextLabel.text = [cell.detailTextLabel.text stringByAppendingFormat:
+            @" · %@ GiB disk", row[@"diskSizeGiB"]];
     cell.detailTextLabel.font =
         [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
     cell.detailTextLabel.adjustsFontForContentSizeCategory = YES;

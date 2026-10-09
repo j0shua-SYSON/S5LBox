@@ -104,6 +104,7 @@ targets:
       - sdk: UIKit.framework
       - sdk: CoreGraphics.framework
       - sdk: QuartzCore.framework
+      - sdk: AVFoundation.framework
       - sdk: libbz2.tbd
       - sdk: libz.tbd
     settings:

@@ -49,7 +49,7 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
     switch ((VMRuntimeSection)section) {
-        case VMRuntimeSectionSession: return 2;
+        case VMRuntimeSectionSession: return 3;
         case VMRuntimeSectionApps: return 2;
         case VMRuntimeSectionSnapshots: return 1;
         case VMRuntimeSectionPower: return 4;
@@ -118,12 +118,20 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
             toggle.accessibilityIdentifier = @"s5lbox.machine-settings.pause";
             [toggle addTarget:self action:@selector(pauseChanged:)
                       forControlEvents:UIControlEventValueChanged];
-        } else {
+        } else if (path.row == 1) {
             cell.textLabel.text = @"Pause in background";
             cell.detailTextLabel.text = @"Recommended. iOS may terminate the app if disabled.";
             toggle.on = [owner runtimePausesInBackground];
             toggle.accessibilityIdentifier = @"s5lbox.machine-settings.background";
             [toggle addTarget:self action:@selector(backgroundChanged:)
+                      forControlEvents:UIControlEventValueChanged];
+        } else {
+            cell.textLabel.text = @"Guest microphone";
+            cell.detailTextLabel.text = [owner runtimeAudioStatus];
+            toggle.on = [owner runtimeMicrophoneEnabled];
+            toggle.enabled = [owner runtimeCanControlGuest];
+            toggle.accessibilityIdentifier = @"s5lbox.machine-settings.microphone";
+            [toggle addTarget:self action:@selector(microphoneChanged:)
                       forControlEvents:UIControlEventValueChanged];
         }
         toggle.accessibilityLabel = cell.textLabel.text;
@@ -184,6 +192,21 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
 }
 - (void)backgroundChanged:(UISwitch *)toggle {
     [self.runtimeDelegate setRuntimePausesInBackground:toggle.on];
+}
+- (void)microphoneChanged:(UISwitch *)toggle {
+    toggle.enabled = NO;
+    __weak typeof(self) weakSelf = self;
+    [self.runtimeDelegate setRuntimeMicrophoneEnabled:toggle.on completion:^(BOOL okay, NSString *message) {
+        VMRuntimeSettingsViewController *self = weakSelf;
+        if (!self) return;
+        [self.tableView reloadData];
+        if (!okay && self.view.window) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Microphone is off"
+                message:message preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        }
+    }];
 }
 - (void)consoleChanged:(UISwitch *)toggle {
     [self.runtimeDelegate setRuntimeInlineConsole:toggle.on];

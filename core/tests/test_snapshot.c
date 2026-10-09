@@ -1259,6 +1259,21 @@ static void test_v32_usb_migration(void) {
     CHECK(snapshot_save_mem(&a, &buf, &len) == SNAP_OK, "v33 fixture save");
     if (buf) {
         size_t mach = find_section(buf, len, 0x4843414du);
+        /* First reconstruct v33 by removing the v34 MACH audio tail. */
+        const size_t audio_bytes = 2u * 584u;
+        uint64_t current_size = mach ? rd64le(buf + mach + 8u) : 0;
+        CHECK(mach && current_size > audio_bytes, "v34 audio tail exists");
+        size_t tail = mach + 16u + (size_t)current_size - audio_bytes;
+        memmove(buf + tail, buf + tail + audio_bytes, len - tail - audio_bytes);
+        len -= audio_bytes;
+        wr32le(buf + 16, 33u);
+        wr64le(buf + 24, rd64le(buf + 24) - audio_bytes);
+        wr64le(buf + mach + 8, current_size - audio_bytes);
+        refresh_snapshot_hash(buf, len);
+        b.i2s[0].audio.count[0] = 20;
+        CHECK(snapshot_load_mem(&b, buf, len) == SNAP_OK, "load v33");
+        CHECK(b.i2s[0].audio.count[0] == 0 && b.cpu.r[7] == a.cpu.r[7],
+              "v33 clears non-existent PCM without moving other fields");
         size_t at = 0, count = 0;
         uint64_t size = mach ? rd64le(buf + mach + 8u) : 0;
         for (size_t i = mach + 16u; mach && i + 4u <= mach + 16u + size; i++)

@@ -183,6 +183,10 @@ typedef void (^VMEngineStopCompletion)(void);
  */
 - (NSString *)modeDescription;
 - (BOOL)isRunningFirmware;
+/* Main-thread session controls; microphone starts off for each engine. */
+- (BOOL)microphoneEnabled;
+- (NSString *)audioStatus;
+- (void)setMicrophoneEnabled:(BOOL)enabled completion:(void (^)(BOOL, NSString *))completion;
 - (NSString *)bringUpNote;
 - (BOOL)isPreparingRootFilesystem;
 

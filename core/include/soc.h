@@ -2489,17 +2489,31 @@ uint16_t s5l_wm8991_peek(const s5l_wm8991_t *codec, uint8_t reg);
  * offset recorded, exactly as on I2C and SPI, so a driver that grows a new
  * register names it in a census instead of vanishing into a stub.
  *
- * WHAT THIS IS NOT. Not a sample path. The PCM FIFOs live at +0x10 and +0x38
+ * PCM transport was added after this original register census. FIFOs live at +0x10 and +0x38
  * and the CPU never touches them: the device tree hands their PHYSICAL
  * addresses (0x3ca00010/0x3ca00038, 0x3cd00010/0x3cd00038 — already absolute in
- * the `dma-channels` blob, not arm-io relative) straight to the PL080, which is
- * not modelled. No clock, no frame timing, no interrupt. i2s0 carries the
+ * the `dma-channels` blob, not arm-io relative) straight to the PL080. The
+ * width-aware codec-side path in i2s_audio.c now supplies bounded FIFOs,
+ * serial clocks, request backpressure and DMA completion timing. i2s0 carries the
  * WM8991 (`/arm-io/i2s0/audio0`, `audio-data,wm8991`); i2s1 carries the
  * baseband voice path (`audio-data,baseband`), which is why both windows exist
  * here even though only one of them belongs to the codec.
  */
 #define S5L_I2S_REGS         7u
 #define S5L_I2S_UNKNOWN_OFF  8u
+
+/* Bounded serial FIFOs. Byte storage preserves the PL080's 16/32-bit access
+ * width. Direction 0 is playback, direction 1 is capture. Clock phases and
+ * unread samples are guest state; the callback and derived gains are not. */
+#define S5L_I2S_FIFO_BYTES 256u
+typedef void (*s5l_audio_frame_fn)(void *ctx, unsigned direction,
+                                  uint32_t rate, float samples[2]);
+typedef struct {
+    uint8_t fifo[2][S5L_I2S_FIFO_BYTES];
+    uint32_t head[2], count[2];
+    uint64_t phase[2], frames[2], xruns[2];
+    uint32_t rate[2];
+} s5l_i2s_audio_t;
 
 typedef struct {
     /* Storage for the seven offsets above, in the order they are listed by
@@ -2510,11 +2524,22 @@ typedef struct {
     uint64_t unknown_reads, unknown_writes;
     uint32_t unknown_off[S5L_I2S_UNKNOWN_OFF];
     unsigned unknown_off_count;
+    s5l_i2s_audio_t audio;
+    uint64_t codec_generation;
+    float gain[2][2];
+    s5l_audio_frame_fn frame;
+    void *frame_ctx;
 } s5l_i2s_t;
 
 void     s5l_i2s_reset(s5l_i2s_t *i2s);
 uint32_t s5l_i2s_read(s5l_i2s_t *i2s, uint32_t off);
 void     s5l_i2s_write(s5l_i2s_t *i2s, uint32_t off, uint32_t val);
+uint32_t s5l_i2s_read_width(s5l_i2s_t *i2s, uint32_t off, unsigned width);
+void s5l_i2s_write_width(s5l_i2s_t *i2s, uint32_t off, uint32_t val, unsigned width);
+bool s5l_i2s_dma_ready(const s5l_i2s_t *i2s, unsigned width, bool source);
+void s5l_i2s_audio_tick(s5l_i2s_t *i2s, const s5l_wm8991_t *codec,
+                       uint32_t ticks, uint32_t tick_hz);
+uint32_t s5l_i2s_audio_next(const s5l_i2s_t *i2s, uint32_t tick_hz);
 /* The byte offset backing slot `index`, or UINT32_MAX past the end. The map is
  * exposed so the tests pin the exact seven the driver writes rather than
  * re-deriving them from this model's own storage order. */

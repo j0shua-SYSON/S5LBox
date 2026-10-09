@@ -895,6 +895,8 @@ static void test_a_dma_store_lands_where_a_cpu_store_lands(void) {
      * the right way round: a DMA store lands where a CPU store lands, and both
      * of them reach the peripheral.
      */
+    /* Timed I2S requires its interface clock before accepting DMA samples. */
+    m.bus.write32(m.bus.ctx, S5L8900_I2S0_BASE, 1u);
     uint64_t before   = m.unmapped_writes;
     uint64_t i2swrote = m.i2s[0].writes;
     m.bus.write32(m.bus.ctx, S5L8900_DMAC0_BASE + CH(1, R_SRC), 0x200u);

@@ -1754,12 +1754,97 @@ static void test_argument_and_growth_guards(void) {
     remove_if_present(source);
 }
 
-int main(void) {
+static bool seek64(FILE *f, uint64_t offset) {
+#ifdef _WIN32
+    return _fseeki64(f, (__int64)offset, SEEK_SET) == 0;
+#else
+    return fseeko(f, (off_t)offset, SEEK_SET) == 0;
+#endif
+}
+
+static uint64_t allocated_bytes(const char *path) {
+#ifdef _WIN32
+    DWORD high = 0;
+    SetLastError(NO_ERROR);
+    DWORD low = GetCompressedFileSizeA(path, &high);
+    if (low == INVALID_FILE_SIZE && GetLastError() != NO_ERROR) return UINT64_MAX;
+    return ((uint64_t)high << 32) | low;
+#else
+    struct stat st;
+    if (stat(path, &st) != 0 || st.st_blocks < 0) return UINT64_MAX;
+    return (uint64_t)st.st_blocks * 512u;
+#endif
+}
+
+static void test_sparse_capacity_and_maintenance_copy(uint64_t capacity) {
+    char source[160], grown[160], clone[160];
+    enum { LARGE_BLOCK_SIZE = 4096u, LARGE_FIXTURE_SIZE = LARGE_BLOCK_SIZE * FIXTURE_BLOCKS };
+    uint8_t fixture[LARGE_FIXTURE_SIZE], primary[HFS_VH_LEN], alternate[HFS_VH_LEN];
+    CHECK(make_path(source, sizeof source, "capacity-source") &&
+          make_path(grown, sizeof grown, "capacity-grown") &&
+          make_path(clone, sizeof clone, "capacity-maintenance"), "capacity paths");
+    /* Match the real root volume's 4 KiB allocation blocks. A synthetic 512 B
+     * block at 8 GiB exceeds the provisioner's deliberate 1 MiB bitmap cap. */
+    memset(fixture, 0, sizeof fixture);
+    make_hfs_fixture(fixture, 1u);
+    memcpy(fixture + 4u * LARGE_BLOCK_SIZE, fixture + FIXTURE_BITMAP_OFFSET, 8);
+    memset(fixture + FIXTURE_BITMAP_OFFSET, 0, 8);
+    memset(fixture + FIXTURE_SIZE - HFS_VH_OFF, 0, HFS_VH_LEN);
+    put_be32(fixture + HFS_VH_OFF + 40, LARGE_BLOCK_SIZE);
+    memcpy(fixture + sizeof fixture - HFS_VH_OFF, fixture + HFS_VH_OFF, HFS_VH_LEN);
+    CHECK(write_file(source, fixture, sizeof fixture), "capacity fixture");
+    rootfs_work_options_t options;
+    rootfs_work_result_t result;
+    memset(&options, 0, sizeof options);
+    options.preserve_fstab = true;
+    options.minimum_volume_bytes = capacity;
+    CHECK(rootfs_work_create(source, grown, &options, &result) == ROOTFS_WORK_OK,
+          "capacity grow: %s", result.detail);
+    if (!result.published) { remove_if_present(source); return; }
+    CHECK(file_size(grown) == capacity, "logical capacity changed");
+    CHECK(allocated_bytes(grown) < capacity / 4u, "sparse growth allocated the whole disk");
+    FILE *f = fopen(grown, "r+b");
+    uint64_t high_offset = capacity - 1024u * 1024u;
+    static const uint8_t marker[] = {0x73,0x35,0x6c,0x42,0x6f,0x78,0xa5,0x5a};
+    CHECK(f != NULL, "open grown volume");
+    if (f) {
+        CHECK(seek64(f, HFS_VH_OFF) && fread(primary, 1, sizeof primary, f) == sizeof primary,
+              "primary header read");
+        CHECK(seek64(f, capacity - HFS_VH_OFF) && fread(alternate, 1, sizeof alternate, f) == sizeof alternate,
+              "64-bit alternate header read");
+        CHECK(get_be32(primary + 44) == capacity / LARGE_BLOCK_SIZE &&
+              memcmp(primary, alternate, sizeof primary) == 0, "large HFS geometry mismatch");
+        CHECK(seek64(f, high_offset) && fwrite(marker, 1, sizeof marker, f) == sizeof marker,
+              "high-offset marker write");
+        CHECK(fclose(f) == 0, "close grown volume");
+    }
+    CHECK(rootfs_work_create(grown, clone, &options, &result) == ROOTFS_WORK_OK,
+          "maintenance clone: %s", result.detail);
+    if (result.published) {
+        CHECK(file_size(clone) == capacity && allocated_bytes(clone) < capacity / 4u,
+              "maintenance materialized sparse disk");
+        uint8_t actual[sizeof marker] = {0};
+        f = fopen(clone, "rb");
+        CHECK(f && seek64(f, high_offset) && fread(actual, 1, sizeof actual, f) == sizeof actual &&
+              memcmp(marker, actual, sizeof marker) == 0, "maintenance lost high-offset data");
+        if (f) fclose(f);
+    }
+    remove_if_present(clone); remove_if_present(grown); remove_if_present(source);
+}
+
+int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--large-disks") == 0) {
+        test_sparse_capacity_and_maintenance_copy(UINT64_C(4) << 30);
+        test_sparse_capacity_and_maintenance_copy(UINT64_C(8) << 30);
+        printf("large disks: %d passed, %d failed\n", g_pass, g_fail);
+        return g_fail ? 1 : 0;
+    }
     printf("rootfs work-image provisioner tests\n");
     test_sha256_known_answers_and_chunking();
     test_sha256_invalid_and_overflow_guards();
     test_success_boundary_growth_and_source_immutable();
     test_minimum_volume_expands_allocation_file();
+    test_sparse_capacity_and_maintenance_copy(UINT64_C(64) << 20);
     test_stale_alternate_accounting_is_accepted();
     test_required_identity_chunk_boundaries();
     test_source_identity_policy_and_cleanup();

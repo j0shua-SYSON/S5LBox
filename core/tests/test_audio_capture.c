@@ -701,9 +701,10 @@ static void test_a_synthetic_transfer_reaches_the_file(void) {
     m.bus.write32(m.bus.ctx, S5L8900_I2S1_BASE + S5L_I2S_TX_FIFO_OFF, 0x99u);
     other_controller++;
 
-    CHECK(m.i2s[0].unknown_writes == N && m.i2s[1].unknown_writes == 1u,
+    CHECK(m.i2s[0].writes == N && m.i2s[0].audio.count[0] == N * 4u &&
+          m.i2s[1].unknown_writes == 1u,
           "the machine routed %llu/%llu FIFO stores",
-          (unsigned long long)m.i2s[0].unknown_writes,
+          (unsigned long long)m.i2s[0].writes,
           (unsigned long long)m.i2s[1].unknown_writes);
     CHECK(m.unmapped_writes == 0u, "an I2S FIFO store was classified unmapped");
     CHECK(rx_stores == 0u && other_controller == 1u, "tap bookkeeping is wrong");

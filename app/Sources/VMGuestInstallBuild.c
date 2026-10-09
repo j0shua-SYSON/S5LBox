@@ -1,5 +1,6 @@
 /* See VMGuestInstallBuild.h. Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "VMGuestInstallBuild.h"
+#include "VMDiskSize.h"
 
 #include "VMResumeCheckpoint.h"
 #include "VMSnapshotStore.h"
@@ -2286,6 +2287,13 @@ build_from_directory(
         return VM_GUEST_INSTALL_BUILD_ERR_ARGUMENT;
     }
 
+    uint64_t chosen_capacity = 0;
+    if (!vm_disk_size_read(work_directory, &chosen_capacity)) {
+        build_detail(detail, detail_capacity,
+                     "The machine's disk-size record is invalid or unreadable.");
+        return VM_GUEST_INSTALL_BUILD_ERR_ARGUMENT;
+    }
+
     if (force_off) {
         if (!vm_resume_checkpoint_disarm(work_directory, detail, detail_capacity))
             return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
@@ -2495,7 +2503,8 @@ build_from_directory(
     memset(&options, 0, sizeof options);
     options.preserve_fstab = true;
     options.allow_unclean_source = allow_unclean_source;
-    options.minimum_volume_bytes = VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES;
+    options.minimum_volume_bytes = chosen_capacity > VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES
+        ? chosen_capacity : VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES;
     options.entries = vm_guest_rootfs_plan_entries(plan);
     options.entry_count = vm_guest_rootfs_plan_entry_count(plan);
     build_progress_adapter_t adapter = {progress, progress_context};

@@ -9004,6 +9004,18 @@ static bool copy_source(host_file_t *source, host_file_t *temporary,
                         void *progress_ctx) {
     uint64_t offset = 0;
 
+    /* The destination is a newly created, unpublished file. Reserve its logical
+     * extent first so skipped zero chunks are holes, including a zero tail.
+     * Read/hash EVERY source byte: sparse copying must not weaken identity or
+     * change detection. Nonzero chunks still use the ordinary checked write. */
+    int resize_error = 0;
+    host_file_allow_sparse_extension(temporary);
+    if (!host_file_resize(temporary, source_size, &resize_error)) {
+        result_fail(result, ROOTFS_WORK_WRITE_FAILED, ROOTFS_WORK_STAGE_COPY,
+                    resize_error, "cannot size the temporary work image");
+        return false;
+    }
+
     /* Report zero before the first chunk, so a bar appears immediately rather
      * than after the first few megabytes have already gone by. */
     if (progress) progress(progress_ctx, 0u, source_size);
@@ -9022,7 +9034,10 @@ static bool copy_source(host_file_t *source, host_file_t *temporary,
                         "source exceeds the SHA-256 cumulative length bound");
             return false;
         }
-        if (!checked_write(temporary, source_size, offset, buffer, amount,
+        size_t nonzero = 0;
+        while (nonzero < amount && buffer[nonzero] == 0u) nonzero++;
+        if (nonzero < amount &&
+            !checked_write(temporary, source_size, offset, buffer, amount,
                            ROOTFS_WORK_STAGE_COPY, result))
             return false;
         offset += amount;

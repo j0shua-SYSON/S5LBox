@@ -1,11 +1,16 @@
-# Disk-size presets: experimental foundation
+# Disk-size presets: candidate implementation
 
-Status on 2026-10-06: **not a released feature or a user-facing picker**.
-The `release/0.1.0-rc.1` branch and the installed RC remain unchanged.
-Work is isolated on `feature/disk-size-presets`.
+Status on 2026-10-10: implemented on `feature/audio-disk-presets`, not merged
+into main or released. The original guarded geometry foundation is retained.
+New Machine offers 2 (default), 4 and 8 GiB; a strict `disk-size-v1` record
+travels with each machine. Fresh provisioning and jailbreak honor it, duplicates
+copy the choice, and missing records retain legacy behavior. Existing disks are
+never resized at boot. Malformed records refuse before install transaction work.
 
-The proposed choices are 2, 4 and 8 GiB. There is no smaller-only substitute.
-The UI, persisted choice and provisioning integration have not been added.
+Maintenance cloning now preserves zero extents while hashing every logical byte,
+so choosing a larger capacity does not inherently allocate that capacity on the
+host. This is sparse allocation, not a promise that deleting guest files always
+reclaims host space. Snapshot retention and actual guest data still consume space.
 
 ## Why raising the cap alone is unsafe
 
@@ -52,7 +57,7 @@ The high-offset instruction, stack slots and continuation register contracts
 are covered by executing the actual authenticated kernel instructions in
 `test_bringup`, not just by calling the host arithmetic helper.
 
-## Evidence and limits
+## Foundation evidence and limits (2026-10-06)
 
 - Windows Release build and CTest: **74/74 passed**, with JIT disabled.
 - Geometry helper: 297 checks passed, including 2/4/8 GiB, both ioctl variants,
@@ -70,7 +75,23 @@ These are **not** proof of an 8 GiB HFS boot, a completed jailbreak, snapshot
 restore, a filled filesystem or physical-phone execution of the new branch.
 No existing machine, firmware input, installed app or disk was modified.
 
-## Before exposing the picker
+## Release validation still required
+
+Current Windows evidence (2026-10-10): **81/81 CTest tests passed**;
+`test_rootfs_work --large-disks`: **28 checks passed** for synthetic 4/8 GiB
+images, sparse maintenance copies and high-offset marker preservation.
+The private authenticated-kernel suites were rerun: **1,496 manifest checks**
+and **245 bring-up checks** passed. Their short boot smoke remains only 200,000
+instructions, not a completed large-disk boot.
+
+The implementation now includes the picker, persistence, provisioning and sparse
+maintenance copy described below. Host regression tests exercise synthetic HFS
+growth, high-offset data preservation and allocated size; `test_rootfs_work
+--large-disks` covers actual 4/8 GiB logical images. This remains distinct from
+guest boot/jailbreak/save/reopen and physical iOS allocation checks.
+
+The original validation checklist is retained to make the outstanding device
+gates explicit; implementation of a checkbox is not proof of its live outcome.
 
 1. Preserve sparse space during maintenance copies. `rootfs_work.c` creates
    sparse growth, but `copy_source` subsequently writes every source chunk.

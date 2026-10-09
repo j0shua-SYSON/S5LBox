@@ -44,6 +44,7 @@ add_library(emucore STATIC
     src/soc/pcf50635.c
     src/soc/wm8991.c
     src/soc/i2s.c
+    src/soc/i2s_audio.c
     src/soc/spi.c
     src/soc/gpioic.c
     src/soc/buttons.c
@@ -455,6 +456,18 @@ add_executable(test_vmfirmwareboot
     ../app/Sources/VMBootOptions.c
     ../app/Sources/VMOptions.c
 )
+add_executable(test_vmdisksize ../app/Tests/test_vmdisksize.c)
+target_include_directories(test_vmdisksize PRIVATE ../app/Sources)
+add_test(NAME app_disk_size COMMAND test_vmdisksize)
+add_executable(test_i2s_audio tests/test_i2s_audio.c)
+target_link_libraries(test_i2s_audio PRIVATE emucore)
+add_test(NAME i2s_pcm_transport COMMAND test_i2s_audio)
+add_executable(test_vmaudiobuffer ../app/Tests/test_vmaudiobuffer.c ../app/Sources/VMAudioBuffer.c)
+target_include_directories(test_vmaudiobuffer PRIVATE ../app/Sources)
+if(NOT WIN32 AND NOT APPLE)
+    target_link_libraries(test_vmaudiobuffer PRIVATE m)
+endif()
+add_test(NAME app_audio_handoff COMMAND test_vmaudiobuffer)
 target_include_directories(test_vmfirmwareboot PRIVATE ../app/Sources ../tools)
 target_link_libraries(test_vmfirmwareboot PRIVATE
     emucore host_ios3_bringup_gate host_file_block host_rootfs_work nethost)

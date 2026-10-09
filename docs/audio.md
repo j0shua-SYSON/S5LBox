@@ -1,3 +1,41 @@
+# Current audio implementation (2026-10-10 candidate)
+
+The `feature/audio-disk-presets` branch adds timed codec-side I²S DMA playback
+and capture, plus an iOS 13+ AVAudioEngine backend. This is a candidate, not
+physical-device audio verification. The older investigation below is preserved
+as historical evidence; its performance numbers and missing-PL080 statements
+do not describe the current emulator.
+
+- `core/src/soc/i2s_audio.c`: bounded serial FIFOs, PLL/divider-derived sample
+  rates, playback/capture PCM, DAC mute, digital volume and output-PGA volume.
+  Guest time advances the serial port; host audio callbacks never touch the board.
+- `machine.c`: PL080 request backpressure and sample-edge servicing within
+  batched clock advances. WFI names the next audio edge.
+- `VMAudioBuffer.c`: two bounded single-producer/single-consumer queues and
+  rate conversion to/from a 48 kHz host stream. No callback allocation or locks.
+- `VMAudioOutput.m`: route/interruption handling, foreground-only host audio,
+  and explicit microphone permission. Machine Settings has a session-only
+  microphone switch, initially off. Denial feeds silence, not fabricated input.
+- Snapshot v34 stores unread guest FIFO bytes and clock phases. Tested v32/v33
+  migration starts empty FIFOs, since those versions had no PCM transport.
+  Host microphone buffers, permission and callback pointers are never saved.
+
+Host tests cover digital samples in both directions, clock ratios, muted/attenuated
+output, full/empty queues, real PL080 transfers, batched-time underrun prevention,
+snapshot migration, rate conversion and permission-off silence. They do **not**
+prove audible system/media playback or a Voice Memos round trip on the phone.
+Those tests, headphones/route changes, and guest volume/ringer behavior remain
+release gates. Baseband telephone audio and analogue effects are not modelled.
+
+Register references: the authenticated 7E18 controller and N82 device tree,
+[openiBoot hardware definitions](https://github.com/iDroid-Project/openiBoot/blob/master/plat-s5l8900/includes/hardware/i2s.h),
+and [Wolfson's Linux codec register definitions](https://github.com/torvalds/linux/blob/master/sound/soc/codecs/wm8990.h).
+Host API references: [Apple audio input](https://developer.apple.com/documentation/avfaudio/avaudioengine/inputnode)
+and [microphone privacy](https://developer.apple.com/library/archive/documentation/Audio/Conceptual/AudioSessionProgrammingGuide/RequestingPermission/RequestingPermission.html).
+No reference implementation source is vendored into this feature.
+
+## Historical register bring-up
+
 <!--
   Extracted from the retired docs/AGENT_HANDOFF.md, section 23.9, on
   2026-07-31, unchanged

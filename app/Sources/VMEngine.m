@@ -31,6 +31,7 @@
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //
 #import "VMEngine.h"
+#import "VMAudioOutput.h"
 #import "VMTouchQueue.h"
 #import "VMButtonQueue.h"
 #import "VMGuestShutdown.h"
@@ -161,6 +162,7 @@ static double vm_engine_now_seconds(void) {
     BOOL             _usbMuxReported;
     uint64_t         _usbBootGeneration;
     VMUSBTransport  *_usbTransport;
+    VMAudioOutput    *_audio;
     /* The provisioning copy's byte counters; see -rootFilesystemProgress. */
     uint64_t         _prepareDone;
     uint64_t         _prepareTotal;
@@ -297,10 +299,16 @@ static double vm_engine_now_seconds(void) {
     _bringUpNote = @"";
     _instanceID = [identifier copy];
     _usbTransport = [[VMUSBTransport alloc] init];
+    _audio = [VMAudioOutput new];
     return self;
 }
 
 - (VMUSBTransport *)usbTransport { return _usbTransport; }
+- (BOOL)microphoneEnabled { return _audio.microphoneEnabled; }
+- (NSString *)audioStatus { return _audio.status; }
+- (void)setMicrophoneEnabled:(BOOL)enabled completion:(void (^)(BOOL, NSString *))completion {
+    [_audio setMicrophoneEnabled:enabled completion:completion];
+}
 
 - (void)dealloc {
     // Safe without any handshake: NSThread holds a strong reference to its
@@ -1780,6 +1788,10 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
     memset(&spin, 0, sizeof spin);
     vm_guest_shutdown_t shutdown;
     BOOL shutdownPrepared = NO, shutdownQuiescent = NO;
+    vm_audio_buffer_t *audioBuffer = _audio.buffer;
+    _machine.i2s[0].frame = vm_audio_guest_frame;
+    _machine.i2s[0].frame_ctx = audioBuffer;
+    BOOL audioRunning = NO;
 
     while (YES) {
         @autoreleasepool {
@@ -1793,6 +1805,12 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
             if (stop) {
                 stoppedByRequest = YES;
                 break;
+            }
+            BOOL wantsAudio = !paused && !checkpoint;
+            if (wantsAudio != audioRunning) {
+                audioRunning = wantsAudio;
+                vm_audio_buffer_active(audioBuffer, audioRunning);
+                [_audio setRunning:audioRunning];
             }
             /* Only this thread knows when guest execution actually stops.
              * Exclude the pause before checkpoint draining as well as normal
@@ -1993,6 +2011,15 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
             }
 
             retired += s5l8900_run(&_machine, kVMChunkInstructions, &status);
+
+            if (_machine.i2s[0].frame != vm_audio_guest_frame) {
+                /* The watchdog replaced the board. Host pointers and queued
+                 * sound from the old kernel must not cross that boundary. */
+                vm_audio_buffer_active(audioBuffer, false);
+                _machine.i2s[0].frame = vm_audio_guest_frame;
+                _machine.i2s[0].frame_ctx = audioBuffer;
+                vm_audio_buffer_active(audioBuffer, audioRunning);
+            }
 
             if (_usbHostActive && !checkpoint) {
                 uint64_t generation = vm_firmware_boot_restart_count(_firmwareBoot);
@@ -2210,6 +2237,8 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
             (unsigned long long)retired]];
 
     [_usbTransport endSession:@"The machine stopped. The USB service session was closed."];
+    vm_audio_buffer_active(audioBuffer, false);
+    [_audio setRunning:NO];
     free(_usbMux); _usbMux = NULL; _usbMuxReported = NO;
     if (_machineReady) {
         [self exportGuestPCProfile_emulatorThread];

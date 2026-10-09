@@ -1016,6 +1016,11 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     return [self runtimeCanControlGuest] && [_engine isRunningFirmware];
 }
 - (BOOL)runtimePaused { return [_engine isPaused]; }
+- (BOOL)runtimeMicrophoneEnabled { return [_engine microphoneEnabled]; }
+- (NSString *)runtimeAudioStatus { return [_engine audioStatus]; }
+- (void)setRuntimeMicrophoneEnabled:(BOOL)enabled completion:(void (^)(BOOL, NSString *))completion {
+    [_engine setMicrophoneEnabled:enabled completion:completion];
+}
 - (void)setRuntimePaused:(BOOL)paused {
     if (![self runtimeCanControlGuest]) return;
     _userPaused = paused;

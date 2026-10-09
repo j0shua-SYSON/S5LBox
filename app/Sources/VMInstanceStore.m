@@ -8,6 +8,7 @@
 #import "VMFirmwareBoot.h"
 #import "VMOptions.h"
 #import "VMSettings.h"
+#include "VMDiskSize.h"
 
 NSString *const VMInstanceStoreDidChangeNotification =
     @"VMInstanceStoreDidChangeNotification";
@@ -396,12 +397,16 @@ static NSString *VMGraphicsRecordText(BOOL mbxEnabled,
     if (index >= _list.count) return nil;
     const vm_instance_t *row = vm_instance_at(&_list, (unsigned)index);
     if (!row) return nil;
+    uint64_t capacity = 0;
+    NSString *directory = [[self containerDirectory] stringByAppendingPathComponent:@(row->id)];
+    BOOL validCapacity = vm_disk_size_read(directory.fileSystemRepresentation, &capacity);
     return @{
         @"id":       @(row->id),
         @"name":     @(row->name),
         @"created":  @(row->created_unix),
         @"opened":   @(row->last_opened_unix),
         @"retired":  @(row->retired_total),
+        @"diskSizeGiB": @(validCapacity ? capacity / VM_DISK_GIB : 0),
     };
 }
 
@@ -418,13 +423,33 @@ static NSString *VMGraphicsRecordText(BOOL mbxEnabled,
     for (unsigned attempt = 0; attempt < 8u; attempt++) {
         uint32_t hi = arc4random(), lo = arc4random();
         NSString *candidate = [NSString stringWithFormat:@"%08x%08x", hi, lo];
-        if (vm_instance_index_of_id(&_list, candidate.UTF8String) < 0)
+        if (vm_instance_index_of_id(&_list, candidate.UTF8String) < 0 &&
+            ![NSFileManager.defaultManager fileExistsAtPath:
+                [[self containerDirectory] stringByAppendingPathComponent:candidate]])
             return candidate;
     }
     return nil;    /* eight collisions on 64 bits is not luck, it is a bug */
 }
 
 - (NSString *)createInstanceNamed:(NSString *)name error:(NSError **)error {
+    return [self createInstanceNamed:name diskSizeGiB:2 error:error];
+}
+
+- (BOOL)writeDiskSize:(NSUInteger)gib forInstance:(NSString *)identifier error:(NSError **)error {
+    const char *record = gib <= 8 ? vm_disk_size_record((unsigned)gib) : NULL;
+    if (!record) {
+        if (error) *error = [NSError errorWithDomain:kErrorDomain code:1001
+            userInfo:@{NSLocalizedDescriptionKey:@"Choose a 2, 4 or 8 GiB disk."}];
+        return NO;
+    }
+    NSString *directory = [self directoryForInstanceWithID:identifier];
+    if (!directory.length) return NO;
+    return [[NSData dataWithBytes:record length:strlen(record)]
+        writeToFile:[directory stringByAppendingPathComponent:@VM_DISK_SIZE_FILE]
+        options:NSDataWritingAtomic error:error];
+}
+
+- (NSString *)createInstanceNamed:(NSString *)name diskSizeGiB:(NSUInteger)gib error:(NSError **)error {
     NSString *identifier = [self freshIdentifier];
     if (!identifier) {
         if (error) *error = [self errorFor:VM_INSTANCE_ERR_ID_TAKEN];
@@ -467,11 +492,25 @@ static NSString *VMGraphicsRecordText(BOOL mbxEnabled,
         return nil;
     }
 
-    /* Do not write the ownership marker yet. The first open, not the list-row
+    if (![self writeDiskSize:gib forInstance:identifier error:error]) {
+        (void)vm_instance_remove(&_list, added);
+        [NSFileManager.defaultManager removeItemAtPath:
+            [[self containerDirectory] stringByAppendingPathComponent:identifier] error:nil];
+        return nil;
+    }
+    /* Do not write the graphics ownership marker yet. The first open, not the list-row
      * creation, is when the image-time setting becomes immutable. This also
      * lets the automatically created first row follow a choice made before it
      * is opened. */
-    [self changed];
+    if (![self save]) {
+        (void)vm_instance_remove(&_list, added);
+        [NSFileManager.defaultManager removeItemAtPath:
+            [[self containerDirectory] stringByAppendingPathComponent:identifier] error:nil];
+        if (error) *error = [NSError errorWithDomain:kErrorDomain code:1002
+            userInfo:@{NSLocalizedDescriptionKey:@"The machine list could not be saved. Check available storage."}];
+        return nil;
+    }
+    [NSNotificationCenter.defaultCenter postNotificationName:VMInstanceStoreDidChangeNotification object:self];
     return identifier;
 }
 
@@ -489,6 +528,12 @@ static NSString *VMGraphicsRecordText(BOOL mbxEnabled,
     NSDictionary *source = [self instanceAtIndex:index];
     if (!source) {
         if (error) *error = [self errorFor:VM_INSTANCE_ERR_RANGE];
+        return nil;
+    }
+    uint64_t capacity = 0;
+    if (!vm_disk_size_read([self directoryForInstanceWithID:source[@"id"]].fileSystemRepresentation, &capacity)) {
+        if (error) *error = [NSError errorWithDomain:kErrorDomain code:1001
+            userInfo:@{NSLocalizedDescriptionKey:@"The source machine's disk-size record is invalid or unreadable."}];
         return nil;
     }
     NSString *identifier = [self freshIdentifier];
@@ -562,7 +607,9 @@ static NSString *VMGraphicsRecordText(BOOL mbxEnabled,
         softwareRendererEnabled ? true : false;
 
     NSError *graphicsError = nil;
-    if (![self writeRecordedGraphicsForInstanceWithID:identifier
+    if (![self writeDiskSize:capacity ? (NSUInteger)(capacity / VM_DISK_GIB) : 2
+                forInstance:identifier error:&graphicsError] ||
+        ![self writeRecordedGraphicsForInstanceWithID:identifier
                                            mbxEnabled:mbxEnabled
                               softwareRendererEnabled:softwareRendererEnabled
                                                 error:&graphicsError]) {

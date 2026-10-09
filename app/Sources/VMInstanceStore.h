@@ -45,6 +45,9 @@ extern NSString *const VMInstanceStoreDidChangeNotification;
  */
 - (nullable NSString *)createInstanceNamed:(NSString *)name
                                      error:(NSError **)error;
+- (nullable NSString *)createInstanceNamed:(NSString *)name
+                               diskSizeGiB:(NSUInteger)gib
+                                     error:(NSError **)error;
 
 /* Rename, duplicate and delete. Each returns NO with `error` set on refusal,
  * and none of them changes anything when they refuse. */

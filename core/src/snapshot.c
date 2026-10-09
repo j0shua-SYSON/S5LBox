@@ -131,7 +131,7 @@ SNAP_SIZE_GUARD(s5l_tvout_t,       12304, "snap_tvout");
 SNAP_SIZE_GUARD(s5l_i2c_t,         320,   "snap_i2c");
 SNAP_SIZE_GUARD(s5l_pcf50635_t,    600,   "snap_pmu");
 SNAP_SIZE_GUARD(s5l_wm8991_t,      496,   "snap_codec");
-SNAP_SIZE_GUARD(s5l_i2s_t,         104,   "snap_i2s");
+SNAP_SIZE_GUARD(s5l_i2s_t,         728,   "snap_i2s + snap_i2s_audio");
 SNAP_SIZE_GUARD(s5l_spi_t,         240,   "snap_spi");
 /* Four register banks, plus what the board is driving and which lines it
  * drives at all -- see the `driven` note in soc.h. */
@@ -227,7 +227,7 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * cleared on restore and deliberately absent from the serialized stream. */
 /* 257304 includes the serialized DWC2 device-DMA registers/endpoints;
  * measured from the compiler's emitted allocation including alignment. */
-SNAP_SIZE_GUARD(s5l8900_t,         257304, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         258552, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -845,7 +845,14 @@ static bool codec_state_valid(const s5l_wm8991_t *c) {
 }
 
 static bool i2s_state_valid(const s5l_i2s_t *s) {
-    return s && s->unknown_off_count <= S5L_I2S_UNKNOWN_OFF;
+    if (!s || s->unknown_off_count > S5L_I2S_UNKNOWN_OFF) return false;
+    for (unsigned d = 0; d < 2; d++)
+        if (s->audio.head[d] >= S5L_I2S_FIFO_BYTES ||
+            s->audio.count[d] > S5L_I2S_FIFO_BYTES ||
+            s->audio.phase[d] > UINT32_MAX ||
+            (s->audio.rate[d] && (s->audio.rate[d] < 8000u ||
+                                   s->audio.rate[d] > 96000u))) return false;
+    return true;
 }
 
 static void snap_codec(sn_io_t *io, s5l_wm8991_t *c) {
@@ -871,8 +878,30 @@ static void snap_i2s(sn_io_t *io, s5l_i2s_t *s) {
     F64(s->unknown_reads); F64(s->unknown_writes);
     FA32(s->unknown_off, S5L_I2S_UNKNOWN_OFF);
     F32(s->unknown_off_count);
-    if (sn_reading(io) && io->err == SNAP_OK && !i2s_state_valid(s))
+    if (sn_reading(io) && io->err == SNAP_OK &&
+        s->unknown_off_count > S5L_I2S_UNKNOWN_OFF)
         io->err = SNAP_ERR_CORRUPT;
+}
+
+static void snap_i2s_audio(sn_io_t *io, s5l_i2s_t *s, uint32_t tick_hz) {
+    if (sn_reading(io) && io->version < 34u) {
+        memset(&s->audio, 0, sizeof s->audio);
+    } else {
+        FBYTES(s->audio.fifo, sizeof s->audio.fifo);
+        FA32(s->audio.head, 2); FA32(s->audio.count, 2);
+        for (unsigned d = 0; d < 2; d++) F64(s->audio.phase[d]);
+        for (unsigned d = 0; d < 2; d++) F64(s->audio.frames[d]);
+        for (unsigned d = 0; d < 2; d++) F64(s->audio.xruns[d]);
+        FA32(s->audio.rate, 2);
+    }
+    if (sn_reading(io)) {
+        s->codec_generation = UINT64_MAX; /* recompute gains on next refresh */
+        memset(s->gain, 0, sizeof s->gain);
+        if (!i2s_state_valid(s) ||
+            (s->audio.phase[0] && s->audio.phase[0] >= tick_hz) ||
+            (s->audio.phase[1] && s->audio.phase[1] >= tick_hz))
+            io->err = SNAP_ERR_CORRUPT;
+    }
 }
 
 static bool spi_state_valid(const s5l_spi_t *s) {
@@ -1160,6 +1189,9 @@ static void snap_mach(sn_io_t *io, s5l8900_t *m) {
 
     F32(m->stub_declare_failures);
 
+    for (unsigned i = 0; i < S5L8900_I2S_COUNT; i++)
+        snap_i2s_audio(io, &m->i2s[i], m->tb_hz);
+
     if (sn_reading(io) && io->err == SNAP_OK &&
         (m->unmapped_addr_count > (unsigned)S5L_UNMAPPED_LOG ||
          m->dev_count           > (unsigned)S5L_DEVLOG ||
@@ -1345,7 +1377,7 @@ static void snap_header(sn_io_t *io, uint64_t *payload_len) {
     if (sn_reading(io) && io->err == SNAP_OK) {
         if (memcmp(magic, SNAPSHOT_MAGIC, SNAPSHOT_MAGIC_LEN) != 0)
             io->err = SNAP_ERR_MAGIC;
-        else if (version != SNAPSHOT_VERSION && version != 32u)
+        else if (version != SNAPSHOT_VERSION && version != 33u && version != 32u)
             io->err = SNAP_ERR_VERSION;
         else if (hlen != SNAP_HEADER_LEN)
             io->err = SNAP_ERR_CORRUPT;
@@ -1399,7 +1431,10 @@ static bool snap_machine_valid(const s5l8900_t *m) {
     if (!pmu_state_valid(&m->pmu)) return false;
     if (!codec_state_valid(&m->codec)) return false;
     for (unsigned i = 0; i < S5L8900_I2S_COUNT; i++)
-        if (!i2s_state_valid(&m->i2s[i])) return false;
+        if (!i2s_state_valid(&m->i2s[i]) ||
+            (m->i2s[i].audio.phase[0] && m->i2s[i].audio.phase[0] >= m->tb_hz) ||
+            (m->i2s[i].audio.phase[1] && m->i2s[i].audio.phase[1] >= m->tb_hz))
+            return false;
     if (!tvout_state_valid(&m->tvout)) return false;
     for (unsigned i = 0; i < S5L8900_SPI_COUNT; i++)
         if (!spi_state_valid(&m->spi[i])) return false;
