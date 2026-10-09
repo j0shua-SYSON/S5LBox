@@ -140,7 +140,10 @@ typedef struct {
 
     [e addObject:@{ @"h": @"Install a guest app",
         @"b": @"From Machines, open App Settings → Install IPA and choose a "
-              @"jailbroken machine. Select an unencrypted ARMv6 IPA built for "
+              @"jailbroken machine. Copy IPAs into Files → On My iPhone → "
+              @"S5LBox → IPAs, or use Import in the library. Each app has its "
+              @"own Install button; adding files never installs them automatically. "
+              @"Select an unencrypted ARMv6 IPA built for "
               @"iPhone OS 3.1.3 or earlier. The app is checked before the guest "
               @"shuts down; installation changes a recoverable disk copy.\n\n"
               @"Start the machine afterward to refresh its Home screen icon. "

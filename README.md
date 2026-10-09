@@ -69,9 +69,11 @@ confirmed, it leaves the machine open and does not start installation.
 Back up guest data first: a new installation replaces the selected guest disk,
 while supported upgrades use a separate migration path.
 
-**App Settings → Install IPA** adds compatible, unencrypted ARMv6 apps to a
-jailbroken guest. It does not install on your host iPhone. Newer-iOS apps,
-encrypted apps and replacing existing apps are not supported.
+Put `.ipa` files in **Files → On My iPhone → S5LBox → IPAs**, or use **Import**
+in **App Settings → Install IPA**. The library has a separate **Install** button
+for each app; adding files never installs everything. Compatible, unencrypted
+ARMv6 apps install into the selected jailbroken guest, not your host iPhone.
+Newer-iOS apps, encrypted apps and replacing existing apps are not supported.
 
 ### Keep your data safe
 

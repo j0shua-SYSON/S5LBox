@@ -8,6 +8,7 @@
 #import "VMFrameTelemetry.h"
 #import "VMSettings.h"
 #import "VMInstanceListViewController.h"
+#import "VMIPALibrary.h"
 
 static NSString *const kAutomationOpenFirstMachineArgument =
     @"--s5lbox-automation-open-first-machine";
@@ -128,6 +129,7 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
      */
     VMSettings *settings = [VMSettings sharedSettings];
     [settings ensureUserVisibleDirectories];
+    [VMIPALibrary directoryWithError:NULL]; // Files-visible even before opening the library.
 
     (void)launchOptions;
     BOOL launchAutomationRequested = VMLaunchRequestsFirstMachine();

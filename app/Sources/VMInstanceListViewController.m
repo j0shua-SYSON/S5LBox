@@ -9,6 +9,7 @@
 #import "VMEngine.h"
 #import "VMGuestInstallViewController.h"
 #import "VMIPAInstallViewController.h"
+#import "VMIPALibraryViewController.h"
 #import "VMGuest.h"
 #import "VMResumeCheckpoint.h"
 #import "VMInstanceStore.h"
@@ -23,7 +24,7 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
 - (BOOL)openInstanceAtIndex:(NSUInteger)index animated:(BOOL)animated
              afterShutdown:(void (^)(void))afterShutdown;
 - (void)prepareGuestInstall:(UIViewController *)install
-                instanceID:(NSString *)identifier;
+                instanceID:(NSString *)identifier returningThrough:(UIViewController *)library;
 @end
 
 @implementation VMInstanceListViewController
@@ -190,38 +191,49 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
             [list showError:missing
                       doing:@"The installed machine no longer exists"];
         };
-        [self_ prepareGuestInstall:install instanceID:identifier];
+        [self_ prepareGuestInstall:install instanceID:identifier returningThrough:nil];
     };
     settings.guestIPARequest = ^(NSString *identifier, NSString *name) {
         VMInstanceListViewController *list = weakSelf;
         UINavigationController *navigation = list.navigationController;
         if (!list || navigation.topViewController != list) return;
-        VMIPAInstallViewController *install = [[VMIPAInstallViewController alloc]
-            initWithInstanceID:identifier machineName:name];
-        __weak VMIPAInstallViewController *weakInstall = install;
-        install.prepareHandler = ^{
+        VMIPALibraryViewController *library = [[VMIPALibraryViewController alloc] initWithMachineName:name];
+        __weak VMIPALibraryViewController *weakLibrary = library;
+        library.selectionHandler = ^(NSURL *url) {
             VMInstanceListViewController *current = weakSelf;
-            VMIPAInstallViewController *screen = weakInstall;
+            VMIPALibraryViewController *collection = weakLibrary;
             UINavigationController *nav = current.navigationController;
-            if (!current || !screen || nav.topViewController != screen) return;
-            [nav popViewControllerAnimated:NO];
-            [current prepareGuestInstall:screen instanceID:identifier];
-        };
-        install.readyHandler = ^{
-            VMInstanceListViewController *current = weakSelf;
-            VMIPAInstallViewController *screen = weakInstall;
-            UINavigationController *nav = current.navigationController;
-            if (!current || !screen || nav.topViewController != screen) return;
-            [nav popViewControllerAnimated:NO];
-            VMInstanceStore *store = VMInstanceStore.sharedStore;
-            for (NSUInteger i = 0; i < store.count; i++) {
-                if ([[store instanceAtIndex:i][@"id"] isEqualToString:identifier]) {
-                    [current openInstanceAtIndex:i animated:YES];
-                    break;
+            if (!current || !collection || nav.topViewController != collection) return;
+            VMIPAInstallViewController *install = [[VMIPAInstallViewController alloc]
+                initWithInstanceID:identifier machineName:name];
+            __weak VMIPAInstallViewController *weakInstall = install;
+            install.prepareHandler = ^{
+                VMInstanceListViewController *owner = weakSelf;
+                VMIPAInstallViewController *screen = weakInstall;
+                VMIPALibraryViewController *back = weakLibrary;
+                UINavigationController *stack = owner.navigationController;
+                if (!owner || !screen || !back || stack.topViewController != screen) return;
+                [stack popToViewController:owner animated:NO];
+                [owner prepareGuestInstall:screen instanceID:identifier returningThrough:back];
+            };
+            install.readyHandler = ^{
+                VMInstanceListViewController *owner = weakSelf;
+                VMIPAInstallViewController *screen = weakInstall;
+                UINavigationController *stack = owner.navigationController;
+                if (!owner || !screen || stack.topViewController != screen) return;
+                [stack popToViewController:owner animated:NO];
+                VMInstanceStore *store = VMInstanceStore.sharedStore;
+                for (NSUInteger i = 0; i < store.count; i++) {
+                    if ([[store instanceAtIndex:i][@"id"] isEqualToString:identifier]) {
+                        [owner openInstanceAtIndex:i animated:YES];
+                        break;
+                    }
                 }
-            }
+            };
+            [nav pushViewController:install animated:YES];
+            [install inspectURL:url];
         };
-        [navigation pushViewController:install animated:YES];
+        [navigation pushViewController:library animated:YES];
     };
     UINavigationController *nav = [[UINavigationController alloc]
         initWithRootViewController:settings];
@@ -230,10 +242,14 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
 }
 
 - (void)prepareGuestInstall:(UIViewController *)install
-                instanceID:(NSString *)identifier {
+                instanceID:(NSString *)identifier returningThrough:(UIViewController *)library {
     NSString *directory = [[VMInstanceStore sharedStore]
         directoryForInstanceWithID:identifier];
     UINavigationController *navigation = self.navigationController;
+    void (^presentInstall)(VMInstanceListViewController *) = ^(VMInstanceListViewController *list) {
+        if (library) [navigation setViewControllers:@[list, library, install] animated:YES];
+        else [navigation pushViewController:install animated:YES];
+    };
     /* Do not boot an already powered-off guest just to shut it down again.
      * The existing read-only probe validates the complete checkpoint pair,
      * checksum, disk geometry and PMU witness; existence alone is not enough.
@@ -255,7 +271,7 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
             VMInstanceListViewController *list = weakSelf;
             if (!list || navigation.topViewController != list) return;
             if (poweredOff) {
-                [navigation pushViewController:install animated:YES];
+                presentInstall(list);
                 return;
             }
             /* Otherwise use the visible machine lifecycle. A failed shutdown
@@ -266,7 +282,7 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
                     [list openInstanceAtIndex:index animated:YES afterShutdown:^{
                         VMInstanceListViewController *current = weakSelf;
                         if (current && navigation.topViewController == current)
-                            [navigation pushViewController:install animated:YES];
+                            presentInstall(current);
                     }];
                     return;
                 }

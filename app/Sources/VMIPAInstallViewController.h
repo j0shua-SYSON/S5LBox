@@ -3,6 +3,7 @@
 
 @interface VMIPAInstallViewController : UITableViewController
 - (instancetype)initWithInstanceID:(NSString *)identifier machineName:(NSString *)name;
+- (void)inspectURL:(NSURL *)url;
 /* Machines owns shutdown/navigation. The package is inspected before this is
  * called. Re-present this controller only after a verified guest shutdown. */
 @property (nonatomic, copy) void (^prepareHandler)(void);

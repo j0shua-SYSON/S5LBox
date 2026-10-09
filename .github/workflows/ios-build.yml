@@ -74,6 +74,15 @@ jobs:
           sudo /tmp/xcodegen/xcodegen/install.sh
           xcodegen --version
 
+      - name: Test Files-visible IPA library
+        run: |
+          set -euo pipefail
+          mkdir -p work/ipa-library-tests
+          xcrun clang -fobjc-arc -Wall -Wextra -Werror -framework Foundation \
+            -I app/Sources app/Sources/VMIPALibrary.m app/Tests/test_vmipalibrary.m \
+            -o work/ipa-library-tests/test_vmipalibrary
+          work/ipa-library-tests/test_vmipalibrary "$GITHUB_WORKSPACE/work/ipa-library-tests"
+
       - name: Verify stock-iPhone app policy
         working-directory: app
         run: |

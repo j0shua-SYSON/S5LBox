@@ -3,10 +3,9 @@
 #import "VMIPAPackage.h"
 #import "VMInstanceStore.h"
 
-@interface VMIPAInstallViewController () <UIDocumentPickerDelegate>
+@interface VMIPAInstallViewController ()
 - (void)setBusy:(BOOL)busy message:(NSString *)message;
 - (void)installPackage;
-- (void)chooseFile;
 - (void)confirmInstall;
 @end
 
@@ -58,6 +57,8 @@
     _status = [message copy];
     self.navigationItem.hidesBackButton = busy;
     self.navigationController.interactivePopGestureRecognizer.enabled = !busy;
+    // Also gates iOS 26's content-wide pop gesture while a disk is in use.
+    self.navigationController.view.userInteractionEnabled = !busy;
     [self.tableView reloadData];
 }
 
@@ -70,7 +71,7 @@
 }
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section != 0) return nil;
-    return @"For jailbroken iPhone OS 3.1.3 guests. Choose an unencrypted, ARMv6-compatible IPA. Apps are added to /Applications; App Store-style sandbox installation and replacing existing apps are not supported.";
+    return @"ARMv6 apps for iPhone OS 3.1.3 or earlier. Adds to /Applications; encrypted apps, updates and App Store-style sandbox installation are not supported.";
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
@@ -82,12 +83,9 @@
     cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     if (path.section == 0) {
-        cell.textLabel.text = _package.displayName ?: @"Choose IPA File…";
+        cell.textLabel.text = _package.displayName ?: _filename.stringByDeletingPathExtension;
         cell.detailTextLabel.text = _package ? [NSString stringWithFormat:@"%@\n%@", _filename, _package.bundleIdentifier] : _filename;
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        cell.accessibilityIdentifier = @"s5lbox.ipa.choose";
-        cell.textLabel.textColor = _busy ? UIColor.secondaryLabelColor : UIColor.systemBlueColor;
-        cell.userInteractionEnabled = !_busy;
+        cell.accessibilityIdentifier = @"s5lbox.ipa.package";
     } else if (path.section == 1) {
         BOOL enabled = !_busy && (_installed || _package != nil);
         cell.textLabel.text = _installed ? @"Start Machine" : @"Install in Guest";
@@ -108,25 +106,13 @@
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)path {
     [tableView deselectRowAtIndexPath:path animated:YES];
     if (_busy) return;
-    if (path.section == 0) [self chooseFile];
-    else if (path.section == 1) {
+    if (path.section == 1) {
         if (_installed) { if (self.readyHandler) self.readyHandler(); }
         else if (_package) [self confirmInstall];
     }
 }
 
-- (void)chooseFile {
-    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc]
-        initWithDocumentTypes:@[@"public.data"] inMode:UIDocumentPickerModeOpen];
-    picker.delegate = self;
-    picker.allowsMultipleSelection = NO;
-    [self presentViewController:picker animated:YES completion:nil];
-}
-- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentAtURL:(NSURL *)url {
-    [self documentPicker:controller didPickDocumentsAtURLs:@[url]];
-}
-- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
-    NSURL *url = urls.firstObject;
+- (void)inspectURL:(NSURL *)url {
     if (!url || _busy) return;
     // Hold security scope immediately, before scheduling provider I/O off-main.
     BOOL scoped = [url startAccessingSecurityScopedResource];
@@ -134,7 +120,6 @@
     _package = nil;
     _installed = NO;
     [self setBusy:YES message:@"Opening and checking the selected file…"];
-    [controller dismissViewControllerAnimated:YES completion:nil];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *error = nil;
         VMIPAPackage *package = [[VMIPAPackage alloc] initWithURL:url error:&error];
