@@ -144,8 +144,8 @@ ImageMagick 6.4.3-6-1p plus four dependencies (`libxml2-lib` 2.6.32-3,
 `libxml2` 2.6.32-7, `png` 1.2.24-3, `tiff` 3.8.2-2p) installed as one reviewed
 five-package transaction; all five final versions were verified within
 55 seconds. This proves package installation, not execution of every ImageMagick
-operation. The later compact-title/visible-version adjustments require their
-own layout check; they do not change the executor.
+operation. The later compact-title/visible-version adjustments do not change
+the executor; their separate acceptance is recorded below.
 
 The same test guest did not have Substrate installed. Planning iOS3 Folders 1.2
 refused the Substrate / Safe Mode dependency cycle before download or mutation,
@@ -156,6 +156,17 @@ iOS build 37901568166 at `1c96798` passed the explicit iOS 13 API-baseline check
 and the 55 native / 15 synthetic package checks. Its app sources equal
 `def62a7`; only CI and documentation changed. Runtime testing on other host
 iOS versions remains outstanding.
+
+Final compact UI candidate `82ed924`: iOS build 37902474803 passed, including
+the iOS 13 API baseline, 55 native package checks, 15 synthetic executor checks,
+and 41 native USB checks. It was installed on the same iOS 15.8.5 phone. The
+compact home, search, detail, confirmation, categories and result screens were
+visually checked; the generic activity heading is gone and list versions remain
+visible. A further real `p7zip` install/remove round trip passed on this exact
+candidate. The host download cache contained only the 187 KiB metadata plist
+after the earlier five-package operation, not retained archives. Core matrix
+37902474600 had seven successful jobs with both macOS JIT jobs still running
+at this handoff; do not describe that final matrix as completely passed yet.
 
 The first physical setup attempt exposed a pre-existing Cydia-repair assumption:
 after Cydia reorganizes Applications into a symlink, its old repair probe reports
