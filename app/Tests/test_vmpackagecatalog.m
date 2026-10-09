@@ -29,7 +29,13 @@ int main(void) { @autoreleasepool {
     CHECK(parsed.count==1); CHECK([parsed[0][@"Description"] isEqual:@"hello\nworld"]);
     CHECK(![VMPackageCatalog parse:[@"Package: sample\nPackage: duplicate\nVersion: 1\n" dataUsingEncoding:NSUTF8StringEncoding] error:&error]);
     CHECK(![VMPackageCatalog parse:[@" orphan\n" dataUsingEncoding:NSUTF8StringEncoding] error:&error]);
+    NSArray *removed=[VMPackageCatalog parse:[@"Package: p7zip\nStatus: deinstall ok not-installed\n\n" dataUsingEncoding:NSUTF8StringEncoding] error:&error];
+    CHECK(removed.count==1); CHECK(!removed.firstObject[@"Version"]);
+    CHECK(![VMPackageCatalog parse:[@"Package: sample\nStatus: install ok installed\n" dataUsingEncoding:NSUTF8StringEncoding] error:&error]);
+    CHECK(![VMPackageCatalog parse:[@"Package: sample\n" dataUsingEncoding:NSUTF8StringEncoding] error:&error]);
     VMPackageCatalog *c=[VMPackageCatalog new];
+    c.installed=removed;
+    CHECK([c planInstall:Pkg(@"p7zip",@"4.57-3p",@"") error:&error].count==1);
     NSDictionary *firmware=Installed(Pkg(@"firmware",@"3.1.3",@""));
     NSDictionary *dep=Pkg(@"support",@"2",@"firmware (>= 3.0), firmware (<< 4.0)");
     NSDictionary *app=Pkg(@"sample",@"1",@"missing | support (>= 2)");

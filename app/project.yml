@@ -25,6 +25,10 @@ targets:
       - path: Assets.xcassets
       - path: Resources/GuestPackages/s5lbox-package-service
         buildPhase: resources
+      - path: Resources/GuestPackages/GuestPackageNotices.txt
+        buildPhase: resources
+      - path: Resources/GuestPackages/APSL-2.0.txt
+        buildPhase: resources
       # Compile the platform-independent emulator core straight into the app.
       - path: ../core/src
         name: core

@@ -1,0 +1,36 @@
+S5LBox guest package service - third-party notice
+
+The ARMv6 s5lbox-package-service executable includes the unmodified crt1.o
+startup object from common-3.0-sdk v0.3.7. Its Apple Csu sources are:
+  crt.c       Copyright (c) 1999-2008 Apple Inc. All rights reserved.
+  start.s     Copyright (c) 1999-2009 Apple Inc. All rights reserved.
+  dyld_glue.s Copyright (c) 2006-2008 Apple Inc. All rights reserved.
+
+Source code of these components is available under the Apple Public Source
+License at:
+https://github.com/apple-oss-distributions/Csu/tree/ece0e9db9c1280f3e89671deec77b3562294c45e
+
+The startup components are distributed under APSL 2.0, included in the
+accompanying APSL-2.0.txt. The APSL 1.1 headers in crt.c and start.s permit
+using a subsequent license version under section 7. Their original source
+notices remain intact upstream. S5LBox has not modified these components.
+
+The Original Code and all software distributed under the License are
+distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
+INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+Please see the License for the specific language governing rights and
+limitations under the License.
+
+SDK source and startup-object build instructions:
+https://github.com/touchHLE/common-3.0-sdk/tree/v0.3.7
+SDK archive: common-3.0.sdk-windows-x86_64.tar.gz
+SHA256: c616f77aa309cca34813f5f5a3207fc27e830d235dd3d45f352fe0db01fafc8e
+crt1.o SHA256: 64253d22b21c81776a9c085b16387317bd837d8caa9070273af9f348e1758fb8
+
+The S5LBox executor and SHA-256 sources are separately MIT licensed; see
+tools/guest_package_service.c, tools/sha256.c and LICENSE in the S5LBox
+source repository: https://github.com/j0shua-SYSON/S5LBox
+This notice does not relicense Apple code as MIT. The executable dynamically
+uses the guest's libSystem; that library is not included in this resource.

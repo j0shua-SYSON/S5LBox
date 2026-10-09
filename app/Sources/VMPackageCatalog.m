@@ -122,7 +122,15 @@ static BOOL IsInstalled(NSDictionary *p) { return [p[@"Status"] isEqual:@"instal
         NSString *line = [raw hasSuffix:@"\r"] ? [raw substringToIndex:raw.length-1] : raw;
         if (!line.length) {
             if (record.count) {
-                if (!VMPackageIdentifierValid(record[@"Package"]) || ![record[@"Version"] length] || result.count >= 100000) {
+                // dpkg keeps a versionless selection tombstone after removing
+                // packages without conffiles. It is not a repository candidate
+                // or an installed package, but must not invalidate all status.
+                NSArray *state = [record[@"Status"] componentsSeparatedByString:@" "];
+                BOOL tombstone = state.count == 3 &&
+                    [@[@"unknown",@"install",@"hold",@"deinstall",@"purge"] containsObject:state[0]] &&
+                    [state[1] isEqual:@"ok"] && [state[2] isEqual:@"not-installed"];
+                if (!VMPackageIdentifierValid(record[@"Package"]) ||
+                    (![record[@"Version"] length] && !tombstone) || result.count >= 100000) {
                     if (error) *error = VMPackageError(@"Invalid package identity or too many package records."); return nil;
                 }
                 [result addObject:[record copy]]; [record removeAllObjects]; last = nil;
