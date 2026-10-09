@@ -207,7 +207,8 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
         if (path.row == 1) {
             VMPackageManagerViewController *packages = [[VMPackageManagerViewController alloc]
                 initWithTransport:self.usbTransport instanceID:self.instanceID];
-            [self.navigationController pushViewController:packages animated:YES]; return;
+            packages.modalPresentationStyle = UIModalPresentationFullScreen;
+            [self presentViewController:packages animated:YES completion:nil]; return;
         }
         VMIPALibraryViewController *library = [[VMIPALibraryViewController alloc] init];
         __weak VMRuntimeSettingsViewController *weakSelf = self;
