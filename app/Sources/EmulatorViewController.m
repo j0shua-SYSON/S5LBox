@@ -917,6 +917,8 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     settings.showsDeveloperControls = [[VMSettings sharedSettings] developerMode];
     /* Use the same instance-derived path as the existing snapshot owner. */
     settings.snapshotsDirectory = [self snapshotsDirectory];
+    settings.usbTransport = [_engine usbTransport];
+    settings.instanceID = self.instanceID;
     UINavigationController *nav = [[UINavigationController alloc]
         initWithRootViewController:settings];
     // The emulator screen is black; a white sheet over it would be a jolt.

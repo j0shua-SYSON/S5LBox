@@ -2,6 +2,7 @@
 // Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 #import <UIKit/UIKit.h>
 #import "VMSnapshotListViewController.h"
+@class VMUSBTransport;
 
 typedef NS_ENUM(NSInteger, VMRuntimeAction) {
     VMRuntimeActionSaveAndClose,
@@ -28,4 +29,6 @@ typedef NS_ENUM(NSInteger, VMRuntimeAction) {
 @property (nonatomic, copy) NSString *machineName;
 @property (nonatomic, copy) NSString *snapshotsDirectory;
 @property (nonatomic) BOOL showsDeveloperControls;
+@property (nonatomic, strong) VMUSBTransport *usbTransport;
+@property (nonatomic, copy) NSString *instanceID;
 @end

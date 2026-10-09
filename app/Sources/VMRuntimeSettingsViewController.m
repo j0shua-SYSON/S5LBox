@@ -2,9 +2,12 @@
 // Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 #import "VMRuntimeSettingsViewController.h"
 #import "VMSettings.h" // Read-only cap choices, not the shared preferences.
+#import "VMIPALibraryViewController.h"
+#import "VMIPAInstallViewController.h"
 
 typedef NS_ENUM(NSInteger, VMRuntimeSection) {
     VMRuntimeSectionSession,
+    VMRuntimeSectionApps,
     VMRuntimeSectionSnapshots,
     VMRuntimeSectionPower,
     VMRuntimeSectionDeveloper,
@@ -39,13 +42,14 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
     (void)tableView;
-    return self.showsDeveloperControls ? 4 : 3;
+    return self.showsDeveloperControls ? 5 : 4;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
     switch ((VMRuntimeSection)section) {
         case VMRuntimeSectionSession: return 2;
+        case VMRuntimeSectionApps: return 1;
         case VMRuntimeSectionSnapshots: return 1;
         case VMRuntimeSectionPower: return 3;
         case VMRuntimeSectionDeveloper: return self.showsDeveloperControls ? 2 : 0;
@@ -57,6 +61,7 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
     (void)tableView;
     switch ((VMRuntimeSection)section) {
         case VMRuntimeSectionSession: return self.machineName.length ? self.machineName : @"Current machine";
+        case VMRuntimeSectionApps: return @"Guest apps";
         case VMRuntimeSectionSnapshots: return @"Saved states";
         case VMRuntimeSectionPower: return @"Power";
         case VMRuntimeSectionDeveloper: return @"Session diagnostics";
@@ -125,7 +130,13 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
         return cell;
     }
     BOOL enabled = owner != nil;
-    if (path.section == VMRuntimeSectionSnapshots) {
+    if (path.section == VMRuntimeSectionApps) {
+        cell.textLabel.text = @"Install IPA…";
+        enabled = self.usbTransport && [owner runtimeCanControlGuest] && ![owner runtimePaused];
+        cell.detailTextLabel.text = [owner runtimePaused] ? @"Resume the guest first." : @"Choose an app from your IPA Library. Uses virtual USB, without shutting down.";
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.accessibilityIdentifier = @"s5lbox.machine-settings.ipa";
+    } else if (path.section == VMRuntimeSectionSnapshots) {
         cell.textLabel.text = @"Snapshots";
         enabled = enabled && self.snapshotsDirectory.length > 0;
         cell.accessoryType = enabled ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
@@ -180,7 +191,24 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)path {
     [tableView deselectRowAtIndexPath:path animated:YES];
-    if (path.section == VMRuntimeSectionSnapshots) {
+    if (path.section == VMRuntimeSectionApps) {
+        if (!self.usbTransport || ![self.runtimeDelegate runtimeCanControlGuest] || [self.runtimeDelegate runtimePaused]) return;
+        VMIPALibraryViewController *library = [[VMIPALibraryViewController alloc] init];
+        __weak VMRuntimeSettingsViewController *weakSelf = self;
+        __weak VMIPALibraryViewController *weakLibrary = library;
+        library.selectionHandler = ^(NSURL *url) {
+            VMRuntimeSettingsViewController *owner = weakSelf;
+            VMIPALibraryViewController *collection = weakLibrary;
+            if (!owner || !collection || collection.navigationController.topViewController != collection) return;
+            VMIPAInstallViewController *install = [[VMIPAInstallViewController alloc]
+                initWithInstanceID:owner.instanceID machineName:owner.machineName];
+            install.liveTransport = owner.usbTransport;
+            install.readyHandler = ^{ [weakSelf dismissViewControllerAnimated:YES completion:nil]; };
+            [collection.navigationController pushViewController:install animated:YES];
+            [install inspectURL:url];
+        };
+        [self.navigationController pushViewController:library animated:YES];
+    } else if (path.section == VMRuntimeSectionSnapshots) {
         if (!self.snapshotsDirectory.length || !self.runtimeDelegate) return;
         VMSnapshotListViewController *list = [[VMSnapshotListViewController alloc] init];
         list.snapshotsDirectory = self.snapshotsDirectory;

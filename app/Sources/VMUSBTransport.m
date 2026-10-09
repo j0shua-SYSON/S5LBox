@@ -111,6 +111,15 @@ static NSError *VMUSBError(NSString *message) {
         if (c.channel < 0) c.channel = usb_mux_connect(mux, c.port);
         if (c.channel < 0) continue;
         usb_mux_channel_t *stream = &mux->channel[c.channel];
+        /* A final reply and RST can arrive in the same USB batch. Drain the
+         * accepted bytes before closing the local socket (notably Complete). */
+        if (c.ready && stream->receive_used) {
+            uint8_t buffer[USB_MUX_TX_SIZE];
+            ssize_t n = send(c.bridgeFD, stream->receive, MIN((size_t)stream->receive_used, sizeof buffer), 0);
+            if (n > 0) (void)usb_mux_read(mux, (unsigned)c.channel, buffer, (size_t)n);
+            else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) c.canceled = YES;
+            if (!c.canceled && stream->receive_used) continue;
+        }
         if (stream->state == USB_MUX_ERROR || stream->state == USB_MUX_CLOSED) {
             c.error = VMUSBError(stream->error ? [NSString stringWithUTF8String:stream->error]
                                                : @"The guest closed the service connection.");
