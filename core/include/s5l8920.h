@@ -283,9 +283,11 @@ void s5l8920_free(s5l8920_t *m);
 bool s5l8920_dsim_attach(s5l8920_t *m, s5l8920_dsim_t *dsim);
 /* Supply independent elapsed source cycles. Gate nibble0 pauses progress,
  * f permits it; unknown/intermediate gate state refuses without advancing.
- * Register reads and CPU steps never call either clock automatically. */
+ * Register reads and CPU steps never supply clocks automatically. Escape
+ * cycles require the optional packet link and are independent of PHY cycles. */
 bool s5l8920_dsim_board_system_clock(s5l8920_t *m, uint64_t cycles);
 bool s5l8920_dsim_board_phy_clock(s5l8920_t *m, uint64_t cycles);
+bool s5l8920_dsim_board_escape_clock(s5l8920_t *m, uint64_t cycles);
 
 /* Reset CPU/controller/UART/timer/I2C state and clear diagnostics, preserving RAM
  * and externally supplied interrupt levels/GPIO samples and configured PMU

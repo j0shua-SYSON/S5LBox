@@ -1337,6 +1337,14 @@ bool s5l8920_dsim_board_phy_clock(s5l8920_t *m,uint64_t cycles) {
     return dsim_board_clock(m,cycles,true);
 }
 
+bool s5l8920_dsim_board_escape_clock(s5l8920_t *m,uint64_t cycles) {
+    if (!m || !m->ram || !m->dsim || !m->dsim->packet.configured ||
+        !m->clock_gate[S5L8920_DSIM_GATE].configured) return false;
+    unsigned gate=m->clock_gate[S5L8920_DSIM_GATE].value&15u;
+    if (!gate) return true;
+    return gate==15u && s5l8920_dsim_escape_clock(m->dsim,cycles);
+}
+
 bool s5l8920_reset(s5l8920_t *m) {
     if (!m || !m->ram) return false;
     if (!arm_reset_profile(&m->cpu,&m->bus,ARM_ARCH_V7_CORTEX_A8)) return false;

@@ -1,4 +1,4 @@
-/* Samsung DSIM clock programming, separate from the display/packet engine.
+/* Samsung DSIM clock, lane control and explicit command-packet link.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #ifndef S5LBOX_S5L8920_DSIM_H
 #define S5LBOX_S5L8920_DSIM_H
@@ -90,6 +90,33 @@ typedef struct {
     s5l8920_dsim_timer_readback_t timer;
 } s5l8920_dsim_readback_input_t;
 
+#define S5L8920_DSIM_TX_LIMIT 16u
+#define S5L8920_DSIM_RX_LIMIT 64u
+typedef struct {
+    uint32_t hs_enter_cycles, hs_exit_cycles; /* Supplied PHY clocks. */
+    uint32_t short_packet_cycles; /* Supplied escape clocks, LP packets only. */
+    unsigned tx_capacity, rx_capacity; /* Headers and words, explicit bounds. */
+} s5l8920_dsim_packet_input_t;
+
+typedef enum {
+    S5L8920_DSIM_HS_OFF = 0, S5L8920_DSIM_HS_ENTER,
+    S5L8920_DSIM_HS_ON, S5L8920_DSIM_HS_EXIT
+} s5l8920_dsim_hs_state_t;
+typedef enum {
+    S5L8920_DSIM_BUS_IDLE = 0, S5L8920_DSIM_BUS_DELAY,
+    S5L8920_DSIM_BUS_REQUEST, S5L8920_DSIM_BUS_RECEIVE
+} s5l8920_dsim_bus_state_t;
+typedef struct {
+    s5l8920_dsim_packet_input_t initial;
+    uint32_t tx[S5L8920_DSIM_TX_LIMIT], rx[S5L8920_DSIM_RX_LIMIT];
+    unsigned tx_head, tx_count, rx_head, rx_count;
+    uint32_t tx_remaining, hs_remaining, bus_remaining;
+    s5l8920_dsim_hs_state_t hs;
+    s5l8920_dsim_bus_state_t bus;
+    uint8_t channel;
+    bool configured, tx_active;
+} s5l8920_dsim_packet_t;
+
 typedef struct {
     s5l8920_dsim_input_t initial;
     s5l8920_dsim_clock_t clock;
@@ -99,6 +126,7 @@ typedef struct {
     uint32_t reset_request;
     s5l8920_dsim_readback_input_t readback_initial;
     bool readback_configured, readback_locked;
+    s5l8920_dsim_packet_t packet;
 } s5l8920_dsim_t;
 
 /* Idle two-data-lane control model, independent of a board attachment. Inputs
@@ -118,7 +146,8 @@ void s5l8920_dsim_reset(s5l8920_dsim_t *d);
  * No status, event, reset, clock-ready or programmed display value can be
  * supplied here. TIMEOUT follows guest writes and returns to this supplied
  * reset value on software reset. Other supplied observations remain constant
- * across supported idle control/reset operations; their writes still refuse.
+ * across supported idle control/reset operations. These inputs do not enable
+ * writes; an optional packet link separately owns PKTHDR and populated RXFIFO.
  * RXFIFO read response requires a known-empty FIFO. MEMACCHR must keep both
  * display memories powered; no analog timing or power-gating effect is inferred.
  * Host reset retains these inputs. Unspecified reads remain unavailable.
@@ -128,6 +157,36 @@ void s5l8920_dsim_reset(s5l8920_dsim_t *d);
  * a caller-selected functional model, not an inferred silicon observation. */
 bool s5l8920_dsim_configure_readback(s5l8920_dsim_t *d,
     const s5l8920_dsim_readback_input_t *input);
+
+/* Optional LP short-command link, configured before any accepted write.
+ * Capacities and timing are explicit functional inputs, not silicon constants.
+ * The limits above bound host storage. Host reset retains the inputs; software
+ * and functional reset cancel queues, turnarounds and pending received data.
+ * No peer is assumed. PKTHDR queues a supported short packet; escape clocks
+ * make its head eligible, and take_packet transfers it to an explicit peer.
+ * Without that consumer the FIFO stays occupied. Reads do not drain TX or
+ * advance time. HS clock requests use independent PHY clocks; packet data is
+ * still LP. Long TX, active display, forced BTA and IRQ remain unsupported. */
+bool s5l8920_dsim_configure_packet(s5l8920_dsim_t *d,
+    const s5l8920_dsim_packet_input_t *input);
+bool s5l8920_dsim_escape_clock(s5l8920_dsim_t *d, uint64_t cycles);
+bool s5l8920_dsim_take_packet(s5l8920_dsim_t *d, uint32_t *header);
+/* Read commands automatically wait 2+STOPstate_Cnt escape cycles for BTA.
+ * receive_begin supplies actual peer direction change; TIMEOUT's BTA count
+ * bounds that wait. Its LP count bounds subsequent silence. Zero timeout
+ * counts are unsupported for read commands (zero semantics unestablished).
+ * receive supplies one already decoded packet including its exact header word;
+ * long packet length must match header WC, short data are in the header. CRC
+ * is excluded from RXFIFO. ECC/CRC validation belongs to the external decoder,
+ * which can supply a failure via receive_error (ECC15 or CRC14, or both).
+ * Capacity refusal preserves pending RX for retry. No bytes/status are invented
+ * for an absent panel. A decoded packet completes the turnaround and latches
+ * real receive causes. RXFIFO reads consume one queued word; other reads stay
+ * passive. An empty RX read still needs its separately supplied observation. */
+bool s5l8920_dsim_receive_begin(s5l8920_dsim_t *d);
+bool s5l8920_dsim_receive(s5l8920_dsim_t *d, uint32_t header,
+    const uint8_t *payload, unsigned length);
+bool s5l8920_dsim_receive_error(s5l8920_dsim_t *d, uint32_t errors);
 
 /* Word offsets only. Software reset1 is supported from stop state; functional
  * reset10000 preserves programmed configuration except escape requests. Both
@@ -140,14 +199,15 @@ bool s5l8920_dsim_configure_readback(s5l8920_dsim_t *d,
  *
  * Two data lanes support stop, ULPS entry, exit and wakeup. Gated lanes retain
  * their internal state; re-enabling resumes it. Duplicate requests preserve
- * progress; conflicting commands during transitions refuse. No HS clock,
- * external clock, active image, packet, BTA or remote-reset operation is
- * accepted. Empty FIFO status requires reset or all FIFO init inputs low.
+ * progress; conflicting commands during transitions refuse. HS clock and LP
+ * short packets require the optional link above. External clocks, active image,
+ * long TX, forced BTA and remote reset refuse. Empty FIFO status requires reset
+ * or all FIFO init inputs low; configured packet queues supply their own flags.
  * PLL/reset interrupt causes latch and support W1C; masks/IRQ wiring remain
  * unavailable. Post-enable PLLTMR and passive snapshot words require explicit
  * readback inputs; otherwise they still refuse.
  * Rejections preserve the entire component and read output. */
-bool s5l8920_dsim_read(const s5l8920_dsim_t *d, uint32_t offset, uint32_t *value);
+bool s5l8920_dsim_read(s5l8920_dsim_t *d, uint32_t offset, uint32_t *value);
 bool s5l8920_dsim_write(s5l8920_dsim_t *d, uint32_t offset, uint32_t value);
 
 /* Independent clock-domain input. No CPU step or register read advances time.

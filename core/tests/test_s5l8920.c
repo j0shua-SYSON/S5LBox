@@ -3934,7 +3934,41 @@ static void test_dsim_board(void) {
         !s5l8920_dsim_board_phy_clock(&m,1u),"board free changed peer or retained connection");
 }
 
+static void test_dsim_packet_board(void) {
+    s5l8920_t m={0};s5l8920_dsim_t d={0},before;
+    const s5l8920_dsim_input_t input={{24000000u,0x10010fu,0xffffu,0u,UINT32_MAX},3u,2u,5u,7u,24u};
+    const s5l8920_dsim_packet_input_t link={3u,4u,5u,2u,5u};
+    const uint32_t base=S5L8920_DSIM_BASE,gate=S5L8920_CLOCK_GATE_BASE+4u*S5L8920_DSIM_GATE;
+    CHECK(!s5l8920_dsim_board_escape_clock(NULL,1u) && !s5l8920_dsim_board_escape_clock(&m,1u),"invalid escape input");
+    CHECK(s5l8920_init(&m),"packet board init");if (!m.ram) return;
+    CHECK(s5l8920_dsim_configure(&d,&input) && s5l8920_dsim_configure_packet(&d,&link) &&
+        s5l8920_clock_gate_configure(&m,S5L8920_DSIM_GATE,15u) && s5l8920_dsim_attach(&m,&d),"packet attach");
+    m.bus.write32(&m,base+0x50u,0u);m.bus.write32(&m,base+0x4cu,0x06831572u);
+    m.bus.write32(&m,base+4u,1u);CHECK(s5l8920_dsim_board_system_clock(&m,3u),"packet reset clock");
+    m.bus.write32(&m,base+0x10u,0x07807003u);m.bus.write32(&m,base+8u,0x11180004u);
+    m.bus.write32(&m,base+0x14u,0x80u);m.bus.write32(&m,base+0x44u,0x1fu);
+    m.bus.write32(&m,base+0xcu,0x00030007u);m.bus.write32(&m,base+0x34u,0xb114u);
+    CHECK(!m.bus_failure.reason && d.packet.tx_count==1u,"real bus header queue");
+    for (unsigned nibble=0u;nibble<15u;++nibble) {
+        m.clock_gate[S5L8920_DSIM_GATE].value=nibble;before=d;
+        CHECK(s5l8920_dsim_board_escape_clock(&m,UINT64_MAX)==(nibble==0u) &&
+            !memcmp(&before,&d,sizeof d),"closed/intermediate escape gate");
+    }
+    m.bus.write32(&m,gate,15u);CHECK(s5l8920_dsim_board_escape_clock(&m,5u),"escape progress");
+    uint32_t header=0u;CHECK(s5l8920_dsim_take_packet(&d,&header) && header==0xb114u,"explicit peer consumed header");
+    CHECK(s5l8920_dsim_board_escape_clock(&m,2u) && s5l8920_dsim_receive_begin(&d),"actual peer turnaround");
+    uint8_t bytes[]={1u,2u,3u,4u,5u};
+    CHECK(s5l8920_dsim_receive(&d,0x51au,bytes,5u),"decoded peer response");
+    put(&m,0u,0xe5912000u);m.cpu.r[15]=S5L8920_RAM_BASE;m.cpu.r[1]=base+0x3cu;
+    CHECK(arm_step(&m.cpu)==ARM_OK && m.cpu.r[2]==0x51au && d.packet.rx_count==2u,"CPU reads FIFO header once");
+    CHECK(m.bus.read32(&m,base+0x3cu)==0x04030201u && m.bus.read32(&m,base+0x3cu)==5u &&
+        (m.bus.read32(&m,base+0x44u)&0x1000000u),"board payload order and empty flag");
+    CHECK(!m.cpu.irq_line && !m.cpu.fiq_line,"no unimplemented IRQ asserted");
+    before=d;CHECK(s5l8920_reset(&m) && !m.dsim && !memcmp(&d,&before,sizeof d),"board reset retains borrowed packet peer");
+    s5l8920_free(&m);
+}
 int main(void) {
+    test_dsim_packet_board();
     test_dsim_board();
     test_empty_nvram_proxy();
     s5l8920_t m = {0};

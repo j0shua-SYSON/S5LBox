@@ -128,8 +128,9 @@ empty RXFIFO data, memory characteristics and PHY/additional words through7c.
 They must be supplied before guest writes; missing words stay unavailable.
 They cannot override status, event, reset, clock-ready or programmed display
 values. TIMEOUT follows guest writes and its supplied reset value. Other
-observations are fixed across the supported idle control operations; their
-writes remain unsupported. An empty RXFIFO response requires known emptiness.
+observations are fixed across the supported idle control operations. Those
+inputs do not enable writes; the optional packet link separately owns PKTHDR
+and populated RXFIFO. An empty RXFIFO response requires known emptiness.
 The caller explicitly chooses any otherwise unspecified bus response and timer
 view. These inputs do not establish physical reset values or implement packet,
 analog tuning, interrupt-mask or panel operations.
@@ -141,7 +142,52 @@ With explicit idle observations it completes194 instructions and stores all32
 words, with no peripheral mutation from reading. Separate cases use reload
 versus remaining timer values and varied passive PHY/tail words. This proves
 the snapshot loop under those inputs, not the complete driver or boot chain.
-The logger/prologue, packet transport, panel and displayed image remain open.
+The logger/prologue, complete panel startup and displayed image remain open.
+
+### Command packets and the panel query
+
+The controller now has an optional LP short-command link. PKTHDR writes queue
+supported short packets; an independent escape-clock input advances their
+explicit transmission interval. An external consumer must actually accept each
+packet before its FIFO entry drains. An absent consumer leaves the original
+guest poll pending. FIFO full/empty flags follow occupancy. RXFIFO reads consume
+one received word; status polling neither consumes packets nor advances time.
+Capacities and transition durations are supplied functional inputs, not measured
+S5L8920 constants. The board's physical gate pauses the new escape-clock input.
+
+HS clock requests separately transition through supplied PHY cycles. Automatic
+read-command bus turnaround waits `2 + STOPstate_Cnt` escape cycles, then waits
+for an explicit peer direction change. The programmed TIMEOUT fields bound
+turnaround and receive silence. Zero timeout counts are unavailable because
+their target semantics are not established. These fields, receive causes and
+FIFO flags follow the related-family [escape-mode description](https://www.manualslib.com/manual/1231975/Samsung-S5pc100.html?page=779),
+[timeout register](https://www.manualslib.com/manual/1231975/Samsung-S5pc100.html?page=776)
+and [FIFO status register](https://www.manualslib.com/manual/1231975/Samsung-S5pc100.html?page=787),
+corroborated by the actual target's polling instructions. No interrupt is wired.
+
+The receive boundary accepts an explicitly supplied, already decoded packet.
+It preserves the supplied header word and stores little-endian payload words,
+with zero padding in the final partial word. Long response length must match its
+header; channel, capacity and response type are checked. ACK/error reports and
+decoder-supplied ECC/CRC failures produce their respective causes. Wire-level
+encoding and integrity checking remain the caller's responsibility. No panel
+response is supplied implicitly. Long TX packets, HS packet data, forced BTA,
+TE, active scanout and a complete panel device remain unsupported.
+
+A bounded firmware witness executes the unchanged original initializer, short
+write helper, HS-ready helper, Pinot B1 query and ID decoder with a prepared
+caller. The previous library refuses the first packet store at `0x4ff09952`.
+With explicit link inputs, the original NOP write returns after43 instructions,
+the HS helper after16, and the query/decoder segment after300. A declared test
+reply produces ID `0x00e50486` through the guest's original bit packing. This is
+an explicit virtual reply based on a supported variant lead, not a measured
+physical panel or an automatically populated kernel device-tree property.
+
+A19-byte reply is fully drained while the caller stores only its15-byte
+capacity. Missing PHY/escape clocks or a missing consumer leave the original
+polls pending; absent direction changes, missing replies and error reports
+reach original failure logging with ID0. The full kernel has not been rerun
+with a completed panel/handoff model: its last stop remains `lcd-panel-id`.
 
 ## Accelerometer configuration
 
