@@ -97,6 +97,18 @@ jobs:
             app/Tests/test_vmusbservices.m -o work/usb-service-tests/test_vmusbservices
           work/usb-service-tests/test_vmusbservices "$GITHUB_WORKSPACE/work/usb-service-tests/pairing"
 
+      - name: Test native package planning
+        run: |
+          set -euo pipefail
+          mkdir -p work/package-tests
+          xcrun clang -fobjc-arc -Wall -Wextra -Werror -framework Foundation \
+            -I app/Sources app/Sources/VMPackageCatalog.m app/Tests/test_vmpackagecatalog.m \
+            -o work/package-tests/test_catalog
+          work/package-tests/test_catalog
+          clang -Wall -Wextra -Werror -DS5LBOX_PACKAGE_TEST -I tools \
+            tools/guest_package_service.c tools/sha256.c -o work/package-tests/test_service
+          python3 tools/test_guest_package_service.py work/package-tests/test_service
+
       - name: Verify stock-iPhone app policy
         working-directory: app
         run: |

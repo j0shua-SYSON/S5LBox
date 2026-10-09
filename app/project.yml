@@ -23,6 +23,8 @@ targets:
       # and was composited onto black before being placed here, because iOS
       # rejects an icon with transparency rather than flattening it for you.
       - path: Assets.xcassets
+      - path: Resources/GuestPackages/s5lbox-package-service
+        buildPhase: resources
       # Compile the platform-independent emulator core straight into the app.
       - path: ../core/src
         name: core
@@ -98,6 +100,8 @@ targets:
       - sdk: UIKit.framework
       - sdk: CoreGraphics.framework
       - sdk: QuartzCore.framework
+      - sdk: libbz2.tbd
+      - sdk: libz.tbd
     settings:
       base:
         PRODUCT_NAME: S5LBox

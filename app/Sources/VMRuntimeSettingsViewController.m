@@ -4,6 +4,7 @@
 #import "VMSettings.h" // Read-only cap choices, not the shared preferences.
 #import "VMIPALibraryViewController.h"
 #import "VMIPAInstallViewController.h"
+#import "VMPackageManagerViewController.h"
 
 typedef NS_ENUM(NSInteger, VMRuntimeSection) {
     VMRuntimeSectionSession,
@@ -49,7 +50,7 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
     (void)tableView;
     switch ((VMRuntimeSection)section) {
         case VMRuntimeSectionSession: return 2;
-        case VMRuntimeSectionApps: return 1;
+        case VMRuntimeSectionApps: return 2;
         case VMRuntimeSectionSnapshots: return 1;
         case VMRuntimeSectionPower: return 4;
         case VMRuntimeSectionDeveloper: return self.showsDeveloperControls ? 2 : 0;
@@ -131,11 +132,15 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
     }
     BOOL enabled = owner != nil;
     if (path.section == VMRuntimeSectionApps) {
-        cell.textLabel.text = @"Install IPA…";
+        cell.textLabel.text = path.row == 0 ? @"Install IPA…" : @"Packages…";
         enabled = self.usbTransport && [owner runtimeCanControlGuest] && ![owner runtimePaused];
         cell.detailTextLabel.text = [owner runtimePaused] ? @"Resume the guest first." : @"Choose an app from your IPA Library. Uses virtual USB, without shutting down.";
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         cell.accessibilityIdentifier = @"s5lbox.machine-settings.ipa";
+        if (path.row == 1) {
+            cell.detailTextLabel.text = [owner runtimePaused] ? @"Resume the guest first." : @"Browse sources and install tweaks in the running guest.";
+            cell.accessibilityIdentifier = @"s5lbox.machine-settings.packages";
+        }
     } else if (path.section == VMRuntimeSectionSnapshots) {
         cell.textLabel.text = @"Snapshots";
         enabled = enabled && self.snapshotsDirectory.length > 0;
@@ -199,6 +204,11 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
     [tableView deselectRowAtIndexPath:path animated:YES];
     if (path.section == VMRuntimeSectionApps) {
         if (!self.usbTransport || ![self.runtimeDelegate runtimeCanControlGuest] || [self.runtimeDelegate runtimePaused]) return;
+        if (path.row == 1) {
+            VMPackageManagerViewController *packages = [[VMPackageManagerViewController alloc]
+                initWithTransport:self.usbTransport instanceID:self.instanceID];
+            [self.navigationController pushViewController:packages animated:YES]; return;
+        }
         VMIPALibraryViewController *library = [[VMIPALibraryViewController alloc] init];
         __weak VMRuntimeSettingsViewController *weakSelf = self;
         __weak VMIPALibraryViewController *weakLibrary = library;

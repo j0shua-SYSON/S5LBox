@@ -4,6 +4,7 @@
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //
 #import "VMGuestInstallViewController.h"
+#import "VMPackageBridge.h"
 
 #import "VMGuestInstallBuild.h"
 #import "VMGuestPackageDownloader.h"
@@ -293,6 +294,10 @@ static void VMGuestInstallBuildProgress(
                 NULL, VMGuestInstallBuildProgress, (__bridge void *)self_,
                 &result, detail, sizeof detail);
         if (status == VM_GUEST_INSTALL_BUILD_OK && result.already_installed) {
+            NSError *bridgeError = nil;
+            if (![VMPackageBridge prepareStoppedMachine:self_->_machineDirectory instanceID:self_->_instanceID error:&bridgeError]) {
+                [self_ failWithDescription:bridgeError.localizedDescription]; return;
+            }
             [self_ completeInstallAlreadyPresent:YES
                                  storageUpgraded:result.storage_upgraded
                          cydiaPrivilegesRepaired:
@@ -361,6 +366,10 @@ static void VMGuestInstallBuildProgress(
                 [NSString stringWithUTF8String:
                     vm_guest_install_build_status_text(status)]];
             return;
+        }
+        NSError *bridgeError = nil;
+        if (![VMPackageBridge prepareStoppedMachine:self_->_machineDirectory instanceID:self_->_instanceID error:&bridgeError]) {
+            [self_ failWithDescription:bridgeError.localizedDescription]; return;
         }
         [self_ completeInstallAlreadyPresent:result.already_installed
                              storageUpgraded:result.storage_upgraded
