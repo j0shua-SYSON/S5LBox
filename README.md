@@ -93,6 +93,12 @@ an app runs; jailbreak utilities may not work inside a normal app sandbox.
 it shuts down the selected jailbroken guest and adds to `/Applications`, with
 no replacement of existing apps. Neither path installs apps on your host iPhone.
 
+On the package-manager feature branch, **Machine Settings → Packages** browses
+sources and installs/removes guest packages with native-host dependency planning
+and downloads. Existing jailbroken machines need **App Settings → Set up package
+manager** once. See [package-manager scope and trust limits](docs/native-package-manager.md)
+before using third-party repositories; repository signatures are not yet verified.
+
 ### Keep your data safe
 
 Each machine has its own writable disk. **Duplicate copies configuration, not

@@ -59,7 +59,10 @@
         if (!_sources) _sources=[@[@{@"name":@"iOS 3 Party",@"base":@"https://ios3.party/",@"index":@"https://ios3.party/"},
             @{@"name":@"Saurik",@"base":@"https://apt.saurik.com/cydia/",@"index":@"https://apt.saurik.com/cydia/"}] mutableCopy];
         NSArray *cached=[NSArray arrayWithContentsOfURL:[[VMPackageRepository directory] URLByAppendingPathComponent:@"catalog.plist"]];
-        _catalog.packages=cached ?: @[]; _visible=@[];
+        NSMutableArray *activeCache=[NSMutableArray array];
+        for (NSDictionary *p in cached) for (NSDictionary *source in _sources)
+            if ([p[@"_base"] isEqual:source[@"base"]]) { [activeCache addObject:p]; break; }
+        _catalog.packages=activeCache; _visible=@[];
         _message=@"Repositories and downloads run on your iPhone. Only dpkg and package scripts run inside the guest.";
     }
     return self;

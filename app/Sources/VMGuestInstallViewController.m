@@ -274,6 +274,7 @@ static void VMGuestInstallBuildProgress(
 }
 
 - (void)startInstall {
+    if (self.packageManagerOnly) _headline.text = @"Setting up packages…";
     [self beginBackgroundTime];
     _machineDirectory = [[VMInstanceStore sharedStore]
         directoryForInstanceWithID:_instanceID];
