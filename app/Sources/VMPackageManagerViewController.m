@@ -77,6 +77,7 @@ static UIImage *Tile(NSString *symbol) {
     [super viewDidLoad];
     self.tableView.rowHeight=UITableViewAutomaticDimension;
     self.tableView.estimatedRowHeight=72;
+    self.navigationItem.largeTitleDisplayMode=UINavigationItemLargeTitleDisplayModeNever;
     self.tableView.accessibilityIdentifier=[@"s5lbox.packages." stringByAppendingString:self.kind];
     self.tableView.keyboardDismissMode=UIScrollViewKeyboardDismissModeOnDrag;
     if ([@[@"search",@"installed",@"list"] containsObject:self.kind]) {
@@ -111,7 +112,7 @@ static UIImage *Tile(NSString *symbol) {
     (void)tableView; NSDictionary *row=self.sections[path.section][@"rows"][path.row];
     UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
     cell.textLabel.text=row[@"title"]; cell.detailTextLabel.text=row[@"detail"];
-    cell.textLabel.font=[UIFont preferredFontForTextStyle:[row[@"hero"] boolValue] ? UIFontTextStyleTitle2 : UIFontTextStyleBody];
+    cell.textLabel.font=[UIFont preferredFontForTextStyle:[row[@"hero"] boolValue] ? UIFontTextStyleHeadline : UIFontTextStyleBody];
     cell.detailTextLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
     cell.textLabel.adjustsFontForContentSizeCategory=cell.detailTextLabel.adjustsFontForContentSizeCategory=YES;
     cell.textLabel.numberOfLines=0;
@@ -191,7 +192,7 @@ static UIImage *Tile(NSString *symbol) {
     for (NSArray *spec in specs) {
         VMPackageScreen *screen=[self screen:spec[0] title:spec[1] context:nil];
         UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:screen];
-        nav.navigationBar.prefersLargeTitles=YES;
+        nav.navigationBar.prefersLargeTitles=NO;
         nav.tabBarItem=[[UITabBarItem alloc] initWithTitle:spec[1] image:[UIImage systemImageNamed:spec[2]] tag:tabs.count];
         [tabs addObject:nav];
     }
@@ -498,7 +499,7 @@ static UIImage *Tile(NSString *symbol) {
 - (void)confirmChanges {
     if (_busy) return;
     VMPackageScreen *review=(VMPackageScreen *)self.activeNavigation.topViewController;
-    VMPackageScreen *op=[self screen:@"operation" title:@"Package activity" context:nil];
+    VMPackageScreen *op=[self screen:@"operation" title:@"" context:nil];
     op.changes=review.changes; op.removing=review.removing;
     op.operationState=op.removing ? @"Preparing removal" : @"Preparing installation";
     op.operationDetail=@"Connecting to your guest…"; op.log=@"Keep S5LBox open. Do not run Cydia at the same time.\n";

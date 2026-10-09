@@ -40,6 +40,9 @@ The activity screen shows the current stage and a verified result; raw guest
 installer output is behind **Show details**. Native Dynamic Type, system
 light/dark colors and local category icons keep the interface readable without
 loading repository web depictions or remote tracking artwork.
+Navigation titles are compact throughout; the transaction screen omits the
+redundant generic title and gives the actual progress/result first. Dynamic
+Type still controls body text instead of forcing a tiny fixed font.
 
 Host compatibility follows S5LBox's **iOS 13.0 and later** deployment target,
 not just the iOS 15 lab phone. CI rejects unguarded newer API calls in all four
@@ -131,6 +134,28 @@ the parser incorrectly rejected. `6dbf077` fixes that with five regression
 checks: 55 native checks and 15 synthetic protocol checks passed in iOS build
 37899384197. Core matrix 37898385090 at `e1de61b` passed all nine jobs. These
 results predate the five-tab UI and do not yet establish its device acceptance.
+
+At `def62a7`, physical acceptance of the five-tab workspace covered opening,
+search, source-specific browsing, package details, dependency review, and the
+activity/result screens. `p7zip` was reinstalled with a matching guest-database
+result observed within 11 seconds, then removed with a verified result in under
+4 seconds. The versionless removal record no longer breaks Installed.
+ImageMagick 6.4.3-6-1p plus four dependencies (`libxml2-lib` 2.6.32-3,
+`libxml2` 2.6.32-7, `png` 1.2.24-3, `tiff` 3.8.2-2p) installed as one reviewed
+five-package transaction; all five final versions were verified within
+55 seconds. This proves package installation, not execution of every ImageMagick
+operation. The later compact-title/visible-version adjustments require their
+own layout check; they do not change the executor.
+
+The same test guest did not have Substrate installed. Planning iOS3 Folders 1.2
+refused the Substrate / Safe Mode dependency cycle before download or mutation,
+as designed. Cycle support remains a real limitation of this first installer;
+it is not yet a complete Cydia replacement for tweak bootstrapping.
+
+iOS build 37901568166 at `1c96798` passed the explicit iOS 13 API-baseline check
+and the 55 native / 15 synthetic package checks. Its app sources equal
+`def62a7`; only CI and documentation changed. Runtime testing on other host
+iOS versions remains outstanding.
 
 The first physical setup attempt exposed a pre-existing Cydia-repair assumption:
 after Cydia reorganizes Applications into a symlink, its old repair probe reports
