@@ -84,12 +84,20 @@ static NSError *PairingError(NSString *message) {
     if (_deviceKey) CFRelease(_deviceKey);
 }
 - (instancetype)initWithInstanceID:(NSString *)identifier devicePublicKey:(NSData *)key error:(NSError **)error {
+    NSURL *base = [NSFileManager.defaultManager URLForDirectory:NSApplicationSupportDirectory inDomain:NSUserDomainMask
+                   appropriateForURL:nil create:YES error:error];
+    if (!base) return nil;
+    return [self initWithInstanceID:identifier devicePublicKey:key
+                         directory:[base URLByAppendingPathComponent:@"USBPairing" isDirectory:YES] error:error];
+}
+- (instancetype)initWithInstanceID:(NSString *)identifier devicePublicKey:(NSData *)key
+                         directory:(NSURL *)folder error:(NSError **)error {
     self = [super init];
     if (!self) return nil;
     NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdefABCDEF-"];
     if (!identifier.length || identifier.length > 64 ||
         [identifier rangeOfCharacterFromSet:allowed.invertedSet].location != NSNotFound ||
-        !key.length || key.length > 16384) {
+        !key.length || key.length > 16384 || !folder.isFileURL) {
         if (error) *error = PairingError(@"Invalid guest pairing identity."); return nil;
     }
     NSString *text = [[NSString alloc] initWithData:key encoding:NSASCIIStringEncoding];
@@ -105,10 +113,6 @@ static NSError *PairingError(NSString *message) {
     NSData *canonicalKey = CFBridgingRelease(SecKeyCopyExternalRepresentation(_deviceKey, NULL));
     if (!canonicalKey) { if (error) *error = PairingError(@"Could not read the guest public key."); return nil; }
     NSFileManager *fm = NSFileManager.defaultManager;
-    NSURL *base = [fm URLForDirectory:NSApplicationSupportDirectory inDomain:NSUserDomainMask
-                   appropriateForURL:nil create:YES error:error];
-    if (!base) return nil;
-    NSURL *folder = [base URLByAppendingPathComponent:@"USBPairing" isDirectory:YES];
     if (![fm createDirectoryAtURL:folder withIntermediateDirectories:YES
                        attributes:@{NSFilePosixPermissions:@0700} error:error]) return nil;
     [folder setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];

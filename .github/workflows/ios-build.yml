@@ -83,6 +83,16 @@ jobs:
             -o work/ipa-library-tests/test_vmipalibrary
           work/ipa-library-tests/test_vmipalibrary "$GITHUB_WORKSPACE/work/ipa-library-tests"
 
+      - name: Test native guest USB services
+        run: |
+          set -euo pipefail
+          mkdir -p work/usb-service-tests/pairing
+          xcrun clang -fobjc-arc -Wall -Wextra -Werror -Wno-deprecated-declarations \
+            -framework Foundation -framework Security -I app/Sources -I core/include \
+            app/Sources/VMUSBService.m app/Sources/VMUSBPairing.m app/Sources/VMUSBAFC.m \
+            app/Tests/test_vmusbservices.m -o work/usb-service-tests/test_vmusbservices
+          work/usb-service-tests/test_vmusbservices "$GITHUB_WORKSPACE/work/usb-service-tests/pairing"
+
       - name: Verify stock-iPhone app policy
         working-directory: app
         run: |
