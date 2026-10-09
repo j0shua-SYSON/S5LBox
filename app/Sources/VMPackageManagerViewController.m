@@ -93,7 +93,9 @@
     });
 }
 - (void)setWorking:(BOOL)busy {
-    _busy=busy; _sections.enabled=!busy; self.navigationItem.rightBarButtonItem.enabled=!busy;
+    _busy=busy; _sections.enabled=!busy;
+    self.navigationItem.rightBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:busy ? @"Cancel" : @"Refresh"
+        style:UIBarButtonItemStylePlain target:self action:busy ? @selector(cancel) : @selector(refresh)];
     self.navigationController.modalInPresentation=busy;
     self.navigationController.interactivePopGestureRecognizer.enabled=!busy;
     self.navigationController.topViewController.navigationItem.hidesBackButton=busy;
@@ -130,6 +132,7 @@
         dispatch_async(dispatch_get_main_queue(),^{
             [self setWorking:NO];
             self->_message=guestError.localizedDescription ?: repoError.localizedDescription ?: [NSString stringWithFormat:@"%lu package versions. Installed list is current.",(unsigned long)packages.count];
+            if (guestError && repoError) self->_message=[NSString stringWithFormat:@"%@\nSources: %@",guestError.localizedDescription,repoError.localizedDescription];
             if (!guest) self->_status=nil;
             [self filter];
         });
@@ -268,6 +271,7 @@
             if (archives.count==plan.count) result=[self->_bridge install:archives status:status error:&error];
         }
         NSArray *installed=result ? [VMPackageCatalog parse:result error:&error] : nil;
+        if (!result && !error) error=VMPackageError(@"No completion was received from the guest. Refresh Installed before retrying.");
         // The terminal reply alone is not enough: confirm every requested state.
         if (installed) for (NSDictionary *wanted in plan) {
             BOOL found=NO;

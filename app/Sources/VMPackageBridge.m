@@ -124,6 +124,7 @@ static NSData *Capability(NSString *identifier, BOOL create, NSError **error) {
     if (NSThread.isMainThread) { if (error) *error = VMPackageError(@"Guest preparation requires a worker thread."); return NO; }
     NSData *token = Capability(identifier,YES,error); if (!token) return NO;
     NSURL *binaryURL = [NSBundle.mainBundle URLForResource:@"s5lbox-package-service" withExtension:nil];
+    if (!binaryURL) { if (error) *error=VMPackageError(@"This build is missing its guest package helper."); return NO; }
     NSData *binary = [NSData dataWithContentsOfURL:binaryURL options:0 error:error]; if (!binary.length) return NO;
     NSString *root = @"/private/var/lib/s5lbox-package-manager-v1";
     NSString *program = [root stringByAppendingPathComponent:@"service"];

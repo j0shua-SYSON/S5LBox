@@ -103,7 +103,9 @@ static BOOL GroupSatisfied(NSArray *group, NSArray *packages) {
 static BOOL IsInstalled(NSDictionary *p) { return [p[@"Status"] isEqual:@"install ok installed"] ||
     [p[@"Status"] isEqual:@"hold ok installed"]; }
 
-@implementation VMPackageCatalog
+@implementation VMPackageCatalog {
+    NSUInteger _planningSteps;
+}
 - (instancetype)init { self = [super init]; if (self) { _packages = @[]; _installed = @[]; } return self; }
 + (NSArray<NSDictionary *> *)parse:(NSData *)data error:(NSError **)error {
     if (!data || data.length > 32u*1024u*1024u) {
@@ -151,7 +153,7 @@ static BOOL IsInstalled(NSDictionary *p) { return [p[@"Status"] isEqual:@"instal
 - (BOOL)visit:(NSDictionary *)p selected:(NSMutableDictionary *)selected
         active:(NSMutableSet *)active order:(NSMutableArray *)order error:(NSError **)error depth:(NSUInteger)depth {
     NSString *name = p[@"Package"];
-    if (depth > 64 || selected.count >= 128) { if (error) *error = VMPackageError(@"Dependency plan is too large."); return NO; }
+    if (++_planningSteps > 4096 || depth > 64 || selected.count >= 128) { if (error) *error = VMPackageError(@"Dependency plan is too large. Use Cydia for this plan."); return NO; }
     if ([active containsObject:name]) { if (error) *error = VMPackageError(@"This dependency cycle requires Cydia. No changes were made."); return NO; }
     if (selected[name]) return [selected[name][@"Version"] isEqual:p[@"Version"]];
     for (NSDictionary *old in self.installed) if ([old[@"Package"] isEqual:name]) {
@@ -213,6 +215,7 @@ static BOOL IsInstalled(NSDictionary *p) { return [p[@"Status"] isEqual:@"instal
     return YES;
 }
 - (NSArray<NSDictionary *> *)planInstall:(NSDictionary *)package error:(NSError **)error {
+    _planningSteps=0;
     NSMutableDictionary *selected = [NSMutableDictionary dictionary]; NSMutableArray *order = [NSMutableArray array];
     if (![self visit:package selected:selected active:[NSMutableSet set] order:order error:error depth:0]) return nil;
     NSMutableArray *effective = [NSMutableArray arrayWithArray:selected.allValues];
