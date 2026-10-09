@@ -57,6 +57,11 @@ set(forbidden_markers
 set(violations "")
 foreach(path IN LISTS checked_files)
     file(READ "${path}" contents)
+    # Exact guest Debian identity used by the package finish policy, not a
+    # linked host framework. Keep every other occurrence forbidden.
+    if(path STREQUAL "${APP_DIR}/Sources/VMPackageCatalog.m")
+        string(REPLACE "NSString *substrate=@\"mobilesubstrate\";" "" contents "${contents}")
+    endif()
     string(TOLOWER "${contents}" contents_lower)
     foreach(marker IN LISTS forbidden_markers)
         string(FIND "${contents_lower}" "${marker}" found)
