@@ -1,6 +1,7 @@
 // Native host planning tests, not guest installation proof. MIT licensed.
 #import <Foundation/Foundation.h>
 #import "VMPackageCatalog.h"
+#import "VMPackageRepository.h"
 #include <stdio.h>
 static unsigned checks, failures;
 #define CHECK(x) do { checks++; if (!(x)) { failures++; fprintf(stderr,"line %d: %s\n",__LINE__,#x); } } while(0)
@@ -16,6 +17,14 @@ int main(void) { @autoreleasepool {
     CHECK(VMPackageVersionCompare(@"1.0",@"1.0-0")==0); CHECK(VMPackageVersionCompare(@"0:1.01",@"1.1")==0);
     CHECK(VMPackageIdentifierValid(@"com.example.tweak")); CHECK(!VMPackageIdentifierValid(@"--root")); CHECK(!VMPackageIdentifierValid(@"x;id"));
     NSError *error=nil;
+    NSData *abc=[@"abc" dataUsingEncoding:NSASCIIStringEncoding];
+    NSMutableDictionary *digest=[@{@"Size":@"3",@"_base":@"https://example.org/",@"MD5sum":@"900150983cd24fb0d6963f7d28e17f72"} mutableCopy];
+    CHECK([VMPackageRepository verify:abc package:digest]);
+    digest[@"_base"]=@"http://example.org/"; CHECK(![VMPackageRepository verify:abc package:digest]);
+    digest[@"_base"]=@"https://example.org/"; digest[@"SHA256"]=@"bad";
+    CHECK(![VMPackageRepository verify:abc package:digest]); // no downgrade to matching MD5
+    digest[@"SHA256"]=[VMPackageRepository sha256:abc]; CHECK([VMPackageRepository verify:abc package:digest]);
+    digest[@"Size"]=@"4"; CHECK(![VMPackageRepository verify:abc package:digest]);
     NSArray *parsed=[VMPackageCatalog parse:[@"Package: sample\r\nVersion: 1\r\nDescription: hello\r\n world\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding] error:&error];
     CHECK(parsed.count==1); CHECK([parsed[0][@"Description"] isEqual:@"hello\nworld"]);
     CHECK(![VMPackageCatalog parse:[@"Package: sample\nPackage: duplicate\nVersion: 1\n" dataUsingEncoding:NSUTF8StringEncoding] error:&error]);

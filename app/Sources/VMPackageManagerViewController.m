@@ -125,13 +125,15 @@
 }
 - (void)refresh {
     if (_busy) return;
-    [self setWorking:YES]; [self report:@"Reading installed packages…"];
+    [self setWorking:YES]; [self report:@"Loading repositories…"];
     NSArray *sources=[_sources copy];
     dispatch_async(_queue,^{
         NSError *guestError=nil, *repoError=nil;
-        BOOL guest=[self readInstalled:&guestError];
         NSArray *packages=[self->_repository refresh:sources error:&repoError];
         if (packages) self->_catalog.packages=packages;
+        dispatch_sync(dispatch_get_main_queue(),^{ [self filter]; });
+        [self report:@"Reading installed packages…"];
+        BOOL guest=[self readInstalled:&guestError];
         dispatch_async(dispatch_get_main_queue(),^{
             [self setWorking:NO];
             self->_message=guestError.localizedDescription ?: repoError.localizedDescription ?: [NSString stringWithFormat:@"%lu package versions. Installed list is current.",(unsigned long)packages.count];
@@ -248,6 +250,9 @@
             review.explanation=removing ? @"Only this package will be removed. Configuration files are kept. Dependent packages are never removed automatically." :
                 @"All changes, including dependencies, are listed above. Packages run root scripts inside your guest. Sources are not signature-verified. Close Cydia before continuing. A guest restart may be needed for tweaks.";
             __weak VMPackageManagerViewController *weakSelf=self;
+            for (NSDictionary *p in plan) if (!removing && !p[@"SHA256"]) {
+                review.explanation=[review.explanation stringByAppendingString:@"\n\nLegacy repository: at least one package has only SHA-1/MD5. These weak checksums detect corruption, not authenticity; HTTPS is required for those downloads."]; break;
+            }
             review.confirm=^{ [weakSelf execute:plan removing:removing status:status]; };
             [self.navigationController pushViewController:review animated:YES];
         });

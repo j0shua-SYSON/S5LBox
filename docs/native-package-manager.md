@@ -40,7 +40,10 @@ This first version **does not verify OpenPGP repository signatures**. HTTPS
 checks remain enabled; an expired certificate is not bypassed. Legacy HTTP is
 an explicit source choice with an interception warning. SHA-256 and exact size
 checks protect against corrupt downloads, not a malicious or intercepted index.
-Only add trusted sources: packages may execute root scripts inside the guest.
+Older sources such as Saurik publish only MD5. SHA-1/MD5 are accepted solely
+over verified HTTPS, with a warning in the transaction preview, and are described
+as weak corruption checks rather than authenticity guarantees. A present but bad
+SHA-256 never falls back to a weaker digest. Only add trusted sources: packages may execute root scripts inside the guest.
 These privileges do not extend to the host iPhone.
 
 The planner understands Debian epoch/upstream/revision ordering, Depends,
@@ -53,7 +56,7 @@ plans it declines. Recommends/Suggests and automatic update-all are not included
 
 Limits: 32 MiB expanded index, 100,000 records per index, 128 packages / 256 MiB
 per transaction, 64 MiB per archive, 4 MiB installed status, thirty-minute host
-execution wait. A package without SHA-256 is refused. Successful transfer is not
+execution wait. Packages without a supported checksum are refused. Successful transfer is not
 success: the UI requires a terminal guest response and matching installed state.
 
 ## Guest boundary

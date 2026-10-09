@@ -102,7 +102,7 @@ jobs:
           set -euo pipefail
           mkdir -p work/package-tests
           xcrun clang -fobjc-arc -Wall -Wextra -Werror -framework Foundation \
-            -I app/Sources app/Sources/VMPackageCatalog.m app/Tests/test_vmpackagecatalog.m \
+            -I app/Sources app/Sources/VMPackageCatalog.m app/Sources/VMPackageRepository.m app/Tests/test_vmpackagecatalog.m -lz -lbz2 \
             -o work/package-tests/test_catalog
           work/package-tests/test_catalog
           clang -Wall -Wextra -Werror -DS5LBOX_PACKAGE_TEST -I tools \

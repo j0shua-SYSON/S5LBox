@@ -23,6 +23,26 @@
     for (NSUInteger i = 0; i < sizeof hash; i++) [result appendFormat:@"%02x",hash[i]];
     return result;
 }
++ (NSString *)checksumField:(NSDictionary *)p {
+    for (NSString *field in @[@"SHA256",@"SHA1",@"MD5sum"]) if (p[field]) return field;
+    return nil;
+}
++ (BOOL)verify:(NSData *)data package:(NSDictionary *)p {
+    if (!data || data.length != [p[@"Size"] longLongValue] || data.length > 64u*1024u*1024u) return NO;
+    NSString *field=[self checksumField:p];
+    if ([field isEqual:@"SHA256"]) return [[self sha256:data] isEqual:[p[field] lowercaseString]];
+    // Legacy digests detect corruption only; HTTPS is mandatory without SHA256.
+    if (![[NSURL URLWithString:p[@"_base"]].scheme.lowercaseString isEqual:@"https"]) return NO;
+    unsigned char digest[CC_SHA1_DIGEST_LENGTH]; NSUInteger length=0;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if ([field isEqual:@"SHA1"]) { CC_SHA1(data.bytes,(CC_LONG)data.length,digest); length=CC_SHA1_DIGEST_LENGTH; }
+    else if ([field isEqual:@"MD5sum"]) { CC_MD5(data.bytes,(CC_LONG)data.length,digest); length=CC_MD5_DIGEST_LENGTH; }
+#pragma clang diagnostic pop
+    if (!length) return NO;
+    NSMutableString *hex=[NSMutableString string]; for (NSUInteger i=0;i<length;i++) [hex appendFormat:@"%02x",digest[i]];
+    return [hex isEqual:[p[field] lowercaseString]];
+}
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task
     didReceiveResponse:(NSURLResponse *)response completionHandler:(void (^)(NSURLSessionResponseDisposition))completion {
     (void)session; (void)task;
@@ -111,13 +131,17 @@
 }
 - (NSURL *)download:(NSDictionary *)p error:(NSError **)error {
     _allowHTTP=[p[@"_allowHTTP"] boolValue];
-    NSString *hash = [p[@"SHA256"] lowercaseString]; long long size = [p[@"Size"] longLongValue];
-    if (hash.length != 64 || [hash rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet]].location != NSNotFound || size < 1 || size > 64ll*1024*1024) {
-        if (error) *error = VMPackageError(@"Package requires a SHA-256 checksum and a size no greater than 64 MB."); return nil;
+    NSString *field=[self.class checksumField:p]; NSString *hash = [p[field ?: @""] lowercaseString];
+    NSUInteger expected=[field isEqual:@"SHA256"] ? 64 : [field isEqual:@"SHA1"] ? 40 : 32;
+    long long size = [p[@"Size"] longLongValue];
+    if (hash.length != expected || [hash rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet]].location != NSNotFound || size < 1 || size > 64ll*1024*1024 ||
+        (![field isEqual:@"SHA256"] && ![[NSURL URLWithString:p[@"_base"]].scheme.lowercaseString isEqual:@"https"])) {
+        if (error) *error = VMPackageError(@"Package requires a valid checksum and a size no greater than 64 MB. Legacy SHA-1/MD5 packages require an HTTPS source."); return nil;
     }
-    NSURL *cache = [[self.class directory] URLByAppendingPathComponent:[hash stringByAppendingString:@".deb"]];
+    NSString *key=[self.class sha256:[[NSString stringWithFormat:@"%@:%@:%@",p[@"_base"],field,hash] dataUsingEncoding:NSUTF8StringEncoding]];
+    NSURL *cache = [[self.class directory] URLByAppendingPathComponent:[key stringByAppendingString:@".deb"]];
     NSData *bytes = [NSData dataWithContentsOfURL:cache options:NSDataReadingMappedIfSafe error:NULL];
-    if (bytes.length == (NSUInteger)size && [[self.class sha256:bytes] isEqual:hash]) return cache;
+    if ([self.class verify:bytes package:p]) return cache;
     NSString *name = p[@"Filename"];
     NSURL *base = [NSURL URLWithString:p[@"_base"]];
     NSURL *url = name.length ? [NSURL URLWithString:[name stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet] relativeToURL:base].absoluteURL : nil;
@@ -129,8 +153,8 @@
     if (self.progress) self.progress([NSString stringWithFormat:@"Downloading %@",p[@"Name"] ?: p[@"Package"]]);
     bytes = [self fetch:url limit:(NSUInteger)size error:error];
     if (!bytes) return nil;
-    if (bytes.length != (NSUInteger)size || ![[self.class sha256:bytes] isEqual:hash]) {
-        if (error) *error = VMPackageError(@"Package size or SHA-256 did not match the repository. Nothing was installed."); return nil;
+    if (![self.class verify:bytes package:p]) {
+        if (error) *error = VMPackageError(@"Package size or checksum did not match the repository. Nothing was installed."); return nil;
     }
     return [bytes writeToURL:cache options:NSDataWritingAtomic error:error] ? cache : nil;
 }

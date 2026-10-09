@@ -43,8 +43,9 @@ static NSData *Capability(NSString *identifier, BOOL create, NSError **error) {
     if (NSThread.isMainThread) { if (error) *error = VMPackageError(@"Package work requires a worker thread."); return nil; }
     NSData *capability = Capability(_identifier,NO,error); if (!capability) return nil;
     __weak VMPackageBridge *weakSelf = self;
+    NSTimeInterval statusDeadline=NSProcessInfo.processInfo.systemUptime+10;
     VMUSBService *service = [[VMUSBService alloc] initWithTransport:_transport port:64321
-        canceled:^BOOL{ return weakSelf.canceled; } error:error];
+        canceled:^BOOL{ return weakSelf.canceled || (operation=='S' && NSProcessInfo.processInfo.systemUptime>statusDeadline); } error:error];
     if (!service) return nil;
     NSMutableData *hello = [NSMutableData dataWithBytes:"SPM1" length:4];
     [hello appendData:capability]; [hello appendBytes:&operation length:1];
@@ -69,8 +70,11 @@ static NSData *Capability(NSString *identifier, BOOL create, NSError **error) {
     return nil;
 }
 - (NSData *)status:(NSError **)error {
-    VMUSBService *service = [self connect:'S' error:error]; if (!service) return nil;
-    NSData *data = [self receive:service terminal:'S' error:error]; [service close]; return data;
+    VMUSBService *service = [self connect:'S' error:error];
+    NSData *data = service ? [self receive:service terminal:'S' error:error] : nil; [service close];
+    if (!data && !self.canceled && error) *error=VMPackageError([NSString stringWithFormat:
+        @"Guest package helper unavailable. Finish booting and wake the guest, or run App Settings > Set up package manager. %@",(*error).localizedDescription ?: @""]);
+    return data;
 }
 - (BOOL)number:(uint32_t)n service:(VMUSBService *)service error:(NSError **)error {
     n = htonl(n); return [service writeData:[NSData dataWithBytes:&n length:4] error:error];
