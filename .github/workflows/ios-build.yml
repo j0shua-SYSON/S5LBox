@@ -86,6 +86,10 @@ jobs:
       - name: Test native guest USB services
         run: |
           set -euo pipefail
+          # Use the same public Security headers as the app build below.
+          # The runner's older default SDK predates SecIdentityCreate's header.
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$latest" ]; then sudo xcode-select -s "$latest"; fi
           mkdir -p work/usb-service-tests/pairing
           xcrun clang -fobjc-arc -Wall -Wextra -Werror -Wno-deprecated-declarations \
             -framework Foundation -framework Security -I app/Sources -I core/include \
