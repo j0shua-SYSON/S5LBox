@@ -1558,3 +1558,54 @@ flush writes still in guest RAM or guarantee an undamaged HFS volume. The next
 boot may need filesystem recovery. Normal shutdown remains preferable when
 the guest responds. A truly wedged host thread/process is outside this path:
 this stops the emulation loop, not an arbitrary deadlocked iOS process.
+
+### 2026-10-09: explicit force-off jailbreak workflow
+
+Candidate `1324abc` makes App Settings -> Jailbreak use **Force Off & Jailbreak**.
+From Machines there is no live emulator to shut down; the installer discards
+the saved running-state marker rather than booting a guest just to operate its
+Power slider. Every emulator exit now waits for disk teardown, including the
+old Leave Without Saving path. The ordinary runtime Force Power Off still
+cancels pending guest-driven install callbacks; it does not silently grant
+jailbreak authorization.
+
+The new builder entrypoint has an explicit stopped-disk ownership precondition.
+It accepts a dirty header only after strict source validation, never writes a
+clean bit, and never reports a PMU shutdown witness for force-off. Forced
+maintenance cannot use catalog/backlink/allocation recovery. Geometry or
+allocation inconsistencies refuse without staging a replacement. A genuinely
+validated powered-off checkpoint retains the existing shutdown/recovery policy.
+The original builder entrypoint still refuses dirty sources without that proof;
+the force policy is per call, not a persistent marker or global switch.
+
+All 77 local Windows CTests passed. The final installer executable passes 341
+checks, including force-off marker invalidation, strict preflight before package
+download, source-byte preservation, null-result/retry behavior, no policy leak
+into ordinary calls, corrupt fresh/installed source refusal, and preservation
+of genuine full-shutdown evidence. iOS build 37892723359 passed. Device artifact:
+2285546 bytes, SHA-256
+`a77944bec0c55b7d157bb99cfb2181cccd7d85c1978697bb1c1f4f0f40ccfa20`.
+
+Physical iPhone 6s Plus / iOS 15.8.5 test: created the disposable
+`rc-force-jailbreak`, opened its original 446 MiB disk, and saved during boot
+after a tap was refused because no touch driver had announced itself (about
+322 million instructions). With the candidate installed, selecting that saved
+machine for jailbreak went directly to stopped-disk preflight: no guest boot or
+shutdown-slider wait. The resume marker disappeared, installation committed a
+2 GiB disk plus jailbreak/maintenance records, and the app auto-started a fresh
+boot by the 21.767-second observation after machine selection. This includes
+automation delay and is not total guest setup time. SpringBoard subsequently
+accepted input. A read-only extraction of the paused guest's bootstrap log
+confirmed package configuration reached Cydia 1.0.3172-68 and the normal first
+repository refresh. No guest filesystem edits or host shell commands were used
+to perform the jailbreak; the actual app UI and production builder did it.
+
+Cydia's icon appeared about nine minutes after selection (including test pauses
+and observation delays); launching it reached its first-run Reorganizing screen.
+The log showed the initial repository refresh and cache generation completing.
+This is not a claim that full Cydia preparation takes 22 seconds: that earlier
+observation measures host installation and entry into the new boot only. The
+bootstrap log also showed a retry after cache generation, so final bootstrap
+completion must not be inferred merely from the icon. All nine jobs in core CI
+37892723446 subsequently passed, including both macOS JIT variants. Main and
+the iOS 6 branch remain unchanged.
