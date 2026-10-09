@@ -177,3 +177,43 @@ filesystem patch was used to bypass the refusal.
 Protocol/dependency references:
 [Debian relationships](https://www.debian.org/doc/debian-policy/ch-relationships.html)
 and [control/version fields](https://www.debian.org/doc/debian-policy/ch-controlfields.html).
+# Package finishing actions (candidate, October 9)
+
+The native workspace now understands Cydia's ordered finish requests: return,
+reopen, restart, reload, reboot. A dedicated inherited descriptor is advertised
+as `CYDIA="<fd> 1"`; maintainer scripts write `finish:<action>\n` to that descriptor.
+Ordinary stdout cannot request a restart. The highest request wins across the
+whole transaction. This is automatic selection of a completion button, not an
+unannounced restart while packages are still being applied.
+
+As fallbacks, changed packages (including the previous release on upgrade and
+the removed release) that declare a Substrate dependency request a respring.
+The guest hashes its SpringBoard launch job and `/etc/notify.conf` before and
+after dpkg: changes request reload and reboot respectively. These are bounded,
+specific heuristics, not universal detection of every tweak's runtime needs.
+The reference is [Cydia's source](https://github.com/sbingner/cydia/blob/master/MobileCydia.mm),
+not a copied implementation.
+
+An authenticated `SPM2` response carries the pending action and whether the
+transaction completed. The root-private state survives helper/app disconnects
+within the same guest boot; a new guest boot clears the need. Failed dpkg does
+not enable the finish action. The native UI additionally checks that all dpkg
+records are configured or removed. The user can finish immediately or return to
+the action on the Packages tab after refreshing. A status hash and dpkg lock
+guard the finish request against stale state/concurrent package work.
+
+Only the guest helper executes the fixed guest commands: launchctl stop for a
+respring, unload/load of the SpringBoard job for reload, and `/sbin/reboot` for a
+reboot. The host app never runs host restart commands. A reboot acknowledgment
+means requested, not proven boot completion. Synthetic builds substitute a
+fixture executable and cannot run these real commands.
+
+Existing v1 setups require App Settings > Set up package manager again. Setup
+stages a new immutable `service-finish-v2` executable and rewrites only the exact
+recognized v1 launch job in the existing crash-safe image transaction. It does
+not overwrite an unknown helper, resize its fork, or edit a running disk. The
+old 50 KiB executable is retained but no longer launched. The capability is kept.
+
+ARMv6 cross-compilation passes. Expanded synthetic/host tests and physical
+acceptance are pending for this candidate; older acceptance below does not
+prove the new finish flow.

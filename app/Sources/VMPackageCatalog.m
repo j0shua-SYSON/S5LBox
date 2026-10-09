@@ -158,6 +158,17 @@ static BOOL IsInstalled(NSDictionary *p) { return [p[@"Status"] isEqual:@"instal
            @"cydia", @"cydia-lproj", @"base", @"base-files", @"bash", @"coreutils", @"coreutils-bin",
            @"darwintools", @"launchctl", @"system-cmds"] containsObject:name];
 }
++ (BOOL)requiresRespring:(NSArray<NSDictionary *> *)changes {
+    // Guest Debian package identity only; never a host injection dependency.
+    NSString *substrate=@"mobilesubstrate";
+    for (NSDictionary *p in changes) {
+        if ([p[@"Package"] isEqual:substrate]) return YES;
+        for (NSString *field in @[@"Depends",@"Pre-Depends"])
+            for (NSArray *group in Relations(p[field],NULL))
+                for (NSArray *relation in group) if ([relation.firstObject isEqual:substrate]) return YES;
+    }
+    return NO;
+}
 - (BOOL)visit:(NSDictionary *)p selected:(NSMutableDictionary *)selected
         active:(NSMutableSet *)active order:(NSMutableArray *)order error:(NSError **)error depth:(NSUInteger)depth {
     NSString *name = p[@"Package"];

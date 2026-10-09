@@ -41,10 +41,39 @@ def main():
         (root / "dpkg").write_text('#!/bin/sh\necho "$@" >> fixture/calls\necho "fixture dpkg output"\n[ ! -f fixture/fail ]\n')
         (root / "dpkg").chmod(0o700)
         process = subprocess.Popen([binary], cwd=work)
-        def connect(op, capability=token):
+        def connect(op, capability=token, modern=False):
             sock = socket.create_connection(("127.0.0.1", 64321), timeout=5)
-            sock.sendall(b"SPM1" + capability + op)
+            sock.sendall((b"SPM2" if modern else b"SPM1") + capability + op)
             return sock
+        def finish_status():
+            with connect(b"S", modern=True) as sock:
+                kind, finish = frame(sock)
+                assert kind == b"F"
+                assert frame(sock) == (b"S", status)
+                return finish
+        def change(script, hint=0, disconnect=False):
+            (root / "dpkg").write_text('#!/bin/sh\n' + script)
+            with connect(b"R", modern=True) as sock:
+                sock.sendall(hashlib.sha256(status).digest() + bytes([hint]) + struct.pack("!I", 7) + b"fixture")
+                if disconnect:
+                    return
+                frames = []
+                while True:
+                    kind, data = frame(sock)
+                    if kind != b"L":
+                        frames.append((kind, data))
+                    if kind in (b"D", b"E"):
+                        return frames
+        def apply(action, digest=None):
+            with connect(b"F", modern=True) as sock:
+                sock.sendall(bytes([action]) + (digest or hashlib.sha256(status).digest()))
+                results = []
+                while True:
+                    kind, data = frame(sock)
+                    if kind != b"L":
+                        results.append((kind, data))
+                    if kind in (b"C", b"E"):
+                        return results
         try:
             for _ in range(100):
                 if process.poll() is not None:
@@ -101,6 +130,81 @@ def main():
                     if kind != b"L":
                         assert kind == b"E"
                         break
+            checks += 1
+            assert finish_status() == b"\x00\x00"  # failed legacy dpkg did not invent an action
+            checks += 1
+            (root / "finish").write_text('#!/bin/sh\necho "$@" >> fixture/finish-calls\n[ ! -f fixture/finish-fails ]\n')
+            (root / "finish").chmod(0o700)
+            # Ordinary stdout must not masquerade as Cydia's dedicated pipe.
+            assert change('echo finish:reboot\n')[-1] == (b"D", status)
+            assert finish_status() == b"\x00\x01"
+            checks += 2
+            # Split writes, priority, malformed/overlong lines and unknown actions.
+            script = '''fd=${CYDIA%% *}
+eval "printf 'finish:restart\\nfinish:return\\nfinish:bogus\\n' >&$fd"
+eval "printf 'finish:re' >&$fd"
+eval "printf 'load\\n' >&$fd"
+eval "printf '%090d' 0 >&$fd"
+eval "printf 'finish:reboot\\nfinish:restart\\n' >&$fd"
+'''
+            assert change(script)[-2:] == [(b"F", b"\x03\x01"), (b"D", status)]
+            assert finish_status() == b"\x03\x01"
+            checks += 2
+            assert apply(2)[0][0] == b"E"  # stale priority
+            assert apply(3, b"x" * 32)[0][0] == b"E"  # stale installed database
+            assert not (root / "finish-calls").exists()
+            checks += 3
+            # Service restart preserves a completed-but-not-applied request.
+            process.terminate(); process.wait(timeout=10)
+            process = subprocess.Popen([binary], cwd=work)
+            time.sleep(0.15)
+            assert finish_status() == b"\x03\x01"
+            assert apply(3) == [(b"A", b"\x03"), (b"C", b"\x03")]
+            assert (root / "finish-calls").read_text() == "reload\n"
+            assert finish_status() == b"\x00\x00"
+            checks += 4
+            # Failed actions are retryable; a failed dpkg is never finish-ready.
+            assert change('exit 0\n', hint=2)[-2] == (b"F", b"\x02\x01")
+            (root / "finish-fails").touch()
+            assert apply(2)[-1][0] == b"E"
+            assert finish_status() == b"\x02\x01"
+            (root / "finish-fails").unlink()
+            assert apply(2)[-1] == (b"C", b"\x02")
+            checks += 4
+            assert change('fd=${CYDIA%% *}\neval "echo finish:reboot >&$fd"\nexit 1\n')[-2][1] == b"\x04\x00"
+            assert apply(4)[0][0] == b"E"
+            assert change('exit 0\n')[-2][1] == b"\x04\x01"
+            assert apply(4)[-1] == (b"C", b"\x04")
+            checks += 4
+            # Cydia's configuration-file fallbacks include creation/removal.
+            assert change('echo changed > fixture/SpringBoard.plist\n')[-2][1] == b"\x03\x01"
+            assert apply(3)[-1][0] == b"C"
+            assert change('echo changed > fixture/notify.conf\n')[-2][1] == b"\x04\x01"
+            assert apply(4)[-1][0] == b"C"
+            assert change('rm fixture/notify.conf\n')[-2][1] == b"\x04\x01"
+            assert apply(4)[-1][0] == b"C"
+            checks += 6
+            # Completion survives a detached host. A fresh boot clears it;
+            # relaunching the service in the same boot does not (tested above).
+            change('fd=${CYDIA%% *}\neval "echo finish:restart >&$fd"\n', disconnect=True)
+            assert finish_status() == b"\x02\x01"
+            process.terminate(); process.wait(timeout=10)
+            process = subprocess.Popen([binary], cwd=work, env={**os.environ, "S5LBOX_TEST_BOOT": "2"})
+            time.sleep(0.15)
+            assert finish_status() == b"\x00\x00"
+            checks += 2
+            assert change('fd=${CYDIA%% *}\neval "echo finish:reopen >&$fd"\n')[-2][1] == b"\x01\x01"
+            before = (root / "finish-calls").read_text()
+            assert apply(1)[-1] == (b"C", b"\x01")
+            assert (root / "finish-calls").read_text() == before  # reopen is not a reboot
+            checks += 3
+            with connect(b"R", modern=True) as sock:
+                sock.sendall(hashlib.sha256(status).digest() + b"\x04")
+                assert frame(sock)[0] == b"E"  # hints cannot fabricate reboot policy
+            checks += 1
+            (root / "pending-finish").write_bytes(b"invalid")
+            with connect(b"S", modern=True) as sock:
+                assert frame(sock)[0] == b"E"
             checks += 1
             print(f"guest package service: {checks} checks passed (synthetic dpkg, no firmware)")
         finally:

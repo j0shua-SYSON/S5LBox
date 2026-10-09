@@ -9,6 +9,17 @@ static BOOL Installed(NSDictionary *p) {
 }
 static NSString *Name(NSDictionary *p) { return p[@"Name"] ?: p[@"Package"] ?: @"Package"; }
 static NSString *Summary(NSDictionary *p) { return [p[@"Description"] componentsSeparatedByString:@"\n"].firstObject ?: @""; }
+static NSString *FinishTitle(NSUInteger action) {
+    return action==4 ? @"Reboot Guest" : action==3 ? @"Reload SpringBoard" : action==2 ? @"Restart SpringBoard" : @"Return to Guest";
+}
+static BOOL Configured(NSArray *records) {
+    for (NSDictionary *p in records) {
+        NSArray *state=[p[@"Status"] componentsSeparatedByString:@" "];
+        if (state.count!=3 || ![state[1] isEqual:@"ok"] ||
+            ![@[@"installed",@"config-files",@"not-installed"] containsObject:state[2]]) return NO;
+    }
+    return YES;
+}
 static NSString *SizeText(unsigned long long bytes) {
     return [NSByteCountFormatter stringFromByteCount:(long long)bytes countStyle:NSByteCountFormatterCountStyleFile];
 }
@@ -151,6 +162,8 @@ static UIImage *Tile(NSString *symbol) {
     NSData *_status;
     NSString *_message;
     BOOL _busy, _idleWasDisabled;
+    NSUInteger _finishAction;
+    BOOL _finishReady;
     UIBackgroundTaskIdentifier _background;
     __weak VMPackageScreen *_operation;
 }
@@ -258,6 +271,9 @@ static UIImage *Tile(NSString *symbol) {
     if ([kind isEqual:@"home"]) {
         NSMutableDictionary *hero=[Row(@"S5LBox Packages",@"Tweaks and tools for iPhone OS 3",@"shippingbox.fill",nil) mutableCopy]; hero[@"hero"]=@YES;
         [sections addObject:Section(nil,@[hero],nil)];
+        if (_finishAction) [sections addObject:Section(nil,@[Row(FinishTitle(_finishAction),
+            _finishReady ? @"Required by your package changes. Only affects the emulated guest." : @"Finish or repair the package operation, then refresh Installed.",
+            @"arrow.clockwise",_finishReady && !_busy ? @"finish-guest" : nil)],nil)];
         [sections addObject:Section(@"Discover",@[
             Row(@"All packages",@"Browse your sources",@"square.grid.2x2",@"all"),
             Row(@"Categories",@"Tweaks, themes, utilities and more",@"square.stack.3d.up",@"categories")],nil)];
@@ -345,6 +361,10 @@ static UIImage *Tile(NSString *symbol) {
         NSMutableDictionary *hero=[Row(screen.operationState,screen.operationDetail,screen.outcome>0 ? @"checkmark.circle.fill" : screen.outcome<0 ? @"exclamationmark.triangle.fill" : @"shippingbox.fill",nil) mutableCopy];
         hero[@"hero"]=@YES; hero[@"spinner"]=@(screen.outcome==0);
         [sections addObject:Section(nil,@[hero],screen.outcome==0 ? @"Keep S5LBox open. Do not run Cydia or power off the guest." : nil)];
+        if (screen.outcome>0 && _finishAction && _finishReady && !_busy) {
+            NSMutableDictionary *finish=[Row(FinishTitle(_finishAction),@"Apply the finishing action requested by your package changes.",@"arrow.clockwise",@"finish-guest") mutableCopy];
+            finish[@"button"]=@YES; [sections addObject:Section(nil,@[finish],@"Only the emulated guest is restarted, never this iPhone.")];
+        }
         NSMutableArray *rows=[NSMutableArray array];
         for (NSDictionary *p in screen.changes) [rows addObject:Row(Name(p),p[@"Version"],Symbol(p[@"Section"]),nil)];
         [sections addObject:Section(screen.removing ? @"Removal" : @"Installation",rows,nil)];
@@ -374,6 +394,7 @@ static UIImage *Tile(NSString *symbol) {
     else if ([action isEqual:@"installed"]) self.selectedIndex=3;
     else if ([action isEqual:@"sources"]) self.selectedIndex=1;
     else if ([action isEqual:@"refresh"]) [self refresh];
+    else if ([action isEqual:@"finish-guest"]) [self applyGuestFinish];
     else if ([action isEqual:@"bigboss"]) [self sourcePrompt:YES];
     else if ([action isEqual:@"remove-source"]) [self removeSource:screen.context[@"sourceRecord"]];
     else if ([action isEqual:@"remove-package"]) [self plan:[self installed:screen.context[@"Package"]] removing:YES];
@@ -426,7 +447,10 @@ static UIImage *Tile(NSString *symbol) {
 - (BOOL)readInstalled:(NSError **)error {
     NSData *status=[_bridge status:error]; if (!status) return NO;
     NSArray *records=[VMPackageCatalog parse:status error:error]; if (!records) return NO;
-    dispatch_sync(dispatch_get_main_queue(),^{ self->_status=status; self->_catalog.installed=records; });
+    NSUInteger finish=_bridge.finishAction; BOOL ready=_bridge.finishReady && Configured(records);
+    dispatch_sync(dispatch_get_main_queue(),^{
+        self->_status=status; self->_catalog.installed=records; self->_finishAction=finish; self->_finishReady=ready;
+    });
     return YES;
 }
 - (void)refresh {
@@ -507,6 +531,12 @@ static UIImage *Tile(NSString *symbol) {
     NSArray *plan=review.changes; NSData *status=review.status; BOOL removing=review.removing;
     dispatch_async(_queue,^{
         NSError *error=nil; NSData *result=nil; NSMutableArray *archives=[NSMutableArray array];
+        // Also examine the previous release: an upgrade can remove its former
+        // injection dependency, but already-running code still needs a restart.
+        NSMutableArray *affected=[plan mutableCopy];
+        for (NSDictionary *old in self->_catalog.installed) for (NSDictionary *p in plan)
+            if ([old[@"Package"] isEqual:p[@"Package"]]) { [affected addObject:old]; break; }
+        self->_bridge.respringAfterChanges=[VMPackageCatalog requiresRespring:affected];
         if (removing) result=[self->_bridge remove:plan[0][@"Package"] status:status error:&error];
         else {
             for (NSDictionary *p in plan) {
@@ -523,13 +553,41 @@ static UIImage *Tile(NSString *symbol) {
             if (found==removing) { error=VMPackageError(@"The installed state does not match the plan. Refresh Installed and check Cydia."); break; }
         }
         for (NSURL *url in archives) [NSFileManager.defaultManager removeItemAtURL:url error:NULL];
+        NSUInteger finish=self->_bridge.finishAction;
+        BOOL ready=!error && self->_bridge.finishReady && installed && Configured(installed);
         dispatch_async(dispatch_get_main_queue(),^{
+            self->_finishAction=finish; self->_finishReady=ready;
             if (installed) { self->_catalog.installed=installed; self->_status=result; }
             else if (error) self->_status=nil;
             [self setWorking:NO]; op.outcome=error ? -1 : 1;
             op.operationState=error ? @"Needs attention" : removing ? @"Removal complete" : @"Installation complete";
-            op.operationDetail=error.localizedDescription ?: @"Verified in your guest. Restart the guest if the tweak requires it.";
+            op.operationDetail=error.localizedDescription ?: finish ?
+                [NSString stringWithFormat:@"Verified in your guest. %@ is required.",FinishTitle(finish)] : @"Verified in your guest. No restart was requested.";
             [self report:op.operationDetail]; [self renderAll];
+        });
+    });
+}
+- (void)applyGuestFinish {
+    if (_busy || !_finishReady || !_finishAction || !_status) return;
+    NSUInteger action=_finishAction; NSData *status=_status;
+    [self setWorking:YES]; [self report:[FinishTitle(action) stringByAppendingString:@"…"];
+    dispatch_async(_queue,^{
+        NSError *error=nil; BOOL ok=[self->_bridge performFinish:status error:&error];
+        dispatch_async(dispatch_get_main_queue(),^{
+            [self setWorking:NO];
+            if (ok) {
+                self->_finishAction=0; self->_finishReady=NO; self->_status=nil;
+                // Dismiss both package workspace and its presenting Machine
+                // Settings so the user can see the guest restart/boot progress.
+                UIViewController *settings=self.presentingViewController;
+                UIViewController *machine=settings.presentingViewController;
+                if (machine) [machine dismissViewControllerAnimated:YES completion:nil];
+                else [self dismissViewControllerAnimated:YES completion:nil];
+            } else {
+                self->_finishReady=NO;
+                [self report:error.localizedDescription ?: @"Restart outcome unknown. Refresh Installed before retrying."];
+                [self renderAll]; [self alert:@"Guest restart needs attention" message:error.localizedDescription ?: @"Refresh Installed before retrying."];
+            }
         });
     });
 }

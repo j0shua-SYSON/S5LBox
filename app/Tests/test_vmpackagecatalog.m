@@ -17,6 +17,11 @@ int main(void) { @autoreleasepool {
     CHECK(VMPackageVersionCompare(@"1.0",@"1.0-0")==0); CHECK(VMPackageVersionCompare(@"0:1.01",@"1.1")==0);
     CHECK(VMPackageIdentifierValid(@"com.example.tweak")); CHECK(!VMPackageIdentifierValid(@"--root")); CHECK(!VMPackageIdentifierValid(@"x;id"));
     NSError *error=nil;
+    CHECK([VMPackageCatalog requiresRespring:@[Pkg(@"tweak",@"1",@"mobilesubstrate (>= 0.9), firmware")]]);
+    CHECK([VMPackageCatalog requiresRespring:@[@{@"Pre-Depends":@"alternative | mobilesubstrate"}]]);
+    CHECK([VMPackageCatalog requiresRespring:@[Pkg(@"mobilesubstrate",@"1",@"")]]);
+    CHECK(![VMPackageCatalog requiresRespring:@[Pkg(@"tool",@"1",@"not-mobilesubstrate, mobilesubstrate-extra")]]);
+    CHECK(![VMPackageCatalog requiresRespring:@[Pkg(@"tool",@"1",@"")]]);
     NSData *abc=[@"abc" dataUsingEncoding:NSASCIIStringEncoding];
     NSMutableDictionary *digest=[@{@"Size":@"3",@"_base":@"https://example.org/",@"MD5sum":@"900150983cd24fb0d6963f7d28e17f72"} mutableCopy];
     CHECK([VMPackageRepository verify:abc package:digest]);

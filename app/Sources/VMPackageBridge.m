@@ -47,7 +47,7 @@ static NSData *Capability(NSString *identifier, BOOL create, NSError **error) {
     VMUSBService *service = [[VMUSBService alloc] initWithTransport:_transport port:64321
         canceled:^BOOL{ return weakSelf.canceled || (operation=='S' && NSProcessInfo.processInfo.systemUptime>statusDeadline); } error:error];
     if (!service) return nil;
-    NSMutableData *hello = [NSMutableData dataWithBytes:"SPM1" length:4];
+    NSMutableData *hello = [NSMutableData dataWithBytes:"SPM2" length:4];
     [hello appendData:capability]; [hello appendBytes:&operation length:1];
     if (![service writeData:hello error:error]) { [service close]; return nil; }
     return service;
@@ -61,6 +61,10 @@ static NSData *Capability(NSString *identifier, BOOL create, NSError **error) {
         NSData *frame = [service readCount:n error:error]; if (!frame) return nil;
         char kind = ((const char *)frame.bytes)[0]; NSData *payload = [frame subdataWithRange:NSMakeRange(1,n-1)];
         if (kind == terminal) return payload;
+        if (kind=='F' && payload.length==2) {
+            const unsigned char *value=payload.bytes;
+            if (value[0]<=4 && value[1]<=1) { _finishAction=value[0]; _finishReady=value[1]!=0; continue; }
+        }
         NSString *message = [[NSString alloc] initWithData:payload encoding:NSUTF8StringEncoding] ?: @"Guest output could not be decoded.";
         if (kind == 'E') { if (error) *error = VMPackageError(message); return nil; }
         if (kind != 'L') { if (error) *error = VMPackageError(@"Unexpected guest package response."); return nil; }
@@ -70,6 +74,7 @@ static NSData *Capability(NSString *identifier, BOOL create, NSError **error) {
     return nil;
 }
 - (NSData *)status:(NSError **)error {
+    _finishAction=0; _finishReady=NO;
     VMUSBService *service = [self connect:'S' error:error];
     NSData *data = service ? [self receive:service terminal:'S' error:error] : nil; [service close];
     if (!data && !self.canceled && error) *error=VMPackageError([NSString stringWithFormat:
@@ -88,6 +93,8 @@ static NSData *Capability(NSString *identifier, BOOL create, NSError **error) {
     @try {
         unsigned char hash[32]; CC_SHA256(status.bytes,(CC_LONG)status.length,hash);
         if (![service writeData:[NSData dataWithBytes:hash length:32] error:error]) return nil;
+        unsigned char hint=self.respringAfterChanges ? 2 : 0;
+        if (![service writeData:[NSData dataWithBytes:&hint length:1] error:error]) return nil;
         if (name) {
             NSData *bytes = [name dataUsingEncoding:NSASCIIStringEncoding]; submitted = YES;
             if (![self number:(uint32_t)bytes.length service:service error:error] || ![service writeData:bytes error:error]) return nil;
@@ -124,6 +131,30 @@ static NSData *Capability(NSString *identifier, BOOL create, NSError **error) {
 - (NSData *)remove:(NSString *)package status:(NSData *)status error:(NSError **)error {
     return [self change:nil remove:package status:status error:error];
 }
+- (BOOL)performFinish:(NSData *)status error:(NSError **)error {
+    unsigned char action=(unsigned char)self.finishAction;
+    if (!action || action>4 || !self.finishReady || !status.length || status.length>4u*1024u*1024u) {
+        if (error) *error=VMPackageError(@"No verified finish request. Refresh Installed first."); return NO;
+    }
+    VMUSBService *service=[self connect:'F' error:error]; if (!service) return NO;
+    unsigned char hash[32]; CC_SHA256(status.bytes,(CC_LONG)status.length,hash);
+    NSMutableData *request=[NSMutableData dataWithBytes:&action length:1]; [request appendBytes:hash length:32];
+    BOOL ok=NO;
+    if ([service writeData:request error:error]) {
+        NSData *accepted=[self receive:service terminal:'A' error:error];
+        ok=accepted.length==1 && ((const unsigned char *)accepted.bytes)[0]==action;
+        // A reboot intentionally drops USB. Other actions must report that the
+        // fixed guest command actually returned successfully, not just an ACK.
+        if (ok && action!=4) {
+            NSData *complete=[self receive:service terminal:'C' error:error];
+            ok=complete.length==1 && ((const unsigned char *)complete.bytes)[0]==action;
+        }
+    }
+    [service close];
+    if (ok) { _finishAction=0; _finishReady=NO; }
+    else if (error && !*error) *error=VMPackageError(@"Guest restart outcome is unknown. Refresh before retrying.");
+    return ok;
+}
 + (BOOL)prepareStoppedMachine:(NSString *)directory instanceID:(NSString *)identifier error:(NSError **)error {
     if (NSThread.isMainThread) { if (error) *error = VMPackageError(@"Guest preparation requires a worker thread."); return NO; }
     NSData *token = Capability(identifier,YES,error); if (!token) return NO;
@@ -131,11 +162,17 @@ static NSData *Capability(NSString *identifier, BOOL create, NSError **error) {
     if (!binaryURL) { if (error) *error=VMPackageError(@"This build is missing its guest package helper."); return NO; }
     NSData *binary = [NSData dataWithContentsOfURL:binaryURL options:0 error:error]; if (!binary.length) return NO;
     NSString *root = @"/private/var/lib/s5lbox-package-manager-v1";
-    NSString *program = [root stringByAppendingPathComponent:@"service"];
+    // Immutable executable generations avoid resizing an existing HFS fork.
+    // Upgrade only the exact previous launch job in the staged transaction.
+    NSString *program = [root stringByAppendingPathComponent:@"service-finish-v2"];
     NSDictionary *job = @{@"Label":@"com.j0shua.s5lbox.packages", @"ProgramArguments":@[program],
         @"RunAtLoad":@YES, @"KeepAlive":@YES, @"ThrottleInterval":@10};
     NSData *plist = [NSPropertyListSerialization dataWithPropertyList:job format:NSPropertyListXMLFormat_v1_0 options:0 error:error];
     if (!plist) return NO;
+    NSMutableDictionary *legacyJob=[job mutableCopy]; legacyJob[@"ProgramArguments"]=@[[root stringByAppendingPathComponent:@"service"]];
+    NSData *legacyPlist=[NSPropertyListSerialization dataWithPropertyList:legacyJob format:NSPropertyListXMLFormat_v1_0 options:0 error:error];
+    if (!legacyPlist) return NO;
+    rootfs_work_file_rewrite_t rewrite={0}; BOOL needsRewrite=NO;
     NSArray *files = @[@[program,binary,@0755],@[[root stringByAppendingPathComponent:@"capability"],token,@0600],
         @[@"/System/Library/LaunchDaemons/com.j0shua.s5lbox.packages-v1.plist",plist,@0644]];
     NSString *live = [directory stringByAppendingPathComponent:@"rootfs-work.img"];
@@ -159,14 +196,19 @@ static NSData *Capability(NSString *identifier, BOOL create, NSError **error) {
         rootfs_work_file_repair_state_t state;
         if (rootfs_work_probe_file_repair_ex(live.fileSystemRepresentation,&probe,true,&state,&check) != ROOTFS_WORK_OK ||
             (state != ROOTFS_WORK_FILE_REPAIR_MISSING && state != ROOTFS_WORK_FILE_REPAIR_SATISFIED)) {
-            if (error) *error = VMPackageError(@"Guest package helper differs from this version. It was not overwritten."); return NO;
+            rootfs_work_file_rewrite_state_t rewriteState;
+            rewrite.path=path.UTF8String; rewrite.expected_content=legacyPlist.bytes; rewrite.expected_content_size=legacyPlist.length;
+            rewrite.desired_content=plist.bytes; rewrite.desired_content_size=plist.length; rewrite.permissions=0644;
+            if (file==files.lastObject && rootfs_work_probe_file_rewrite_ex(live.fileSystemRepresentation,&rewrite,true,&rewriteState,&check)==ROOTFS_WORK_OK &&
+                rewriteState==ROOTFS_WORK_FILE_REWRITE_NEEDED) { needsRewrite=YES; continue; }
+            if (error) *error = VMPackageError(@"Guest package helper differs from a recognized version. It was not overwritten."); return NO;
         }
         if (state == ROOTFS_WORK_FILE_REPAIR_MISSING) {
             entries[count].kind=ROOTFS_WORK_ENTRY_FILE; entries[count].path=path.UTF8String;
             entries[count].content=data.bytes; entries[count].content_size=data.length; entries[count].permissions=mode; count++;
         }
     }
-    if (count == 1) return YES;
+    if (count == 1 && !needsRewrite) return YES;
     char snapshots[VM_GUEST_INSTALL_PATH_CAPACITY]; vm_snapshot_info_t items[VM_SNAPSHOT_MAX]; size_t n=0;
     if (vm_snapshot_dir(work,snapshots,sizeof snapshots) != VM_SNAPSHOT_OK ||
         vm_snapshot_list(snapshots,items,VM_SNAPSHOT_MAX,&n,detail,sizeof detail) != VM_SNAPSHOT_OK || n) {
@@ -179,6 +221,7 @@ static NSData *Capability(NSString *identifier, BOOL create, NSError **error) {
     }
     rootfs_work_options_t options={0}; options.preserve_fstab=true; options.allow_unclean_source=true;
     options.entries=entries; options.entry_count=count;
+    if (needsRewrite) { options.file_rewrites=&rewrite; options.file_rewrite_count=1; }
     if (rootfs_work_create(live.fileSystemRepresentation,stage,&options,&check) != ROOTFS_WORK_OK || !check.published) {
         vm_guest_app_discard_stage(work,NULL,0);
         if (error) *error = VMPackageError([NSString stringWithUTF8String:check.detail]); return NO;

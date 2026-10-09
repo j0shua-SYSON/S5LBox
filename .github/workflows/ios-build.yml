@@ -143,6 +143,10 @@ jobs:
               if not path.is_file():
                   continue
               text = path.read_text(encoding="utf-8", errors="strict")
+              # A Debian package identifier used for guest-only finish policy,
+              # not a linked/injected host framework. No other occurrence is exempt.
+              if path == Path("Sources/VMPackageCatalog.m"):
+                  text = text.replace('NSString *substrate=@"mobilesubstrate";', '')
               for marker in forbidden:
                   if marker.lower() in text.lower():
                       violations.append(f"{path}: {marker}")

@@ -11,6 +11,7 @@ BOOL VMPackageIdentifierValid(NSString *name);
 @property (nonatomic, copy) NSArray<NSDictionary *> *installed;
 + (NSArray<NSDictionary *> *)parse:(NSData *)data error:(NSError **)error;
 + (BOOL)protectedPackage:(NSDictionary *)package;
++ (BOOL)requiresRespring:(NSArray<NSDictionary *> *)changes;
 // Dependency-first order. No removals, downgrades, essential changes, or forced
 // dependency overrides. Unsupported relationships/cycles fail before download.
 - (NSArray<NSDictionary *> *)planInstall:(NSDictionary *)package error:(NSError **)error;
