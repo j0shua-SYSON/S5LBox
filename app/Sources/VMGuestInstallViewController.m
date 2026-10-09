@@ -9,6 +9,7 @@
 #import "VMGuestInstallBuild.h"
 #import "VMGuestPackageDownloader.h"
 #import "VMInstanceStore.h"
+#import "VMResumeCheckpoint.h"
 
 @interface VMGuestInstallViewController ()
 - (void)startInstall;
@@ -286,6 +287,23 @@ static void VMGuestInstallBuildProgress(
     dispatch_async(_buildQueue, ^{
         VMGuestInstallViewController *self_ = weakSelf;
         if (!self_) return;
+        if (self_.packageManagerOnly) {
+            NSError *error = nil; char recovery[320] = {0};
+            const char *work = self_->_machineDirectory.fileSystemRepresentation;
+            if (vm_guest_maintenance_recover(work,NULL,NULL,NULL,recovery,sizeof recovery) != VM_GUEST_INSTALL_OK ||
+                !vm_resume_checkpoint_disarm(work,recovery,sizeof recovery)) {
+                [self_ failWithHeadline:@"Package setup failed" description:[NSString stringWithUTF8String:recovery]]; return;
+            }
+            if (![VMPackageBridge prepareStoppedMachine:self_->_machineDirectory instanceID:self_->_instanceID error:&error]) {
+                [self_ failWithHeadline:@"Package setup failed" description:error.localizedDescription]; return;
+            }
+            dispatch_async(dispatch_get_main_queue(),^{
+                [self_ endBackgroundTime];
+                [self_ setFraction:1 stage:@"Package manager ready. Starting the guest…"];
+                if (self_.readyHandler) self_.readyHandler();
+            });
+            return;
+        }
         vm_guest_install_build_result_t result;
         char detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
         vm_guest_install_build_status_t status =

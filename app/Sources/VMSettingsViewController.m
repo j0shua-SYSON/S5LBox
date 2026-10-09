@@ -60,6 +60,7 @@ typedef NS_ENUM(NSInteger, VMGeneralRow) {
     VMGeneralRowGraphicsMode,
     VMGeneralRowJailbreak,
     VMGeneralRowInstallIPA,
+    VMGeneralRowPackageSetup,
     VMGeneralRowDeveloperMode,
     VMGeneralRowCount
 };
@@ -118,6 +119,7 @@ static NSString *VMStringFromC(const char *text) {
 - (void)refreshBanner;
 - (void)confirmGuestInstall;
 - (void)chooseMachineForGuestInstall;
+- (void)chooseMachineWithRequest:(void (^)(NSString *, NSString *))request;
 - (void)inlineConsoleChanged:(UISwitch *)sender;
 - (void)developerModeToggled:(UISwitch *)sender;
 - (void)chooseGraphicsMode;
@@ -514,6 +516,11 @@ titleForFooterInSection:(NSInteger)section {
             cell.detailTextLabel.text = @"Add a compatible app to a jailbroken guest.";
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.accessibilityIdentifier = @"s5lbox.settings.install-ipa";
+        } else if (indexPath.row == VMGeneralRowPackageSetup) {
+            cell.textLabel.text = @"Set up package manager";
+            cell.detailTextLabel.text = @"One-time setup for an existing jailbroken machine.";
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.accessibilityIdentifier = @"s5lbox.settings.package-setup";
         } else if (indexPath.row == VMGeneralRowDeveloperMode) {
             cell.textLabel.text = @"Developer Mode";
             cell.accessoryType = UITableViewCellAccessoryNone;
@@ -767,6 +774,15 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
         } else if (indexPath.row == VMGeneralRowInstallIPA) {
             void (^request)(void) = [self.guestIPARequest copy];
             if (request) [self dismissViewControllerAnimated:YES completion:request];
+        } else if (indexPath.row == VMGeneralRowPackageSetup) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Set up package manager?"
+                message:@"Adds live package installation to a jailbroken machine. Saved running state is discarded; unsaved work may be lost. Guest files are kept."
+                preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Force Off & Set Up" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *a) {
+                [self chooseMachineWithRequest:self.guestPackageSetupRequest];
+            }]];
+            [self presentViewController:alert animated:YES completion:nil];
         }
         return;
     }
@@ -857,7 +873,9 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
 }
 
 - (void)chooseMachineForGuestInstall {
-    void (^request)(NSString *, NSString *) = [self.guestInstallRequest copy];
+    [self chooseMachineWithRequest:self.guestInstallRequest];
+}
+- (void)chooseMachineWithRequest:(void (^)(NSString *, NSString *))request {
     if (!request) return;
     VMInstanceStore *store = [VMInstanceStore sharedStore];
     NSMutableArray<NSDictionary<NSString *, NSString *> *> *eligible =

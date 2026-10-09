@@ -19,6 +19,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 /* Called after a durable image publication, on the main queue. */
 @property (nonatomic, copy, nullable) void (^readyHandler)(void);
+@property (nonatomic) BOOL packageManagerOnly;
 
 @end
 

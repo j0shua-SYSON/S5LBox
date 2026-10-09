@@ -20,7 +20,7 @@ static NSData *Capability(NSString *identifier, BOOL create, NSError **error) {
     NSData *data = [NSData dataWithContentsOfURL:path options:0 error:NULL];
     if (data.length == 32) return data;
     if (!create || [NSFileManager.defaultManager fileExistsAtPath:path.path]) {
-        if (error) *error = VMPackageError(@"Package manager is not prepared for this machine. Save and close it, then use App Settings > Jailbreak once to add support."); return nil;
+        if (error) *error = VMPackageError(@"Package manager is not prepared for this machine. Save and close it, then use App Settings > Set up package manager."); return nil;
     }
     unsigned char bytes[32];
     if (SecRandomCopyBytes(kSecRandomDefault,sizeof bytes,bytes) != errSecSuccess) {

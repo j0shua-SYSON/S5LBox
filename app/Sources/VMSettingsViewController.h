@@ -18,5 +18,6 @@
 @property (nonatomic, copy, nullable) void (^guestInstallRequest)(
     NSString *instanceID, NSString *machineName);
 @property (nonatomic, copy, nullable) void (^guestIPARequest)(void);
+@property (nonatomic, copy, nullable) void (^guestPackageSetupRequest)(NSString *instanceID, NSString *machineName);
 
 @end

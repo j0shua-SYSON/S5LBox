@@ -162,7 +162,7 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
     VMSettingsViewController *settings =
         [[VMSettingsViewController alloc] init];
     __weak VMInstanceListViewController *weakSelf = self;
-    settings.guestInstallRequest = ^(NSString *identifier, NSString *name) {
+    void (^prepareGuest)(NSString *, NSString *, BOOL) = ^(NSString *identifier, NSString *name, BOOL packagesOnly) {
         VMInstanceListViewController *self_ = weakSelf;
         UINavigationController *navigation = self_.navigationController;
         if (!self_ || !navigation || navigation.topViewController != self_)
@@ -171,6 +171,7 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
             [[VMGuestInstallViewController alloc] initWithInstanceID:identifier
                                                          machineName:name];
         __weak VMGuestInstallViewController *weakInstall = install;
+        install.packageManagerOnly = packagesOnly;
         install.readyHandler = ^{
             VMInstanceListViewController *list = weakSelf;
             VMGuestInstallViewController *screen = weakInstall;
@@ -200,6 +201,8 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
          * the stopped disk. Do not boot it just to drive a guest Power slider. */
         [navigation pushViewController:install animated:YES];
     };
+    settings.guestInstallRequest = ^(NSString *identifier, NSString *name) { prepareGuest(identifier,name,NO); };
+    settings.guestPackageSetupRequest = ^(NSString *identifier, NSString *name) { prepareGuest(identifier,name,YES); };
     settings.guestIPARequest = ^{
         VMInstanceListViewController *list = weakSelf;
         UINavigationController *navigation = list.navigationController;
