@@ -393,7 +393,7 @@ static BOOL VMProbeFirmware(vm_firmware_boot_state_t *out) {
         case VMImportSectionReadiness: return 1;
         case VMImportSectionChoose:   return _chooseRowCount;
         case VMImportSectionProgress: return VMImportProgressRowCount;
-        case VMImportSectionResults:  return VM_FW_ARTEFACT_COUNT;
+        case VMImportSectionResults:  return VM_FW_ARTEFACT_COUNT + 1;
         case VMImportSectionKeys:     return (NSInteger)_keyRows.count;
         case VMImportSectionReport:   return 1;
         default:                      return 0;
@@ -684,10 +684,22 @@ estimatedHeightForRowAtIndexPath:(NSIndexPath *)indexPath {
             UITableViewCell *cell =
                 [self cellWithIdentifier:kVMImportPlainCell
                                    style:UITableViewCellStyleSubtitle];
-            if (row < 0 || row >= VM_FW_ARTEFACT_COUNT) return cell;
+            // Archive/provider failures happen before any artifact starts.
+            // Keep their actual reason visible, not only in Copy report.
+            if (row == 0) {
+                cell.textLabel.text = _report.status == VM_FW_OK ? @"Import complete"
+                    : _report.status == VM_FW_ERR_CANCELLED ? @"Import cancelled" : @"Import did not finish";
+                cell.textLabel.textColor = _report.status == VM_FW_OK
+                    ? UIColor.labelColor : UIColor.systemOrangeColor;
+                cell.detailTextLabel.text = VMStringFromC(_report.detail[0]
+                    ? _report.detail : vm_fw_strerror(_report.status));
+                cell.accessibilityIdentifier = @"s5lbox.firmware-import.result";
+                return cell;
+            }
+            if (row < 1 || row > VM_FW_ARTEFACT_COUNT) return cell;
 
-            const vm_fw_artefact_t which = (vm_fw_artefact_t)row;
-            const vm_fw_artefact_report_t *artefact = &_report.artefacts[row];
+            const vm_fw_artefact_t which = (vm_fw_artefact_t)(row - 1);
+            const vm_fw_artefact_report_t *artefact = &_report.artefacts[row - 1];
 
             cell.textLabel.text = [NSString stringWithFormat:@"%@  -  %@",
                 VMStringFromC(vm_fw_artefact_title(which)),
@@ -1045,7 +1057,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     didFinishWithStatus:(vm_fw_status_t)status
                  report:(const vm_fw_report_t *)report {
     (void)importer;
-    (void)status;   /* it is report->status too, and the rows say more */
+    (void)status;   /* report->status drives the visible result summary */
 
     if (report) {
         _report = *report;

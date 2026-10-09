@@ -65,7 +65,7 @@
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     if (path.section == 0) {
         cell.textLabel.text = @"Your IPA collection";
-        NSString *hint = @"Add files to Files → On My iPhone → S5LBox → IPAs, or tap Import. Install each app when you want; adding files never installs them automatically.";
+        NSString *hint = @"Copy IPAs to Files → On My iPhone → S5LBox → IPAs, or tap Import. Adding files doesn’t install them. Choose Install for each app.";
         cell.detailTextLabel.text = _status.length ? [NSString stringWithFormat:@"%@\n\n%@", hint, _status] : hint;
         if (_importing) {
             UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
