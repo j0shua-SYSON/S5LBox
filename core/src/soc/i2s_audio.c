@@ -123,7 +123,8 @@ static void configure(s5l_i2s_t *s, const s5l_wm8991_t *c) {
                 if ((c->regs[1] & 0x1000u) && (c->regs[0x36] & (2u >> ch))) {
                     unsigned attn = c->regs[0x22] & 3u;
                     float speaker = attn == 3u ? 0 :
-                        out_gain(c->regs[0x26]) * db_gain(-6.f * (float)attn);
+                        out_gain(s5l_wm8991_peek(c, WM8991_REG_SPKVOL)) *
+                        db_gain(-6.f * (float)attn);
                     if (speaker > analogue) analogue = speaker;
                 }
                 if (c->regs[1] & (0x800u >> ch)) {

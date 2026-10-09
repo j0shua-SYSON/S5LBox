@@ -1,8 +1,9 @@
 # Current audio implementation (2026-10-10 candidate)
 
 The `feature/audio-disk-presets` branch adds timed codec-side I²S DMA playback
-and capture, plus an iOS 13+ AVAudioEngine backend. This is a candidate, not
-physical-device audio verification. The older investigation below is preserved
+and capture, plus an iOS 13+ AVAudioEngine backend. Physical-device microphone
+recording is verified; audible playback and routing remain candidate gates.
+The older investigation below is preserved
 as historical evidence; its performance numbers and missing-PL080 statements
 do not describe the current emulator.
 
@@ -23,8 +24,8 @@ do not describe the current emulator.
 Host tests cover digital samples in both directions, clock ratios, muted/attenuated
 output, full/empty queues, real PL080 transfers, batched-time underrun prevention,
 snapshot migration, rate conversion and permission-off silence. They do **not**
-prove audible system/media playback or a Voice Memos round trip on the phone.
-Those tests, headphones/route changes, and guest volume/ringer behavior remain
+prove audible system/media playback. Physical Voice Memos recording evidence
+is below; headphones/route changes and guest volume/ringer behavior remain
 release gates. Baseband telephone audio and analogue effects are not modelled.
 The serial path currently accepts the stock 16-bit stereo controller mode;
 other controller word-length encodings remain unimplemented, rather than being
@@ -57,7 +58,26 @@ clock interrupts on DT GPIO line 134 before starting DMA. The original candidate
 never supplied these edges. The follow-up clocks LRCLK independently of serial
 transfer enable, routes its edge through GPIO4/VIC2 and declares the WFI deadline.
 Regression coverage includes both pre-DMA edges, acknowledgement, masking and
-no invented PCM while serial transfer is stopped. Live retesting remains required.
+no invented PCM while serial transfer is stopped.
+
+`e1604ac` passed 81/81 local tests and the iOS build. Installed on the phone,
+a cold-booted disposable 8 GiB guest now records in Voice Memos. Its saved clip
+decodes successfully as 44.1 kHz mono ALAC, 25.727710 seconds / 1,134,002 samples,
+with nonzero signal (range -286..341, RMS -55.17 dBFS). This proves microphone
+data reached an actual guest recording, not that every sample is nonzero or
+that playback was heard. Guest replay progress advances. A post-replay snapshot
+contains 3,860,108 TX and 2,286,186 RX frames with zero core FIFO xruns;
+live speaker gain/routing and host audible playback remain under validation.
+
+A snapshot paused during replay exposed a second independent bug: TXCOM `6`,
+4,008,435 TX frames and an enabled/unmuted speaker route, but both output gains
+were zero. R38 (`0x26`) had never been written. The initial register-only model
+returned zero for all unwritten storage, while both 7E18's uint16 defaults table
+at `c0691030 + 0x4c` and [WM8991 Rev 4.0, Table 37](https://www.mouser.com/datasheet/2/76/WM8991-473496.pdf)
+specify `0x79` (0 dB). The follow-up supplies that default through the codec's
+effective read path, including old snapshots. Explicit writes of zero still
+mute. Bus reads, PCM output, attenuation and saved-state regression tests cover
+the distinction; no guessed volume boost or application-specific patch is used.
 
 Earlier, a disposable desktop probe restored the older USB checkpoint and
 executed another 150 million instructions with three board-level power presses.
@@ -65,9 +85,8 @@ It produced **zero PCM**, and its final display capture failed (no active RGB
 window). That attempt is not an audio pass and does not identify an audio cause.
 Logs are under project-local `work/audio-validation/lock-sound-02.*.log`.
 
-Next device checks: retest Voice Memos after the clock-interrupt fix, then
+Next device checks: verify output after the speaker-default fix, then
 system click/lock sounds, media playback and volume/mute;
-enable microphone explicitly and record/replay a short Voice Memos clip;
 deny permission and verify silence; pause/resume, background, route changes,
 and save/reopen without replaying old host samples. Keep main unchanged until
 those tests and the large-disk gates in `DISK-SIZE-PRESETS.md` pass.

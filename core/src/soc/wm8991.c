@@ -4,9 +4,9 @@
  * The register model stays deliberately bounded, exactly as the PMU's does.
  * Register 0 is the identity the driver gates on and is read-only. Register 1
  * bit 5 is the part discriminator and is unimplemented on purpose. Everything
- * else is storage: bytes the guest wrote read back, and a register nobody has
- * written returns zero while being recorded, so a boot tells the next reader
- * which registers the driver actually wanted.
+ * else is storage, except the established speaker PGA reset value. Unknown
+ * unwritten registers return zero while being recorded, so a boot tells the
+ * next reader which registers the driver actually wanted.
  *
  * See the WM8991 block in soc.h for where every constant and both wire
  * encodings were read out of the shipped firmware.
@@ -19,10 +19,9 @@
 void s5l_wm8991_reset(s5l_wm8991_t *codec) {
     if (!codec) return;
     /* Total initialization, as on I2C: this makes reset semantics explicit and
-     * is safe for a stack object holding any prior byte pattern. Every register
-     * resets to zero because no reset value other than register 0's identity
-     * was established from the firmware, and inventing one would be
-     * indistinguishable from a measured value until the boot diverged. */
+     * is safe for a stack object holding any prior byte pattern. Effective
+     * reset values are supplied by peek(), retaining the distinction between
+     * an unwritten register and an explicit zero in older snapshots too. */
     memset(codec, 0, sizeof *codec);
 }
 
@@ -46,6 +45,12 @@ uint16_t s5l_wm8991_peek(const s5l_wm8991_t *codec, uint8_t reg) {
      * comparison at 0xc068b0b0 against the literal 0x8990 at 0xc068b124 is what
      * decides whether the codec is accepted at all. */
     if (reg == WM8991_REG_ID) return WM8991_ID_VALUE;
+    /* 7E18's uint16_t defaults table at c0691030 has 0x0079 at +0x4c.
+     * WM8991 Rev 4.0 Table 37 agrees: R38 powers on at 0 dB. The stock
+     * speaker route leaves it unwritten, so zero-filled storage is NOT mute.
+     * Explicit writes, including zero/mute, must always win. */
+    if (reg == WM8991_REG_SPKVOL && !codec->written[reg])
+        return WM8991_SPKVOL_RESET;
     if (reg == WM8991_REG_GPSTAT)
         return apply_status_mirror(codec, codec->regs[reg]);
     return codec->regs[reg];
@@ -70,12 +75,13 @@ static uint16_t reg_read(s5l_wm8991_t *codec, uint8_t reg) {
         codec->id_reads++;
         return WM8991_ID_VALUE;
     }
-    if (!codec->written[reg]) note_unknown_read(codec, reg);
+    if (!codec->written[reg] && reg != WM8991_REG_SPKVOL)
+        note_unknown_read(codec, reg);
     if (reg == WM8991_REG_GPSTAT) {
         codec->status_mirror_reads++;
         return apply_status_mirror(codec, codec->regs[reg]);
     }
-    return codec->regs[reg];
+    return s5l_wm8991_peek(codec, reg);
 }
 
 static void reg_write(s5l_wm8991_t *codec, uint8_t reg, uint16_t val) {

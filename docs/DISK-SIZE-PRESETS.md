@@ -77,6 +77,14 @@ No existing machine, firmware input, installed app or disk was modified.
 
 ## Release validation still required
 
+Physical iPhone 6s Plus / iOS 15.8.5 (2026-10-10): new disposable machines
+selected through the native picker provisioned exact 4/8 GiB images, each
+initially allocating about 414 MiB on APFS. Both booted to SpringBoard and
+saved/reopened; the 8 GiB guest also cold-booted again and created a Voice Memos
+recording. Primary and alternate 8 GiB HFS headers both report 4 KiB blocks and
+2,097,152 blocks. Existing user machines were not modified. This does not yet
+prove guest I/O beyond 4 GiB, a completed large-disk jailbreak, or clean shutdown.
+
 Current Windows evidence (2026-10-10): **81/81 CTest tests passed**;
 `test_rootfs_work --large-disks`: **28 checks passed** for synthetic 4/8 GiB
 images, sparse maintenance copies and high-offset marker preservation.

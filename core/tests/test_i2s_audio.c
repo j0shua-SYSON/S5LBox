@@ -21,7 +21,8 @@ static void setup(s5l8900_t *m, capture_t *capture) {
     c->regs[6] = 0x1ce; c->regs[7] = 0x5000;
     c->regs[8] = c->regs[9] = 0x8020;
     c->regs[0xb] = c->regs[0xc] = c->regs[0xf] = c->regs[0x10] = 192;
-    c->regs[0x26] = 121; c->regs[0x36] = 3;
+    /* Stock guest leaves speaker PGA unwritten: its reset value is unity. */
+    c->regs[0x36] = 3;
     c->regs[0x3c] = 0x87; c->regs[0x3d] = 0x86; c->regs[0x3e] = 0xc2;
     c->reg_writes++;
     s5l_i2s_t *s = &m->i2s[0];
@@ -52,10 +53,15 @@ static void test_transport(void) {
     s5l_i2s_write_width(s, 0x10, 0x40004000, 4);
     s5l_i2s_audio_tick(s, &m.codec, 137, 6000000);
     CHECK(cap.last[0] == 0 && cap.last[1] == 0);
-    m.codec.regs[0xa] = 0; m.codec.regs[0x26] = 115; m.codec.reg_writes++;
+    m.codec.regs[0xa] = 0; m.codec.regs[0x26] = 115;
+    m.codec.written[0x26] = 1; m.codec.reg_writes++;
     s5l_i2s_write_width(s, 0x10, 0x40004000, 4);
     s5l_i2s_audio_tick(s, &m.codec, 137, 6000000);
     CHECK(fabsf(cap.last[0] - 0.2505936f) < 0.00001f);
+    m.codec.regs[0x26] = 0; m.codec.reg_writes++;
+    s5l_i2s_write_width(s, 0x10, 0x40004000, 4);
+    s5l_i2s_audio_tick(s, &m.codec, 137, 6000000);
+    CHECK(cap.last[0] == 0 && cap.last[1] == 0); /* explicit PGA mute */
     /* Full FIFO applies backpressure; an overflow never writes out of bounds. */
     for (unsigned i = 0; i < 64; i++) s5l_i2s_write_width(s, 0x10, i, 4);
     CHECK(!s5l_i2s_dma_ready(s, 2, false));

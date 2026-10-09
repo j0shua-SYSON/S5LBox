@@ -136,6 +136,8 @@ static void test_constants_match_the_shipped_firmware(void) {
     /* Seven-bit index space: the packed encoding cannot address more. */
     CHECK(WM8991_NREG == 0x80u, "register file is %u deep, expect 128",
           WM8991_NREG);
+    CHECK(WM8991_REG_SPKVOL == 0x26u && WM8991_SPKVOL_RESET == 0x79u,
+          "speaker default disagrees with the halfword at c069107c");
     /* /arm-io/i2s0 reg {0x04a00000,0x1000} and /arm-io/i2s1 {0x04d00000,0x1000},
      * with arm-io mapping child + 0x38000000. The guest's own driver prints the
      * mapped VA for each on every boot, which is the second source. */
@@ -437,6 +439,26 @@ static void test_reset_is_total(void) {
           "reset did not totally initialize a poisoned object");
 }
 
+static void test_speaker_power_on_volume(void) {
+    s5l_i2c_t bus; s5l_wm8991_t codec;
+    setup(&bus, &codec);
+    CHECK(s5l_wm8991_peek(&codec, WM8991_REG_SPKVOL) == 0x79u,
+          "unwritten speaker volume is not the firmware's 0 dB default");
+    CHECK(bus_read16(&bus, WM8991_REG_SPKVOL, NULL) == 0x79u &&
+          codec.unknown_reads == 0u && !codec.written[WM8991_REG_SPKVOL],
+          "known reset value was not read consistently without a write");
+    bus_write16(&bus, WM8991_REG_SPKVOL, 0u);
+    CHECK(bus_read16(&bus, WM8991_REG_SPKVOL, NULL) == 0u &&
+          s5l_wm8991_peek(&codec, WM8991_REG_SPKVOL) == 0u,
+          "explicit speaker mute was replaced by the reset default");
+    bus_write16(&bus, WM8991_REG_SPKVOL, 115u);
+    CHECK(bus_read16(&bus, WM8991_REG_SPKVOL, NULL) == 115u,
+          "speaker attenuation was not retained");
+    s5l_wm8991_reset(&codec);
+    CHECK(s5l_wm8991_peek(&codec, WM8991_REG_SPKVOL) == 0x79u,
+          "reset did not clear the explicit speaker volume");
+}
+
 /* ------------------------------------------------------------- the I2S --- */
 
 static void test_i2s_stores_the_seven_and_shows_the_rest(void) {
@@ -624,6 +646,9 @@ static void test_snapshot_carries_the_codec_and_windows(void) {
           "I2S window contents did not survive the round trip");
     CHECK(s5l_wm8991_peek(&dst.codec, 0x2bu) == 0x2d5eu,
           "codec storage did not survive the round trip");
+    CHECK(s5l_wm8991_peek(&dst.codec, WM8991_REG_SPKVOL) == 0x79u &&
+          !dst.codec.written[WM8991_REG_SPKVOL],
+          "zero-filled unwritten speaker register lost its default on restore");
 
     /* Resume the second half in the DESTINATION: it must yield the LSB, 0x5e,
      * which is only true if BOTH `second_byte` and `latch` crossed the
@@ -638,6 +663,15 @@ static void test_snapshot_carries_the_codec_and_windows(void) {
     CHECK(dst.codec.second_byte == false,
           "the restored transfer did not complete its register");
 
+    free(snap);
+    snap = NULL; len = 0;
+    bus_write16(&src.i2c[0], WM8991_REG_SPKVOL, 0u);
+    CHECK(snapshot_save_mem(&src, &snap, &len) == SNAP_OK &&
+          snapshot_load_mem(&dst, snap, len) == SNAP_OK,
+          "explicit speaker mute snapshot failed");
+    CHECK(dst.codec.written[WM8991_REG_SPKVOL] &&
+          s5l_wm8991_peek(&dst.codec, WM8991_REG_SPKVOL) == 0u,
+          "restore replaced explicit mute with the speaker reset default");
     free(snap);
     s5l8900_free(&src);
     s5l8900_free(&dst);
@@ -701,6 +735,7 @@ int main(void) {
     test_pointer_survives_stop_and_reads_auto_increment();
     test_unwritten_registers_are_visible_and_bounded();
     test_reset_is_total();
+    test_speaker_power_on_volume();
     test_i2s_stores_the_seven_and_shows_the_rest();
     test_machine_routes_the_codec_and_both_windows();
     test_snapshot_carries_the_codec_and_windows();

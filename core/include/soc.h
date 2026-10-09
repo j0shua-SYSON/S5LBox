@@ -2389,11 +2389,11 @@ void s5l_pcf50635_civil(uint64_t unix_seconds, int *year, int *month, int *day,
  * is the device terminate. It is counted, so a boot can say how often it
  * mattered. Every other bit of both registers is ordinary storage.
  *
- * WHAT IS NOT MODELLED. Everything else. There is no volume, routing, clocking,
- * power-sequencing or mute behaviour here, and no register has a reset value
- * other than zero — because none was established. Unwritten registers read zero
- * and are recorded, exactly as the PMU does, so the next reader learns which
- * registers the driver actually wanted from a boot rather than from a guess.
+ * Timed digital transport, clocking, volume and mute are in i2s_audio.c.
+ * Analogue power sequencing and telephone/baseband audio remain unmodelled.
+ * The speaker PGA's established reset value is 0x79 (7E18 defaults table
+ * c0691030 + 0x4c; WM8991 Rev 4.0 Table 37). Other unmodelled unwritten
+ * registers read zero and are recorded so new accesses remain observable.
  */
 #define WM8991_I2C_ADDR   0x1bu
 #define WM8991_NREG       0x80u   /* seven-bit register index space */
@@ -2403,6 +2403,8 @@ void s5l_pcf50635_civil(uint64_t unix_seconds, int *year, int *month, int *day,
 #define WM8991_PWR1_PROBE 0x0020u /* bit 5: the WM8991/WM1817 discriminator   */
 #define WM8991_REG_GPSTAT 0x12u   /* polled at 0xc068d4fc; bit 12 read-only   */
 #define WM8991_REG_GPCTRL 0x17u   /* commanded at 0xc068d44c; drives the above */
+#define WM8991_REG_SPKVOL 0x26u   /* speaker PGA; 7E18 default at c069107c */
+#define WM8991_SPKVOL_RESET 0x79u /* 0 dB, not mute */
 #define WM8991_GP_BIT     0x1000u
 #define WM8991_UNKNOWN_REGS 16u
 #define WM8991_MAX_WRITE  3u      /* the longest form: index + two data bytes */
