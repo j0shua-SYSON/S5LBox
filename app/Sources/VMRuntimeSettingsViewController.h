@@ -1,0 +1,31 @@
+// S5LBox -- controls for one open machine, never app/new-machine defaults.
+// Copyright (c) 2026 j0shua-SYSON. MIT licensed.
+#import <UIKit/UIKit.h>
+#import "VMSnapshotListViewController.h"
+
+typedef NS_ENUM(NSInteger, VMRuntimeAction) {
+    VMRuntimeActionSaveAndClose,
+    VMRuntimeActionShutDown,
+    VMRuntimeActionRestart,
+};
+
+@protocol VMRuntimeSettingsDelegate <VMSnapshotListDelegate>
+- (BOOL)runtimeCanControlGuest;
+- (BOOL)runtimeCanShutDown;
+- (BOOL)runtimePaused;
+- (void)setRuntimePaused:(BOOL)paused;
+- (BOOL)runtimePausesInBackground;
+- (void)setRuntimePausesInBackground:(BOOL)pauses;
+- (BOOL)runtimeInlineConsole;
+- (void)setRuntimeInlineConsole:(BOOL)enabled;
+- (uint64_t)runtimeInstructionCap;
+- (void)setRuntimeInstructionCap:(uint64_t)cap;
+- (void)performRuntimeAction:(VMRuntimeAction)action;
+@end
+
+@interface VMRuntimeSettingsViewController : UITableViewController
+@property (nonatomic, weak) id<VMRuntimeSettingsDelegate> runtimeDelegate;
+@property (nonatomic, copy) NSString *machineName;
+@property (nonatomic, copy) NSString *snapshotsDirectory;
+@property (nonatomic) BOOL showsDeveloperControls;
+@end

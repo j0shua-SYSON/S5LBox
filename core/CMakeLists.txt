@@ -1407,6 +1407,11 @@ add_test(NAME app_stock_host_policy
             -DAPP_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../app
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_app_stock_policy.cmake)
 
+add_test(NAME app_settings_scope
+    COMMAND ${CMAKE_COMMAND}
+            -DAPP_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../app
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_settings_scope.cmake)
+
 add_test(NAME app_option_mirror
     COMMAND ${CMAKE_COMMAND}
             -DBOOTKERNEL=$<TARGET_FILE:bootkernel>

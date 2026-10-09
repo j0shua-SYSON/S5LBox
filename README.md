@@ -48,6 +48,11 @@ temporary installation copies.
 
 Without supported firmware, the app runs a built-in test program—not iPhone OS.
 
+The Machines gear opens **App Settings** for defaults, firmware and jailbreak.
+Inside a machine, **Settings** opens **Machine Settings** for that session's
+pause behavior, snapshots and power controls. Session changes do not alter
+defaults for other machines; Developer Mode adds session diagnostics.
+
 ### Networking and Cydia
 
 Networking is opt-in. Before a new machine's first open, enable **Guest

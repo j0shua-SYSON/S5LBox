@@ -12,8 +12,9 @@
 //  being true the day the app booted firmware; it is a tested table now
 //  precisely so it cannot go stale again.
 //
-//  APPLIED HERE. The instruction cap and the pause-on-background switch. Both
-//  are real properties of this app's run loop and both take effect immediately.
+//  RUNTIME DEFAULTS. Instruction cap, background pause and inline console are
+//  copied when a machine screen opens. Its Machine Settings edits that session
+//  only, without changing these defaults. Developer Mode remains app-wide.
 //
 //  NEW-MACHINE DEFAULTS live in NSUserDefaults. A machine created by the
 //  current app records the two image-time graphics values at its first open,
@@ -34,9 +35,8 @@
 
 #import "VMOptions.h"
 
-/* Posted on the main thread after anything here changes, so the emulator screen
- * can re-apply the two settings that are actually applied. No object, no user
- * info: a reader re-reads, which is cheap and cannot go stale. */
+/* Posted on the main thread after app defaults change. An open emulator may
+ * refresh app-wide chrome (Developer Mode), but retains its session values. */
 extern NSString *const VMSettingsDidChangeNotification;
 
 /* The three file names the emulator accepts, which are also exactly what the
@@ -103,7 +103,7 @@ typedef NS_ENUM(NSInteger, VMGraphicsMode) {
 - (VMGraphicsMode)graphicsModeForNewMachines;
 - (void)setGraphicsModeForNewMachines:(VMGraphicsMode)mode;
 
-#pragma mark - Applied
+#pragma mark - Defaults for newly opened sessions
 
 /* Retired instructions to stop after; 0 for no limit. */
 - (uint64_t)instructionCap;
@@ -111,6 +111,8 @@ typedef NS_ENUM(NSInteger, VMGraphicsMode) {
 
 /* The next cap in the cycle the settings screen offers, wrapping round. */
 - (uint64_t)nextInstructionCap;
+/* Shared display choices; does not read or change preferences. */
++ (NSArray<NSNumber *> *)instructionCapChoices;
 
 /* Suspend the emulator while the app is in the background. On by default: iOS
  * terminates apps that keep a core busy in the background. */

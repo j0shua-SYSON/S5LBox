@@ -34,7 +34,7 @@
 #import "VMFramebufferView.h"
 #import "VMGuest.h"
 #import "VMSettings.h"
-#import "VMSettingsViewController.h"
+#import "VMRuntimeSettingsViewController.h"
 #import "VMSnapshotListViewController.h"
 #import "VMInstanceStore.h"
 #include "VMSnapshotStore.h"
@@ -84,7 +84,8 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 // Declared up front so every call below is checked against a prototype.
 @interface EmulatorViewController () <VMButtonBarDelegate,
                                       VMFramebufferViewTouchDelegate,
-                                      VMSnapshotListDelegate>
+                                      VMSnapshotListDelegate,
+                                      VMRuntimeSettingsDelegate>
 - (NSString *)snapshotsDirectory;
 - (void)startEmulator;
 - (void)launchEngine;
@@ -179,6 +180,10 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
      * reasons for it, and -applyPauseState is the only thing that writes it. */
     BOOL               _userPaused;
     BOOL               _inBackground;
+    /* Copied once on open. Runtime Settings never rewrites app defaults. */
+    BOOL               _sessionPausesInBackground;
+    BOOL               _sessionInlineConsole;
+    uint64_t           _sessionInstructionCap;
     BOOL               _savingCheckpoint;
     BOOL               _restarting;
     BOOL               _shuttingDown;
@@ -260,6 +265,10 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    VMSettings *defaults = [VMSettings sharedSettings];
+    _sessionPausesInBackground = [defaults pausesInBackground];
+    _sessionInlineConsole = [defaults inlineConsole];
+    _sessionInstructionCap = [defaults instructionCap];
     _checkpointBackgroundTask = UIBackgroundTaskInvalid;
     self.view.backgroundColor = [UIColor blackColor];
 
@@ -631,6 +640,14 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
         return;
     }
 
+    /* The built-in demo has no firmware disk or resumable CPU state. Close
+     * it directly rather than showing a checkpoint failure for a demo. */
+    if (![_engine isRunningFirmware]) {
+        [_engine stop];
+        [self.navigationController popViewControllerAnimated:YES];
+        return;
+    }
+
     [self beginCheckpointBackgroundTask];
     [self setCheckpointSaving:YES];
     __weak EmulatorViewController *weakSelf = self;
@@ -689,8 +706,8 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
 - (void)settingsDidChange:(NSNotification *)notification {
     (void)notification;
-    /* Only two settings are applied by this app, and both are cheap to
-     * re-apply, so re-apply both rather than working out which moved. */
+    /* Reapply this session's values, not newly edited app defaults. Developer
+     * mode remains app-wide and still changes the toolbar/console visibility. */
     [self applySettingsToEngine];
     [self applyPauseState];
     [self refreshStatusLine];
@@ -720,7 +737,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 - (void)applyPauseState {
     const BOOL backgroundPause =
         _inBackground && (_shuttingDown ||
-                         [[VMSettings sharedSettings] pausesInBackground]);
+                         _sessionPausesInBackground);
     const BOOL paused = _userPaused || backgroundPause;
 
     NSString *reason = _userPaused ? @"user"
@@ -743,7 +760,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 }
 
 - (void)applySettingsToEngine {
-    [_engine setInstructionCap:[[VMSettings sharedSettings] instructionCap]];
+    [_engine setInstructionCap:_sessionInstructionCap];
 }
 
 /* The toolbar is built from what the engine says, not from what was last
@@ -892,21 +909,63 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 - (void)settingsTapped:(id)sender {
     (void)sender;
 
-    VMSettingsViewController *settings = [[VMSettingsViewController alloc] init];
-    /* Settings owns no machine, so the snapshots screen is given this one's
-     * directory here. Derived from the same instance id the engine was built
-     * with, rather than joined by hand: two places that build the path is how
-     * a machine ends up listing another machine's saved states. */
+    if (_savingCheckpoint || _restarting || _shuttingDown) return;
+    VMRuntimeSettingsViewController *settings =
+        [[VMRuntimeSettingsViewController alloc] init];
+    settings.runtimeDelegate = self;
+    settings.machineName = self.title ?: @"Current machine";
+    settings.showsDeveloperControls = [[VMSettings sharedSettings] developerMode];
+    /* Use the same instance-derived path as the existing snapshot owner. */
     settings.snapshotsDirectory = [self snapshotsDirectory];
-    settings.snapshotDelegate = self;
     UINavigationController *nav = [[UINavigationController alloc]
         initWithRootViewController:settings];
     // The emulator screen is black; a white sheet over it would be a jolt.
     nav.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-    /* Nothing needs intercepting on dismissal: every control writes through to
-     * NSUserDefaults immediately and posts VMSettingsDidChangeNotification, so
-     * a swipe-to-dismiss and the Done button are the same thing. */
+    /* Session changes are immediate through the delegate. Dismissal never
+     * saves app defaults, restarts the guest or changes another machine. */
     [self presentViewController:nav animated:YES completion:nil];
+}
+
+#pragma mark - Current-session settings
+
+- (BOOL)runtimeCanControlGuest {
+    return [_engine isRunning] && !_savingCheckpoint && !_restarting && !_shuttingDown;
+}
+- (BOOL)runtimeCanShutDown {
+    return [self runtimeCanControlGuest] && [_engine isRunningFirmware];
+}
+- (BOOL)runtimePaused { return [_engine isPaused]; }
+- (void)setRuntimePaused:(BOOL)paused {
+    if (![self runtimeCanControlGuest]) return;
+    _userPaused = paused;
+    [self applyPauseState];
+    [self refreshStatusLine];
+}
+- (BOOL)runtimePausesInBackground { return _sessionPausesInBackground; }
+- (void)setRuntimePausesInBackground:(BOOL)pauses {
+    _sessionPausesInBackground = pauses;
+    [self applyPauseState];
+}
+- (BOOL)runtimeInlineConsole { return _sessionInlineConsole; }
+- (void)setRuntimeInlineConsole:(BOOL)enabled {
+    _sessionInlineConsole = enabled;
+    [self.view setNeedsLayout];
+}
+- (uint64_t)runtimeInstructionCap { return _sessionInstructionCap; }
+- (void)setRuntimeInstructionCap:(uint64_t)cap {
+    _sessionInstructionCap = cap;
+    [self applySettingsToEngine];
+}
+- (void)performRuntimeAction:(VMRuntimeAction)action {
+    if (_savingCheckpoint || _restarting || _shuttingDown ||
+        self.navigationController.topViewController != self) return;
+    switch (action) {
+        case VMRuntimeActionSaveAndClose: [self saveAndCloseTapped:nil]; break;
+        case VMRuntimeActionShutDown:
+            if ([self runtimeCanShutDown]) [self shutDownTapped:nil];
+            break;
+        case VMRuntimeActionRestart: [self resetTapped:nil]; break;
+    }
 }
 
 #pragma mark - Snapshots
@@ -1065,7 +1124,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     // working against the same rectangle the picture is drawn in.
     /* The picture takes everything unless the console is sharing the screen,
      * in which case it takes the 62% it always did. */
-    BOOL inlineConsole = [[VMSettings sharedSettings] inlineConsole] &&
+    BOOL inlineConsole = _sessionInlineConsole &&
                          [[VMSettings sharedSettings] developerMode];
     CGFloat band = inlineConsole ? floor(freeSpace * 0.62) : freeSpace;
     if (band < 60.0) band = fmin(60.0, freeSpace);

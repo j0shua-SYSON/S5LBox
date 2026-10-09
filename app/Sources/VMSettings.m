@@ -229,6 +229,13 @@ static const uint64_t kVMInstructionCaps[] = {
     return kVMInstructionCaps[0];
 }
 
++ (NSArray<NSNumber *> *)instructionCapChoices {
+    NSMutableArray<NSNumber *> *choices = [NSMutableArray array];
+    for (NSUInteger i = 0; i < kVMInstructionCapCount; i++)
+        [choices addObject:@(kVMInstructionCaps[i])];
+    return [choices copy];
+}
+
 - (BOOL)jailbreakEnabled {
     /* Both halves, or it is not on. A half-jailbroken machine is a state the
      * harness supports and this switch deliberately cannot express. */

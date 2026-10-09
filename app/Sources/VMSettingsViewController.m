@@ -13,7 +13,6 @@
 #import "VMInstanceStore.h"
 #import "VMOptions.h"
 #import "VMManualViewController.h"
-#import "VMSnapshotListViewController.h"
 #import "VMSettings.h"
 
 #import <math.h>
@@ -61,7 +60,6 @@ typedef NS_ENUM(NSInteger, VMGeneralRow) {
     VMGeneralRowGraphicsMode,
     VMGeneralRowJailbreak,
     VMGeneralRowDeveloperMode,
-    VMGeneralRowSnapshots,
     VMGeneralRowCount
 };
 
@@ -153,10 +151,10 @@ static NSString *VMStringFromC(const char *text) {
     [super viewDidLoad];
 
     _settings = [VMSettings sharedSettings];
-    self.title = @"Settings";
+    self.title = @"App Settings";
+    self.tableView.accessibilityIdentifier = @"s5lbox.app-settings";
     self.navigationController.navigationBar.prefersLargeTitles = YES;
-    /* When presented by the black emulator, its navigation controller already
-     * opts into dark appearance. From the machine list, follow the person's
+    /* App Settings is presented from Machines. Follow the person's
      * system appearance instead of forcing a dark settings sheet globally. */
 
     self.navigationItem.rightBarButtonItem =
@@ -271,7 +269,8 @@ static NSString *VMStringFromC(const char *text) {
         if (summary.length) [text appendFormat:@"\n\n%@", summary];
     }
     [text appendString:
-        @"\n\nOnly the rows under Diagnostics take effect immediately."];
+        @"\n\nRuntime defaults are copied when you open a machine. Use "
+        @"Machine Settings inside the guest screen to change that session."];
     _banner.text = text;
 }
 
@@ -370,7 +369,7 @@ titleForHeaderInSection:(NSInteger)section {
         return VMStringFromC(vm_option_group_title((unsigned)section));
     switch ((VMSettingsSection)section) {
         case VMSettingsSectionFirmware:    return @"Firmware";
-        case VMSettingsSectionDiagnostics: return @"Diagnostics";
+        case VMSettingsSectionDiagnostics: return @"Runtime defaults & diagnostics";
         case VMSettingsSectionCommandLine: return @"Equivalent command line";
         default:                           return nil;
     }
@@ -380,17 +379,9 @@ titleForHeaderInSection:(NSInteger)section {
 titleForFooterInSection:(NSInteger)section {
     section = [self sectionAt:section];
     if (section == VMSettingsSectionGeneral) {
-        return [[VMSettings sharedSettings] developerMode]
-            ? @"Developer mode is on: the option table, the guest console and "
-              @"the diagnostics are shown. Each option says whether it reaches "
-              @"the boot, is fixed into a work image, or is unavailable here."
-            : @"New here? Read the manual first.\n\n"
-              @"Jailbreak downloads a pinned iPhone OS 3 package set from its "
-              @"publisher's archive and installs it into one stopped machine's "
-              @"own disk. The app bundles none of those packages.\n\n"
-              @"Developer mode adds the full option table, the guest console "
-              @"and diagnostics — useful for working on the emulator, noise "
-              @"otherwise.";
+        return @"App-wide setup and defaults. Controls for an open machine "
+               @"are in its own Machine Settings. Developer Mode adds boot "
+               @"options, the guest console and diagnostics.";
     }
     (void)tableView;
 
@@ -443,8 +434,8 @@ titleForFooterInSection:(NSInteger)section {
                     [VMEngine firmwareReadinessSummary]];
         case VMSettingsSectionDiagnostics:
             return @"The instruction cap, background pause and inline console "
-                    "are applied by the app. The JIT row is an explicit host "
-                    "capability test, not an emulator speed switch.";
+                    @"are defaults for newly opened sessions. The JIT row tests "
+                    @"host capability; it is not an emulator speed switch.";
         case VMSettingsSectionCommandLine:
             return @"What these switches would spell on a tools/bootkernel "
                     "command line, so a phone session and a desktop session can "
@@ -526,18 +517,6 @@ titleForFooterInSection:(NSInteger)section {
             [sw addTarget:self action:@selector(developerModeToggled:)
                  forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
-        } else if (indexPath.row == VMGeneralRowSnapshots) {
-            BOOL hasMachine = self.snapshotsDirectory.length > 0;
-            cell.textLabel.text = hasMachine ? @"Snapshots"
-                                             : @"Snapshots — open a machine first";
-            cell.textLabel.textColor = hasMachine ? [UIColor labelColor]
-                                                  : [UIColor secondaryLabelColor];
-            cell.accessoryType = hasMachine
-                ? UITableViewCellAccessoryDisclosureIndicator
-                : UITableViewCellAccessoryNone;
-            cell.selectionStyle = hasMachine
-                ? UITableViewCellSelectionStyleDefault
-                : UITableViewCellSelectionStyleNone;
         }
         return cell;
     }
@@ -658,7 +637,7 @@ titleForFooterInSection:(NSInteger)section {
                                                            style:UITableViewCellStyleSubtitle];
                 cell.textLabel.text = @"Instruction cap";
                 cell.detailTextLabel.text = [NSString stringWithFormat:
-                    @"%@  ·  applied  ·  tap to change",
+                    @"%@  ·  new-session default  ·  tap to change",
                     VMDescribeInstructionCap([_settings instructionCap])];
                 cell.selectionStyle = UITableViewCellSelectionStyleDefault;
                 return cell;
@@ -680,9 +659,8 @@ titleForFooterInSection:(NSInteger)section {
                                                            style:UITableViewCellStyleSubtitle];
                 cell.textLabel.text = @"Console under the screen";
                 cell.detailTextLabel.text =
-                    @"Applied. Puts the guest's serial output back beneath the "
-                     "picture for live debugging, as it was before it moved to "
-                     "its own screen. Costs about a third of the picture.";
+                    @"Default for new sessions. Show guest output beneath "
+                    @"the display when Developer Mode is enabled.";
                 UISwitch *t = [[UISwitch alloc] initWithFrame:CGRectZero];
                 t.on = [[VMSettings sharedSettings] inlineConsole];
                 [t addTarget:self action:@selector(inlineConsoleChanged:)
@@ -696,8 +674,8 @@ titleForFooterInSection:(NSInteger)section {
                                                        style:UITableViewCellStyleSubtitle];
             cell.textLabel.text = @"Pause in background";
             cell.detailTextLabel.text =
-                @"Applied. Off keeps the interpreter running in the background, "
-                 "which iOS may end the app for.";
+                @"Default for new sessions. Recommended: iOS may terminate "
+                @"the app if it continues running in the background.";
             UISwitch *toggle = [[UISwitch alloc] initWithFrame:CGRectZero];
             toggle.on = [_settings pausesInBackground];
             [toggle addTarget:self
@@ -729,7 +707,7 @@ titleForFooterInSection:(NSInteger)section {
             cell.textLabel.text = @"Reset to defaults";
             cell.textLabel.textColor = [UIColor systemRedColor];
             cell.detailTextLabel.text =
-                @"Forget every value above, including the two applied ones.";
+                @"Reset app defaults. Does not delete machines or their files.";
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
             return cell;
         }
@@ -780,18 +758,6 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
             [self chooseGraphicsMode];
         } else if (indexPath.row == VMGeneralRowJailbreak) {
             [self confirmGuestInstall];
-        } else if (indexPath.row == VMGeneralRowSnapshots) {
-            if (self.snapshotsDirectory.length == 0) return;
-            VMSnapshotListViewController *list =
-                [[VMSnapshotListViewController alloc] init];
-            /* Both come from whoever presented this screen. Settings is built
-             * with a plain -init and holds no machine of its own, so a nil
-             * directory here means "nobody told us which machine", and the
-             * list shows an empty screen rather than another machine's. */
-            list.snapshotsDirectory = self.snapshotsDirectory;
-            list.delegate = self.snapshotDelegate;
-            if (self.navigationController)
-                [self.navigationController pushViewController:list animated:YES];
         }
         return;
     }
@@ -1001,6 +967,9 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
 - (void)performReset {
     [_settings resetToDefaults];
     _copiedCommandLine = NO;
+    [self rebuildVisibleSections];
+    [self refreshBanner];
+    [self.view setNeedsLayout];
     [self.tableView reloadData];
 }
 
