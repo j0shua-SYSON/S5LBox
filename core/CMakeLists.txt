@@ -890,10 +890,9 @@ add_executable(test_vmoptions
 target_include_directories(test_vmoptions PRIVATE ../app/Sources)
 add_test(NAME app_option_table COMMAND test_vmoptions)
 
-# The manually dispatched phone experiment is a separate product policy, not a
-# change to the normal app's defaults. Compile the same longhand table test in
-# that policy too so a labelled MBX IPA cannot quietly pair MBX with the CPU
-# renderer or fall back to the normal default.
+# The separately identified MBX test bundle now shares the product defaults.
+# Compile its variant too so the build flag cannot change desktop replay
+# baselines or silently re-enable the CPU-renderer override.
 add_executable(test_vmoptions_mbx_experiment
     ../app/Tests/test_vmoptions.c
     ../app/Sources/VMOptions.c

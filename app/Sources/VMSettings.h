@@ -76,8 +76,8 @@ typedef NS_ENUM(NSInteger, VMGraphicsMode) {
 /* `index` is an index into VMOptions.c's table. This is the effective launch
  * value: normally the new-machine default below, except that the two graphics
  * rows can come from a versioned machine record selected immediately before
- * VMEngine starts. An unset global key reads as the table default rather than
- * as NO. */
+ * VMEngine starts. Legacy disks without a record retain the old graphics
+ * fallback when no explicit global choice exists, not the new MBX default. */
 - (BOOL)valueForOptionIndex:(NSUInteger)index;
 
 /* The app-wide value shown and edited by Settings for machines created later.

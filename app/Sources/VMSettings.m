@@ -1,13 +1,9 @@
 //
 //  S5LBox — the app's settings. See VMSettings.h.
 //
-//  Every key is read through -objectForKey: and falls back to the table's own
-//  default when absent, rather than being seeded with -registerDefaults:. That
-//  is not a style preference: registered defaults are a snapshot taken at
-//  launch, so a default changed in VMOptions.c would keep the old value for
-//  anyone who had already run the app, and the whole reason that table exists
-//  is that a default which quietly means two different things falsifies every
-//  run recorded against it.
+//  Explicit saved choices take precedence over the product's new-machine
+//  defaults. Desktop baseline defaults remain separate for exact replay flags
+//  and for old graphics images without a trustworthy per-machine record.
 //
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //
@@ -100,8 +96,9 @@ static const uint64_t kVMInstructionCaps[] = {
 
     NSString *key = [self keyForOptionIndex:index];
     NSNumber *stored = key ? [[self defaults] objectForKey:key] : nil;
-    if (![stored isKindOfClass:[NSNumber class]]) return option->def ? YES : NO;
-    return stored.boolValue;
+    BOOL hasSavedValue = [stored isKindOfClass:[NSNumber class]];
+    return vm_option_new_machine_value((unsigned)index, hasSavedValue,
+                                       hasSavedValue ? stored.boolValue : NO);
 }
 
 - (BOOL)valueForOptionIndex:(NSUInteger)index {
@@ -115,6 +112,16 @@ static const uint64_t kVMInstructionCaps[] = {
             if (ca >= 0 && index == (NSUInteger)ca)
                 return _recordedGraphicsSoftware;
         }
+    }
+    /* No graphics record means an older, already-created image (or the demo).
+     * Preserve its former global fallback; new product defaults must not
+     * silently switch the driver underneath a CPU-renderer disk. New images
+     * select their recorded pair before reaching this method. */
+    if ((mbx >= 0 && index == (NSUInteger)mbx) ||
+        (ca >= 0 && index == (NSUInteger)ca)) {
+        NSNumber *stored = [[self defaults] objectForKey:[self keyForOptionIndex:index]];
+        if ([stored isKindOfClass:[NSNumber class]]) return stored.boolValue;
+        return vm_option_at((unsigned)index)->def;
     }
     return [self valueForNewMachineOptionIndex:index];
 }

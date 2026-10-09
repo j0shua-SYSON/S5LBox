@@ -491,10 +491,10 @@ titleForFooterInSection:(NSInteger)section {
             cell.textLabel.text = @"Graphics for new machines";
             if (mode == VMGraphicsModeSoftware)
                 cell.detailTextLabel.text =
-                    @"CPU software renderer; MBX off (compatible default)";
+                    @"CPU software renderer; MBX off (compatibility option)";
             else if (mode == VMGraphicsModeExperimentalMBX)
                 cell.detailTextLabel.text =
-                    @"MBX on; CPU software renderer off (experimental)";
+                    @"MBX on; CPU software renderer off (default, experimental)";
             else
                 cell.detailTextLabel.text =
                     @"Custom developer switches; not a controlled test mode";
@@ -924,9 +924,9 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
         @"the value "
         @"written into their writable image. Older machines created before "
         @"that record existed keep the app-wide setting because their saved "
-        @"option bits cannot be trusted.\n\nMBX is substantially faster on "
-        @"the tested phones, but it is not the default until repeated "
-        @"cold-boot, navigation, sleep/wake, and resume soaks are stable.";
+        @"option bits cannot be trusted.\n\nMBX is the default for new "
+        @"machines and remains experimental. CPU software is available as "
+        @"a compatibility option. This does not convert an existing disk.";
     UIAlertController *picker = [UIAlertController
         alertControllerWithTitle:@"Graphics for new machines"
                          message:message

@@ -39,8 +39,9 @@ temporary installation copies.
    stock iOS**.
 2. Open S5LBox. From **Machines**, tap the gear and choose **Import from an IPSW**.
    Select your firmware and provide the keys requested by the importer.
-3. Keep **Graphics for new machines** set to **CPU software** for the default
-   configuration. Return to Machines and open a machine. Initial disk preparation
+3. New machines default to **MBX** graphics (experimental), with the CPU
+   software-renderer override off. **CPU software** remains a compatibility
+   option. Return to Machines and open a machine. Initial disk preparation
    and a cold boot take longer than reopening a saved session.
 4. Use **Back** and choose **Save & close** to resume later, or **Shut down** to
    power off iPhone OS and cold-boot next time. Keep S5LBox open until it returns
@@ -55,10 +56,10 @@ defaults for other machines; Developer Mode adds session diagnostics.
 
 ### Networking and Cydia
 
-Networking is opt-in. Before a new machine's first open, enable **Guest
-networking (PPP over uart4)** under **Settings → Developer Mode**, and leave
-**Route guest traffic to the internet** enabled. Provisioning settings do not
-retrofit an existing disk.
+Guest networking and internet routing are **on by default for new machines**.
+To opt out before the first open, disable **Guest networking (PPP over uart4)**
+under **App Settings → Developer Mode**. Explicit saved choices are preserved;
+these defaults do not retrofit an existing offline disk.
 
 To install Cydia, prepare a machine first, return to Machines, then open
 **Settings → Jailbreak** and follow its prompts. This affects the **guest only**,

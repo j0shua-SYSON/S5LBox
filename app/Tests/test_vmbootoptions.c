@@ -509,6 +509,26 @@ static void test_network_state_is_reconciled_with_the_work_image(void) {
           "network reconciliation overwrote unrelated caller boot policy");
 }
 
+static void test_product_defaults_reach_boot_and_provisioning(void) {
+    bool values[VM_BOOT_OPTION_MAX];
+    vm_boot_options_report_t report;
+    vm_boot_provision_options_t provision;
+    for (unsigned i = 0; i < vm_option_count(); i++)
+        values[i] = vm_option_new_machine_value(i, false, false);
+    vm_boot_options_apply(values, vm_option_count(), NULL, &report);
+    vm_boot_options_for_provisioning(values, vm_option_count(), &provision);
+    const int mbx = index_of("mbx"), ppp = index_of("ppp"), nat = index_of("nat");
+    if (mbx < 0 || ppp < 0 || nat < 0) return;
+    CHECK(report.row[mbx].effective, "product default must leave MBX matched");
+    CHECK(!provision.ca_software_render, "product default must not force CPU rendering");
+    CHECK(provision.ppp, "product default must provision the guest network service");
+    CHECK(report.row[ppp].effective && report.row[nat].effective,
+          "product default must enable networking and internet routing");
+    vm_boot_options_reconcile_network(&report, NULL, false);
+    CHECK(!report.row[ppp].effective && !report.row[nat].effective,
+          "new defaults must not pretend an existing offline disk is provisioned");
+}
+
 static void test_jailbreak_state_is_reconciled_with_the_work_image(void) {
     bool values[VM_BOOT_OPTION_MAX];
     vm_boot_options_report_t report;
@@ -689,6 +709,7 @@ int main(void) {
     test_fixed_rows();
     test_provisioned_row();
     test_network_state_is_reconciled_with_the_work_image();
+    test_product_defaults_reach_boot_and_provisioning();
     test_jailbreak_state_is_reconciled_with_the_work_image();
     test_missing_and_short_value_arrays();
     test_every_note_is_usable();

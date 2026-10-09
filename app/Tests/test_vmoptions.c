@@ -17,13 +17,9 @@
 static unsigned tests;
 static unsigned failed;
 
-#if defined(S5LBOX_MBX_EXPERIMENT) && S5LBOX_MBX_EXPERIMENT
-#define EXPECTED_MBX_DEFAULT true
-#define EXPECTED_CA_DEFAULT  false
-#else
+/* Desktop replay baseline is the same for both app bundle variants. */
 #define EXPECTED_MBX_DEFAULT false
 #define EXPECTED_CA_DEFAULT  true
-#endif
 
 #define CHECK(expr, ...) do {                                                \
     tests++;                                                                 \
@@ -221,14 +217,37 @@ static void test_command_line(void) {
     CHECK(full[need - 1] != ' ', "trailing separator in \"%s\"", full);
     /* Flipped means the opposite spelling of the default: an off default is
      * now asserted with --name, an on default negated with --no-name. */
-#if defined(S5LBOX_MBX_EXPERIMENT) && S5LBOX_MBX_EXPERIMENT
-    CHECK(strncmp(full, "--no-mbx", strlen("--no-mbx")) == 0,
-          "on experiment default not negated first: %s", full);
-#else
     CHECK(strstr(full, "--mbx") != NULL, "off default not asserted: %s", full);
     CHECK(strstr(full, "--no-mbx") == NULL, "off default also negated: %s", full);
-#endif
     CHECK(strstr(full, "--no-vram") != NULL, "on default not negated: %s", full);
+}
+
+static void test_new_machine_defaults(void) {
+    bool values[64];
+    CHECK(vm_option_count() <= 64, "new-machine values outgrew test buffer");
+    if (vm_option_count() > 64) return;
+    for (unsigned i = 0; i < vm_option_count(); i++) {
+        const vm_option_t *row = vm_option_at(i);
+        bool expected = row->def;
+        if (!strcmp(row->name, "mbx") || !strcmp(row->name, "ppp"))
+            expected = true;
+        else if (!strcmp(row->name, "ca-software-render")) expected = false;
+        values[i] = vm_option_new_machine_value(i, false, false);
+        CHECK(values[i] == expected, "%s has the wrong product default", row->name);
+        CHECK(vm_option_new_machine_value(i, false, true) == expected,
+              "%s used a saved value when none exists", row->name);
+        CHECK(!vm_option_new_machine_value(i, true, false),
+              "%s ignored an explicit saved off choice", row->name);
+        CHECK(vm_option_new_machine_value(i, true, true),
+              "%s ignored an explicit saved on choice", row->name);
+    }
+    CHECK(values[vm_option_index("nat")], "guest internet routing must default on");
+    expect_command_line(values, "--mbx --no-ca-software-render --ppp",
+                        "product defaults render exact desktop replay flags");
+    CHECK(!vm_option_new_machine_value(vm_option_count(), false, true),
+          "invalid default index resolved");
+    CHECK(!vm_option_new_machine_value(0xffffffffu, true, true),
+          "invalid saved-value index resolved");
 }
 
 static void test_command_line_truncation_and_nulls(void) {
@@ -364,6 +383,7 @@ int main(int argc, char **argv) {
     test_rows_are_grouped_and_unique();
     test_lookup();
     test_command_line();
+    test_new_machine_defaults();
     test_command_line_truncation_and_nulls();
     test_omissions();
 

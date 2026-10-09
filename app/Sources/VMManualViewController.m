@@ -167,10 +167,10 @@ typedef struct {
               @"complete emulator — there is only one engine." }];
 
     [e addObject:@{ @"h": @"Graphics status",
-        @"b": @"The default remains Apple's CPU software renderer because it "
-              @"has the strongest cold-boot history. Settings now pairs the "
-              @"two controls as Graphics for new machines: CPU software, or "
-              @"experimental MBX. Choose before a machine's first open. Current "
+        @"b": @"New machines default to experimental MBX graphics, with the "
+              @"CPU software-renderer override off. Graphics for new machines "
+              @"also offers CPU software as a compatibility option. Choose "
+              @"before a machine's first open. Current "
               @"machines then record the exact pair beside their work image and "
               @"reuse it on later starts. Machines created by older builds do "
               @"not: their saved option bits were compile-time defaults, not "
@@ -182,9 +182,17 @@ typedef struct {
               @"decoder rejection or recovery.\n\nThat is substantial graphics "
               @"coverage. Recent physical runs also survive the historical "
               @"Safari Pages and Spotlight terminal paths, repeated sleep/wake, "
-              @"and checkpoint restore. That is promising evidence, not yet "
-              @"the repeated long-session proof required to make MBX the "
-              @"default." }];
+              @"and checkpoint restore. MBX being the default does not imply "
+              @"complete rendering coverage, original-device speed, or "
+              @"long-session stability on every host." }];
+
+    [e addObject:@{ @"h": @"Guest networking",
+        @"b": @"Guest networking and internet routing are on by default for "
+              @"new machines. App Settings in Developer Mode lets you turn "
+              @"them off before the first open. Explicit saved choices are "
+              @"preserved. The networking service is installed when the guest "
+              @"disk is prepared; changing defaults does not add it to an "
+              @"existing offline disk." }];
 
     if (dev) {
         [e addObject:@{ @"h": @"Console",

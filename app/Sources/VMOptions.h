@@ -9,7 +9,8 @@
  *
  * So the app's copy is a table too, in the same shape, in plain C11: one row
  * per toggle, the name spelled exactly as bootkernel spells it, and the same
- * default. app/Tests/test_vmoptions.c pins the whole thing -- names, order,
+ * desktop baseline. App product defaults are resolved separately below.
+ * app/Tests/test_vmoptions.c pins the whole thing -- names, order,
  * defaults and the rendered command line -- so a change on either side is a
  * deliberate change to a test rather than a silent divergence.
  *
@@ -81,7 +82,7 @@ typedef struct {
     const char   *name;    /* --name enables, --no-name disables; bootkernel's spelling */
     const char   *title;   /* short label for a table row                               */
     const char   *detail;  /* one sentence: what it does and why the default is that    */
-    bool          def;     /* bootkernel's default, and therefore the app's             */
+    bool          def;     /* desktop baseline for equivalent command-line rendering   */
     unsigned char group;   /* vm_option_group_t                                         */
     unsigned char impl;    /* vm_option_impl_t                                          */
 } vm_option_t;
@@ -108,6 +109,13 @@ const vm_option_omission_t *vm_option_omitted_at(unsigned index);
 
 /* Row `index`, or NULL when out of range. */
 const vm_option_t *vm_option_at(unsigned index);
+
+/* Product defaults for a new machine: MBX on, CPU override off, PPP/NAT on.
+ * Explicit saved values (including false) win. Invalid indices return false.
+ * Keep these separate from `def` so desktop defaults and replay flags do not
+ * change when the app's initial setup changes. */
+bool vm_option_new_machine_value(unsigned index, bool has_saved_value,
+                                 bool saved_value);
 
 /* Index of the row called `name`, or -1 for NULL and unknown names. */
 int vm_option_index(const char *name);
