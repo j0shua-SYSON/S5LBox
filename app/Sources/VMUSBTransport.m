@@ -121,6 +121,7 @@ static NSError *VMUSBError(NSString *message) {
             if (!c.canceled && stream->receive_used) continue;
         }
         if (stream->state == USB_MUX_ERROR || stream->state == USB_MUX_CLOSED) {
+            if (stream->error) NSLog(@"[usb] guest service %u: %s", c.port, stream->error);
             c.error = VMUSBError(stream->error ? [NSString stringWithUTF8String:stream->error]
                                                : @"The guest closed the service connection.");
             usb_mux_close(mux, (unsigned)c.channel);

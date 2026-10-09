@@ -26,7 +26,11 @@ static NSError *InstallError(NSString *message) {
     NSMutableDictionary *query = [@{@"Label":@"S5LBox", @"Request":request} mutableCopy];
     if (values) [query addEntriesFromDictionary:values];
     NSDictionary *reply = [service request:query error:error];
-    if (!reply) return nil;
+    if (!reply) {
+        if (error) *error = InstallError([NSString stringWithFormat:@"Guest %@: %@", request,
+            (*error).localizedDescription ?: @"The connection ended without a reply."]);
+        return nil;
+    }
     if (![reply[@"Request"] isEqual:request] || reply[@"Error"] ||
         (reply[@"Result"] && ![reply[@"Result"] isEqual:@"Success"])) {
         if (error) *error = InstallError([NSString stringWithFormat:@"Guest %@ failed: %@.", request,
@@ -82,17 +86,20 @@ static NSError *InstallError(NSString *message) {
         VMUSBPairing *pairing = [[VMUSBPairing alloc] initWithInstanceID:_identifier devicePublicKey:key[@"Value"] error:&failure];
         if (!pairing) break;
         NSDictionary *pairValues = @{@"PairRecord":pairing.record, @"ProtocolVersion":@"2"};
-        // Legacy guests require ValidatePair. Reuse an already accepted identity
-        // without rewriting the guest pair record on every installation.
-        NSDictionary *validated = [self lockdown:lockdown request:@"ValidatePair" values:pairValues error:NULL];
-        if (!validated && (![self lockdown:lockdown request:@"Pair" values:pairValues error:&failure] ||
-                           ![self lockdown:lockdown request:@"ValidatePair" values:pairValues error:&failure])) break;
+        // A saved host identity does not prove that this guest snapshot has
+        // accepted it. Establish it before the legacy trusted-host validation.
+        if (![self lockdown:lockdown request:@"Pair" values:pairValues error:&failure]) break;
+        [self report:@"Confirming the guest’s pairing record…" fraction:-1];
+        if (![self lockdown:lockdown request:@"ValidatePair" values:pairValues error:&failure]) break;
+        [self report:@"Starting the guest’s paired session…" fraction:-1];
         NSDictionary *session = [self lockdown:lockdown request:@"StartSession"
             values:@{@"HostID":pairing.record[@"HostID"], @"SystemBUID":pairing.record[@"SystemBUID"]} error:&failure];
         if (!session) break;
         if (![session[@"SessionID"] isKindOfClass:NSString.class]) { failure = InstallError(@"The guest returned an invalid session."); break; }
-        if ([session[@"EnableSessionSSL"] boolValue] &&
-            ![lockdown enableTLSWithIdentity:pairing.identity expectedKey:pairing.deviceKey error:&failure]) break;
+        if ([session[@"EnableSessionSSL"] boolValue]) {
+            [self report:@"Securing the guest USB connection…" fraction:-1];
+            if (![lockdown enableTLSWithIdentity:pairing.identity expectedKey:pairing.deviceKey error:&failure]) break;
+        }
         [self report:@"Opening the guest’s installation services…" fraction:-1];
         files = [self openService:@"com.apple.afc" lockdown:lockdown pairing:pairing error:&failure];
         if (!files) break;
