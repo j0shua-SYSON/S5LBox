@@ -10,8 +10,11 @@ static bool running(const s5l_i2s_t *s, unsigned d) {
 }
 
 static unsigned sample_bits(const s5l_i2s_t *s, unsigned d) {
-    static const unsigned bits[] = {16, 20, 24, 32};
-    return bits[(s->regs[d ? 3 : 1] >> 5) & 3u];
+    /* The N82 stock stream and openiBoot establish code 0 = 16 bits. The
+     * codec's 16/20/24/32 encodings are NOT evidence for the SoC's other codes.
+     * Do not invent packing for an unobserved serial-controller mode. Guest
+     * AudioQueue/CoreAudio convert app sample formats to this hardware stream. */
+    return ((s->regs[d ? 3 : 1] >> 5) & 3u) == 0u ? 16u : 0u;
 }
 
 static uint32_t pop(s5l_i2s_audio_t *a, unsigned d, unsigned n) {
@@ -157,7 +160,7 @@ void s5l_i2s_audio_tick(s5l_i2s_t *s, const s5l_wm8991_t *c,
     if (!s || !c || !tick_hz) return;
     configure(s, c);
     for (unsigned d = 0; d < 2; d++) {
-        if (!running(s, d) || !s->audio.rate[d]) continue;
+        if (!running(s, d) || !s->audio.rate[d] || !sample_bits(s, d)) continue;
         uint64_t phase = s->audio.phase[d] + (uint64_t)ticks * s->audio.rate[d];
         uint64_t frames = phase / tick_hz;
         s->audio.phase[d] = phase % tick_hz;
@@ -191,7 +194,7 @@ uint32_t s5l_i2s_audio_next(const s5l_i2s_t *s, uint32_t tick_hz) {
     if (!s || !tick_hz) return 0;
     for (unsigned d = 0; d < 2; d++) {
         uint32_t rate = s->audio.rate[d];
-        if (!running(s, d) || !rate) continue;
+        if (!running(s, d) || !rate || !sample_bits(s, d)) continue;
         uint64_t remaining = tick_hz - s->audio.phase[d];
         uint32_t ticks = (uint32_t)((remaining + rate - 1u) / rate);
         if (!ticks) ticks = 1;

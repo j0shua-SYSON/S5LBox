@@ -64,6 +64,11 @@ static void test_transport(void) {
     /* Old audio cannot reappear after stop/restart. */
     s5l_i2s_write_width(s, 8, 0, 4);
     CHECK(s->audio.count[0] == 0 && s->audio.phase[0] == 0);
+    unsigned before = cap.calls[0];
+    s5l_i2s_write_width(s, 4, 0x01100321, 4);
+    s5l_i2s_write_width(s, 8, 6, 4);
+    s5l_i2s_audio_tick(s, &m.codec, 137, 6000000);
+    CHECK(cap.calls[0] == before); /* unknown controller packing is not guessed */
     s5l8900_free(&m);
 }
 static void test_clock_and_snapshot(void) {

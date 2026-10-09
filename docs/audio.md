@@ -26,6 +26,10 @@ snapshot migration, rate conversion and permission-off silence. They do **not**
 prove audible system/media playback or a Voice Memos round trip on the phone.
 Those tests, headphones/route changes, and guest volume/ringer behavior remain
 release gates. Baseband telephone audio and analogue effects are not modelled.
+The serial path currently accepts the stock 16-bit stereo controller mode;
+other controller word-length encodings remain unimplemented, rather than being
+inferred from the different WM8991 register encoding. Application media formats
+are converted to the hardware stream by the guest audio stack.
 
 Register references: the authenticated 7E18 controller and N82 device tree,
 [openiBoot hardware definitions](https://github.com/iDroid-Project/openiBoot/blob/master/plat-s5l8900/includes/hardware/i2s.h),

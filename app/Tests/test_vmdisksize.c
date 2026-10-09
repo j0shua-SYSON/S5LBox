@@ -14,8 +14,8 @@ int main(void) {
         CHECK(!vm_disk_size_parse(r,strlen(r)-1,&size)); CHECK(size == 123);
         CHECK(!vm_disk_size_parse(r,strlen(r)+1,&size));
     }
-    CHECK(!vm_disk_size_parse("s5lbox-disk-v1 3\n",16,&size));
-    CHECK(!vm_disk_size_parse("s5lbox-disk-v2 2\n",16,&size));
+    CHECK(!vm_disk_size_parse("s5lbox-disk-v1 3\n",strlen("s5lbox-disk-v1 3\n"),&size));
+    CHECK(!vm_disk_size_parse("s5lbox-disk-v2 2\n",strlen("s5lbox-disk-v2 2\n"),&size));
     CHECK(!vm_disk_size_parse(NULL,0,&size));
     CHECK(!vm_disk_size_read(NULL,&size));
     CHECK(!vm_disk_size_read("",&size));
