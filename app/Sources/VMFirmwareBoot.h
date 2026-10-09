@@ -365,6 +365,10 @@ bool vm_firmware_boot_arm_overlay(vm_firmware_boot_t *boot,
 bool vm_firmware_boot_network_status(const vm_firmware_boot_t *boot,
                                      vm_network_status_t *out);
 
+/* Owner-thread generation for invalidating host services after a real guest
+ * watchdog reboot. Not snapshot state; NULL/new owners return zero. */
+uint64_t vm_firmware_boot_restart_count(const vm_firmware_boot_t *boot);
+
 void vm_firmware_boot_destroy(vm_firmware_boot_t **boot);
 
 /*

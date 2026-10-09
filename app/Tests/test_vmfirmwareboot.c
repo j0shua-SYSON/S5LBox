@@ -581,6 +581,8 @@ static void test_guest_watchdog_restart_fixture(void) {
                   strstr(machine.uart0.tx,
                          "[vm] guest watchdog reboot 1:") != NULL,
               "watchdog restart did not publish its lifecycle witness");
+        CHECK(vm_firmware_boot_restart_count(boot) == 1u,
+              "host services did not observe the watchdog boot generation");
     }
 
     s5l8900_free(&machine);
@@ -663,6 +665,8 @@ static void test_powered_off_checkpoint_fixture(void) {
 }
 
 int main(void) {
+    CHECK(vm_firmware_boot_restart_count(NULL) == 0u,
+          "missing boot owner reported a restart generation");
     vm_firmware_boot_state_t state;
 
     printf("== vm firmware boot ==\n");

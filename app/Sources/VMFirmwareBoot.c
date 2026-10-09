@@ -529,6 +529,10 @@ vm_firmware_boot_t *vm_firmware_boot_create(void) {
     return boot;
 }
 
+uint64_t vm_firmware_boot_restart_count(const vm_firmware_boot_t *boot) {
+    return boot ? boot->restart_count : 0u;
+}
+
 bool vm_firmware_boot_arm_overlay(vm_firmware_boot_t *boot,
                                   const char *overlay_path) {
     if (!boot) return false;

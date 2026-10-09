@@ -159,6 +159,7 @@ static double vm_engine_now_seconds(void) {
     usb_mux_t       *_usbMux;
     double           _usbMuxStart;
     BOOL             _usbMuxReported;
+    uint64_t         _usbBootGeneration;
     VMUSBTransport  *_usbTransport;
     /* The provisioning copy's byte counters; see -rootFilesystemProgress. */
     uint64_t         _prepareDone;
@@ -862,6 +863,7 @@ static double vm_engine_now_seconds(void) {
     }
 
     _usbHostActive = _machine.usbotg.enabled != 0;
+    _usbBootGeneration = vm_firmware_boot_restart_count(_firmwareBoot);
     if (_usbHostActive) [_usbTransport beginSession];
     else [_usbTransport endSession:@"This boot has no virtual USB controller. Enable USB OTG, shut down, and start the machine again."];
     if (_usbHostActive) {
@@ -1993,6 +1995,22 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
             retired += s5l8900_run(&_machine, kVMChunkInstructions, &status);
 
             if (_usbHostActive && !checkpoint) {
+                uint64_t generation = vm_firmware_boot_restart_count(_firmwareBoot);
+                if (generation != _usbBootGeneration) {
+                    // A replacement kernel must never inherit the previous
+                    // host's usbmux sequences or open service channels. Use
+                    // the actual reboot boundary, not just USB register state.
+                    _usbBootGeneration = generation;
+                    [_usbTransport beginSession];
+                    if (_usbMux) {
+                        usb_mux_cancel(_usbMux, "Guest rebooted");
+                        free(_usbMux); _usbMux = NULL;
+                    }
+                    _usbMuxReported = NO;
+                    usb_host_disconnect(&_usbHost, &_machine);
+                    usb_host_init(&_usbHost, &_machine);
+                    [self appendConsole:@"[usb] new guest boot: previous service session discarded\n"];
+                }
                 if (_machine.usbotg.enabled && !_machine.usbotg.connected)
                     usb_host_init(&_usbHost, &_machine); /* guest reboot */
                 unsigned previous = _usbHost.stage;
