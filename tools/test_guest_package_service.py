@@ -176,6 +176,22 @@ eval "printf 'finish:reboot\\nfinish:restart\\n' >&$fd"
             assert change('exit 0\n')[-2][1] == b"\x04\x01"
             assert apply(4)[-1] == (b"C", b"\x04")
             checks += 4
+            # A real reboot kills its parent helper before execute() returns.
+            # Emulate that and relaunch with the SAME boot timestamp: the
+            # consumed reboot must not reappear. Never call a host reboot.
+            assert change('fd=${CYDIA%% *}\neval "echo finish:reboot >&$fd"\n')[-2][1] == b"\x04\x01"
+            (root / "finish").write_text('#!/bin/sh\nkill -TERM "$PPID"\n')
+            with connect(b"F", modern=True) as sock:
+                sock.sendall(b"\x04" + hashlib.sha256(status).digest())
+                assert frame(sock) == (b"A", b"\x04")
+            process.wait(timeout=10)
+            process = subprocess.Popen([binary], cwd=work)
+            time.sleep(0.15)
+            assert finish_status() == b"\x00\x00"
+            (root / "finish").write_text('#!/bin/sh\necho "$@" >> fixture/finish-calls\n[ ! -f fixture/finish-fails ]\n')
+            assert change('exit 0\n', hint=2)[-2][1] == b"\x02\x01"
+            assert apply(2)[-1][0] == b"C"
+            checks += 5
             # Cydia's configuration-file fallbacks include creation/removal.
             assert change('echo changed > fixture/SpringBoard.plist\n')[-2][1] == b"\x03\x01"
             assert apply(3)[-1][0] == b"C"

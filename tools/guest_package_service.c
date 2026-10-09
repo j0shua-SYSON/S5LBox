@@ -301,8 +301,15 @@ static void apply_finish(void) {
         action==3 ? SPRINGBOARD : "com.apple.SpringBoard",NULL};
 #endif
     if (action>1 && access(args[0],X_OK)) { close(lockfd); failure("Guest restart command is unavailable."); return; }
-    // Acceptance is not a claim that SpringBoard/boot has completed. Reboot can
-    // close USB and terminate this service; boot-scoped state handles that.
+    // Consume a reboot durably BEFORE invoking it: reboot terminates us, and
+    // an emulated cold boot can reuse exactly the same KERN_BOOTTIME. Restore
+    // the request on a rejected ACK or a command failure. Never clear merely
+    // because a client disconnected or a helper process was relaunched.
+    if (action==4) {
+        pending=finish_ready=0;
+        if (!save_finish()) { pending=action; finish_ready=1; close(lockfd); failure("Cannot record the guest reboot request."); return; }
+    }
+    // Acceptance is not a claim that SpringBoard/boot has completed.
     if (frame('A',&action,1)) {
         int ok=action==1 || execute(args,0)==0;
 #ifndef S5LBOX_PACKAGE_TEST
@@ -313,9 +320,10 @@ static void apply_finish(void) {
         }
 #endif
         if (ok) { pending=finish_ready=0; if (!save_finish()) ok=0; }
+        if (!ok) { pending=action; finish_ready=1; (void)save_finish(); }
         if (ok) frame('C',&action,1);
         else failure("Guest restart command failed. The request is still pending; refresh and retry.");
-    }
+    } else if (action==4) { pending=action; finish_ready=1; (void)save_finish(); }
     close(lockfd);
 }
 static void connection(void) {

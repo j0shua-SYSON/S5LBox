@@ -164,14 +164,17 @@ static NSData *Capability(NSString *identifier, BOOL create, NSError **error) {
     NSString *root = @"/private/var/lib/s5lbox-package-manager-v1";
     // Immutable executable generations avoid resizing an existing HFS fork.
     // Upgrade only the exact previous launch job in the staged transaction.
-    NSString *program = [root stringByAppendingPathComponent:@"service-finish-v2"];
+    NSString *program = [root stringByAppendingPathComponent:@"service-finish-v3"];
     NSDictionary *job = @{@"Label":@"com.j0shua.s5lbox.packages", @"ProgramArguments":@[program],
         @"RunAtLoad":@YES, @"KeepAlive":@YES, @"ThrottleInterval":@10};
     NSData *plist = [NSPropertyListSerialization dataWithPropertyList:job format:NSPropertyListXMLFormat_v1_0 options:0 error:error];
     if (!plist) return NO;
-    NSMutableDictionary *legacyJob=[job mutableCopy]; legacyJob[@"ProgramArguments"]=@[[root stringByAppendingPathComponent:@"service"]];
-    NSData *legacyPlist=[NSPropertyListSerialization dataWithPropertyList:legacyJob format:NSPropertyListXMLFormat_v1_0 options:0 error:error];
-    if (!legacyPlist) return NO;
+    NSMutableArray<NSData *> *legacyPlists=[NSMutableArray array];
+    for (NSString *legacy in @[@"service",@"service-finish-v2"]) {
+        NSMutableDictionary *legacyJob=[job mutableCopy]; legacyJob[@"ProgramArguments"]=@[[root stringByAppendingPathComponent:legacy]];
+        NSData *bytes=[NSPropertyListSerialization dataWithPropertyList:legacyJob format:NSPropertyListXMLFormat_v1_0 options:0 error:error];
+        if (!bytes) return NO; [legacyPlists addObject:bytes];
+    }
     rootfs_work_file_rewrite_t rewrite={0}; BOOL needsRewrite=NO;
     NSArray *files = @[@[program,binary,@0755],@[[root stringByAppendingPathComponent:@"capability"],token,@0600],
         @[@"/System/Library/LaunchDaemons/com.j0shua.s5lbox.packages-v1.plist",plist,@0644]];
@@ -197,10 +200,13 @@ static NSData *Capability(NSString *identifier, BOOL create, NSError **error) {
         if (rootfs_work_probe_file_repair_ex(live.fileSystemRepresentation,&probe,true,&state,&check) != ROOTFS_WORK_OK ||
             (state != ROOTFS_WORK_FILE_REPAIR_MISSING && state != ROOTFS_WORK_FILE_REPAIR_SATISFIED)) {
             rootfs_work_file_rewrite_state_t rewriteState;
-            rewrite.path=path.UTF8String; rewrite.expected_content=legacyPlist.bytes; rewrite.expected_content_size=legacyPlist.length;
-            rewrite.desired_content=plist.bytes; rewrite.desired_content_size=plist.length; rewrite.permissions=0644;
-            if (file==files.lastObject && rootfs_work_probe_file_rewrite_ex(live.fileSystemRepresentation,&rewrite,true,&rewriteState,&check)==ROOTFS_WORK_OK &&
-                rewriteState==ROOTFS_WORK_FILE_REWRITE_NEEDED) { needsRewrite=YES; continue; }
+            if (file==files.lastObject) for (NSData *legacyPlist in legacyPlists) {
+                rewrite.path=path.UTF8String; rewrite.expected_content=legacyPlist.bytes; rewrite.expected_content_size=legacyPlist.length;
+                rewrite.desired_content=plist.bytes; rewrite.desired_content_size=plist.length; rewrite.permissions=0644;
+                if (rootfs_work_probe_file_rewrite_ex(live.fileSystemRepresentation,&rewrite,true,&rewriteState,&check)==ROOTFS_WORK_OK &&
+                    rewriteState==ROOTFS_WORK_FILE_REWRITE_NEEDED) { needsRewrite=YES; break; }
+            }
+            if (needsRewrite) continue;
             if (error) *error = VMPackageError(@"Guest package helper differs from a recognized version. It was not overwritten."); return NO;
         }
         if (state == ROOTFS_WORK_FILE_REPAIR_MISSING) {
