@@ -280,7 +280,7 @@ static void VMGuestInstallBuildProgress(
         return;
     }
 
-    [self setFraction:0.01 stage:@"Checking this machine\u2026"];
+    [self setFraction:0.01 stage:@"Discarding saved running state and checking the guest disk…"];
     __weak VMGuestInstallViewController *weakSelf = self;
     dispatch_async(_buildQueue, ^{
         VMGuestInstallViewController *self_ = weakSelf;
@@ -288,7 +288,7 @@ static void VMGuestInstallBuildProgress(
         vm_guest_install_build_result_t result;
         char detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
         vm_guest_install_build_status_t status =
-            vm_guest_install_build_from_directory(
+            vm_guest_install_build_after_force_off(
                 self_->_machineDirectory.fileSystemRepresentation,
                 NULL, VMGuestInstallBuildProgress, (__bridge void *)self_,
                 &result, detail, sizeof detail);
@@ -344,7 +344,7 @@ static void VMGuestInstallBuildProgress(
         vm_guest_install_build_result_t result;
         char detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
         vm_guest_install_build_status_t status =
-            vm_guest_install_build_from_directory(
+            vm_guest_install_build_after_force_off(
                 self_->_machineDirectory.fileSystemRepresentation,
                 packageDirectory.fileSystemRepresentation,
                 VMGuestInstallBuildProgress, (__bridge void *)self_,

@@ -70,6 +70,7 @@ typedef struct {
     bool cydia_cache_staged;
     bool filesystem_repaired;
     bool powered_off_checkpoint_witnessed;
+    bool forced_power_off; /* explicit caller policy, NOT a clean-shutdown witness */
     size_t historical_snapshots;
     vm_guest_rootfs_stats_t plan;
     rootfs_work_result_t rootfs;
@@ -153,6 +154,18 @@ typedef struct {
  */
 vm_guest_install_build_status_t
 vm_guest_install_build_from_directory(
+    const char *work_directory, const char *package_directory,
+    vm_guest_install_build_progress_t progress, void *progress_context,
+    vm_guest_install_build_result_t *result,
+    char *detail, size_t detail_capacity);
+
+/* Explicit force-off jailbreak workflow. The caller must already have stopped
+ * the emulator and closed its disk, and keep it stopped throughout this call.
+ * Discards automatic resume, then permits a dirty header ONLY after strict HFS
+ * structural validation. No catalog/allocation recovery is authorized by force
+ * alone, and no clean bit or PMU witness is fabricated. Unsaved guest RAM is lost.
+ * An already verified full-shutdown checkpoint retains the ordinary policy. */
+vm_guest_install_build_status_t vm_guest_install_build_after_force_off(
     const char *work_directory, const char *package_directory,
     vm_guest_install_build_progress_t progress, void *progress_context,
     vm_guest_install_build_result_t *result,

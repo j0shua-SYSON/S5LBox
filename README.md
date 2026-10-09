@@ -69,8 +69,10 @@ these defaults do not retrofit an existing offline disk.
 To install Cydia, prepare a machine first, return to Machines, then open
 **Settings → Jailbreak** and follow its prompts. This affects the **guest only**,
 not your host iPhone. Packages are downloaded separately; they are not bundled.
-S5LBox shuts down the selected guest before installing. If shutdown cannot be
-confirmed, it leaves the machine open and does not start installation.
+**Force Off & Jailbreak** discards saved running state and checks the stopped
+disk without waiting for guest touch or shutdown. Unsaved work may be lost.
+Structural disk errors still block installation; force-off does not mark a
+damaged filesystem clean.
 Back up guest data first: a new installation replaces the selected guest disk,
 while supported upgrades use a separate migration path.
 

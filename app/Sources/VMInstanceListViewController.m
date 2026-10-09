@@ -195,7 +195,10 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
             [list showError:missing
                       doing:@"The installed machine no longer exists"];
         };
-        [self_ prepareGuestInstall:install instanceID:identifier returningThrough:nil];
+        /* Machines owns no running engine: every exit waits for disk teardown.
+         * Jailbreak explicitly discards saved CPU state and strictly validates
+         * the stopped disk. Do not boot it just to drive a guest Power slider. */
+        [navigation pushViewController:install animated:YES];
     };
     settings.guestIPARequest = ^{
         VMInstanceListViewController *list = weakSelf;

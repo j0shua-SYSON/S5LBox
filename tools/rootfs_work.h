@@ -445,7 +445,9 @@ typedef struct rootfs_work_options {
      * HFS volume normally has to carry kHFSVolumeUnmountedBit before this
      * transformer will even copy it. A caller may set this only when it owns
      * separate, durable proof that the guest completed full power-off and the
-     * backing file was flushed afterwards. All geometry, alternate-header,
+     * backing file was flushed afterwards; or explicit user consent to discard
+     * saved running state after host teardown, with strict source validation
+     * and ALL catalog/allocation recovery disabled. All geometry, alternate-header,
      * allocation-bitmap and catalog checks still run, and the dirty/inconsistent
      * attributes are preserved in the output so the next guest boot can fsck;
      * this option never lies by stamping a volume clean.
@@ -663,7 +665,9 @@ rootfs_work_status_t rootfs_work_validate_source(
 /*
  * Same read-only validation, with one narrowly scoped exception for a caller
  * that has already proved a full guest power-off by an independent durable
- * witness. `allow_unclean_source` bypasses only the missing unmounted bit; it
+ * witness, or owns a force-stopped disk under the explicit-consent policy
+ * above (without structural recovery). `allow_unclean_source` bypasses only
+ * the missing unmounted bit; it
  * does not bypass any structural check or modify the source.
  */
 rootfs_work_status_t rootfs_work_validate_source_ex(

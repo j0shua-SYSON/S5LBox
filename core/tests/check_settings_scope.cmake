@@ -50,3 +50,11 @@ foreach(required "[_engine setInstructionCap:_sessionInstructionCap]"
     endif()
 endforeach()
 message(STATUS "App defaults and current-machine settings ownership passed")
+
+file(READ "${APP_DIR}/Sources/VMGuestInstallViewController.m" jailbreak)
+string(FIND "${jailbreak}" "vm_guest_install_build_after_force_off(" force_builder)
+string(FIND "${app}" "Force Off & Jailbreak" force_choice)
+string(FIND "${machines}" "[self_ prepareGuestInstall:install" boot_to_shutdown)
+if(force_builder EQUAL -1 OR force_choice EQUAL -1 OR NOT boot_to_shutdown EQUAL -1)
+    message(FATAL_ERROR "Jailbreak must use explicit stopped-disk preflight, not boot-to-shutdown")
+endif()

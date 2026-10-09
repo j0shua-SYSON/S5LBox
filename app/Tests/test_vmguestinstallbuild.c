@@ -1343,6 +1343,74 @@ static void test_fresh_install_checks_shutdown_before_packages(void) {
           "fresh preflight changed its source disk");
 }
 
+static void test_force_off_checks_disk_before_packages(void) {
+    clear_fixture();
+    CHECK(make_directory(FIXTURE_DIR), "force-off fixture directory");
+    char live[VM_GUEST_INSTALL_PATH_CAPACITY];
+    char marker[VM_GUEST_INSTALL_PATH_CAPACITY];
+    char stage[VM_GUEST_INSTALL_PATH_CAPACITY];
+    CHECK(join_path(live, sizeof live, FIXTURE_DIR, VM_GUEST_INSTALL_LIVE_FILE) &&
+          join_path(marker, sizeof marker, FIXTURE_DIR, VM_FW_BOOT_RESTORE_ONCE_FILE) &&
+          join_path(stage, sizeof stage, FIXTURE_DIR, VM_GUEST_INSTALL_STAGE_DIRECTORY),
+          "force-off fixture paths");
+    uint8_t fixture[HFS_FIXTURE_SIZE], observed[HFS_FIXTURE_SIZE];
+    make_dirty_hfs_fixture(fixture);
+    char detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+    CHECK(write_buffer(live, fixture, sizeof fixture) &&
+          save_automatic_checkpoint(false, HFS_FIXTURE_SIZE, detail, sizeof detail),
+          "force-off suspended source: %s", detail);
+    vm_guest_install_build_result_t result;
+    progress_log_t progress = {0};
+    vm_guest_install_build_status_t status = vm_guest_install_build_after_force_off(
+        FIXTURE_DIR, NULL, capture_progress, &progress, &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_ERR_ARGUMENT && result.forced_power_off &&
+          !result.powered_off_checkpoint_witnessed &&
+          result.rootfs.status == ROOTFS_WORK_OK && result.rootfs.source_unclean_accepted &&
+          !progress.staging_seen && !exists(stage) && !exists(marker),
+          "force-off did not discard resume and strictly preflight before packages: %s", detail);
+    CHECK(read_buffer(live, observed, sizeof observed) &&
+          memcmp(observed, fixture, sizeof fixture) == 0,
+          "force-off preflight changed source or stamped it clean");
+    status = vm_guest_install_build_after_force_off(
+        FIXTURE_DIR, NULL, NULL, NULL, NULL, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_ERR_ARGUMENT,
+          "force-off retry without result changed policy: %s", detail);
+    status = vm_guest_install_build_from_directory(
+        FIXTURE_DIR, NULL, NULL, NULL, &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_ERR_STORAGE_NOT_CLEAN &&
+          !result.forced_power_off && !result.powered_off_checkpoint_witnessed,
+          "force-off leaked into ordinary install policy: %s", detail);
+
+    /* A forced stop must not authorize geometry or allocation reconstruction. */
+    for (unsigned fault = 0; fault < 2; ++fault) {
+        make_dirty_hfs_fixture(fixture);
+        uint32_t offset = fault ? 48u : 44u; /* freeBlocks or totalBlocks */
+        uint32_t value = fault ? HFS_FIXTURE_BLOCKS : HFS_FIXTURE_BLOCKS + 1u;
+        write_be32(fixture + HFS_VOLUME_HEADER_OFFSET + offset, value);
+        write_be32(fixture + HFS_FIXTURE_SIZE - HFS_VOLUME_HEADER_OFFSET + offset, value);
+        CHECK(write_buffer(live, fixture, sizeof fixture), "force-off corrupt fixture");
+        memset(&progress, 0, sizeof progress);
+        status = vm_guest_install_build_after_force_off(
+            FIXTURE_DIR, NULL, capture_progress, &progress, &result, detail, sizeof detail);
+        CHECK(status == VM_GUEST_INSTALL_BUILD_ERR_ROOTFS && result.forced_power_off &&
+              !result.powered_off_checkpoint_witnessed && !result.filesystem_repaired &&
+              !progress.staging_seen && !exists(stage),
+              "force-off bypassed structural fault %u: %s", fault, detail);
+        CHECK(read_buffer(live, observed, sizeof observed) &&
+              memcmp(observed, fixture, sizeof fixture) == 0,
+              "force-off changed rejected source %u", fault);
+    }
+    make_dirty_hfs_fixture(fixture);
+    CHECK(write_buffer(live, fixture, sizeof fixture) &&
+          save_automatic_checkpoint(true, HFS_FIXTURE_SIZE, detail, sizeof detail),
+          "force-off clean shutdown fixture");
+    status = vm_guest_install_build_after_force_off(
+        FIXTURE_DIR, NULL, NULL, NULL, &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_ERR_ARGUMENT &&
+          !result.forced_power_off && result.powered_off_checkpoint_witnessed && exists(marker),
+          "existing clean shutdown proof was needlessly discarded: %s", detail);
+}
+
 static void test_dirty_existing_install_refuses_before_stage(void) {
     clear_fixture();
     CHECK(make_directory(FIXTURE_DIR), "could not create dirty fixture");
@@ -1474,6 +1542,22 @@ static void test_dirty_existing_install_refuses_before_stage(void) {
               "dirty refusal left maintenance artifact %s",
               MAINTENANCE_LEAVES[i]);
     }
+
+    write_be32(fixture + HFS_VOLUME_HEADER_OFFSET + 48u, HFS_FIXTURE_BLOCKS);
+    write_be32(fixture + HFS_FIXTURE_SIZE - HFS_VOLUME_HEADER_OFFSET + 48u,
+               HFS_FIXTURE_BLOCKS);
+    CHECK(write_buffer(live, fixture, sizeof fixture), "forced maintenance mismatch");
+    memset(&progress, 0, sizeof progress);
+    status = vm_guest_install_build_after_force_off(
+        FIXTURE_DIR, NULL, capture_progress, &progress, &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_ERR_ROOTFS && result.forced_power_off &&
+          result.already_installed && !result.powered_off_checkpoint_witnessed &&
+          !result.filesystem_repaired && !result.filesystem_recovery_transaction.committed &&
+          !progress.staging_seen,
+          "forced maintenance incorrectly authorized allocation recovery: %s", detail);
+    CHECK(read_buffer(live, observed, sizeof observed) &&
+          memcmp(observed, fixture, sizeof fixture) == 0,
+          "forced maintenance changed the rejected source");
 }
 
 static void test_powered_off_checkpoint_allows_only_dirty_bit(void) {
@@ -2515,6 +2599,7 @@ int main(void) {
     test_snapshot_blocks_free_count_recovery();
     test_committed_maintenance_cleanup_blocks_new_transaction();
     test_fresh_install_checks_shutdown_before_packages();
+    test_force_off_checks_disk_before_packages();
     test_dirty_existing_install_refuses_before_stage();
     test_powered_off_checkpoint_allows_only_dirty_bit();
     test_real_storage_upgrade_when_supplied();

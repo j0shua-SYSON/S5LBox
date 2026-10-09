@@ -832,9 +832,9 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     NSString *message = self.guestInstallRequest
         ? @"Install Cydia in the selected virtual machine. This does not "
            @"jailbreak your iPhone.\n\n"
-           @"The guest shuts down automatically. A new install replaces its "
-           @"disk; compatible upgrades preserve data. Back up important "
-           @"guest files first."
+           @"Force Power Off discards saved running state, then checks the "
+           @"disk before installing. Unsaved work may be lost. Back up "
+           @"important guest files first."
         : @"Return to Machines using Back, then open Settings > Jailbreak. "
            @"The guest must be shut down before its disk can be changed.";
     UIAlertController *alert = [UIAlertController
@@ -846,7 +846,7 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
                                             handler:nil]];
     if (self.guestInstallRequest) {
         __weak VMSettingsViewController *weakSelf = self;
-        [alert addAction:[UIAlertAction actionWithTitle:@"Continue"
+        [alert addAction:[UIAlertAction actionWithTitle:@"Force Off & Jailbreak"
                                                   style:UIAlertActionStyleDestructive
                                                 handler:^(UIAlertAction *action) {
             (void)action;

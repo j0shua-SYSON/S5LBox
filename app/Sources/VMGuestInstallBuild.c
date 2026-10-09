@@ -1430,13 +1430,13 @@ static rootfs_work_status_t build_probe_file_repair(
     rootfs_work_result_t *probe) {
     bool authorized = allow_unclean_source && *allow_unclean_source;
     rootfs_work_status_t status = rootfs_work_probe_file_repair_policy(
-        live, repair, authorized, authorized, state, probe);
+        live, repair, authorized, authorized && !(result && result->forced_power_off), state, probe);
     if (!build_rootfs_is_unclean(status, probe) ||
         !build_authorize_unclean_source(
             work_directory, live_size, allow_unclean_source, result))
         return status;
     return rootfs_work_probe_file_repair_policy(
-        live, repair, true, true, state, probe);
+        live, repair, true, !(result && result->forced_power_off), state, probe);
 }
 
 static rootfs_work_status_t build_probe_file_rewrite(
@@ -1448,13 +1448,13 @@ static rootfs_work_status_t build_probe_file_rewrite(
     rootfs_work_result_t *probe) {
     bool authorized = allow_unclean_source && *allow_unclean_source;
     rootfs_work_status_t status = rootfs_work_probe_file_rewrite_policy(
-        live, rewrite, authorized, authorized, state, probe);
+        live, rewrite, authorized, authorized && !(result && result->forced_power_off), state, probe);
     if (!build_rootfs_is_unclean(status, probe) ||
         !build_authorize_unclean_source(
             work_directory, live_size, allow_unclean_source, result))
         return status;
     return rootfs_work_probe_file_rewrite_policy(
-        live, rewrite, true, true, state, probe);
+        live, rewrite, true, !(result && result->forced_power_off), state, probe);
 }
 
 static rootfs_work_status_t build_validate_source(
@@ -1534,7 +1534,7 @@ static vm_guest_install_build_status_t build_maintain_install(
      * transaction used by powered-off boot recovery. A dirty source receives
      * this privilege only when its exact powered-off checkpoint independently
      * authorizes the existing narrow exception. */
-    bool allow_unclean_source = false;
+    bool allow_unclean_source = result && result->forced_power_off;
     bool source_validated = false;
     bool snapshot_gate_passed = false;
     rootfs_work_result_t accounting_probe;
@@ -1544,6 +1544,11 @@ static vm_guest_install_build_status_t build_maintain_install(
     if (result) result->rootfs = accounting_probe;
     if (accounting_status == ROOTFS_WORK_OK) {
         source_validated = true;
+    } else if (result && result->forced_power_off) {
+        /* Forced power loss does not authorize reconstructing catalog or
+         * allocation state. Preserve the source and refuse before staging. */
+        return build_rootfs_refusal(accounting_status, &accounting_probe,
+                                    detail, detail_capacity);
     } else if (accounting_status == ROOTFS_WORK_HFS_INVALID &&
                accounting_probe.source_allocation_free_count_mismatch &&
                (accounting_probe.source_cleanly_unmounted ||
@@ -2017,7 +2022,7 @@ static vm_guest_install_build_status_t build_maintain_install(
     options.preserve_fstab = true;
     options.allow_unclean_source = allow_unclean_source;
     options.repair_catalog_backlinks =
-        allow_unclean_source &&
+        allow_unclean_source && !(result && result->forced_power_off) &&
         (repair_needed || source_needed || trust_needed || verifier_needed ||
          cache_needed);
     if (grow_storage)
@@ -2267,9 +2272,9 @@ static vm_guest_install_build_status_t build_maintain_install(
     return VM_GUEST_INSTALL_BUILD_OK;
 }
 
-vm_guest_install_build_status_t
-vm_guest_install_build_from_directory(
-    const char *work_directory, const char *package_directory,
+static vm_guest_install_build_status_t
+build_from_directory(
+    const char *work_directory, const char *package_directory, bool force_off,
     vm_guest_install_build_progress_t progress, void *progress_context,
     vm_guest_install_build_result_t *result,
     char *detail, size_t detail_capacity) {
@@ -2279,6 +2284,12 @@ vm_guest_install_build_from_directory(
         build_detail(detail, detail_capacity,
                      "The machine work directory is missing.");
         return VM_GUEST_INSTALL_BUILD_ERR_ARGUMENT;
+    }
+
+    if (force_off) {
+        if (!vm_resume_checkpoint_disarm(work_directory, detail, detail_capacity))
+            return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
+        if (result) result->forced_power_off = true;
     }
 
     build_progress(progress, progress_context,
@@ -2410,7 +2421,7 @@ vm_guest_install_build_from_directory(
                      "The machine has no valid writable guest disk.");
         return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
     }
-    bool allow_unclean_source = false;
+    bool allow_unclean_source = force_off;
     rootfs_work_result_t preflight;
     rootfs_work_status_t preflight_status = build_validate_source(
         work_directory, live, live_size, &allow_unclean_source,
@@ -2596,6 +2607,36 @@ vm_guest_install_build_from_directory(
     build_progress(progress, progress_context,
                    VM_GUEST_INSTALL_BUILD_COMPLETE, 1u, 1u);
     return VM_GUEST_INSTALL_BUILD_OK;
+}
+
+vm_guest_install_build_status_t vm_guest_install_build_from_directory(
+    const char *work_directory, const char *package_directory,
+    vm_guest_install_build_progress_t progress, void *progress_context,
+    vm_guest_install_build_result_t *result,
+    char *detail, size_t detail_capacity) {
+    return build_from_directory(work_directory, package_directory, false,
+        progress, progress_context, result, detail, detail_capacity);
+}
+
+vm_guest_install_build_status_t vm_guest_install_build_after_force_off(
+    const char *work_directory, const char *package_directory,
+    vm_guest_install_build_progress_t progress, void *progress_context,
+    vm_guest_install_build_result_t *result,
+    char *detail, size_t detail_capacity) {
+    /* Keep policy available to all inner probes even if the caller needs no
+     * result. No persisted "force" flag can authorize a later unrelated run. */
+    vm_guest_install_build_result_t local_result;
+    char live[VM_GUEST_INSTALL_PATH_CAPACITY];
+    uint64_t size = 0u;
+    bool clean_shutdown = work_directory && *work_directory &&
+        build_join(live, work_directory, VM_GUEST_INSTALL_LIVE_FILE) &&
+        build_regular_file_size(live, &size) &&
+        vm_resume_checkpoint_probe_state(work_directory, size,
+            BUILD_CHECKPOINT_RAM_BASE, BUILD_CHECKPOINT_RAM_SIZE, NULL, 0u) ==
+                VM_RESUME_CHECKPOINT_POWERED_OFF;
+    return build_from_directory(work_directory, package_directory, !clean_shutdown,
+        progress, progress_context, result ? result : &local_result,
+        detail, detail_capacity);
 }
 
 const char *vm_guest_install_build_status_text(

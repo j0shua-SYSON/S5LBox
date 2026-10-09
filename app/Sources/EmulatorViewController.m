@@ -711,16 +711,15 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     /* A halted machine has already released its s5l8900_t, so there is no
      * state left to serialize. Leaving is still safe and must not trap the
      * user behind a save button that can never succeed. */
-    if (!_engine || ![_engine isRunning]) {
+    if (!_engine) {
         [self.navigationController popViewControllerAnimated:YES];
         return;
     }
 
     /* The built-in demo has no firmware disk or resumable CPU state. Close
      * it directly rather than showing a checkpoint failure for a demo. */
-    if (![_engine isRunningFirmware]) {
-        [_engine stop];
-        [self.navigationController popViewControllerAnimated:YES];
+    if (![_engine isRunning] || ![_engine isRunningFirmware]) {
+        [self forcePowerOff];
         return;
     }
 
@@ -752,9 +751,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
                 actionWithTitle:@"Leave Without Saving"
                           style:UIAlertActionStyleDestructive
                         handler:^(__unused UIAlertAction *action) {
-                            [strongSelf->_engine stop];
-                            [strongSelf.navigationController
-                                popViewControllerAnimated:YES];
+                            [strongSelf forcePowerOff];
                         }]];
             [strongSelf presentViewController:alert animated:YES completion:nil];
         }];
