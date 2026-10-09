@@ -93,13 +93,13 @@ typedef struct {
               @"disk — its own writable copy of the filesystem, made the first "
               @"time you open it — so what one machine does to iPhone OS does "
               @"not happen to the others.\n\nWhat they SHARE is the firmware "
-              @"you imported, which nothing ever writes to, and the switches in "
-              @"Settings, which are still one set for the whole app.\n\n"
+              @"you imported, which nothing ever writes to, and App Settings "
+              @"defaults. Machine Settings controls only the open session.\n\n"
               @"Swipe a machine for Rename, Duplicate and Delete. Duplicate "
               @"copies the settings, not the disk: the copy builds its own the "
               @"first time you open it. Delete removes that machine's disk too, "
               @"which is most of the space it uses.\n\n"
-              @"The gear on this screen opens Settings and firmware import "
+              @"The gear on this screen opens App Settings and firmware import "
               @"without starting a machine first. Tap a machine to open it."
               @"\n\nOnly one machine runs at a time. Each "
               @"needs 128 MB of memory to itself, and the emulator core runs "
@@ -128,9 +128,19 @@ typedef struct {
               @"gets its own writable copy of the filesystem, and every run "
               @"works on that. Your import is only ever read." }];
 
-    [e addObject:@{ @"h": @"Settings",
+    [e addObject:@{ @"h": @"Machine Settings",
+        @"b": @"Settings inside an open machine controls that session: pause "
+              @"the guest, choose whether to pause in the background, browse "
+              @"saved states, save and close, shut down, or restart. Restart "
+              @"asks first because unsaved guest work may be lost.\n\n"
+              @"Developer Mode adds an inline console and instruction limit "
+              @"for this session. These changes do not rewrite App Settings; "
+              @"opening a machine again starts with the app defaults. Firmware, "
+              @"jailbreak and new-machine setup stay in App Settings." }];
+
+    [e addObject:@{ @"h": @"App Settings",
         @"b": dev
-            ? @"Developer mode is ON, so Settings shows the full option table: "
+            ? @"Developer mode is ON, so App Settings shows the full option table: "
               @"sixteen switches that mirror the desktop tool exactly, plus "
               @"the instruction cap and the diagnostics pages.\n\nEach row says "
               @"whether it reaches the boot, is fixed into a work image, or "
@@ -139,7 +149,7 @@ typedef struct {
               @"of them changes the built-in test program, which has no device "
               @"tree to configure.\n\nThe screen also renders them as a command "
               @"line you can run on the desktop, where all sixteen are resolved."
-            : @"Settings is deliberately short. The switches that control how a "
+            : @"App Settings is deliberately short. The switches that control how a "
               @"real firmware boot is set up — which pieces of hardware the "
               @"guest is told about, which compatibility fixes are applied — "
               @"live behind Developer Mode.\n\nThey are not hidden because they "
