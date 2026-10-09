@@ -561,8 +561,8 @@ static UIImage *Tile(NSString *symbol) {
             else if (error) self->_status=nil;
             [self setWorking:NO]; op.outcome=error ? -1 : 1;
             op.operationState=error ? @"Needs attention" : removing ? @"Removal complete" : @"Installation complete";
-            op.operationDetail=error.localizedDescription ?: finish ?
-                [NSString stringWithFormat:@"Verified in your guest. %@ is required.",FinishTitle(finish)] : @"Verified in your guest. No restart was requested.";
+            op.operationDetail=error.localizedDescription ?: (finish ?
+                [NSString stringWithFormat:@"Verified in your guest. %@ is required.",FinishTitle(finish)] : @"Verified in your guest. No restart was requested.");
             [self report:op.operationDetail]; [self renderAll];
         });
     });
@@ -570,7 +570,7 @@ static UIImage *Tile(NSString *symbol) {
 - (void)applyGuestFinish {
     if (_busy || !_finishReady || !_finishAction || !_status) return;
     NSUInteger action=_finishAction; NSData *status=_status;
-    [self setWorking:YES]; [self report:[FinishTitle(action) stringByAppendingString:@"…"];
+    [self setWorking:YES]; [self report:[FinishTitle(action) stringByAppendingString:@"…"]];
     dispatch_async(_queue,^{
         NSError *error=nil; BOOL ok=[self->_bridge performFinish:status error:&error];
         dispatch_async(dispatch_get_main_queue(),^{
