@@ -53,6 +53,7 @@ static rootfs_work_entry_t *g_jb_entries = NULL;
 #include "snapshot.h"
 #include "soc.h"
 #include "usb_host.h"
+#include "usb_mux.h"
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 #include "a64_static.h"
 #include "vfp.h"
@@ -33595,6 +33596,8 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "          [--drag <at>:<x0>:<y0>:<x1>:<y1>[:<steps>[:<span>]]] ...\n"
             "          [--fast] [--run-api] [--frame-meter]\n"
             "          [--usb-enumerate] (virtual USB host; stops at usbmux configuration)\n"
+            "          [--usb-mux-probe] (also verifies the guest usbmux version handshake)\n"
+            "          [--usb-lockdown-probe] (also performs a real QueryType request)\n"
             "          [--interpreter-control | --compact-raw-control]\n"
             "          [--canonical-bus]\n"
             "          [--no-direct-ram-writes]\n"
@@ -33929,6 +33932,15 @@ int main(int argc, char **argv) {
      * emulated-machine toggle and therefore not snapshot state. */
     bool frame_meter_requested = false;
     bool usb_enumerate = false;
+    bool usb_mux_probe = false;
+    bool usb_lockdown_probe = false, usb_lockdown_ok = false;
+    int usb_lockdown_channel = -1;
+    unsigned usb_lockdown_sent = 0, usb_lockdown_received = 0;
+    uint8_t usb_lockdown_reply[4097] = {0};
+    static const char usb_lockdown_query[] =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+        "<plist version=\"1.0\"><dict><key>Label</key><string>S5LBox</string>"
+        "<key>Request</key><string>QueryType</string></dict></plist>";
     /* --sequence-profile: full instruction-entry aggregation in the literal
      * runner. It implies --fast so no unrelated observer dominates the run. */
     bool sequence_profile_requested = false;
@@ -34228,7 +34240,10 @@ int main(int argc, char **argv) {
             frame_meter_requested = true;
             continue;
         }
-        if (!strcmp(argv[i], "--usb-enumerate")) {
+        if (!strcmp(argv[i], "--usb-enumerate") || !strcmp(argv[i], "--usb-mux-probe") ||
+            !strcmp(argv[i], "--usb-lockdown-probe")) {
+            usb_lockdown_probe = !strcmp(argv[i], "--usb-lockdown-probe");
+            usb_mux_probe = usb_lockdown_probe || !strcmp(argv[i], "--usb-mux-probe");
             usb_enumerate = true;
             cfg.v.usb_otg = true;
             run_api_hot = fast_hot = true;
@@ -35398,6 +35413,8 @@ int main(int argc, char **argv) {
     s5l8900_t mach;
     if (!s5l8900_init(&mach, phys_base, ram_size)) { fprintf(stderr, "init failed\n"); return 1; }
     usb_host_t usb_host = {0};
+    static usb_mux_t usb_mux; /* host stream buffers are not machine state */
+    bool usb_mux_started = false;
     if (usb_enumerate) usb_host_init(&usb_host, &mach);
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     if (interpreter_control &&
@@ -37549,7 +37566,59 @@ external_md_work_ready:
                            usb_host.error ? usb_host.error : "");
                     fflush(stdout);
                 }
-                if (usb_host_ready(&usb_host) || usb_host.error) break;
+                if (usb_host.error) break;
+                if (usb_host_ready(&usb_host)) {
+                    if (!usb_mux_probe) break;
+                    if (!usb_mux_started) {
+                        usb_mux_init(&usb_mux); usb_mux_started = true;
+                    }
+                    usb_mux_poll(&usb_mux, &mach, &usb_host);
+                    if (usb_mux.error) {
+                        printf("USB mux rejected header:");
+                        for (unsigned i = 0; i < 16; i++) printf(" %02x", usb_mux.receive[i]);
+                        printf("\n");
+                        if (usb_mux.receive[3] == 1)
+                            printf("USB mux control: %.*s\n", 240, (const char *)usb_mux.receive + 17);
+                        break;
+                    }
+                    if (usb_mux_ready(&usb_mux)) {
+                        if (!usb_lockdown_probe) break;
+                        if (usb_lockdown_channel < 0)
+                            usb_lockdown_channel = usb_mux_connect(&usb_mux, 62078);
+                        if (usb_lockdown_channel >= 0) {
+                            unsigned ch = (unsigned)usb_lockdown_channel;
+                            if (usb_mux.channel[ch].error) break;
+                            const unsigned length = sizeof usb_lockdown_query - 1u;
+                            uint8_t query[4 + sizeof usb_lockdown_query - 1];
+                            query[0] = (uint8_t)(length >> 24);
+                            query[1] = (uint8_t)(length >> 16);
+                            query[2] = (uint8_t)(length >> 8);
+                            query[3] = (uint8_t)length;
+                            memcpy(query + 4, usb_lockdown_query, length);
+                            usb_lockdown_sent += (unsigned)usb_mux_write(&usb_mux, ch,
+                                query + usb_lockdown_sent, sizeof query - usb_lockdown_sent);
+                            usb_lockdown_received += (unsigned)usb_mux_read(&usb_mux, ch,
+                                usb_lockdown_reply + usb_lockdown_received,
+                                sizeof usb_lockdown_reply - 1u - usb_lockdown_received);
+                            if (usb_lockdown_received >= 4) {
+                                unsigned n = (unsigned)usb_lockdown_reply[0] << 24 |
+                                    (unsigned)usb_lockdown_reply[1] << 16 |
+                                    (unsigned)usb_lockdown_reply[2] << 8 | usb_lockdown_reply[3];
+                                if (n > sizeof usb_lockdown_reply - 5u) break;
+                                if (usb_lockdown_received == n + 4u) {
+                                    /* QueryType has no credentials or user data. The app
+                                     * uses Foundation's plist parser; this bounded smoke
+                                     * probe prints the real reply for inspection. */
+                                    printf("Lockdown QueryType: %.*s\n", (int)n,
+                                           (const char *)usb_lockdown_reply + 4);
+                                    usb_lockdown_ok = strstr((const char *)usb_lockdown_reply + 4,
+                                        "<string>com.apple.mobile.lockdown</string>") != NULL;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
             /* VMEngine drains its input queues here, between app chunks.  The
              * absolute schedules below can split the preceding chunk so these
@@ -39678,6 +39747,20 @@ external_md_work_ready:
                mach.usbotg.ep[0][0].size, mach.usbotg.ep[1][0].size,
                usb_host.error ? usb_host.error : "");
         if (!usb_host_ready(&usb_host)) exit_code = 6;
+        if (usb_mux_probe) {
+            printf("USB mux: started=%u ready=%u version=%u %s\n",
+                   usb_mux_started, usb_mux_ready(&usb_mux), usb_mux.version,
+                   usb_mux.error ? usb_mux.error : "");
+            if (!usb_mux_ready(&usb_mux)) exit_code = 6;
+        }
+        if (usb_lockdown_probe) {
+            printf("Lockdown probe: channel=%d sent=%u received=%u type-verified=%u %s\n",
+                   usb_lockdown_channel, usb_lockdown_sent, usb_lockdown_received,
+                   usb_lockdown_ok, usb_lockdown_channel >= 0 &&
+                   usb_mux.channel[usb_lockdown_channel].error ?
+                   usb_mux.channel[usb_lockdown_channel].error : "");
+            if (!usb_lockdown_ok) exit_code = 6;
+        }
     }
     if (bridge_halt_failure) exit_code = 7;
     else if (guest_fatal_entry_seen) exit_code = 10;

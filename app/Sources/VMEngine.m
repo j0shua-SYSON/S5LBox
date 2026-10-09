@@ -39,7 +39,9 @@
 #import "VMInstancePaths.h"
 #import "VMInstanceStore.h"
 #import "VMSettings.h"
+#import "VMUSBTransport.h"
 #include "usb_host.h"
+#include "usb_mux.h"
 
 #import <mach/mach.h>
 #import <pthread.h>
@@ -153,6 +155,10 @@ static double vm_engine_now_seconds(void) {
     s5l8900_t        _machine;
     usb_host_t       _usbHost;
     BOOL             _usbHostActive;
+    usb_mux_t       *_usbMux;
+    double           _usbMuxStart;
+    BOOL             _usbMuxReported;
+    VMUSBTransport  *_usbTransport;
     /* The provisioning copy's byte counters; see -rootFilesystemProgress. */
     uint64_t         _prepareDone;
     uint64_t         _prepareTotal;
@@ -288,8 +294,11 @@ static double vm_engine_now_seconds(void) {
     _mode    = @"";
     _bringUpNote = @"";
     _instanceID = [identifier copy];
+    _usbTransport = [[VMUSBTransport alloc] init];
     return self;
 }
+
+- (VMUSBTransport *)usbTransport { return _usbTransport; }
 
 - (void)dealloc {
     // Safe without any handshake: NSThread holds a strong reference to its
@@ -852,6 +861,8 @@ static double vm_engine_now_seconds(void) {
     }
 
     _usbHostActive = _machine.usbotg.enabled != 0;
+    if (_usbHostActive) [_usbTransport beginSession];
+    else [_usbTransport endSession:@"This boot has no virtual USB controller. Enable USB OTG, shut down, and start the machine again."];
     if (_usbHostActive) {
         /* A saved guest retains its controller, not this process's host
          * session. Deliver cable removal before starting a new host session. */
@@ -872,6 +883,7 @@ static double vm_engine_now_seconds(void) {
                                                selector:@selector(threadMain:)
                                                  object:nil];
     if (!thread) {
+        [_usbTransport endSession:@"The emulator thread could not be started."];
         s5l8900_free(&_machine);
         vm_firmware_boot_destroy(&_firmwareBoot);
         pthread_mutex_lock(&_lock);
@@ -896,6 +908,7 @@ static double vm_engine_now_seconds(void) {
     pthread_mutex_unlock(&_lock);
 
     if (cancelled) {
+        [_usbTransport endSession:@"Machine startup was canceled."];
         s5l8900_free(&_machine);
         vm_firmware_boot_destroy(&_firmwareBoot);
         pthread_mutex_lock(&_lock);
@@ -1962,12 +1975,43 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
                     usb_host_init(&_usbHost, &_machine); /* guest reboot */
                 unsigned previous = _usbHost.stage;
                 usb_host_poll(&_usbHost, &_machine);
+                if (!usb_host_ready(&_usbHost) && _usbMux) {
+                    [_usbTransport beginSession];
+                    usb_mux_cancel(_usbMux, "Guest USB controller reset");
+                    free(_usbMux); _usbMux = NULL;
+                    _usbMuxReported = NO;
+                }
                 if (previous != _usbHost.stage) {
                     [self appendConsole:[NSString stringWithFormat:
                         @"[usb] stage=%u VID/PID=%04x/%04x configuration=%u bulk=%u/%u %s\n",
                         _usbHost.stage, _usbHost.vendor, _usbHost.product,
                         _usbHost.configuration, _usbHost.bulk_in, _usbHost.bulk_out,
                         _usbHost.error ?: ""]];
+                }
+                if (usb_host_ready(&_usbHost)) {
+                    if (!_usbMux && !_usbMuxReported) {
+                        _usbMux = calloc(1, sizeof *_usbMux);
+                        if (_usbMux) {
+                            usb_mux_init(_usbMux);
+                            _usbMuxStart = vm_engine_now_seconds();
+                        } else {
+                            _usbMuxReported = YES;
+                            [self appendConsole:@"[usb] usbmux allocation failed\n"];
+                        }
+                    }
+                    if (_usbMux) {
+                        usb_mux_poll(_usbMux, &_machine, &_usbHost);
+                        if (!usb_mux_ready(_usbMux) && !_usbMux->error &&
+                            vm_engine_now_seconds() - _usbMuxStart > 120.0)
+                            usb_mux_cancel(_usbMux, "Guest usbmux negotiation timed out");
+                        [_usbTransport pollWithMux:_usbMux];
+                        if (!_usbMuxReported && (usb_mux_ready(_usbMux) || _usbMux->error)) {
+                            _usbMuxReported = YES;
+                            [self appendConsole:[NSString stringWithFormat:
+                                @"[usb] usbmux version=%u ready=%u %s\n",
+                                _usbMux->version, usb_mux_ready(_usbMux), _usbMux->error ?: ""]];
+                        }
+                    }
                 }
             }
 
@@ -2125,6 +2169,8 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
             (int)status, _machine.cpu.r[15], _machine.cpu.cpsr,
             (unsigned long long)retired]];
 
+    [_usbTransport endSession:@"The machine stopped. The USB service session was closed."];
+    free(_usbMux); _usbMux = NULL; _usbMuxReported = NO;
     if (_machineReady) {
         [self exportGuestPCProfile_emulatorThread];
         [self exportNativePCProfile_emulatorThread];

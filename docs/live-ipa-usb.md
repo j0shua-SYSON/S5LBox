@@ -33,10 +33,29 @@ Synthetic enumeration does not prove Apple firmware enumeration.
 The first real 7E18 host run retired 4 billion instructions without a CPU error
 and started `AppleSynopsysOTGCore`, but never connected: GAHBCFG/GINTMSK remained
 zero and DCTL remained soft-disconnected. That run predated the PMU supply path.
-No successful guest descriptor exchange or live installation has been observed.
+That connection failure is now resolved. The 7E18 initialization sequence never
+clears DCTL.SDIS after core reset; using the older integration's connected reset
+state, and waiting for DMA/reset-interrupt readiness before issuing reset,
+produced real enumeration at 6,567,000,000 retired instructions. Guest descriptors
+reported VID/PID `05ac/1292`, configuration 3, bulk IN 3 / OUT 2. This reset value
+is inferred from the actual driver sequence and cross-checked against the older
+S5L8900 model, not measured from physical silicon.
 
-Next gates: stock firmware enumeration; usbmux version/TCP transport;
-lockdown pairing/session; AFC upload to `PublicStaging`; installation_proxy
+The real guest also negotiated usbmux v2 and answered `QueryType` over a TCP-like
+stream to port 62078: `com.apple.mobile.lockdown`, 346 framed reply bytes. Host
+fixtures live under `work/usb-live-validation/lockdown-04.*` (not committed).
+Two failed assumptions are covered by regressions: the guest's v2 reserved
+signature is zero, not the host-to-device `feedface`; control warning/info
+messages are not fatal transport errors.
+
+The portable multiplexing layer has four bounded streams, fixed-scale windows,
+fragment reassembly, sequence/ACK validation, cancellation, and bulk ZLP framing.
+The native bridge uses nonblocking local socket pairs so service/TLS work runs
+on a worker without touching emulator-owned state. Pairing and TLS client code
+is under development and is not an installation-success claim.
+
+Next gates: native service-layer build/tests; lockdown pairing/session;
+AFC upload to `PublicStaging`; installation_proxy
 progress/Complete; then guest icon and launch. Signing/provisioning rejection
 must be surfaced honestly. Kernel jailbreak support alone does not prove that
 the installation service will accept every unsigned IPA.

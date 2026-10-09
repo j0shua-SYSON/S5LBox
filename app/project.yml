@@ -94,6 +94,7 @@ targets:
     # discover on a CI runner.
     dependencies:
       - sdk: Foundation.framework
+      - sdk: Security.framework
       - sdk: UIKit.framework
       - sdk: CoreGraphics.framework
       - sdk: QuartzCore.framework

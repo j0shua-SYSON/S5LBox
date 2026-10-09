@@ -10,6 +10,7 @@
 #import <Foundation/Foundation.h>
 #import "VMGuest.h"
 #import "VMTouchMap.h"
+@class VMUSBTransport;
 
 /* The iPhone 3G's physical inputs, in the order the control bar shows them.
  * The ringer is a sliding switch rather than a button on the real device; it is
@@ -101,6 +102,8 @@ typedef void (^VMEngineStopCompletion)(void);
  * without anyone pressing anything. */
 - (BOOL)isPaused;
 - (BOOL)isRunning;
+/* Service clients run off-main; this transport never accesses the guest disk. */
+- (VMUSBTransport *)usbTransport;
 
 /* Stop after this many retired instructions, 0 for no limit. Checked between
  * chunks on the emulator thread, so a change takes effect within a few tens of

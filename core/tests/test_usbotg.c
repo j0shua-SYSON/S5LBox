@@ -40,6 +40,7 @@ static void test_enumeration(bool malformed) {
     usb_host_t host;
     usb_host_init(&host, &m);
     wr(USBOTG_GAHBCFG, 0x21);
+    wr(USBOTG_GINTMSK, USBOTG_INT_RESET | USBOTG_INT_ENUM);
     wr(USBOTG_DCTL, 0);
     bool status_in = false;
     unsigned requests = 0;
@@ -99,6 +100,8 @@ int main(void) {
     CHECK(!s5l_usbotg_bus_reset(&m.usbotg));
     s5l_usbotg_connect(&m.usbotg, true);
     CHECK(rd(USBOTG_GOTGCTL) & (1u << 19));
+    CHECK(rd(USBOTG_DCTL) == 0);
+    wr(USBOTG_DCTL, 2u);
     CHECK(!s5l_usbotg_bus_reset(&m.usbotg)); /* soft disconnected */
     wr(USBOTG_DCTL, 0u);
     wr(USBOTG_GAHBCFG, 0x21u);

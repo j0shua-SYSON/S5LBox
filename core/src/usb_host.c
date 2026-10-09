@@ -97,10 +97,22 @@ static bool parse_config(usb_host_t *h) {
 }
 
 void usb_host_poll(usb_host_t *h, s5l8900_t *m) {
-    if (h->stage == FAILED || h->stage == READY) return;
+    if (h->stage == FAILED) return;
+    if (h->stage == READY) {
+        /* A guest core reset removes its USB address. Old service streams
+         * must be discarded; descriptors and endpoints must be rediscovered. */
+        if (m->usbotg.enabled && m->usbotg.connected &&
+            (m->usbotg.dcfg & (0x7fu << 4))) return;
+        memset(h, 0, sizeof *h);
+    }
     if (h->control && !control_poll(h, m)) return;
     switch (h->stage) {
         case WAIT_DEVICE:
+            /* Firmware may reset/reconfigure the controller several times
+             * before it is able to receive a bus-reset interrupt. */
+            if ((m->usbotg.gahbcfg & 0x21u) != 0x21u ||
+                !(m->usbotg.gintmsk & USBOTG_INT_RESET) ||
+                (m->usbotg.pcgcctl & 1u)) return;
             if (s5l_usbotg_bus_reset(&m->usbotg)) {
                 m->level_dirty = true; h->stage = WAIT_RESET;
             }

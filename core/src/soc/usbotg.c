@@ -30,7 +30,12 @@ void s5l_usbotg_reset(s5l_usbotg_t *u) { memset(u, 0, sizeof *u); }
 void s5l_usbotg_enable(s5l_usbotg_t *u) {
     if (!u || u->enabled) return;
     u->enabled = 1u;
-    u->dctl = SOFT_DISCONNECT;
+    /* This older integration starts connected at the controller level;
+     * Apple's 7E18 initialization resets/configures the core without clearing
+     * SDIS. A modern STM32-style reset value of 2 leaves it disconnected
+     * forever. This matches the older S5L8900 model, not a measured chip dump.
+     * Cable presence and host readiness still gate every transfer. */
+    u->dctl = 0;
     for (unsigned d = 0; d < 2u; d++)
         for (unsigned n = 0; n < S5L_USB_ENDPOINTS; n++)
             u->ep[d][n].ctl = USBOTG_EP_NAK;
