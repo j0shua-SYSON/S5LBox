@@ -177,7 +177,8 @@ jobs:
             -Werror=unguarded-availability -Werror=unguarded-availability-new \
             -Iapp/Sources -Icore/include -Itools -fsyntax-only \
             app/Sources/VMPackageCatalog.m app/Sources/VMPackageRepository.m \
-            app/Sources/VMPackageBridge.m app/Sources/VMPackageManagerViewController.m
+            app/Sources/VMPackageBridge.m app/Sources/VMPackageManagerViewController.m \
+            app/Sources/VMUSBService.m app/Sources/VMUSBPairing.m
 
       - name: Compile-check every JIT source for iphoneos
         # The app deliberately excludes jit/** until the run loop owns a code

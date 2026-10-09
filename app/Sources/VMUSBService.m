@@ -162,7 +162,11 @@ static OSStatus ServiceWrite(SSLConnectionRef ref, const void *data, size_t *siz
         if (status == errSSLServerAuthCompleted) {
             SecTrustRef trust = NULL;
             OSStatus copied = SSLCopyPeerTrust(_tls, &trust);
-            SecKeyRef peer = !copied && trust ? SecTrustCopyKey(trust) : NULL;
+            SecKeyRef peer = NULL;
+            if (!copied && trust) {
+                if (@available(iOS 14.0, *)) peer = SecTrustCopyKey(trust);
+                else peer = SecTrustCopyPublicKey(trust);
+            }
             CFDataRef actual = peer ? SecKeyCopyExternalRepresentation(peer, NULL) : NULL;
             CFDataRef expected = SecKeyCopyExternalRepresentation(key, NULL);
             pinned = actual && expected && CFEqual(actual, expected);
