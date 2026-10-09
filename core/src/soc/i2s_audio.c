@@ -155,15 +155,22 @@ static uint32_t encode(float v, unsigned bits) {
     return (uint32_t)(int64_t)n;
 }
 
-void s5l_i2s_audio_tick(s5l_i2s_t *s, const s5l_wm8991_t *c,
+bool s5l_i2s_audio_tick(s5l_i2s_t *s, const s5l_wm8991_t *c,
                        uint32_t ticks, uint32_t tick_hz) {
-    if (!s || !c || !tick_hz) return;
+    if (!s || !c || !tick_hz) return false;
     configure(s, c);
+    bool clock_edge = false;
     for (unsigned d = 0; d < 2; d++) {
-        if (!running(s, d) || !s->audio.rate[d] || !sample_bits(s, d)) continue;
+        /* LRCLK exists before TXCOM/RXCOM start. The stock slave-mode driver
+         * waits for two GPIO clock edges BEFORE issuing its first DMA request
+         * (7E18 c05a3948..c05a3a04). Gating the clock on DMA deadlocks it. */
+        bool active = running(s, d) && sample_bits(s, d);
+        if (!(s->regs[0] & 1u) || !s->audio.rate[d] || (d && !active)) continue;
         uint64_t phase = s->audio.phase[d] + (uint64_t)ticks * s->audio.rate[d];
         uint64_t frames = phase / tick_hz;
         s->audio.phase[d] = phase % tick_hz;
+        if (!d && frames && (s->regs[1] & (1u << 20))) clock_edge = true;
+        if (!active) continue;
         /* Normal machine stepping stops at each sample edge. Bound externally
          * supplied huge tick jumps as well: count lost time, never allocate or
          * loop for millions of frames on a corrupt/hostile guest clock jump. */
@@ -187,6 +194,14 @@ void s5l_i2s_audio_tick(s5l_i2s_t *s, const s5l_wm8991_t *c,
             s->audio.frames[d]++;
         }
     }
+    return clock_edge;
+}
+
+uint32_t s5l_i2s_clock_next(const s5l_i2s_t *s, uint32_t tick_hz) {
+    if (!s || !tick_hz || !(s->regs[0] & 1u) ||
+        !(s->regs[1] & (1u << 20)) || !s->audio.rate[0]) return 0;
+    uint32_t rate = s->audio.rate[0];
+    return (uint32_t)((tick_hz - s->audio.phase[0] + rate - 1u) / rate);
 }
 
 uint32_t s5l_i2s_audio_next(const s5l_i2s_t *s, uint32_t tick_hz) {

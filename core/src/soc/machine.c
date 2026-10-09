@@ -1122,6 +1122,16 @@ static s5l_wake_kind_t wake_edge_gpio(const s5l8900_t *m, uint32_t *ticks) {
     return S5L_WAKE_NEVER;
 }
 
+/* N82 i2s0 interrupts {0x86,0}: GPIO group 4, bit 6, cascade VIC 2.
+ * Unlike host-driven touch, its clock has a predictable next edge. */
+static s5l_wake_kind_t wake_edge_gpio4(const s5l8900_t *m, uint32_t *ticks) {
+    if (m->gpioic.en[4] & (1u << 6)) {
+        uint32_t next = s5l_i2s_clock_next(&m->i2s[0], m->tb_hz);
+        if (next) { *ticks = next; return S5L_WAKE_AT; }
+    }
+    return S5L_WAKE_NEVER;
+}
+
 /*
  * uart4's receive line, and the answer docs/derivations.md §23.5.1 asked for:
  * "S5L_WAKE_NEVER when the RX FIFO is empty and an immediate edge when it is
@@ -1178,7 +1188,7 @@ static const s5l_wake_source_t WAKE_SOURCES[] = {
     { "gpio-group1", 32u, wake_edge_gpio },
     { "gpio-group2", 31u, wake_edge_gpio },
     { "gpio-group3",  3u, wake_edge_gpio },
-    { "gpio-group4",  2u, wake_edge_gpio },
+    { "gpio-group4",  2u, wake_edge_gpio4 },
     { "gpio-group5",  1u, wake_edge_gpio },
     { "gpio-group6",  0u, wake_edge_gpio },
     { "uart4-rx", S5L8900_IRQ_UART4, wake_edge_uart4 },
@@ -2203,6 +2213,7 @@ static void s5l8900_refresh(s5l8900_t *m, uint32_t tb) {
     s5l_i2s_audio_tick(&m->i2s[0], &m->codec, 0, m->tb_hz);
     uint32_t audio_remaining = tb;
     unsigned audio_slices = 0;
+    bool audio_clock_edge = false;
     do {
         for (unsigned i = 0; i < S5L8900_DMAC_COUNT; i++) {
             m->dma_access_active = true;
@@ -2216,14 +2227,23 @@ static void s5l8900_refresh(s5l8900_t *m, uint32_t tb) {
         if (!audio_remaining) break;
         uint32_t step = s5l_i2s_audio_next(&m->i2s[0], m->tb_hz);
         if (!step || step > audio_remaining) {
-            s5l_i2s_audio_tick(&m->i2s[0], &m->codec, audio_remaining, m->tb_hz);
+            audio_clock_edge |= s5l_i2s_audio_tick(&m->i2s[0], &m->codec,
+                                                  audio_remaining, m->tb_hz);
             break; /* no sample edge, so no new DMA request */
         }
         if (audio_slices++ >= 4096u)
             step = audio_remaining;
-        s5l_i2s_audio_tick(&m->i2s[0], &m->codec, step, m->tb_hz);
+        audio_clock_edge |= s5l_i2s_audio_tick(&m->i2s[0], &m->codec, step, m->tb_hz);
         audio_remaining -= step;
     } while (true);
+
+    /* Edge-latched GPIO: coalesce elapsed clock edges into one pending bit,
+     * not one interrupt per sample after the driver has masked the line. */
+    if (audio_clock_edge) {
+        s5l_gpioic_set_line(&m->gpioic, 134u, false);
+        s5l_gpioic_set_line(&m->gpioic, 134u, true);
+        s5l_gpioic_set_line(&m->gpioic, 134u, false);
+    }
 
     s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_UART4,
                      s5l_uart_rx_irq(&m->uart4));

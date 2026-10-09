@@ -132,8 +132,41 @@ static void test_real_dma_and_batched_time(void) {
     CHECK(m.bus.read32(m.bus.ctx, 0x2000) == 0xc0002000u);
     s5l8900_free(&m);
 }
+static void test_clock_before_dma(void) {
+    s5l8900_t m; capture_t cap = {0}; setup(&m, &cap);
+    m.cpu_hz = m.tb_hz = 6000000;
+    s5l_i2s_write_width(&m.i2s[0], 8, 0, 4);
+    s5l_i2s_write_width(&m.i2s[0], 0x34, 0, 4);
+    s5l_gpioic_write(&m.gpioic, GPIOIC_INTEN + 4 * 4, 1u << 6);
+    const s5l_wake_source_t *sources = NULL;
+    unsigned n = s5l8900_wake_sources(&sources), seen = 0;
+    for (unsigned i = 0; i < n; i++) if (!strcmp(sources[i].name, "gpio-group4")) {
+        uint32_t edge = 0;
+        CHECK(sources[i].next_edge(&m, &edge) == S5L_WAKE_AT && edge == 137);
+        seen++;
+    }
+    CHECK(seen == 1);
+    s5l8900_tick(&m, 136);
+    CHECK(!(m.gpioic.stat[4] & (1u << 6)));
+    s5l8900_tick(&m, 1);
+    CHECK(m.gpioic.stat[4] & (1u << 6));
+    CHECK(s5l_gpioic_group_irq(&m.gpioic, 4));
+    CHECK(cap.calls[0] == 0 && cap.calls[1] == 0);
+    CHECK(m.i2s[0].audio.frames[0] == 0 && m.i2s[0].audio.count[1] == 0);
+    s5l_gpioic_write(&m.gpioic, GPIOIC_INTSTAT + 4 * 4, 1u << 6);
+    s5l8900_tick(&m, 0);
+    CHECK(!(m.gpioic.stat[4] & (1u << 6)));
+    s5l8900_tick(&m, 136);
+    CHECK(m.gpioic.stat[4] & (1u << 6)); /* second edge unblocks stock start */
+    s5l_gpioic_write(&m.gpioic, GPIOIC_INTEN + 4 * 4, 0);
+    CHECK(!s5l_gpioic_group_irq(&m.gpioic, 4));
+    s5l_i2s_write_width(&m.i2s[0], 0, 0, 4);
+    CHECK(s5l_i2s_clock_next(&m.i2s[0], m.tb_hz) == 0);
+    s5l8900_free(&m);
+}
 int main(void) {
     test_transport(); test_clock_and_snapshot(); test_real_dma_and_batched_time();
+    test_clock_before_dma();
     printf("I2S PCM: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

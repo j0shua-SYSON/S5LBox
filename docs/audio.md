@@ -46,14 +46,27 @@ passed. Transport IPA SHA-256:
 `fee25b33c6a041d0d3e4158bf22e959c39b2c40b357b08f9cac4ef92e39efc42`.
 The artifact is an ad-hoc-signed lab transport, not a stock-install signing claim.
 
-The physical phone remained locked; this candidate has **not** replaced the
-installed app. A disposable desktop probe restored the older USB checkpoint and
+The candidate was installed after the phone was unlocked. A new disposable
+4 GiB machine (`audio-disk-4g-test`) booted to SpringBoard and saved/reopened.
+The host engine starts on iOS 15.8.5, and opt-in microphone permission enables
+the input route. Voice Memos, however, stalled before starting recording:
+the captured state had GPIO4 enable `08000040`, zero pending bits, I2S0
+TXCON `01100301`, both transfer commands stopped, and zero PCM frames.
+The exact driver (`c05a3948..c05a3a04`, handler `c05a3c2c`) waits for two
+clock interrupts on DT GPIO line 134 before starting DMA. The original candidate
+never supplied these edges. The follow-up clocks LRCLK independently of serial
+transfer enable, routes its edge through GPIO4/VIC2 and declares the WFI deadline.
+Regression coverage includes both pre-DMA edges, acknowledgement, masking and
+no invented PCM while serial transfer is stopped. Live retesting remains required.
+
+Earlier, a disposable desktop probe restored the older USB checkpoint and
 executed another 150 million instructions with three board-level power presses.
 It produced **zero PCM**, and its final display capture failed (no active RGB
 window). That attempt is not an audio pass and does not identify an audio cause.
 Logs are under project-local `work/audio-validation/lock-sound-02.*.log`.
 
-Next device checks: system click/lock sounds, media playback and volume/mute;
+Next device checks: retest Voice Memos after the clock-interrupt fix, then
+system click/lock sounds, media playback and volume/mute;
 enable microphone explicitly and record/replay a short Voice Memos clip;
 deny permission and verify silence; pause/resume, background, route changes,
 and save/reopen without replaying old host samples. Keep main unchanged until

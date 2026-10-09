@@ -2537,9 +2537,11 @@ void     s5l_i2s_write(s5l_i2s_t *i2s, uint32_t off, uint32_t val);
 uint32_t s5l_i2s_read_width(s5l_i2s_t *i2s, uint32_t off, unsigned width);
 void s5l_i2s_write_width(s5l_i2s_t *i2s, uint32_t off, uint32_t val, unsigned width);
 bool s5l_i2s_dma_ready(const s5l_i2s_t *i2s, unsigned width, bool source);
-void s5l_i2s_audio_tick(s5l_i2s_t *i2s, const s5l_wm8991_t *codec,
+/* Returns a codec LRCLK edge even before a serial transfer is started. */
+bool s5l_i2s_audio_tick(s5l_i2s_t *i2s, const s5l_wm8991_t *codec,
                        uint32_t ticks, uint32_t tick_hz);
 uint32_t s5l_i2s_audio_next(const s5l_i2s_t *i2s, uint32_t tick_hz);
+uint32_t s5l_i2s_clock_next(const s5l_i2s_t *i2s, uint32_t tick_hz);
 /* The byte offset backing slot `index`, or UINT32_MAX past the end. The map is
  * exposed so the tests pin the exact seven the driver writes rather than
  * re-deriving them from this model's own storage order. */
