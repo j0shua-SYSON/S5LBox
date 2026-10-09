@@ -2,6 +2,6 @@
 #import <UIKit/UIKit.h>
 
 @interface VMIPALibraryViewController : UITableViewController
-- (instancetype)initWithMachineName:(NSString *)name;
+- (instancetype)init;
 @property (nonatomic, copy) void (^selectionHandler)(NSURL *url);
 @end

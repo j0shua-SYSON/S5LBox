@@ -10,14 +10,12 @@
 
 @implementation VMIPALibraryViewController {
     NSArray<NSURL *> *_files;
-    NSString *_machineName;
     NSString *_status;
     BOOL _importing;
 }
-- (instancetype)initWithMachineName:(NSString *)name {
+- (instancetype)init {
     self = [super initWithStyle:UITableViewStyleInsetGrouped];
     if (!self) return nil;
-    _machineName = [name copy];
     _files = @[];
     self.title = @"IPA Library";
     return self;
@@ -53,7 +51,7 @@
     return section == 0 ? 1 : MAX((NSUInteger)1, _files.count);
 }
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    return section == 1 ? [NSString stringWithFormat:@"Install in %@", _machineName] : nil;
+    return section == 1 ? @"Apps" : nil;
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];

@@ -118,7 +118,6 @@ static NSString *VMStringFromC(const char *text) {
 - (void)refreshBanner;
 - (void)confirmGuestInstall;
 - (void)chooseMachineForGuestInstall;
-- (void)chooseMachineForGuestInstallIPA:(BOOL)ipa;
 - (void)inlineConsoleChanged:(UISwitch *)sender;
 - (void)developerModeToggled:(UISwitch *)sender;
 - (void)chooseGraphicsMode;
@@ -766,7 +765,8 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
         } else if (indexPath.row == VMGeneralRowJailbreak) {
             [self confirmGuestInstall];
         } else if (indexPath.row == VMGeneralRowInstallIPA) {
-            [self chooseMachineForGuestInstallIPA:YES];
+            void (^request)(void) = [self.guestIPARequest copy];
+            if (request) [self dismissViewControllerAnimated:YES completion:request];
         }
         return;
     }
@@ -857,11 +857,7 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
 }
 
 - (void)chooseMachineForGuestInstall {
-    [self chooseMachineForGuestInstallIPA:NO];
-}
-
-- (void)chooseMachineForGuestInstallIPA:(BOOL)ipa {
-    void (^request)(NSString *, NSString *) = [(ipa ? self.guestIPARequest : self.guestInstallRequest) copy];
+    void (^request)(NSString *, NSString *) = [self.guestInstallRequest copy];
     if (!request) return;
     VMInstanceStore *store = [VMInstanceStore sharedStore];
     NSMutableArray<NSDictionary<NSString *, NSString *> *> *eligible =
@@ -878,14 +874,13 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
         NSString *work = [machine stringByAppendingPathComponent:leaf];
         NSDictionary *attributes = [files attributesOfItemAtPath:work error:NULL];
         if ([attributes[NSFileSize] unsignedLongLongValue] == 0u) continue;
-        if (ipa && vm_guest_install_probe(machine.fileSystemRepresentation, NULL, NULL, 0) != VM_GUEST_INSTALL_PROBE_VALID) continue;
         [eligible addObject:@{ @"id": identifier, @"name": name }];
     }
 
     if (eligible.count == 0u) {
         UIAlertController *none = [UIAlertController
             alertControllerWithTitle:@"No prepared machine"
-                             message:ipa ? @"Jailbreak a machine from App Settings before installing an IPA." : @"Open a machine once so its writable root "
+                             message:@"Open a machine once so its writable root "
                                       @"filesystem is prepared, return with Back, "
                                       @"then try again."
                       preferredStyle:UIAlertControllerStyleAlert];

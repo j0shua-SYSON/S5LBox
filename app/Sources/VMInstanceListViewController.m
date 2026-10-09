@@ -8,6 +8,7 @@
 #import "EmulatorViewController.h"
 #import "VMEngine.h"
 #import "VMGuestInstallViewController.h"
+#import "VMGuestInstall.h"
 #import "VMIPAInstallViewController.h"
 #import "VMIPALibraryViewController.h"
 #import "VMGuest.h"
@@ -25,6 +26,9 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
              afterShutdown:(void (^)(void))afterShutdown;
 - (void)prepareGuestInstall:(UIViewController *)install
                 instanceID:(NSString *)identifier returningThrough:(UIViewController *)library;
+- (void)chooseMachineForIPA:(NSURL *)url library:(VMIPALibraryViewController *)library;
+- (void)inspectIPA:(NSURL *)url library:(VMIPALibraryViewController *)library
+       instanceID:(NSString *)identifier machineName:(NSString *)name;
 @end
 
 @implementation VMInstanceListViewController
@@ -193,45 +197,17 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
         };
         [self_ prepareGuestInstall:install instanceID:identifier returningThrough:nil];
     };
-    settings.guestIPARequest = ^(NSString *identifier, NSString *name) {
+    settings.guestIPARequest = ^{
         VMInstanceListViewController *list = weakSelf;
         UINavigationController *navigation = list.navigationController;
         if (!list || navigation.topViewController != list) return;
-        VMIPALibraryViewController *library = [[VMIPALibraryViewController alloc] initWithMachineName:name];
+        VMIPALibraryViewController *library = [[VMIPALibraryViewController alloc] init];
         __weak VMIPALibraryViewController *weakLibrary = library;
         library.selectionHandler = ^(NSURL *url) {
             VMInstanceListViewController *current = weakSelf;
             VMIPALibraryViewController *collection = weakLibrary;
-            UINavigationController *nav = current.navigationController;
-            if (!current || !collection || nav.topViewController != collection) return;
-            VMIPAInstallViewController *install = [[VMIPAInstallViewController alloc]
-                initWithInstanceID:identifier machineName:name];
-            __weak VMIPAInstallViewController *weakInstall = install;
-            install.prepareHandler = ^{
-                VMInstanceListViewController *owner = weakSelf;
-                VMIPAInstallViewController *screen = weakInstall;
-                VMIPALibraryViewController *back = weakLibrary;
-                UINavigationController *stack = owner.navigationController;
-                if (!owner || !screen || !back || stack.topViewController != screen) return;
-                [stack popToViewController:owner animated:NO];
-                [owner prepareGuestInstall:screen instanceID:identifier returningThrough:back];
-            };
-            install.readyHandler = ^{
-                VMInstanceListViewController *owner = weakSelf;
-                VMIPAInstallViewController *screen = weakInstall;
-                UINavigationController *stack = owner.navigationController;
-                if (!owner || !screen || stack.topViewController != screen) return;
-                [stack popToViewController:owner animated:NO];
-                VMInstanceStore *store = VMInstanceStore.sharedStore;
-                for (NSUInteger i = 0; i < store.count; i++) {
-                    if ([[store instanceAtIndex:i][@"id"] isEqualToString:identifier]) {
-                        [owner openInstanceAtIndex:i animated:YES];
-                        break;
-                    }
-                }
-            };
-            [nav pushViewController:install animated:YES];
-            [install inspectURL:url];
+            if (!current || !collection || current.navigationController.topViewController != collection) return;
+            [current chooseMachineForIPA:url library:collection];
         };
         [navigation pushViewController:library animated:YES];
     };
@@ -239,6 +215,74 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
         initWithRootViewController:settings];
     nav.navigationBar.prefersLargeTitles = YES;
     [self presentViewController:nav animated:YES completion:nil];
+}
+
+- (void)chooseMachineForIPA:(NSURL *)url library:(VMIPALibraryViewController *)library {
+    VMInstanceStore *store = VMInstanceStore.sharedStore;
+    NSMutableArray<NSDictionary *> *eligible = [NSMutableArray array];
+    for (NSUInteger i = 0; i < store.count; i++) {
+        NSDictionary *row = [store instanceAtIndex:i];
+        NSString *directory = [store directoryForInstanceWithID:row[@"id"]];
+        if (directory.length && vm_guest_install_probe(directory.fileSystemRepresentation,
+            NULL, NULL, 0) == VM_GUEST_INSTALL_PROBE_VALID) [eligible addObject:row];
+    }
+    if (eligible.count == 1) {
+        [self inspectIPA:url library:library instanceID:eligible[0][@"id"] machineName:eligible[0][@"name"]];
+        return;
+    }
+    UIAlertController *picker = [UIAlertController alertControllerWithTitle:
+        eligible.count ? @"Install in which machine?" : @"Jailbreak a machine first"
+        message:eligible.count ? nil : @"Your IPAs can stay in this library. Prepare a machine and use App Settings → Jailbreak before installing apps."
+        preferredStyle:eligible.count ? UIAlertControllerStyleActionSheet : UIAlertControllerStyleAlert];
+    for (NSDictionary *row in eligible) {
+        [picker addAction:[UIAlertAction actionWithTitle:row[@"name"] style:UIAlertActionStyleDefault
+            handler:^(UIAlertAction *action) {
+                [self inspectIPA:url library:library instanceID:row[@"id"] machineName:row[@"name"]];
+            }]];
+    }
+    [picker addAction:[UIAlertAction actionWithTitle:eligible.count ? @"Cancel" : @"OK"
+        style:UIAlertActionStyleCancel handler:nil]];
+    picker.popoverPresentationController.sourceView = library.view;
+    picker.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX(library.view.bounds),
+        CGRectGetMidY(library.view.bounds), 1, 1);
+    picker.popoverPresentationController.permittedArrowDirections = 0;
+    [library presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)inspectIPA:(NSURL *)url library:(VMIPALibraryViewController *)library
+       instanceID:(NSString *)identifier machineName:(NSString *)name {
+    UINavigationController *navigation = self.navigationController;
+    if (navigation.topViewController != library) return;
+    VMIPAInstallViewController *install = [[VMIPAInstallViewController alloc]
+        initWithInstanceID:identifier machineName:name];
+    __weak VMInstanceListViewController *weakSelf = self;
+    __weak VMIPALibraryViewController *weakLibrary = library;
+    __weak VMIPAInstallViewController *weakInstall = install;
+    install.prepareHandler = ^{
+        VMInstanceListViewController *owner = weakSelf;
+        VMIPAInstallViewController *screen = weakInstall;
+        VMIPALibraryViewController *back = weakLibrary;
+        UINavigationController *stack = owner.navigationController;
+        if (!owner || !screen || !back || stack.topViewController != screen) return;
+        [stack popToViewController:owner animated:NO];
+        [owner prepareGuestInstall:screen instanceID:identifier returningThrough:back];
+    };
+    install.readyHandler = ^{
+        VMInstanceListViewController *owner = weakSelf;
+        VMIPAInstallViewController *screen = weakInstall;
+        UINavigationController *stack = owner.navigationController;
+        if (!owner || !screen || stack.topViewController != screen) return;
+        [stack popToViewController:owner animated:NO];
+        VMInstanceStore *store = VMInstanceStore.sharedStore;
+        for (NSUInteger i = 0; i < store.count; i++) {
+            if ([[store instanceAtIndex:i][@"id"] isEqualToString:identifier]) {
+                [owner openInstanceAtIndex:i animated:YES];
+                break;
+            }
+        }
+    };
+    [navigation pushViewController:install animated:YES];
+    [install inspectURL:url];
 }
 
 - (void)prepareGuestInstall:(UIViewController *)install
