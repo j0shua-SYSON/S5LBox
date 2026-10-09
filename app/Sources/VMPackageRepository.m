@@ -28,7 +28,8 @@
     return nil;
 }
 + (BOOL)verify:(NSData *)data package:(NSDictionary *)p {
-    if (!data || data.length != [p[@"Size"] longLongValue] || data.length > 64u*1024u*1024u) return NO;
+    long long expected=[p[@"Size"] longLongValue];
+    if (!data || expected < 1 || expected > 64ll*1024ll*1024ll || data.length != (NSUInteger)expected) return NO;
     NSString *field=[self checksumField:p];
     if ([field isEqual:@"SHA256"]) return [[self sha256:data] isEqual:[p[field] lowercaseString]];
     // Legacy digests detect corruption only; HTTPS is mandatory without SHA256.
