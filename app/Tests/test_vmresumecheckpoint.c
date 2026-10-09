@@ -168,7 +168,21 @@ int main(void) {
 
     /* A second save replaces the single resume point, rather than keeping a
      * stale first marker or restoring the first machine by accident. */
-    (void)remove(marker);
+    CHECK(vm_resume_checkpoint_disarm(FIXTURE_DIR, detail, sizeof detail),
+          "running force-off invalidation failed: %s", detail);
+    CHECK(detail[0] == '\0' && file_bytes(marker) == 0u,
+          "force-off left its marker armed or an error on success");
+    CHECK(file_bytes(state) == running_state_bytes &&
+          file_bytes(bridge) == running_bridge_bytes &&
+          snapshot_load(&restored, state) == SNAP_OK &&
+          restored.cpu.r[0] == source.cpu.r[0],
+          "force-off damaged checkpoint payloads");
+    CHECK(vm_resume_checkpoint_probe_state(
+              FIXTURE_DIR, sidecar.media_size, 0u, TEST_RAM_SIZE,
+              detail, sizeof detail) == VM_RESUME_CHECKPOINT_ABSENT,
+          "forced stop was mistaken for a clean shutdown witness");
+    CHECK(vm_resume_checkpoint_disarm(FIXTURE_DIR, NULL, 0u),
+          "already absent marker was not idempotent");
     source.cpu.r[0] = 0x2468ace0u;
     CHECK(vm_resume_checkpoint_save(&source, &sidecar, FIXTURE_DIR,
                                     detail, sizeof detail),
@@ -212,6 +226,36 @@ int main(void) {
     CHECK(vm_resume_checkpoint_save(&source, &sidecar, FIXTURE_DIR,
                                     detail, sizeof detail),
           "could not restore a valid powered-off transaction: %s", detail);
+
+    CHECK(vm_resume_checkpoint_disarm(FIXTURE_DIR, detail, sizeof detail),
+          "powered-off force invalidation failed: %s", detail);
+    CHECK(vm_resume_checkpoint_probe_state(
+              FIXTURE_DIR, sidecar.media_size, 0u, TEST_RAM_SIZE,
+              detail, sizeof detail) == VM_RESUME_CHECKPOINT_ABSENT,
+          "a stale shutdown witness survived force-off");
+    CHECK(file_bytes(state) == powered_state_bytes &&
+          file_bytes(bridge) == powered_bridge_bytes,
+          "force-off removed powered-off payloads");
+    CHECK(!vm_resume_checkpoint_disarm(NULL, detail, sizeof detail) && detail[0],
+          "null directory accepted or error missing");
+    CHECK(!vm_resume_checkpoint_disarm("", NULL, 0u), "empty directory accepted");
+    char too_long[VM_FW_BOOT_PATH_CAPACITY + 128u];
+    memset(too_long, 'x', sizeof too_long - 1u);
+    too_long[sizeof too_long - 1u] = '\0';
+    CHECK(!vm_resume_checkpoint_disarm(too_long, detail, sizeof detail),
+          "oversized directory accepted");
+#ifdef _WIN32
+    CHECK(_mkdir(marker) == 0, "could not create marker directory fixture");
+#else
+    CHECK(mkdir(marker, 0700) == 0, "could not create marker directory fixture");
+#endif
+    CHECK(!vm_resume_checkpoint_disarm(FIXTURE_DIR, detail, sizeof detail) && detail[0],
+          "force-off silently removed or accepted a directory");
+#ifdef _WIN32
+    CHECK(_rmdir(marker) == 0, "marker directory was removed or cannot be cleaned");
+#else
+    CHECK(rmdir(marker) == 0, "marker directory was removed or cannot be cleaned");
+#endif
 
     /* The transaction invalidates the request BEFORE writing. Make snapshot
      * validation fail after that point and prove startup has no marker with

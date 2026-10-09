@@ -46,6 +46,28 @@ static bool resume_remove_if_present(const char *path) {
     return errno == ENOENT;
 }
 
+bool vm_resume_checkpoint_disarm(const char *work_directory,
+                                 char *detail, size_t detail_capacity) {
+    char marker[VM_FW_BOOT_PATH_CAPACITY + VM_RESUME_PATH_EXTRA];
+    resume_detail(detail, detail_capacity, "");
+    if (!resume_path(marker, sizeof marker, work_directory,
+                     VM_FW_BOOT_RESTORE_ONCE_FILE)) {
+        resume_detail(detail, detail_capacity,
+                      "The machine stopped, but its resume-marker path is invalid.");
+        return false;
+    }
+    /* Unlike remove(), unlink never removes a directory at this path. */
+#ifdef _WIN32
+    int result = _unlink(marker);
+#else
+    int result = unlink(marker);
+#endif
+    if (result == 0 || errno == ENOENT) return true;
+    resume_detail(detail, detail_capacity,
+                  "The machine stopped, but its resume marker could not be cleared. Retry before reopening it.");
+    return false;
+}
+
 static bool resume_replace(const char *source, const char *destination) {
 #ifdef _WIN32
     return MoveFileExA(source, destination,

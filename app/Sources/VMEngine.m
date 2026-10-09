@@ -34,6 +34,7 @@
 #import "VMTouchQueue.h"
 #import "VMButtonQueue.h"
 #import "VMGuestShutdown.h"
+#import "VMResumeCheckpoint.h"
 #import <dispatch/dispatch.h>
 #import "VMFirmwareBoot.h"
 #import "VMInstancePaths.h"
@@ -965,6 +966,27 @@ static double vm_engine_now_seconds(void) {
         VMEngineStopCompletion done = [completion copy];
         dispatch_async(dispatch_get_main_queue(), done);
     }
+}
+
+- (void)forcePowerOffWithCompletion:(VMEngineCheckpointCompletion)completion {
+    NSString *instanceID = [_instanceID copy];
+    NSString *directory = instanceID.length
+        ? [[VMInstanceStore sharedStore] directoryForInstanceWithID:instanceID]
+        : nil;
+    /* Teardown is the ownership boundary. In particular a shutdown/checkpoint
+     * already in flight must not publish a new marker AFTER we disarm it. */
+    [self stopWithCompletion:^{
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            char detail[VM_FW_BOOT_DETAIL_CAPACITY] = {0};
+            BOOL cleared = !instanceID.length || vm_resume_checkpoint_disarm(
+                directory.fileSystemRepresentation, detail, sizeof detail);
+            NSString *message = cleared ? @"Machine powered off. The next launch will boot from disk."
+                : [NSString stringWithUTF8String:detail];
+            if (completion) dispatch_async(dispatch_get_main_queue(), ^{
+                completion(cleared, message);
+            });
+        });
+    }];
 }
 
 - (void)saveCheckpointAndStopWithCompletion:
@@ -1955,7 +1977,7 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
                         y:66 phase:VM_TOUCH_CANCELLED];
                     if (finished)
                         dispatch_async(dispatch_get_main_queue(), ^{
-                            finished(NO, @"iPhone OS did not complete shutdown. The machine is still open and its disk has not been replaced. You can retry, or use Power and slide to power off.");
+                            finished(NO, @"iPhone OS did not complete shutdown. The machine is still open. Retry, or use Force Power Off if the guest cannot respond.");
                         });
                 }
             }

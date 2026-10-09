@@ -8,11 +8,13 @@ typedef NS_ENUM(NSInteger, VMRuntimeAction) {
     VMRuntimeActionSaveAndClose,
     VMRuntimeActionShutDown,
     VMRuntimeActionRestart,
+    VMRuntimeActionForcePowerOff,
 };
 
 @protocol VMRuntimeSettingsDelegate <VMSnapshotListDelegate>
 - (BOOL)runtimeCanControlGuest;
 - (BOOL)runtimeCanShutDown;
+- (BOOL)runtimeCanForcePowerOff;
 - (BOOL)runtimePaused;
 - (void)setRuntimePaused:(BOOL)paused;
 - (BOOL)runtimePausesInBackground;

@@ -47,6 +47,11 @@ temporary installation copies.
    power off iPhone OS and cold-boot next time. Keep S5LBox open until it returns
    to Machines before force-quitting or copying machine files.
 
+If a guest is stuck booting or cannot shut down, use **Back → Force Power Off**
+(also in Machine Settings). Back stays available during shutdown. This stops
+without guest input or saving; unsaved work may be lost and the guest disk may
+need repair. The next launch starts from disk, and a pending jailbreak is cancelled.
+
 Without supported firmware, the app runs a built-in test program—not iPhone OS.
 
 The Machines gear opens **App Settings** for defaults, firmware and jailbreak.

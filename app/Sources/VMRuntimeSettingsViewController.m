@@ -51,7 +51,7 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
         case VMRuntimeSectionSession: return 2;
         case VMRuntimeSectionApps: return 1;
         case VMRuntimeSectionSnapshots: return 1;
-        case VMRuntimeSectionPower: return 3;
+        case VMRuntimeSectionPower: return 4;
         case VMRuntimeSectionDeveloper: return self.showsDeveloperControls ? 2 : 0;
     }
     return 0;
@@ -149,11 +149,17 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
             cell.textLabel.text = @"Shut down";
             enabled = [owner runtimeCanShutDown];
             cell.accessibilityIdentifier = @"s5lbox.machine-settings.shutdown";
-        } else {
+        } else if (path.row == VMRuntimeActionRestart) {
             cell.textLabel.text = @"Restart guest…";
             cell.detailTextLabel.text = @"Unsaved work may be lost.";
             cell.textLabel.textColor = [UIColor systemRedColor];
             cell.accessibilityIdentifier = @"s5lbox.machine-settings.restart";
+        } else {
+            cell.textLabel.text = @"Force Power Off…";
+            cell.detailTextLabel.text = @"Works during boot. Unsaved work may be lost.";
+            enabled = [owner runtimeCanForcePowerOff];
+            cell.textLabel.textColor = [UIColor systemRedColor];
+            cell.accessibilityIdentifier = @"s5lbox.machine-settings.force-power-off";
         }
     } else {
         uint64_t cap = [owner runtimeInstructionCap];
@@ -218,6 +224,8 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
         VMRuntimeAction action = (VMRuntimeAction)path.row;
         if (!self.runtimeDelegate || (action == VMRuntimeActionShutDown &&
             ![self.runtimeDelegate runtimeCanShutDown])) return;
+        if (action == VMRuntimeActionForcePowerOff &&
+            ![self.runtimeDelegate runtimeCanForcePowerOff]) return;
         if (action != VMRuntimeActionRestart) {
             [self performAfterDismiss:action];
             return;

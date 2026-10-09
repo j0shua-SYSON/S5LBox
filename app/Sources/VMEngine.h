@@ -72,6 +72,12 @@ typedef void (^VMEngineStopCompletion)(void);
  */
 - (void)stopWithCompletion:(VMEngineStopCompletion)completion;
 
+/* Stop without guest input or a saved checkpoint, then disarm automatic resume.
+ * Completion runs on main after disk/USB teardown and marker invalidation.
+ * Unsaved guest writes can be lost: never use this as a clean-shutdown witness.
+ * A NO result means the machine stopped but cold-boot invalidation failed. */
+- (void)forcePowerOffWithCompletion:(VMEngineCheckpointCompletion)completion;
+
 /*
  * Save this live firmware machine as the next-run resume point, then stop it.
  * The request is handled by the emulator thread between guest instructions;

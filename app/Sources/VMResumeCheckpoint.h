@@ -38,6 +38,13 @@ bool vm_resume_checkpoint_save(const s5l8900_t *machine,
                                const char *work_directory,
                                char *detail, size_t detail_capacity);
 
+/* Force-off invalidation, called only after the machine and disk are closed.
+ * Remove only the automatic restore marker, leaving disk and payloads intact.
+ * Idempotent when absent; refuses directories and reports other IO failures.
+ * This is NOT evidence of a clean guest shutdown. */
+bool vm_resume_checkpoint_disarm(const char *work_directory,
+                                 char *detail, size_t detail_capacity);
+
 typedef enum {
     VM_RESUME_CHECKPOINT_ABSENT = 0,
     VM_RESUME_CHECKPOINT_RUNNING,

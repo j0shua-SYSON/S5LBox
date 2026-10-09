@@ -119,6 +119,8 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 - (void)backTapped:(id)sender;
 - (void)saveAndCloseTapped:(id)sender;
 - (void)shutDownTapped:(id)sender;
+- (void)forcePowerOffTapped:(id)sender;
+- (void)forcePowerOff;
 @end
 
 @implementation VMDisplayLinkProxy {
@@ -187,6 +189,8 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     BOOL               _savingCheckpoint;
     BOOL               _restarting;
     BOOL               _shuttingDown;
+    BOOL               _forcePowerOffRequested;
+    BOOL               _forcePoweringOff;
     BOOL               _restoreIdleTimer;
     BOOL               _previousIdleTimerDisabled;
     UIBackgroundTaskIdentifier _checkpointBackgroundTask;
@@ -542,8 +546,10 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
 - (void)setCheckpointSaving:(BOOL)saving {
     _savingCheckpoint = saving;
-    const BOOL busy = _savingCheckpoint || _restarting || _shuttingDown;
-    self.navigationItem.leftBarButtonItem.enabled = !busy;
+    const BOOL busy = _savingCheckpoint || _restarting || _shuttingDown || _forcePowerOffRequested;
+    /* Normal shutdown may never get a working guest UI. Keep its escape hatch. */
+    self.navigationItem.leftBarButtonItem.enabled =
+        !_savingCheckpoint && !_restarting && !_forcePoweringOff;
     _screen.userInteractionEnabled = !busy;
     _keys.userInteractionEnabled = !busy;
     _toolbar.userInteractionEnabled = !busy;
@@ -552,17 +558,16 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
 - (void)setRestarting:(BOOL)restarting {
     _restarting = restarting;
-    const BOOL busy = _savingCheckpoint || _restarting || _shuttingDown;
-    self.navigationItem.leftBarButtonItem.enabled = !busy;
-    _screen.userInteractionEnabled = !busy;
-    _keys.userInteractionEnabled = !busy;
-    _toolbar.userInteractionEnabled = !busy;
-    [self refreshPrepareOverlay];
+    [self setCheckpointSaving:_savingCheckpoint];
 }
 
 - (void)backTapped:(id)sender {
-    if (_savingCheckpoint || _restarting || _shuttingDown) return;
-    if (!_engine || ![_engine isRunning] || ![_engine isRunningFirmware]) {
+    if (_savingCheckpoint || _restarting || _forcePoweringOff) return;
+    if (_shuttingDown || _forcePowerOffRequested) {
+        [self forcePowerOffTapped:sender];
+        return;
+    }
+    if (!_engine || !self.instanceID.length) {
         [self saveAndCloseTapped:sender];
         return;
     }
@@ -579,6 +584,10 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
         style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
             [weakSelf shutDownTapped:nil];
         }]];
+    [choice addAction:[UIAlertAction actionWithTitle:@"Force Power Off…"
+        style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *a) {
+            [weakSelf forcePowerOffTapped:nil];
+        }]];
     [choice addAction:[UIAlertAction actionWithTitle:@"Cancel"
         style:UIAlertActionStyleCancel handler:nil]];
     choice.popoverPresentationController.barButtonItem =
@@ -588,7 +597,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
 - (void)shutDownTapped:(id)sender {
     (void)sender;
-    if (_savingCheckpoint || _restarting || _shuttingDown) return;
+    if (_savingCheckpoint || _restarting || _shuttingDown || _forcePowerOffRequested) return;
     _shuttingDown = YES;
     _userPaused = NO;
     [self applyPauseState];
@@ -600,36 +609,103 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     __weak EmulatorViewController *weakSelf = self;
     [_engine shutDownAndStopWithCompletion:^(BOOL finished, NSString *message) {
         EmulatorViewController *screen = weakSelf;
+        if (!screen || screen->_forcePowerOffRequested) return;
+        void (^finish)(void) = ^{
+            if (screen->_forcePowerOffRequested) return;
+            [UIApplication sharedApplication].idleTimerDisabled =
+                screen->_previousIdleTimerDisabled;
+            screen->_restoreIdleTimer = NO;
+            screen->_shuttingDown = NO;
+            [screen setCheckpointSaving:NO];
+            if (finished) {
+                void (^afterShutdown)(void) = [screen.guestShutdownCompletion copy];
+                screen.guestShutdownCompletion = nil;
+                [screen.navigationController popViewControllerAnimated:!afterShutdown];
+                /* UIKit must finish removing this controller before the install
+                 * workflow pushes another. Even a nonanimated pop can still be
+                 * updating the navigation stack inside this callback. */
+                if (afterShutdown)
+                    dispatch_async(dispatch_get_main_queue(), afterShutdown);
+                return;
+            }
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:@"Shutdown not completed"
+                                 message:message
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                style:UIAlertActionStyleDefault handler:nil]];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Force Power Off…"
+                style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *a) {
+                    [weakSelf forcePowerOffTapped:nil];
+                }]];
+            [screen presentViewController:alert animated:YES completion:nil];
+        };
+        /* Shutdown can finish while its force-off confirmation is visible. */
+        if (screen.presentedViewController)
+            [screen dismissViewControllerAnimated:YES completion:finish];
+        else finish();
+    }];
+}
+
+- (void)forcePowerOffTapped:(id)sender {
+    (void)sender;
+    if (![self runtimeCanForcePowerOff]) return;
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Force Power Off?"
+        message:@"Stops without saving, even during boot. Unsaved work may be lost and the guest disk may need repair."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
+        style:UIAlertActionStyleCancel handler:nil]];
+    __weak EmulatorViewController *weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"Force Power Off"
+        style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *a) {
+            [weakSelf forcePowerOff];
+        }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)forcePowerOff {
+    if (![self runtimeCanForcePowerOff]) return;
+    _forcePowerOffRequested = YES; /* also suppress any queued shutdown callback */
+    _forcePoweringOff = YES;
+    _shuttingDown = NO;
+    self.guestShutdownCompletion = nil; /* NEVER continue jailbreak after force-off */
+    if (!_restoreIdleTimer) {
+        _previousIdleTimerDisabled = [UIApplication sharedApplication].idleTimerDisabled;
+        _restoreIdleTimer = YES;
+    }
+    [UIApplication sharedApplication].idleTimerDisabled = YES;
+    [self beginCheckpointBackgroundTask];
+    [self setCheckpointSaving:NO];
+    __weak EmulatorViewController *weakSelf = self;
+    [_engine forcePowerOffWithCompletion:^(BOOL finished, NSString *message) {
+        EmulatorViewController *screen = weakSelf;
         if (!screen) return;
-        [UIApplication sharedApplication].idleTimerDisabled =
-            screen->_previousIdleTimerDisabled;
+        [screen endCheckpointBackgroundTask];
+        [UIApplication sharedApplication].idleTimerDisabled = screen->_previousIdleTimerDisabled;
         screen->_restoreIdleTimer = NO;
-        screen->_shuttingDown = NO;
+        screen->_forcePoweringOff = NO;
         [screen setCheckpointSaving:NO];
         if (finished) {
-            void (^afterShutdown)(void) = [screen.guestShutdownCompletion copy];
-            screen.guestShutdownCompletion = nil;
-            [screen.navigationController popViewControllerAnimated:!afterShutdown];
-            /* UIKit must finish removing this controller before the install
-             * workflow pushes another. Even a nonanimated pop can still be
-             * updating the navigation stack inside this callback. */
-            if (afterShutdown)
-                dispatch_async(dispatch_get_main_queue(), afterShutdown);
+            [screen.navigationController popViewControllerAnimated:YES];
             return;
         }
+        /* Stay stopped if invalidation failed. Back can retry without ever
+         * opening a second disk owner or claiming a clean shutdown. */
         UIAlertController *alert = [UIAlertController
-            alertControllerWithTitle:@"Shutdown not completed"
-                             message:message
-                      preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK"
-            style:UIAlertActionStyleDefault handler:nil]];
+            alertControllerWithTitle:@"Machine stopped"
+            message:message preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Retry"
+            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+                [weakSelf forcePowerOff];
+            }]];
         [screen presentViewController:alert animated:YES completion:nil];
     }];
 }
 
 - (void)saveAndCloseTapped:(id)sender {
     (void)sender;
-    if (_savingCheckpoint || _restarting || _shuttingDown) return;
+    if (_savingCheckpoint || _restarting || _shuttingDown || _forcePowerOffRequested) return;
     self.guestShutdownCompletion = nil; /* saving cancels a pending install */
 
     /* A halted machine has already released its s5l8900_t, so there is no
@@ -862,7 +938,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
 - (void)resetTapped:(id)sender {
     (void)sender;
-    if (!_frame || _savingCheckpoint || _restarting) return;
+    if (!_frame || _savingCheckpoint || _restarting || _shuttingDown || _forcePowerOffRequested) return;
 
     /* Take what the outgoing machine has already said before letting go of it.
      * Its final publication — the last of the guest's output, and the engine's
@@ -909,7 +985,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 - (void)settingsTapped:(id)sender {
     (void)sender;
 
-    if (_savingCheckpoint || _restarting || _shuttingDown) return;
+    if (_savingCheckpoint || _restarting || _shuttingDown || _forcePowerOffRequested) return;
     VMRuntimeSettingsViewController *settings =
         [[VMRuntimeSettingsViewController alloc] init];
     settings.runtimeDelegate = self;
@@ -931,7 +1007,13 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 #pragma mark - Current-session settings
 
 - (BOOL)runtimeCanControlGuest {
-    return [_engine isRunning] && !_savingCheckpoint && !_restarting && !_shuttingDown;
+    return [_engine isRunning] && !_savingCheckpoint && !_restarting && !_shuttingDown && !_forcePowerOffRequested;
+}
+- (BOOL)runtimeCanForcePowerOff {
+    /* No guest-ready/isRunning/touch requirement: half-booted and halted guests
+     * must be stoppable too. Checkpoints/restarts retain their disk ownership. */
+    return _engine && !_savingCheckpoint && !_restarting && !_forcePoweringOff &&
+        self.navigationController.topViewController == self;
 }
 - (BOOL)runtimeCanShutDown {
     return [self runtimeCanControlGuest] && [_engine isRunningFirmware];
@@ -959,7 +1041,11 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     [self applySettingsToEngine];
 }
 - (void)performRuntimeAction:(VMRuntimeAction)action {
-    if (_savingCheckpoint || _restarting || _shuttingDown ||
+    if (action == VMRuntimeActionForcePowerOff) {
+        [self forcePowerOffTapped:nil];
+        return;
+    }
+    if (_savingCheckpoint || _restarting || _shuttingDown || _forcePowerOffRequested ||
         self.navigationController.topViewController != self) return;
     switch (action) {
         case VMRuntimeActionSaveAndClose: [self saveAndCloseTapped:nil]; break;
@@ -967,6 +1053,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
             if ([self runtimeCanShutDown]) [self shutDownTapped:nil];
             break;
         case VMRuntimeActionRestart: [self resetTapped:nil]; break;
+        case VMRuntimeActionForcePowerOff: break; /* handled above */
     }
 }
 
@@ -1044,10 +1131,18 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
  * a user can see it moving even when the bar is only a few pixels along.
  */
 - (void)refreshPrepareOverlay {
+    if (_forcePowerOffRequested) {
+        _prepareScrim.hidden = NO;
+        _prepareBar.hidden = YES;
+        _prepareLabel.text = _forcePoweringOff
+            ? @"Powering off machine…\nClosing the guest disk."
+            : @"Machine stopped.\nUse Back to retry clearing its resume point.";
+        return;
+    }
     if (_shuttingDown) {
         _prepareScrim.hidden = NO;
         _prepareBar.hidden = YES;
-        _prepareLabel.text = @"Shutting down iPhone OS...\nPlease keep S5LBox open.";
+        _prepareLabel.text = @"Shutting down iPhone OS...\nNot responding? Use Back for Force Power Off.";
         return;
     }
     if (_savingCheckpoint) {

@@ -18,7 +18,9 @@ endforeach()
 foreach(required "Machine Settings" "runtimeDelegate" "snapshotsDirectory"
         "setRuntimePaused:" "setRuntimePausesInBackground:"
         "setRuntimeInlineConsole:" "setRuntimeInstructionCap:"
-        "performAfterDismiss:" "UIAlertActionStyleCancel")
+        "performAfterDismiss:" "UIAlertActionStyleCancel"
+        "VMRuntimeActionForcePowerOff" "runtimeCanForcePowerOff"
+        "s5lbox.machine-settings.force-power-off")
     string(FIND "${runtime}" "${required}" found)
     if(found EQUAL -1)
         message(FATAL_ERROR "Runtime settings lost its scoped control: ${required}")
@@ -38,7 +40,10 @@ if(NOT old_controller EQUAL -1 OR current_controller EQUAL -1 OR app_controller 
 endif()
 foreach(required "[_engine setInstructionCap:_sessionInstructionCap]"
         "_shuttingDown ||\n                         _sessionPausesInBackground"
-        "BOOL inlineConsole = _sessionInlineConsole")
+        "BOOL inlineConsole = _sessionInlineConsole"
+        "[_engine forcePowerOffWithCompletion:"
+        "self.guestShutdownCompletion = nil; /* NEVER continue jailbreak after force-off */"
+        "!_savingCheckpoint && !_restarting && !_forcePoweringOff;")
     string(FIND "${emulator}" "${required}" found)
     if(found EQUAL -1)
         message(FATAL_ERROR "Engine no longer consumes session-owned settings: ${required}")
