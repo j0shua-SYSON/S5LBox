@@ -127,6 +127,12 @@ extern "C" {
 #define VM_GUEST_INSTALL_SHA256_SIZE     32u
 #define VM_GUEST_INSTALL_PATH_CAPACITY   1200u
 
+/* Repeatable guest-app transaction, recovered with every other disk owner. */
+#define VM_GUEST_APP_STAGE_DIRECTORY "guest.app-install-v1.stage"
+#define VM_GUEST_APP_BACKUP_FILE "rootfs-work.pre-app-install-v1"
+#define VM_GUEST_APP_MARKER_FILE "guest.app-install-v1"
+#define VM_GUEST_APP_JOURNAL_FILE "guest.app-install-v1.transaction"
+
 typedef enum {
     VM_GUEST_INSTALL_PROBE_ABSENT = 0,
     VM_GUEST_INSTALL_PROBE_VALID,
@@ -159,6 +165,17 @@ typedef struct {
 } vm_guest_install_result_t;
 
 const char *vm_guest_install_status_text(vm_guest_install_status_t status);
+
+bool vm_guest_app_stage_image_path(char *out, size_t capacity, const char *work);
+vm_guest_install_status_t vm_guest_app_prepare_stage(const char *work,
+    vm_guest_install_result_t *result, char *detail, size_t capacity);
+vm_guest_install_status_t vm_guest_app_clone_live_to_stage(const char *work,
+    char *detail, size_t capacity);
+vm_guest_install_status_t vm_guest_app_discard_stage(const char *work,
+    char *detail, size_t capacity);
+vm_guest_install_status_t vm_guest_app_publish(const char *work,
+    const uint8_t identity[VM_GUEST_INSTALL_SHA256_SIZE],
+    vm_guest_install_result_t *result, char *detail, size_t capacity);
 
 /* Parse the exact committed-record format. An empty or malformed file is not
  * presence: it is INVALID, so boot cannot silently enable or disable only one

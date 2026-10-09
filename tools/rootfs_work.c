@@ -9601,6 +9601,65 @@ rootfs_work_status_t rootfs_work_repair_powered_off_clone(
     return rootfs_work_repair_powered_off_clone_impl(clone_path, true, result);
 }
 
+rootfs_work_status_t rootfs_work_provision_clone(const char *path,
+    const rootfs_work_entry_t *entries, size_t count, bool allow_unclean,
+    rootfs_work_result_t *result) {
+    host_file_t clone;
+    file_stamp_t before, after;
+    hfs_volume_t volume, final_volume;
+    rootfs_work_options_t options;
+    int error = 0;
+    if (!result) return ROOTFS_WORK_INVALID_ARGUMENT;
+    result_reset(result);
+    host_file_init(&clone);
+    memset(&options, 0, sizeof options);
+    if (!path || !*path || !entries || !count || count > ROOTFS_WORK_MAX_ENTRIES)
+        return result_fail(result, ROOTFS_WORK_INVALID_ARGUMENT,
+            ROOTFS_WORK_STAGE_ARGUMENTS, 0, "bounded entries and an unpublished clone are required");
+    options.entries = entries;
+    options.entry_count = count;
+    options.allow_unclean_source = allow_unclean;
+    options.preserve_fstab = true;
+    options.entry_mac_time = ROOTFS_WORK_DEFAULT_MAC_TIME;
+    uint8_t *buffer = malloc(ROOTFS_WORK_MAX_IO_BUFFER);
+    if (!buffer) return result_fail(result, ROOTFS_WORK_NO_MEMORY,
+        ROOTFS_WORK_STAGE_ARGUMENTS, 0, "cannot allocate the provisioning buffer");
+    result->io_buffer_bytes = ROOTFS_WORK_MAX_IO_BUFFER;
+#ifdef _WIN32
+    if (!windows_open_unpublished_clone(path, &clone, &before, result)) goto done;
+#else
+    if (!posix_open_unpublished_clone(path, &clone, &before, result)) goto done;
+#endif
+    result->source_size = before.size;
+    if (!hfs_validate(&clone, before.size, &volume, buffer, ROOTFS_WORK_MAX_IO_BUFFER,
+        allow_unclean, ROOTFS_WORK_STAGE_SOURCE_VALIDATE, result)) goto done;
+    if (!provision_volume(&clone, before.size, &volume, &options, buffer,
+        ROOTFS_WORK_MAX_IO_BUFFER, result)) goto done;
+    if (!hfs_validate(&clone, before.size, &final_volume, buffer, ROOTFS_WORK_MAX_IO_BUFFER,
+        allow_unclean, ROOTFS_WORK_STAGE_FINAL_VALIDATE, result)) goto done;
+    if (final_volume.total_blocks != volume.total_blocks ||
+        final_volume.block_size != volume.block_size) {
+        result_fail(result, ROOTFS_WORK_HFS_INVALID, ROOTFS_WORK_STAGE_FINAL_VALIDATE,
+                    0, "provisioning unexpectedly changed disk geometry");
+        goto done;
+    }
+    if (!host_file_sync(&clone, &error) || !host_file_stamp(&clone, &after, &error) ||
+        after.size != before.size || after.identity_a != before.identity_a ||
+        after.identity_b != before.identity_b || after.links != before.links) {
+        result_fail(result, ROOTFS_WORK_SYNC_FAILED, ROOTFS_WORK_STAGE_FLUSH,
+                    error, "could not durably validate the unpublished app disk");
+        goto done;
+    }
+    result->final_size = before.size;
+done:
+    if (host_file_is_open(&clone) && !host_file_close(&clone, &error) &&
+        result->status == ROOTFS_WORK_OK)
+        result_fail(result, ROOTFS_WORK_SYNC_FAILED, ROOTFS_WORK_STAGE_FLUSH,
+                    error, "could not close the unpublished app disk");
+    free(buffer);
+    return result->status;
+}
+
 rootfs_work_status_t rootfs_work_create(const char *source_path,
                                         const char *destination_path,
                                         const rootfs_work_options_t *options,

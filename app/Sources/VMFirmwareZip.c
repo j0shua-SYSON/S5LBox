@@ -415,6 +415,8 @@ vmfw_zip_status_t vmfw_zip_iterate(const vmfw_zip_t *zip,
             return VMFW_ZIP_ERR_BAD_DIRECTORY;
 
         e.is_directory = (name_len > 0 && e.name[name_len - 1] == '/');
+        if ((rd16(hdr + 4) >> 8) == 3)
+            e.unix_mode = (uint16_t)(rd32(hdr + 38) >> 16);
 
         bool need_usize  = (usize32 == ZIP64_SENTINEL32);
         bool need_csize  = (csize32 == ZIP64_SENTINEL32);

@@ -303,6 +303,7 @@ static void vmfw_strip_trailing_slash(char *path) {
      * import queue takes at the start of a run. */
     NSLock      *_keysLock;
     vm_fw_keys_t _keys;
+    NSFileCoordinator *_fileCoordinator; // protected by @synchronized(self)
 }
 
 #pragma mark - Lifecycle
@@ -358,6 +359,7 @@ static void vmfw_strip_trailing_slash(char *path) {
 
 - (void)cancelImport {
     if (_state) atomic_store(&_state->cancel, true);
+    @synchronized (self) { [_fileCoordinator cancel]; }
 }
 
 - (void)importIPSWAtURL:(NSURL *)url {
@@ -402,7 +404,37 @@ static void vmfw_strip_trailing_slash(char *path) {
     vm_fw_report_t report;
     memset(&report, 0, sizeof report);
 
-    const vm_fw_status_t status = [self runImportOfURL:url intoReport:&report];
+    /* Open-mode URLs may belong to iCloud or another File Provider. Security
+     * scope alone does not materialize them or coordinate their contents. */
+    __block vm_fw_status_t status = VM_FW_ERR_ARCHIVE_UNREADABLE;
+    __block vm_fw_report_t coordinatedReport;
+    memset(&coordinatedReport, 0, sizeof coordinatedReport);
+    __block BOOL accessed = NO;
+    NSError *accessError = nil;
+    NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+    @synchronized (self) {
+        _fileCoordinator = coordinator;
+        if (atomic_load(&_state->cancel)) [coordinator cancel];
+    }
+    [coordinator coordinateReadingItemAtURL:url
+                                   options:NSFileCoordinatorReadingWithoutChanges
+                                     error:&accessError
+                                byAccessor:^(NSURL *readableURL) {
+        accessed = YES;
+        status = [self runImportOfURL:readableURL intoReport:&coordinatedReport];
+    }];
+    @synchronized (self) { _fileCoordinator = nil; }
+    report = coordinatedReport;
+    if (!accessed && atomic_load(&_state->cancel)) {
+        status = vmfw_fail(&report, VM_FW_ERR_CANCELLED, "Import cancelled.");
+    } else if (accessError || !accessed) {
+        NSString *message = [NSString stringWithFormat:
+            @"The selected file could not be downloaded or opened: %@. "
+             "Try downloading it in Files, then choose it again.",
+            accessError.localizedDescription ?: @"the file provider did not return a readable file"];
+        status = vmfw_fail(&report, VM_FW_ERR_ARCHIVE_UNREADABLE,
+                           message.UTF8String);
+    }
 
     if (scoped) [url stopAccessingSecurityScopedResource];
 

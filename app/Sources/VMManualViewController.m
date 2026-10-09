@@ -138,6 +138,19 @@ typedef struct {
               @"opening a machine again starts with the app defaults. Firmware, "
               @"jailbreak and new-machine setup stay in App Settings." }];
 
+    [e addObject:@{ @"h": @"Install a guest app",
+        @"b": @"From Machines, open App Settings → Install IPA and choose a "
+              @"jailbroken machine. Select an unencrypted ARMv6 IPA built for "
+              @"iPhone OS 3.1.3 or earlier. The app is checked before the guest "
+              @"shuts down; installation changes a recoverable disk copy.\n\n"
+              @"Start the machine afterward to refresh its Home screen icon. "
+              @"Apps go in /Applications, not an App Store sandbox. Existing "
+              @"apps are never overwritten, historical snapshots must be "
+              @"resolved first, and a successful install does not guarantee "
+              @"app compatibility. Your host iPhone is not modified.\n\n"
+              @"If Files cannot provide a selected IPA or IPSW, download it "
+              @"in Files first, then choose the local copy." }];
+
     [e addObject:@{ @"h": @"App Settings",
         @"b": dev
             ? @"Developer mode is ON, so App Settings shows the full option table: "

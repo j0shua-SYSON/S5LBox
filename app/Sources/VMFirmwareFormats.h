@@ -275,6 +275,7 @@ typedef struct {
     uint32_t crc32;
     uint16_t method;
     bool     is_directory;
+    uint16_t unix_mode; /* Unix creator metadata, zero for other ZIP creators. */
 } vmfw_zip_entry_t;
 
 /*

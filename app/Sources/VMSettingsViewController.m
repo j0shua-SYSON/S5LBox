@@ -59,6 +59,7 @@ typedef NS_ENUM(NSInteger, VMGeneralRow) {
     VMGeneralRowManual = 0,
     VMGeneralRowGraphicsMode,
     VMGeneralRowJailbreak,
+    VMGeneralRowInstallIPA,
     VMGeneralRowDeveloperMode,
     VMGeneralRowCount
 };
@@ -117,6 +118,7 @@ static NSString *VMStringFromC(const char *text) {
 - (void)refreshBanner;
 - (void)confirmGuestInstall;
 - (void)chooseMachineForGuestInstall;
+- (void)chooseMachineForGuestInstallIPA:(BOOL)ipa;
 - (void)inlineConsoleChanged:(UISwitch *)sender;
 - (void)developerModeToggled:(UISwitch *)sender;
 - (void)chooseGraphicsMode;
@@ -508,6 +510,11 @@ titleForFooterInSection:(NSInteger)section {
                 : @"Return to Machines and open Settings there before installing";
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        } else if (indexPath.row == VMGeneralRowInstallIPA) {
+            cell.textLabel.text = @"Install IPA";
+            cell.detailTextLabel.text = @"Add a compatible app to a jailbroken guest.";
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.accessibilityIdentifier = @"s5lbox.settings.install-ipa";
         } else if (indexPath.row == VMGeneralRowDeveloperMode) {
             cell.textLabel.text = @"Developer Mode";
             cell.accessoryType = UITableViewCellAccessoryNone;
@@ -758,6 +765,8 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
             [self chooseGraphicsMode];
         } else if (indexPath.row == VMGeneralRowJailbreak) {
             [self confirmGuestInstall];
+        } else if (indexPath.row == VMGeneralRowInstallIPA) {
+            [self chooseMachineForGuestInstallIPA:YES];
         }
         return;
     }
@@ -848,7 +857,12 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
 }
 
 - (void)chooseMachineForGuestInstall {
-    if (!self.guestInstallRequest) return;
+    [self chooseMachineForGuestInstallIPA:NO];
+}
+
+- (void)chooseMachineForGuestInstallIPA:(BOOL)ipa {
+    void (^request)(NSString *, NSString *) = [(ipa ? self.guestIPARequest : self.guestInstallRequest) copy];
+    if (!request) return;
     VMInstanceStore *store = [VMInstanceStore sharedStore];
     NSMutableArray<NSDictionary<NSString *, NSString *> *> *eligible =
         [NSMutableArray array];
@@ -864,13 +878,14 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
         NSString *work = [machine stringByAppendingPathComponent:leaf];
         NSDictionary *attributes = [files attributesOfItemAtPath:work error:NULL];
         if ([attributes[NSFileSize] unsignedLongLongValue] == 0u) continue;
+        if (ipa && vm_guest_install_probe(machine.fileSystemRepresentation, NULL, NULL, 0) != VM_GUEST_INSTALL_PROBE_VALID) continue;
         [eligible addObject:@{ @"id": identifier, @"name": name }];
     }
 
     if (eligible.count == 0u) {
         UIAlertController *none = [UIAlertController
             alertControllerWithTitle:@"No prepared machine"
-                             message:@"Open a machine once so its writable root "
+                             message:ipa ? @"Jailbreak a machine from App Settings before installing an IPA." : @"Open a machine once so its writable root "
                                       @"filesystem is prepared, return with Back, "
                                       @"then try again."
                       preferredStyle:UIAlertControllerStyleAlert];
@@ -883,7 +898,6 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
 
     void (^choose)(NSDictionary<NSString *, NSString *> *) =
         ^(NSDictionary<NSString *, NSString *> *row) {
-        void (^request)(NSString *, NSString *) = [self.guestInstallRequest copy];
         [self dismissViewControllerAnimated:YES completion:^{
             if (request) request(row[@"id"], row[@"name"]);
         }];
@@ -894,7 +908,7 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     }
 
     UIAlertController *picker = [UIAlertController
-        alertControllerWithTitle:@"Choose a stopped machine"
+        alertControllerWithTitle:@"Choose a machine"
                          message:nil
                   preferredStyle:UIAlertControllerStyleActionSheet];
     for (NSDictionary<NSString *, NSString *> *row in eligible) {

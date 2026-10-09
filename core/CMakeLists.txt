@@ -968,6 +968,18 @@ else()
 endif()
 add_test(NAME app_firmware_import COMMAND test_vmfirmwareimport)
 
+add_executable(test_vmipa ../app/Tests/test_vmipa.c
+    ../app/Sources/VMIPAArchive.c ../app/Sources/VMFirmwareZip.c
+    ../app/Sources/VMFirmwareInflate.c ../app/Sources/VMFirmwareDigest.c)
+target_include_directories(test_vmipa PRIVATE ../app/Sources ../app/Tests include)
+set_target_properties(test_vmipa PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_vmipa PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_vmipa PRIVATE -Wall -Wextra -Werror -Wformat=2 -Wshadow)
+endif()
+add_test(NAME app_ipa_archive COMMAND test_vmipa)
+
 # --- host tools -------------------------------------------------------------
 # The host-owned writable-file adapter stays outside emucore: the portable core
 # exposes vm_block_t callbacks but never depends on descriptors, locks, or

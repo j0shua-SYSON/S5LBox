@@ -164,6 +164,7 @@ static UIColor *VMImportStateColor(vm_fw_state_t state) {
 - (void)configureProgressCell:(VMImportProgressCell *)cell;
 - (void)presentPicker;
 - (void)startImportOfURL:(NSURL *)url;
+- (void)revealImportState;
 - (void)presentKeyAlertForArtefact:(vm_fw_artefact_t)which;
 - (void)applyKeyText:(NSString *)keyText
                   iv:(NSString *)ivText
@@ -830,15 +831,32 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [self presentViewController:picker animated:YES completion:nil];
 }
 
-/* The plural callback. The singular one is deprecated and is not implemented,
- * so there is no second path that could disagree with this one. */
+/* Some older providers still deliver the singular callback. Both feed one
+ * selection path, and a duplicate delivery is refused by the running guard. */
 - (void)documentPicker:(UIDocumentPickerViewController *)controller
 didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
-    (void)controller;
     NSURL *url = urls.firstObject;
     if (!url) return;
     _pickedURL = url;
+    _importer.delegate = self;
     [self startImportOfURL:url];
+    [controller dismissViewControllerAnimated:YES completion:^{
+        [self revealImportState];
+    }];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller
+   didPickDocumentAtURL:(NSURL *)url {
+    [self documentPicker:controller didPickDocumentsAtURLs:url ? @[url] : @[]];
+}
+
+- (void)revealImportState {
+    NSInteger section = [self visibleIndexOfSection:
+        _running ? VMImportSectionProgress : VMImportSectionResults];
+    if (section >= 0 && [self.tableView numberOfRowsInSection:section] > 0)
+        [self.tableView scrollToRowAtIndexPath:
+            [NSIndexPath indexPathForRow:0 inSection:section]
+            atScrollPosition:UITableViewScrollPositionTop animated:YES];
 }
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
@@ -861,6 +879,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
     [self refresh];
     [_importer importIPSWAtURL:url];
+    [self revealImportState];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -1039,6 +1058,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     _stage = VM_FW_STAGE_DONE;
 
     [self refresh];
+    [self revealImportState];
 }
 
 @end

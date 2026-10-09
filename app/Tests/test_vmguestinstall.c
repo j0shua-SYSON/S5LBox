@@ -216,8 +216,17 @@ static void remove_fixture_artifacts(void) {
         VM_GUEST_RECOVERY_JOURNAL_TMP,
         VM_GUEST_INSTALL_RESUME_ONCE_FILE,
         VM_GUEST_INSTALL_RESUME_ONCE_TMP,
+        VM_GUEST_APP_BACKUP_FILE,
+        VM_GUEST_APP_MARKER_FILE,
+        VM_GUEST_APP_MARKER_FILE ".partial",
+        VM_GUEST_APP_JOURNAL_FILE,
+        VM_GUEST_APP_JOURNAL_FILE ".partial",
     };
     char path[1400];
+    if (vm_guest_app_stage_image_path(path, sizeof path, FIXTURE_DIR))
+        (void)remove(path);
+    if (path_for(path, sizeof path, VM_GUEST_APP_STAGE_DIRECTORY))
+        (void)remove_directory(path);
     if (stage_path_for(path, sizeof path, VM_GUEST_INSTALL_NEXT_FILE))
         (void)remove(path);
     if (path_for(path, sizeof path, VM_GUEST_INSTALL_STAGE_DIRECTORY))
@@ -1552,6 +1561,40 @@ static void test_repeatable_recovery_transaction(void) {
           detail);
 }
 
+static void test_repeatable_app_transaction(void) {
+    char live[1400], next[1400], resume[1400], detail[256];
+    uint8_t identity[32] = {1};
+    vm_guest_install_result_t result;
+    CHECK(path_for(live, sizeof live, VM_GUEST_INSTALL_LIVE_FILE) &&
+          vm_guest_app_stage_image_path(next, sizeof next, FIXTURE_DIR) &&
+          path_for(resume, sizeof resume, VM_GUEST_INSTALL_RESUME_ONCE_FILE), "app paths");
+    for (unsigned boundary = 0; boundary <= 4; boundary++) {
+        CHECK(prepare_recovery_live(), "prepare app fixture");
+        CHECK(vm_guest_app_prepare_stage(FIXTURE_DIR, &result, detail, sizeof detail) == VM_GUEST_INSTALL_OK &&
+              vm_guest_app_clone_live_to_stage(FIXTURE_DIR, detail, sizeof detail) == VM_GUEST_INSTALL_OK &&
+              file_equals(next, "old-rootfs") && write_bytes(next, "with-app"), "stage app: %s", detail);
+        vm_guest_install_test_interrupt_after(boundary);
+        vm_guest_install_status_t status = vm_guest_app_publish(FIXTURE_DIR, identity, &result, detail, sizeof detail);
+        vm_guest_install_test_interrupt_after(0);
+        CHECK(status == (boundary ? VM_GUEST_INSTALL_ERR_INTERRUPTED : VM_GUEST_INSTALL_OK), "app boundary %u: %s", boundary, detail);
+        CHECK(vm_guest_maintenance_recover(FIXTURE_DIR, NULL, NULL, NULL, detail, sizeof detail) == VM_GUEST_INSTALL_OK &&
+              file_equals(live, "with-app") && !exists(resume), "app recovery %u: %s", boundary, detail);
+        CHECK(vm_guest_app_prepare_stage(FIXTURE_DIR, &result, detail, sizeof detail) == VM_GUEST_INSTALL_OK &&
+              !result.committed && vm_guest_app_clone_live_to_stage(FIXTURE_DIR, detail, sizeof detail) == VM_GUEST_INSTALL_OK &&
+              vm_guest_app_discard_stage(FIXTURE_DIR, detail, sizeof detail) == VM_GUEST_INSTALL_OK &&
+              file_equals(live, "with-app"), "second app transaction blocked: %s", detail);
+    }
+    CHECK(prepare_recovery_live() &&
+          vm_guest_app_prepare_stage(FIXTURE_DIR, &result, detail, sizeof detail) == VM_GUEST_INSTALL_OK &&
+          vm_guest_app_clone_live_to_stage(FIXTURE_DIR, detail, sizeof detail) == VM_GUEST_INSTALL_OK, "prepare app rollback");
+    vm_guest_install_test_interrupt_after(2);
+    CHECK(vm_guest_app_publish(FIXTURE_DIR, identity, &result, detail, sizeof detail) == VM_GUEST_INSTALL_ERR_INTERRUPTED,
+          "app rollback interruption");
+    vm_guest_install_test_interrupt_after(0);
+    CHECK(remove(next) == 0 && vm_guest_maintenance_recover(FIXTURE_DIR, NULL, NULL, NULL, detail, sizeof detail) == VM_GUEST_INSTALL_OK &&
+          file_equals(live, "old-rootfs") && exists(resume), "app rollback lost original: %s", detail);
+}
+
 int main(void) {
     printf("== guest install transaction ==\n");
     if (!make_directory(FIXTURE_DIR)) {
@@ -1635,6 +1678,7 @@ int main(void) {
     test_maintenance_recovery_chooses_the_active_owner();
     test_maintenance_recovery_refuses_competing_owners();
     test_repeatable_recovery_transaction();
+    test_repeatable_app_transaction();
 
     vm_guest_install_test_interrupt_after(0u);
     remove_fixture_artifacts();

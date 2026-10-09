@@ -6469,6 +6469,31 @@ done:
     sx_release(sx);
 }
 
+static void test_provision_unpublished_clone(void) {
+    fixture_t *fx = fx_create(FX_DATA_BLOCKS - 1u);
+    char path[256];
+    rootfs_work_entry_t entry;
+    rootfs_work_result_t result;
+    if (!fx) { CHECK(0, "clone fixture allocation"); return; }
+    if (!make_path(path, sizeof path, "app-clone") || !write_file(path, fx->image, FX_SIZE)) {
+        CHECK(0, "clone fixture write"); free(fx); return;
+    }
+    static const char body[] = "app-content";
+    entry_file(&entry, "/alpha/installed", body, sizeof body, 0755u);
+    CHECK(rootfs_work_provision_clone(path, &entry, 1, false, &result) == ROOTFS_WORK_OK &&
+          !result.published && result.final_size == FX_SIZE, "clone provision: %s", result.detail);
+    size_t size = 0;
+    uint8_t *before = read_file(path, &size);
+    CHECK(before && size == FX_SIZE && memcmp(before, fx->image, FX_SIZE), "clone did not change");
+    CHECK(rootfs_work_provision_clone(path, &entry, 1, false, &result) == ROOTFS_WORK_PROVISION_EXISTS,
+          "clone overwrite not refused: %s", result.detail);
+    size_t after_size = 0;
+    uint8_t *after = read_file(path, &after_size);
+    CHECK(before && after && size == after_size && !memcmp(before, after, size), "refused clone plan changed bytes");
+    CHECK(rootfs_work_validate_source(path, &result) == ROOTFS_WORK_OK, "provisioned clone invalid: %s", result.detail);
+    free(before); free(after); free(fx); (void)remove(path);
+}
+
 static void test_status_and_stage_names(void) {
     static const rootfs_work_status_t statuses[] = {
         ROOTFS_WORK_PROVISION_INVALID, ROOTFS_WORK_PROVISION_UNSUPPORTED,
@@ -6494,6 +6519,7 @@ static void test_status_and_stage_names(void) {
 int main(void) {
     printf("HFS+ catalog provisioning tests\n");
     test_status_and_stage_names();
+    test_provision_unpublished_clone();
     test_fixture_is_a_valid_volume();
     test_create_directory();
     test_create_file();

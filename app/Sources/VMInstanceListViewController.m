@@ -8,6 +8,7 @@
 #import "EmulatorViewController.h"
 #import "VMEngine.h"
 #import "VMGuestInstallViewController.h"
+#import "VMIPAInstallViewController.h"
 #import "VMGuest.h"
 #import "VMResumeCheckpoint.h"
 #import "VMInstanceStore.h"
@@ -21,7 +22,7 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
 @interface VMInstanceListViewController ()
 - (BOOL)openInstanceAtIndex:(NSUInteger)index animated:(BOOL)animated
              afterShutdown:(void (^)(void))afterShutdown;
-- (void)prepareGuestInstall:(VMGuestInstallViewController *)install
+- (void)prepareGuestInstall:(UIViewController *)install
                 instanceID:(NSString *)identifier;
 @end
 
@@ -191,13 +192,44 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
         };
         [self_ prepareGuestInstall:install instanceID:identifier];
     };
+    settings.guestIPARequest = ^(NSString *identifier, NSString *name) {
+        VMInstanceListViewController *list = weakSelf;
+        UINavigationController *navigation = list.navigationController;
+        if (!list || navigation.topViewController != list) return;
+        VMIPAInstallViewController *install = [[VMIPAInstallViewController alloc]
+            initWithInstanceID:identifier machineName:name];
+        __weak VMIPAInstallViewController *weakInstall = install;
+        install.prepareHandler = ^{
+            VMInstanceListViewController *current = weakSelf;
+            VMIPAInstallViewController *screen = weakInstall;
+            UINavigationController *nav = current.navigationController;
+            if (!current || !screen || nav.topViewController != screen) return;
+            [nav popViewControllerAnimated:NO];
+            [current prepareGuestInstall:screen instanceID:identifier];
+        };
+        install.readyHandler = ^{
+            VMInstanceListViewController *current = weakSelf;
+            VMIPAInstallViewController *screen = weakInstall;
+            UINavigationController *nav = current.navigationController;
+            if (!current || !screen || nav.topViewController != screen) return;
+            [nav popViewControllerAnimated:NO];
+            VMInstanceStore *store = VMInstanceStore.sharedStore;
+            for (NSUInteger i = 0; i < store.count; i++) {
+                if ([[store instanceAtIndex:i][@"id"] isEqualToString:identifier]) {
+                    [current openInstanceAtIndex:i animated:YES];
+                    break;
+                }
+            }
+        };
+        [navigation pushViewController:install animated:YES];
+    };
     UINavigationController *nav = [[UINavigationController alloc]
         initWithRootViewController:settings];
     nav.navigationBar.prefersLargeTitles = YES;
     [self presentViewController:nav animated:YES completion:nil];
 }
 
-- (void)prepareGuestInstall:(VMGuestInstallViewController *)install
+- (void)prepareGuestInstall:(UIViewController *)install
                 instanceID:(NSString *)identifier {
     NSString *directory = [[VMInstanceStore sharedStore]
         directoryForInstanceWithID:identifier];
@@ -241,7 +273,7 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
             }
             NSError *missing = [NSError errorWithDomain:@"com.j0shua.S5LBox.GuestInstall"
                 code:1 userInfo:@{ NSLocalizedDescriptionKey:
-                    @"The selected machine no longer exists. No jailbreak was started." }];
+                    @"The selected machine no longer exists. No disk changes were started." }];
             [list showError:missing doing:@"Could not open the machine"];
         });
     });

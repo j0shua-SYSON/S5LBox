@@ -108,17 +108,15 @@ extern "C" {
  */
 
 /*
- * 1024.  The acquired Cydia payload is 555 regular files plus 89 symlinks --
- * 644 objects -- and every directory in its tree is an entry too, so the real
- * request is somewhere above that; the exact directory count has not been
- * measured here.  1024 admits 644 with half again in headroom, plus the two
- * activation entries.  The cost is one catalog_content_t (24 bytes) per entry
- * in the plan, so the cap itself is 24 KiB.  The scale test runs 678.
+ * 4096 permits bounded legacy app bundles as well as the Cydia payload.
+ * This is an admission cap, not a promise that every volume can fit this many
+ * objects: node, root-growth, extent and free-space limits still fail closed.
+ * Per-file contents may be memory-mapped by the caller (up to 128 MiB).
  */
-#define ROOTFS_WORK_MAX_ENTRIES 1024u
+#define ROOTFS_WORK_MAX_ENTRIES 4096u
 #define ROOTFS_WORK_MAX_FILE_REPAIRS 16u
 #define ROOTFS_WORK_MAX_FILE_REWRITES 16u
-#define ROOTFS_WORK_MAX_ENTRY_BYTES (16u * 1024u * 1024u)
+#define ROOTFS_WORK_MAX_ENTRY_BYTES (128u * 1024u * 1024u)
 /*
  * 4096 catalog nodes one request may TOUCH -- not a bound on the tree, which
  * may be any size.  Every node this writer touches is a node of the tree, so
@@ -127,10 +125,9 @@ extern "C" {
  * records need the most nodes to hold them.
  *
  * Measured at that worst case: the 678-entry scale test publishes a tree of 669
- * leaves and 731 nodes in all.  Scaled linearly to this file's 1024-entry cap
- * that is about 1100, and the shipping volume's 4096-byte nodes would need
- * roughly an eighth of it.  4096 clears the measured worst case by 5.6x and the
- * extrapolated one by 3.7x.  The cap itself costs only its 16-byte cache slot
+ * leaves and 731 nodes in all. This is not a 4096-entry capacity guarantee;
+ * a larger request can hit this node cap first and will be refused. The cap
+ * itself costs only its 16-byte cache slot
  * (64 KiB in all); node buffers are allocated per node actually touched.
  */
 #define ROOTFS_WORK_MAX_CATALOG_NODES 4096u
@@ -760,6 +757,14 @@ rootfs_work_status_t rootfs_work_repair_powered_off_catalog_clone(
  */
 rootfs_work_status_t rootfs_work_repair_powered_off_clone(
     const char *clone_path, rootfs_work_result_t *result);
+
+/* Provision only a caller-owned, unpublished clone. Never pass a live disk.
+ * No growth, firmware patching or replacement of existing files. On any error
+ * discard the clone; the caller's recovery journal alone may publish success.
+ * allow_unclean requires an independently verified powered-off guest. */
+rootfs_work_status_t rootfs_work_provision_clone(const char *clone_path,
+    const rootfs_work_entry_t *entries, size_t count, bool allow_unclean,
+    rootfs_work_result_t *result);
 
 /*
  * Create destination_path.  The destination must not exist.  On success the

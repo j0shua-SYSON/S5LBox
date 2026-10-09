@@ -69,6 +69,10 @@ confirmed, it leaves the machine open and does not start installation.
 Back up guest data first: a new installation replaces the selected guest disk,
 while supported upgrades use a separate migration path.
 
+**App Settings → Install IPA** adds compatible, unencrypted ARMv6 apps to a
+jailbroken guest. It does not install on your host iPhone. Newer-iOS apps,
+encrypted apps and replacing existing apps are not supported.
+
 ### Keep your data safe
 
 Each machine has its own writable disk. **Duplicate copies configuration, not

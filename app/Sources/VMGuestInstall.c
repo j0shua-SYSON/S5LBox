@@ -237,6 +237,15 @@ static const guest_transaction_spec_t VM_GUEST_RECOVERY_SPEC = {
     true
 };
 
+static const guest_transaction_spec_t VM_GUEST_APP_SPEC = {
+    VM_GUEST_APP_BACKUP_FILE, VM_GUEST_APP_STAGE_DIRECTORY,
+    VM_GUEST_APP_MARKER_FILE, VM_GUEST_APP_MARKER_FILE ".partial",
+    VM_GUEST_APP_JOURNAL_FILE, VM_GUEST_APP_JOURNAL_FILE ".partial",
+    "s5lbox-guest-app-install 1\narchive-sha256 ",
+    "s5lbox-guest-app-install-transaction 1\narchive-sha256 ",
+    "guest-app-install", true
+};
+
 typedef enum {
     GUEST_NODE_ABSENT = 0,
     GUEST_NODE_REGULAR,
@@ -416,6 +425,10 @@ bool vm_guest_recovery_stage_image_path(char *out, size_t capacity,
                                         const char *work_directory) {
     return guest_stage_image_path_for(out, capacity, work_directory,
                                       &VM_GUEST_RECOVERY_SPEC);
+}
+
+bool vm_guest_app_stage_image_path(char *out, size_t capacity, const char *work) {
+    return guest_stage_image_path_for(out, capacity, work, &VM_GUEST_APP_SPEC);
 }
 
 static guest_node_t guest_node(const char *path) {
@@ -1028,7 +1041,7 @@ vm_guest_maintenance_recover(const char *work_directory,
                              vm_guest_install_result_t *storage_result,
                              vm_guest_install_result_t *sources_result,
                              char *detail, size_t detail_capacity) {
-    enum { MAINTENANCE_COUNT = 10 };
+    enum { MAINTENANCE_COUNT = 11 };
     const guest_transaction_spec_t *specs[MAINTENANCE_COUNT] = {
         &VM_GUEST_RECOVERY_SPEC,
         &VM_GUEST_PRIVILEGE_SPEC,
@@ -1039,7 +1052,8 @@ vm_guest_maintenance_recover(const char *work_directory,
         &VM_GUEST_APT_VERIFIER_SPEC,
         &VM_GUEST_CYDIA_CACHE_V3_SPEC,
         &VM_GUEST_CYDIA_CACHE_V4_SPEC,
-        &VM_GUEST_CYDIA_CACHE_SPEC
+        &VM_GUEST_CYDIA_CACHE_SPEC,
+        &VM_GUEST_APP_SPEC
     };
     guest_paths_t paths[MAINTENANCE_COUNT];
     vm_guest_install_result_t local[MAINTENANCE_COUNT];
@@ -1053,7 +1067,8 @@ vm_guest_maintenance_recover(const char *work_directory,
         &local[6],
         &local[7],
         &local[8],
-        &local[9]
+        &local[9],
+        &local[10]
     };
     bool journal[MAINTENANCE_COUNT] = {false};
     size_t owner = MAINTENANCE_COUNT;
@@ -1438,6 +1453,14 @@ vm_guest_recovery_prepare_stage(const char *work_directory,
                                    result, detail, detail_capacity);
 }
 
+vm_guest_install_status_t vm_guest_app_prepare_stage(const char *work,
+    vm_guest_install_result_t *result, char *detail, size_t capacity) {
+    vm_guest_install_status_t status = vm_guest_maintenance_recover(
+        work, NULL, NULL, NULL, detail, capacity);
+    if (status != VM_GUEST_INSTALL_OK) return status;
+    return guest_prepare_stage_for(work, &VM_GUEST_APP_SPEC, result, detail, capacity);
+}
+
 static bool guest_copy_new(const char *source, const char *destination) {
 #if defined(__APPLE__)
     if (clonefile(source, destination, 0u) == 0) return true;
@@ -1499,14 +1522,14 @@ done:
 #endif
 }
 
-vm_guest_install_status_t
-vm_guest_recovery_clone_live_to_stage(const char *work_directory,
-                                      char *detail, size_t detail_capacity) {
+static vm_guest_install_status_t
+guest_clone_live_to_stage_for(const char *work_directory,
+    const guest_transaction_spec_t *spec, char *detail, size_t detail_capacity) {
     guest_paths_t paths;
 
     guest_detail(detail, detail_capacity, "");
     if (!guest_paths_init_for(&paths, work_directory,
-                              &VM_GUEST_RECOVERY_SPEC)) {
+                              spec)) {
         guest_detail(detail, detail_capacity,
                      "The filesystem-recovery path is too long to use.");
         return VM_GUEST_INSTALL_ERR_PATH;
@@ -1533,14 +1556,14 @@ vm_guest_recovery_clone_live_to_stage(const char *work_directory,
     return VM_GUEST_INSTALL_OK;
 }
 
-vm_guest_install_status_t
-vm_guest_recovery_discard_stage(const char *work_directory,
-                                char *detail, size_t detail_capacity) {
+static vm_guest_install_status_t
+guest_discard_stage_for(const char *work_directory,
+    const guest_transaction_spec_t *spec, char *detail, size_t detail_capacity) {
     guest_paths_t paths;
 
     guest_detail(detail, detail_capacity, "");
     if (!guest_paths_init_for(&paths, work_directory,
-                              &VM_GUEST_RECOVERY_SPEC)) {
+                              spec)) {
         guest_detail(detail, detail_capacity,
                      "The filesystem-recovery path is too long to use.");
         return VM_GUEST_INSTALL_ERR_PATH;
@@ -1576,6 +1599,23 @@ vm_guest_recovery_discard_stage(const char *work_directory,
         return VM_GUEST_INSTALL_ERR_IO;
     }
     return VM_GUEST_INSTALL_OK;
+}
+
+vm_guest_install_status_t vm_guest_recovery_clone_live_to_stage(
+    const char *work, char *detail, size_t capacity) {
+    return guest_clone_live_to_stage_for(work, &VM_GUEST_RECOVERY_SPEC, detail, capacity);
+}
+vm_guest_install_status_t vm_guest_app_clone_live_to_stage(
+    const char *work, char *detail, size_t capacity) {
+    return guest_clone_live_to_stage_for(work, &VM_GUEST_APP_SPEC, detail, capacity);
+}
+vm_guest_install_status_t vm_guest_recovery_discard_stage(
+    const char *work, char *detail, size_t capacity) {
+    return guest_discard_stage_for(work, &VM_GUEST_RECOVERY_SPEC, detail, capacity);
+}
+vm_guest_install_status_t vm_guest_app_discard_stage(
+    const char *work, char *detail, size_t capacity) {
+    return guest_discard_stage_for(work, &VM_GUEST_APP_SPEC, detail, capacity);
 }
 
 static vm_guest_install_status_t
@@ -1772,6 +1812,12 @@ vm_guest_recovery_publish(const char *work_directory,
     return guest_publish_for(work_directory, &VM_GUEST_RECOVERY_SPEC,
                              VM_GUEST_RECOVERY_IDENTITY, result,
                              detail, detail_capacity);
+}
+
+vm_guest_install_status_t vm_guest_app_publish(const char *work,
+    const uint8_t identity[VM_GUEST_INSTALL_SHA256_SIZE],
+    vm_guest_install_result_t *result, char *detail, size_t capacity) {
+    return guest_publish_for(work, &VM_GUEST_APP_SPEC, identity, result, detail, capacity);
 }
 
 static vm_guest_install_status_t
