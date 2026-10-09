@@ -195,7 +195,7 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
 }
 - (void)microphoneChanged:(UISwitch *)toggle {
     toggle.enabled = NO;
-    __weak typeof(self) weakSelf = self;
+    __weak VMRuntimeSettingsViewController *weakSelf = self;
     [self.runtimeDelegate setRuntimeMicrophoneEnabled:toggle.on completion:^(BOOL okay, NSString *message) {
         VMRuntimeSettingsViewController *self = weakSelf;
         if (!self) return;

@@ -31,7 +31,7 @@
     _status = @"Audio is stopped.";
     _observers = [NSMutableArray array];
     NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
-    __weak typeof(self) weakSelf = self;
+    __weak VMAudioOutput *weakSelf = self;
     for (NSString *name in @[AVAudioSessionRouteChangeNotification,
                              AVAudioSessionMediaServicesWereResetNotification,
                              AVAudioEngineConfigurationChangeNotification,
@@ -167,7 +167,7 @@
         _microphoneEnabled = NO; [self rebuild];
         if (completion) completion(YES, @""); return;
     }
-    __weak typeof(self) weakSelf = self;
+    __weak VMAudioOutput *weakSelf = self;
     [AVAudioSession.sharedInstance requestRecordPermission:^(BOOL granted) {
         dispatch_async(dispatch_get_main_queue(), ^{
             VMAudioOutput *self = weakSelf;
