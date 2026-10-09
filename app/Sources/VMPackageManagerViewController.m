@@ -149,7 +149,6 @@ static UIImage *Tile(NSString *symbol) {
     dispatch_queue_t _queue;
     NSData *_status;
     NSString *_message;
-    NSDate *_refreshed;
     BOOL _busy, _idleWasDisabled;
     UIBackgroundTaskIdentifier _background;
     __weak VMPackageScreen *_operation;
@@ -169,6 +168,9 @@ static UIImage *Tile(NSString *symbol) {
         if ([p[@"_base"] isEqual:source[@"base"]]) { [active addObject:p]; break; }
     _catalog.packages=active;
     _message=@"Refresh sources to get started.";
+    // On iOS 15 UITabBarController may load its view from super's init.
+    // Build only after the worker queue, bridge and catalog actually exist.
+    if (self.isViewLoaded) [self buildWorkspace];
     return self;
 }
 - (VMPackageScreen *)screen:(NSString *)kind title:(NSString *)title context:(NSDictionary *)context {
@@ -177,7 +179,12 @@ static UIImage *Tile(NSString *symbol) {
     screen.sections=@[]; screen.query=@""; return screen;
 }
 - (void)viewDidLoad {
-    [super viewDidLoad]; self.view.backgroundColor=UIColor.systemBackgroundColor;
+    [super viewDidLoad];
+    if (_queue) [self buildWorkspace];
+}
+- (void)buildWorkspace {
+    if (self.viewControllers.count) return;
+    self.view.backgroundColor=UIColor.systemBackgroundColor;
     NSMutableArray *tabs=[NSMutableArray array];
     NSArray *specs=@[@[@"home",@"Packages",@"shippingbox"],@[@"sources",@"Sources",@"tray.2"],
         @[@"changes",@"Changes",@"arrow.down.circle"],@[@"installed",@"Installed",@"checkmark.seal"],@[@"search",@"Search",@"magnifyingglass"]];
@@ -230,7 +237,8 @@ static UIImage *Tile(NSString *symbol) {
 }
 - (NSDictionary *)packageRow:(NSDictionary *)p {
     NSDictionary *old=[self installed:p[@"Package"]];
-    NSString *version=[NSString stringWithFormat:@"%@%@",p[@"Version"] ?: @"",old ? @"  •  Installed" : @""];
+    NSString *installed=old ? [old[@"Version"] isEqual:p[@"Version"]] ? @"  •  Installed" : [@"  •  Installed: " stringByAppendingString:old[@"Version"]] : @"";
+    NSString *version=[NSString stringWithFormat:@"%@%@",p[@"Version"] ?: @"",installed];
     NSMutableDictionary *row=[Row(Name(p),[NSString stringWithFormat:@"%@\n%@",Summary(p),version],Symbol(p[@"Section"]),@"package") mutableCopy];
     row[@"package"]=p; row[@"identifier"]=[@"package." stringByAppendingString:p[@"Package"]]; return row;
 }
@@ -299,14 +307,18 @@ static UIImage *Tile(NSString *symbol) {
     } else if ([kind isEqual:@"detail"]) {
         NSDictionary *p=screen.context; NSDictionary *old=[self installed:p[@"Package"]];
         BOOL available=p[@"Filename"]!=nil;
-        NSString *action=available ? old && [old[@"Version"] isEqual:p[@"Version"]] ? @"Installed" : old ? @"Update" : @"Install" : @"Remove";
+        BOOL protected=[VMPackageCatalog protectedPackage:p] || (old && [VMPackageCatalog protectedPackage:old]);
+        BOOL newer=old && VMPackageVersionCompare(p[@"Version"],old[@"Version"])>0;
+        BOOL older=old && VMPackageVersionCompare(p[@"Version"],old[@"Version"])<0;
+        NSString *action=available ? old && [old[@"Version"] isEqual:p[@"Version"]] ? @"Installed" : newer ? @"Update" : @"Install" : @"Remove";
         UIBarButtonItem *button=[[UIBarButtonItem alloc] initWithTitle:action style:UIBarButtonItemStyleDone target:self action:@selector(packageAction)];
-        button.enabled=!_busy && ![action isEqual:@"Installed"];
+        button.enabled=!_busy && !protected && !older && ![action isEqual:@"Installed"];
         screen.navigationItem.rightBarButtonItem=button;
         NSMutableDictionary *hero=[[self packageRow:p] mutableCopy]; hero[@"action"]=@""; hero[@"hero"]=@YES;
         hero[@"detail"]=[NSString stringWithFormat:@"%@\n%@",p[@"Version"] ?: @"",old ? [@"Installed: " stringByAppendingString:old[@"Version"]] : @"Not installed"];
         [hero removeObjectForKey:@"package"];
         [sections addObject:Section(nil,@[hero],nil)];
+        if (protected || older) [sections addObject:Section(nil,@[Row(@"Managed in Cydia",older ? @"Downgrades must be performed in the guest's package manager." : @"Core and held packages cannot be changed here.",@"lock",nil)],nil)];
         [sections addObject:Section(@"Description",@[Row(p[@"Description"] ?: @"No description provided.",nil,nil,nil)],nil)];
         NSString *author=[[p[@"Author"] ?: p[@"Maintainer"] ?: @"Not provided" componentsSeparatedByString:@"<"].firstObject stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
         NSMutableArray *info=[NSMutableArray arrayWithArray:@[Row(@"Version",p[@"Version"],nil,nil),Row(@"Author",author,nil,nil),
@@ -316,7 +328,7 @@ static UIImage *Tile(NSString *symbol) {
         if ([p[@"Depends"] length] || [p[@"Pre-Depends"] length]) [sections addObject:Section(@"Dependencies",@[
             Row(@"Required packages",[NSString stringWithFormat:@"%@%@%@",p[@"Pre-Depends"] ?: @"",p[@"Pre-Depends"] && p[@"Depends"] ? @", " : @"",p[@"Depends"] ?: @""],nil,nil)],@"The complete changes will be shown before you confirm.")];
         NSMutableArray *actions=[NSMutableArray arrayWithObject:Row(@"Other versions",@"Choose a release from your sources",@"clock",@"versions")];
-        if (old && available) { NSMutableDictionary *remove=[Row(@"Remove package",@"Keep configuration files",@"trash",@"remove-package") mutableCopy]; remove[@"destructive"]=@YES; [actions addObject:remove]; }
+        if (old && available && !protected) { NSMutableDictionary *remove=[Row(@"Remove package",@"Keep configuration files",@"trash",@"remove-package") mutableCopy]; remove[@"destructive"]=@YES; [actions addObject:remove]; }
         [sections addObject:Section(nil,actions,@"Packages may run root scripts inside the guest. Sources are not signature-verified. A successful install does not guarantee tweak compatibility.")];
     } else if ([kind isEqual:@"review"]) {
         NSMutableArray *rows=[NSMutableArray array]; unsigned long long bytes=0; BOOL weak=NO;
@@ -416,7 +428,7 @@ static UIImage *Tile(NSString *symbol) {
     return YES;
 }
 - (void)refresh {
-    if (_busy) return; _operation=nil; [self setWorking:YES]; [self report:@"Loading repositories…"];
+    if (!_queue || _busy) return; _operation=nil; [self setWorking:YES]; [self report:@"Loading repositories…"];
     NSArray *sources=[_sources copy];
     dispatch_async(_queue,^{
         NSError *guestError=nil,*repoError=nil;
@@ -427,7 +439,6 @@ static UIImage *Tile(NSString *symbol) {
         dispatch_async(dispatch_get_main_queue(),^{
             [self setWorking:NO];
             if (!guest) self->_status=nil;
-            if (packages) self->_refreshed=[NSDate date];
             self->_message=guestError.localizedDescription ?: repoError.localizedDescription ?: [NSString stringWithFormat:@"%lu package versions. Installed list is current.",(unsigned long)self->_catalog.packages.count];
             if (guestError && repoError) self->_message=[NSString stringWithFormat:@"%@\nSources: %@",guestError.localizedDescription,repoError.localizedDescription];
             [self renderAll];
@@ -512,6 +523,7 @@ static UIImage *Tile(NSString *symbol) {
         for (NSURL *url in archives) [NSFileManager.defaultManager removeItemAtURL:url error:NULL];
         dispatch_async(dispatch_get_main_queue(),^{
             if (installed) { self->_catalog.installed=installed; self->_status=result; }
+            else if (error) self->_status=nil;
             [self setWorking:NO]; op.outcome=error ? -1 : 1;
             op.operationState=error ? @"Needs attention" : removing ? @"Removal complete" : @"Installation complete";
             op.operationDetail=error.localizedDescription ?: @"Verified in your guest. Restart the guest if the tweak requires it.";

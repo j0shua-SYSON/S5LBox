@@ -120,6 +120,9 @@
         if (!data) { if (error) *error = failure; return nil; }
         NSArray *records = [VMPackageCatalog parse:data error:error]; if (!records) return nil;
         for (NSDictionary *record in records) {
+            // A versionless dpkg tombstone is valid installed-state metadata,
+            // never an installable repository release.
+            if (![record[@"Version"] length]) continue;
             if (![@[@"iphoneos-arm",@"all"] containsObject:record[@"Architecture"] ?: @""]) continue;
             NSMutableDictionary *p = [record mutableCopy]; p[@"_source"] = source[@"name"]; p[@"_base"] = source[@"base"]; p[@"_allowHTTP"]=@(_allowHTTP);
             [all addObject:p];
