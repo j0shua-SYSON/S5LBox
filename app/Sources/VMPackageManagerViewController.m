@@ -239,7 +239,8 @@ static UIImage *Tile(NSString *symbol) {
     NSDictionary *old=[self installed:p[@"Package"]];
     NSString *installed=old ? [old[@"Version"] isEqual:p[@"Version"]] ? @"  •  Installed" : [@"  •  Installed: " stringByAppendingString:old[@"Version"]] : @"";
     NSString *version=[NSString stringWithFormat:@"%@%@",p[@"Version"] ?: @"",installed];
-    NSMutableDictionary *row=[Row(Name(p),[NSString stringWithFormat:@"%@\n%@",Summary(p),version],Symbol(p[@"Section"]),@"package") mutableCopy];
+    // Keep the exact release visible even when Dynamic Type wraps the summary.
+    NSMutableDictionary *row=[Row(Name(p),[NSString stringWithFormat:@"%@\n%@",version,Summary(p)],Symbol(p[@"Section"]),@"package") mutableCopy];
     row[@"package"]=p; row[@"identifier"]=[@"package." stringByAppendingString:p[@"Package"]]; return row;
 }
 - (void)render:(VMPackageScreen *)screen {
@@ -296,7 +297,7 @@ static UIImage *Tile(NSString *symbol) {
         for (NSDictionary *p in packages) [rows addObject:[self packageRow:p]];
         NSString *empty=[kind isEqual:@"changes"] ? @"No available updates" : @"No packages found";
         NSString *hint=screen.query.length ? @"Try another name or description." : [kind isEqual:@"changes"] ? @"Refresh to check your sources. Core packages are managed in Cydia." : @"Refresh sources or check the guest connection.";
-        NSString *title=[kind isEqual:@"changes"] ? @"Available updates" : [NSString stringWithFormat:@"%lu packages",(unsigned long)packages.count];
+        NSString *title=[kind isEqual:@"changes"] ? @"Available updates" : [NSString stringWithFormat:@"%lu package%@",(unsigned long)packages.count,packages.count==1 ? @"" : @"s"];
         if ([kind isEqual:@"installed"] && !_status) [sections addObject:Section(nil,@[Row(@"Installed list unavailable",_message,@"exclamationmark.circle",@"refresh")],nil)];
         [sections addObject:Section(title,rows.count ? rows : @[Row(empty,hint,@"tray",nil)],
             [kind isEqual:@"changes"] ? @"Choose an update to review compatibility and dependencies before installing." : nil)];
