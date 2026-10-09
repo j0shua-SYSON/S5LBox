@@ -41,6 +41,15 @@ installer output is behind **Show details**. Native Dynamic Type, system
 light/dark colors and local category icons keep the interface readable without
 loading repository web depictions or remote tracking artwork.
 
+Host compatibility follows S5LBox's **iOS 13.0 and later** deployment target,
+not just the iOS 15 lab phone. CI rejects unguarded newer API calls in all four
+native package components against the iOS 13 baseline. SF Symbol lookup has a
+baseline fallback. Workspace creation is gated on completed initialization:
+iOS 15 was observed loading the tab controller's view during `super init`.
+API checks are not proof of runtime behavior on every supported iOS version;
+physical validation below names the OS actually tested. Guest package/tweak
+compatibility is a separate concern; this feature targets the iPhone OS 3 lane.
+
 Close Cydia during package operations. Keep S5LBox foregrounded. Stop waiting
 cancels host work, not a running guest dpkg process. A disconnect after submission
 has an unknown outcome; refresh Installed before retrying. Do not force power off
