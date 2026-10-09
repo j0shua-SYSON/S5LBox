@@ -552,6 +552,9 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         if (size!=4u || (offset&3u)) {
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
         } else if (offset/4u<S5L8920_GPIO_PIN_COUNT && gpio_control_supported(offset/4u,value)) {
+            if (m->pinot && offset/4u==S5L8920_PINOT_RESET_PIN && (value&0x7eu)!=0x12u) {
+                fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);return;
+            }
             if (!gpio_flash_select(m,offset/4u,value)) {
                 fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
                 return;
@@ -560,6 +563,8 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
             pin->control=(uint16_t)value;
             pin->programmed=true;
             pin->inactive_valid=pin->inactive_high=false;
+            if (m->pinot && offset/4u==S5L8920_PINOT_RESET_PIN)
+                (void)pinot_panel_reset_pin(m->pinot,(value&1u)!=0u);
             gpio_latch_level(m,offset/4u);
             gpio_refresh_irq(m);
         } else if (offset>=S5L8920_GPIO_IRQ_STATUS &&
@@ -734,7 +739,7 @@ bool s5l8920_spi_attach_flash(s5l8920_t *m,unsigned bank,sst25vf080b_t *flash,
     unsigned cs_pin,unsigned gate,unsigned tx_low,unsigned rx_high,uint8_t bias_value,uint8_t bias_known) {
     if (!m || !m->ram || bank>=S5L8920_SPI_COUNT || !flash ||
         !flash->initialized || cs_pin>=S5L8920_GPIO_PIN_COUNT ||
-        gate>=S5L8920_CLOCK_GATE_COUNT) return false;
+        gate>=S5L8920_CLOCK_GATE_COUNT || (m->pinot && cs_pin==S5L8920_PINOT_RESET_PIN)) return false;
     if (m->spi_flash[bank])
         return m->spi_flash[bank]==flash && m->spi_flash_cs[bank]==cs_pin &&
             m->spi_flash_gate[bank]==gate && m->spi_flash_bias[bank]==bias_value &&
@@ -1345,6 +1350,23 @@ bool s5l8920_dsim_board_escape_clock(s5l8920_t *m,uint64_t cycles) {
     return gate==15u && s5l8920_dsim_escape_clock(m->dsim,cycles);
 }
 
+bool s5l8920_pinot_attach(s5l8920_t *m,pinot_panel_t *panel) {
+    if (!m || !m->ram || !panel || !panel->configured || !m->dsim || !m->dsim->packet.configured) return false;
+    if (m->pinot) return m->pinot==panel;
+    const s5l8920_gpio_pin_t *pin=&m->gpio[S5L8920_PINOT_RESET_PIN];
+    if (!pin->programmed || (pin->control&0x7eu)!=0x12u) return false;
+    for (unsigned i=0;i<S5L8920_SPI_COUNT;++i)
+        if (m->spi_flash[i] && m->spi_flash_cs[i]==S5L8920_PINOT_RESET_PIN) return false;
+    if (!pinot_panel_reset_pin(panel,(pin->control&1u)!=0u)) return false;
+    m->pinot=panel;return true;
+}
+bool s5l8920_pinot_service(s5l8920_t *m) {
+    if (!m || !m->ram || !m->pinot || !m->dsim || !m->clock_gate[S5L8920_DSIM_GATE].configured) return false;
+    unsigned gate=m->clock_gate[S5L8920_DSIM_GATE].value&15u;
+    if (!gate) return true;
+    return gate==15u && pinot_panel_service(m->pinot,m->dsim);
+}
+
 bool s5l8920_reset(s5l8920_t *m) {
     if (!m || !m->ram) return false;
     if (!arm_reset_profile(&m->cpu,&m->bus,ARM_ARCH_V7_CORTEX_A8)) return false;
@@ -1359,6 +1381,7 @@ bool s5l8920_reset(s5l8920_t *m) {
     }
     m->timebase_ticks=0u;
     m->dsim=NULL;
+    m->pinot=NULL;
     memset(&m->deadline,0,sizeof m->deadline);
     for (unsigned gate=0;gate<S5L8920_CLOCK_GATE_COUNT;gate++)
         m->clock_gate[gate].value=m->clock_gate[gate].initial;

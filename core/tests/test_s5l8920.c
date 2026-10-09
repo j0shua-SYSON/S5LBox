@@ -3967,7 +3967,61 @@ static void test_dsim_packet_board(void) {
     before=d;CHECK(s5l8920_reset(&m) && !m.dsim && !memcmp(&d,&before,sizeof d),"board reset retains borrowed packet peer");
     s5l8920_free(&m);
 }
+static void test_pinot_reset_board(void) {
+    s5l8920_t m={0};s5l8920_dsim_t d={0};pinot_panel_t p={0},other={0},before;
+    const s5l8920_dsim_input_t initial={{24000000u,0x10010fu,0xffffu,0u,UINT32_MAX},3u,2u,5u,7u,11u};
+    const s5l8920_dsim_packet_input_t link={3u,4u,5u,2u,5u};
+    const pinot_panel_input_t panel={{0,0xe5,0x4e},0u,3u,5u,7u,11u,13u};
+    uint32_t pin=S5L8920_GPIO_BASE+4u*S5L8920_PINOT_RESET_PIN;
+    CHECK(!s5l8920_pinot_attach(NULL,&p) && !s5l8920_pinot_service(&m),"panel invalid board");
+    CHECK(s5l8920_init(&m),"panel board init");if (!m.ram) return;
+    CHECK(pinot_panel_configure(&p,&panel) && pinot_panel_configure(&other,&panel),"explicit panel inputs");
+    CHECK(!s5l8920_pinot_attach(&m,&p) && !m.pinot,"panel needs DSIM link");
+    CHECK(s5l8920_dsim_configure(&d,&initial) && s5l8920_dsim_configure_packet(&d,&link) &&
+        s5l8920_clock_gate_configure(&m,S5L8920_DSIM_GATE,15u) && s5l8920_dsim_attach(&m,&d),"panel board DSIM setup");
+    CHECK(!s5l8920_pinot_attach(&m,&p),"unknown reset output accepted");
+    m.bus.write32(&m,pin,0x213u);
+    CHECK(!m.bus_failure.reason && s5l8920_pinot_attach(&m,&p) && p.reset_high && !p.reset_valid,"reset level attached");
+    before=p;CHECK(s5l8920_pinot_attach(&m,&p) && !s5l8920_pinot_attach(&m,&other) &&
+        !memcmp(&before,&p,sizeof p),"duplicate/replacement panel attachment");
+    sst25vf080b_t flash={0};
+    const sst25vf080b_timing_t flash_time={1000u,1000u,1000u,1000u,1000u};
+    CHECK(sst25vf080b_init_unbacked(&flash,&flash_time,true,true) &&
+        s5l8920_clock_gate_configure(&m,9u,15u),"reset pin ownership fixture");
+    sst25vf080b_t flash_before=flash;s5l8920_spi_t spi_before=m.spi[0];
+    CHECK(!s5l8920_spi_attach_flash(&m,0u,&flash,S5L8920_PINOT_RESET_PIN,9u,0u,1u,0xffu,0xffu) &&
+        !m.spi_flash[0] && !memcmp(&flash,&flash_before,sizeof flash) &&
+        !memcmp(&m.spi[0],&spi_before,sizeof spi_before),"panel reset pin cannot become flash chip select");
+    CHECK(pinot_panel_power(&p,true),"explicit powered rail");
+    m.bus.write32(&m,pin,0x212u);CHECK(!p.reset_high && pinot_panel_advance(&p,3u),"actual reset low");
+    m.bus.write32(&m,pin,0x213u);CHECK(p.reset_valid && p.recovery_remaining==5u,"actual reset release");
+    before=p;m.bus.write32(&m,pin,0x213u);
+    CHECK(!memcmp(&before,&p,sizeof p),"duplicate GPIO write restarted reset timer");
+    for (unsigned mode=0u;mode<2u;++mode) {
+        m.bus.write32(&m,pin,mode?0x21eu:0x210u);
+        CHECK(m.bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && m.gpio[40].control==0x213u &&
+            !memcmp(&before,&p,sizeof p),"unmodeled reset drive changed GPIO/panel");
+        s5l8920_clear_bus_failure(&m);
+    }
+    for (unsigned gate=0u;gate<16u;++gate) {
+        m.clock_gate[S5L8920_DSIM_GATE].value=gate;before=p;s5l8920_dsim_t prior=d;
+        CHECK(s5l8920_pinot_service(&m)==(gate==0u || gate==15u) && !memcmp(&before,&p,sizeof p) &&
+            !memcmp(&prior,&d,sizeof d),"service gate or passive clock semantics");
+    }
+    CHECK(pinot_panel_advance(&p,5u) && pinot_panel_command(&p,0xb114u),"pending panel transaction");
+    m.bus.write32(&m,pin,0x212u);CHECK(!p.reply_pending && !p.reset_valid,"GPIO reset failed to cancel reply");
+    before=p;CHECK(s5l8920_reset(&m) && !m.pinot && !m.dsim && !memcmp(&before,&p,sizeof p),"board reset changed borrowed panel");
+    m.bus.write32(&m,pin,0x213u);
+    CHECK(s5l8920_dsim_attach(&m,&d) &&
+        s5l8920_spi_attach_flash(&m,0u,&flash,S5L8920_PINOT_RESET_PIN,9u,0u,1u,0xffu,0xffu),
+        "explicit alternate board owns GPIO as flash chip select");
+    flash_before=flash;
+    CHECK(!s5l8920_pinot_attach(&m,&p) && !m.pinot && !memcmp(&before,&p,sizeof p) &&
+        !memcmp(&flash,&flash_before,sizeof flash),"flash chip select cannot become panel reset");
+    s5l8920_free(&m);CHECK(!m.pinot && !memcmp(&before,&p,sizeof p),"board free changed borrowed panel");
+}
 int main(void) {
+    test_pinot_reset_board();
     test_dsim_packet_board();
     test_dsim_board();
     test_empty_nvram_proxy();

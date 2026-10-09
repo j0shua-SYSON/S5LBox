@@ -186,8 +186,61 @@ physical panel or an automatically populated kernel device-tree property.
 A19-byte reply is fully drained while the caller stores only its15-byte
 capacity. Missing PHY/escape clocks or a missing consumer leave the original
 polls pending; absent direction changes, missing replies and error reports
-reach original failure logging with ID0. The full kernel has not been rerun
-with a completed panel/handoff model: its last stop remains `lcd-panel-id`.
+reach original failure logging with ID0. The full kernel has not yet been rerun
+with the stateful panel and original handoff below: its last stop remains
+`lcd-panel-id`.
+
+### Panel reset, commands and firmware handoff
+
+An optional Pinot panel now receives the controller's transmitted short
+packets. Its identity bytes, channel and nonzero timing intervals are explicit
+inputs. Initial power is off and reset is asserted. The caller supplies stable
+power and elapsed time; no PMU rail state or physical calibration is inferred.
+A powered reset-low pulse must meet its configured minimum, followed by the
+release interval. Power loss, reset assertion and software reset cancel pending
+replies. Unavailable panels and other channels do not answer; the transmitter
+can still drain its packet. Only an accepted B1 read starts a delayed response
+through the controller's actual turnaround and RX FIFO paths. FIFO backpressure
+retains it; transaction timeout prevents it leaking into a later read.
+
+Supported commands include NOP, software reset, sleep in/out and display
+off/on. Sleep transitions require elapsed time. Display on requires completed
+sleep exit, and sleep entry requires display off. Repeated levels or pending
+sleep commands do not restart deadlines. Unsupported commands refuse without
+partially consuming the controller queue. These are control states, not pixels
+or evidence of a working display.
+
+The board connects the panel reset to GPIO40, which the original helper reaches
+using identifier `0x500` at `0x830000a0`. Attachment requires an explicitly
+programmed output and packet controller. GPIO writes drive reset without
+advancing time; unknown drive modes and conflicting flash chip-select ownership
+refuse atomically. Raw DSIM gate19 controls link service. Board reset/free
+detach the borrowed devices without changing them.
+
+A seven-case firmware witness executes the original initializer, both actual
+GPIO reset helpers, short-command/HS helpers, query/decoder and complete LCD
+device-tree producer at `0x4ff0662c`. It includes the original property lookup,
+string comparison and ARM memory copy. Caller frames, parser root, stable
+power and independent clocks are prepared inputs; no guest instruction or
+return is replaced. The declared variant decodes to `0x00e50486` and is present
+in this exact iBoot's variant table at `0x4ff29bf8` with mask `0x00ffffff`.
+This establishes a supported virtual variant, not a measured physical identity.
+
+The query takes300 instructions and the complete handoff733. All57,856 bytes
+of the matching device tree are compared: only the expected `lcd-panel-id`
+and15-byte `raw-panel-id` contents change. No-power, insufficient-reset and
+missing-recovery scenarios reach original error logging without identity.
+Zero identity is rejected without modifying the tree. A missing ID property
+allows only the raw bytes to be copied; an absent parser root returns zero
+without changing either property, so a zero return alone is not success.
+Original short helpers also drive sleep/display state transitions.
+
+The initial witness guard omitted the memory-copy function's final `BX LR` at
+`0x4ff22ecc`; including that original instruction completed the witness. The
+failed run is retained. The full Pinot entry, PMU power coupling, calibration
+commands, long packet transmission, active scanout and a connected boot chain
+remain unverified or unimplemented. This isolated handoff does not establish
+new full-kernel progress, launchd or SpringBoard.
 
 ## Accelerometer configuration
 

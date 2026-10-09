@@ -11,6 +11,7 @@
 #include "s5l8920_spi.h"
 #include "s5l8920_spi_flash.h"
 #include "s5l8920_dsim.h"
+#include "pinot_panel.h"
 #include "lis331dl.h"
 #include "ak8973.h"
 #include <stddef.h>
@@ -24,6 +25,7 @@
 #define S5L8920_VIC_COUNT 3u
 #define S5L8920_IRQ_COUNT (32u * S5L8920_VIC_COUNT)
 #define S5L8920_DSIM_GATE 0x19u
+#define S5L8920_PINOT_RESET_PIN 40u /* Original GPIO identifier0x500. */
 #define S5L8920_UART0_BASE UINT32_C(0x82500000)
 #define S5L8920_UART0_IRQ 24u
 #define S5L8920_UART_COUNT 5u
@@ -262,6 +264,7 @@ typedef struct {
     unsigned spi_flash_cs[S5L8920_SPI_COUNT], spi_flash_gate[S5L8920_SPI_COUNT];
     uint8_t spi_flash_bias[S5L8920_SPI_COUNT], spi_flash_bias_known[S5L8920_SPI_COUNT];
     s5l8920_dsim_t *dsim;
+    pinot_panel_t *pinot;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -288,6 +291,18 @@ bool s5l8920_dsim_attach(s5l8920_t *m, s5l8920_dsim_t *dsim);
 bool s5l8920_dsim_board_system_clock(s5l8920_t *m, uint64_t cycles);
 bool s5l8920_dsim_board_phy_clock(s5l8920_t *m, uint64_t cycles);
 bool s5l8920_dsim_board_escape_clock(s5l8920_t *m, uint64_t cycles);
+
+/* Optional caller-owned panel on the decoded DSIM link and GPIO40 reset.
+ * Requires an attached packet controller and a known GPIO output level.
+ * The caller supplies stable power and elapsed panel time independently;
+ * this does not infer the regulator's electrical state. GPIO writes drive
+ * reset immediately; changing the attached reset pin to an unknown/non-output
+ * source refuses. Duplicate attachment preserves state, replacement refuses.
+ * Board reset/free detach without changing either borrowed device.
+ * Service uses the existing raw DSIM gate; closed pauses, intermediate refuses.
+ * Neither a CPU step, read, service nor GPIO write advances panel time. */
+bool s5l8920_pinot_attach(s5l8920_t *m, pinot_panel_t *panel);
+bool s5l8920_pinot_service(s5l8920_t *m);
 
 /* Reset CPU/controller/UART/timer/I2C state and clear diagnostics, preserving RAM
  * and externally supplied interrupt levels/GPIO samples and configured PMU
