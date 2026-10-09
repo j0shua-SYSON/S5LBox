@@ -1,6 +1,6 @@
 # Live IPA installation
 
-Work branch: `feature/live-ipa-usb`. This is not yet an available installer.
+Work branch: `feature/live-ipa-usb`. Experimental candidate, not merged to main.
 The IPA library remains in `Documents/IPAs`; importing a file must never
 automatically install it. The target is one app at a time, through the running
 guest's own AFC and `com.apple.mobile.installation_proxy` services.
@@ -51,14 +51,34 @@ messages are not fatal transport errors.
 The portable multiplexing layer has four bounded streams, fixed-scale windows,
 fragment reassembly, sequence/ACK validation, cancellation, and bulk ZLP framing.
 The native bridge uses nonblocking local socket pairs so service/TLS work runs
-on a worker without touching emulator-owned state. Pairing and TLS client code
-is under development and is not an installation-success claim.
+on a worker without touching emulator-owned state. The iPhone build now includes
+private per-machine RSA pairing identities, pinned TLS 1.0, bounded AFC upload,
+and installation_proxy progress/error handling. Runtime Settings → Install IPA
+opens the same Files-visible library, but uses the running guest's services.
+The existing Machines-side offline installer is still a separate path.
 
-Next gates: native service-layer build/tests; lockdown pairing/session;
-AFC upload to `PublicStaging`; installation_proxy
-progress/Complete; then guest icon and launch. Signing/provisioning rejection
-must be surfaced honestly. Kernel jailbreak support alone does not prove that
-the installation service will accept every unsigned IPA.
+Native CI has 41 passing service/identity checks, including bounded/malformed AFC
+frames, staging-path restrictions, cancellation, plist framing, and persistence.
+The portable core has 77 passing tests; all nine core CI jobs at `553e5bb` passed.
+
+Physical iPhone8,2 / iOS 15.8.5, clean jailbroken `rc-ipa-validation` guest:
+
+- `0a4e71c`: real enumeration and usbmux v2; QueryType/GetValue reached the
+  guest. Initial connection timeout happened while the guest was asleep on its
+  lock screen. Unlocking it allowed progress; its Auto-Lock setting was Never.
+- `c4f7acd`: explicit Pair → ValidatePair → StartSession succeeded; the following
+  StartService disconnected. A saved host identity alone is not proof that a
+  restored guest accepted it; pairing now precedes legacy validation.
+- `c8edf29`: disabling TLS 1.0 BEAST one-byte record splitting on this private
+  local connection fixed StartService. After restoring the saved machine,
+  pairing/TLS, AFC upload of the 151349-byte MobileTerminal-426 IPA, and the real
+  installation_proxy request all completed far enough for the guest to return
+  `ApplicationVerificationFailed`. This is an honest rejection, not an install.
+
+Next gate: install a compatible, guest-accepted IPA; require Status=Complete,
+then verify the guest icon and launch. Unsigned homebrew needs a compatible
+guest signing setup (such as AppSync for OS 3.1); the emulator must not silently
+replace the guest's policy or fall back to direct HFS writes.
 
 ## References
 

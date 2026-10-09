@@ -6,6 +6,8 @@
 /* Worker-thread only. Returns an owned nonblocking local socket, or -1.
  * No physical USB, network listener, host filesystem or guest disk access. */
 - (int)openPort:(uint16_t)port timeout:(NSTimeInterval)timeout error:(NSError **)error;
+- (int)openPort:(uint16_t)port timeout:(NSTimeInterval)timeout
+      canceled:(BOOL (^)(void))canceled error:(NSError **)error;
 /* Owner emulator thread lifecycle; reset wakes every pending client. */
 - (void)beginSession;
 - (void)endSession:(NSString *)reason;

@@ -4,6 +4,8 @@
 @class VMUSBTransport;
 @interface VMUSBService : NSObject
 - (instancetype)initWithTransport:(VMUSBTransport *)transport port:(uint16_t)port error:(NSError **)error;
+- (instancetype)initWithTransport:(VMUSBTransport *)transport port:(uint16_t)port
+                         canceled:(BOOL (^)(void))canceled error:(NSError **)error;
 @property (nonatomic, copy) BOOL (^canceled)(void);
 - (BOOL)writeData:(NSData *)data error:(NSError **)error;
 - (NSData *)readCount:(NSUInteger)count error:(NSError **)error;

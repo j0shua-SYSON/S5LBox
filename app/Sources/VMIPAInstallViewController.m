@@ -194,6 +194,7 @@
         BOOL result = [installer installURL:url error:&error];
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_installed = result;
+            if (result) self->_package = nil; // release the inspection's extracted cache
             [self setBusy:NO message:result ? @"The guest reports installation complete. Return to its Home screen to open the app."
                 : error.localizedDescription ?: @"Installation did not finish."];
             self->_usbInstaller = nil;

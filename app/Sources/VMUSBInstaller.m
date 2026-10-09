@@ -47,9 +47,9 @@ static NSError *InstallError(NSString *message) {
     if (![port isKindOfClass:NSNumber.class] || port.integerValue < 1 || port.integerValue > 65535) {
         if (error) *error = InstallError(@"The guest returned an invalid service port."); return nil;
     }
-    VMUSBService *service = [[VMUSBService alloc] initWithTransport:_transport port:port.unsignedShortValue error:error];
     __weak VMUSBInstaller *weakSelf = self;
-    service.canceled = ^BOOL{ return weakSelf.canceled; };
+    VMUSBService *service = [[VMUSBService alloc] initWithTransport:_transport port:port.unsignedShortValue
+        canceled:^BOOL{ return weakSelf.canceled; } error:error];
     if ([reply[@"EnableServiceSSL"] boolValue] &&
         ![service enableTLSWithIdentity:pairing.identity expectedKey:pairing.deviceKey error:error]) return nil;
     return service;
@@ -71,9 +71,9 @@ static NSError *InstallError(NSString *message) {
     do {
         if (self.canceled) { failure = InstallError(@"Installation canceled."); break; }
         [self report:@"Connecting to the guest’s virtual USB…" fraction:-1];
-        lockdown = [[VMUSBService alloc] initWithTransport:_transport port:62078 error:&failure];
+        lockdown = [[VMUSBService alloc] initWithTransport:_transport port:62078
+            canceled:^BOOL{ return weakSelf.canceled; } error:&failure];
         if (!lockdown) break;
-        lockdown.canceled = ^BOOL{ return weakSelf.canceled; };
         NSDictionary *type = [self lockdown:lockdown request:@"QueryType" values:nil error:&failure];
         if (!type) break;
         if (![type[@"Type"] isEqual:@"com.apple.mobile.lockdown"]) {
@@ -114,7 +114,11 @@ static NSError *InstallError(NSString *message) {
         uint64_t handle = [afc openPath:path error:&failure];
         if (!handle) break;
         uint8_t buffer[65536]; off_t sent = 0;
+        NSTimeInterval uploadDeadline = NSProcessInfo.processInfo.systemUptime + 900;
         while (sent < initial.st_size) {
+            if (NSProcessInfo.processInfo.systemUptime >= uploadDeadline) {
+                failure = InstallError(@"The IPA upload did not finish within fifteen minutes."); break;
+            }
             ssize_t n = read(fd, buffer, (size_t)MIN((off_t)sizeof buffer, initial.st_size - sent));
             if (n < 0 && errno == EINTR) continue;
             if (n <= 0) { failure = InstallError(@"The IPA changed or could not be read during upload."); break; }

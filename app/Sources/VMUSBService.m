@@ -36,10 +36,15 @@ static OSStatus ServiceWrite(SSLConnectionRef ref, const void *data, size_t *siz
     SSLContextRef _tls;
 }
 - (instancetype)initWithTransport:(VMUSBTransport *)transport port:(uint16_t)port error:(NSError **)error {
+    return [self initWithTransport:transport port:port canceled:nil error:error];
+}
+- (instancetype)initWithTransport:(VMUSBTransport *)transport port:(uint16_t)port
+                         canceled:(BOOL (^)(void))canceled error:(NSError **)error {
     self = [super init];
     if (!self) return nil;
     _socketFD = -1;
-    _socketFD = [transport openPort:port timeout:120 error:error];
+    _canceled = [canceled copy];
+    _socketFD = [transport openPort:port timeout:120 canceled:_canceled error:error];
     if (_socketFD < 0) return nil;
     return self;
 }

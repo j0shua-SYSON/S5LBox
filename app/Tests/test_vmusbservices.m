@@ -16,6 +16,11 @@ static unsigned checks, failures;
 // Service tests substitute only the FD factory. The service framing code is real.
 static int nextFD = -1;
 @implementation VMUSBTransport
+- (int)openPort:(uint16_t)port timeout:(NSTimeInterval)timeout
+      canceled:(BOOL (^)(void))canceled error:(NSError **)error {
+    (void)canceled;
+    return [self openPort:port timeout:timeout error:error];
+}
 - (int)openPort:(uint16_t)port timeout:(NSTimeInterval)timeout error:(NSError **)error {
     (void)port; (void)timeout; (void)error;
     int result = nextFD; nextFD = -1; return result;

@@ -52,6 +52,10 @@ static NSError *VMUSBError(NSString *message) {
     [_condition broadcast]; [_condition unlock];
 }
 - (int)openPort:(uint16_t)port timeout:(NSTimeInterval)timeout error:(NSError **)error {
+    return [self openPort:port timeout:timeout canceled:nil error:error];
+}
+- (int)openPort:(uint16_t)port timeout:(NSTimeInterval)timeout
+      canceled:(BOOL (^)(void))canceled error:(NSError **)error {
     if (NSThread.isMainThread || !port || !isfinite(timeout) || timeout <= 0) {
         if (error) *error = VMUSBError(@"USB service connections require a worker thread and a finite timeout.");
         return -1;
@@ -76,7 +80,7 @@ static NSError *VMUSBError(NSString *message) {
     }
     VMUSBConnection *c = [[VMUSBConnection alloc] init];
     c.port = port; c.bridgeFD = fds[0]; c.channel = -1;
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:MIN(timeout, 300.0)];
+    NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + MIN(timeout, 300.0);
     [_condition lock];
     if (!_accepting || _connections.count >= USB_MUX_CHANNELS) {
         c.error = VMUSBError(_unavailable ?: @"All virtual USB service channels are busy.");
@@ -84,10 +88,14 @@ static NSError *VMUSBError(NSString *message) {
     } else {
         [_connections addObject:c];
         while (!c.ready && !c.error) {
-            if (![_condition waitUntilDate:deadline] && !c.ready && !c.error) {
+            NSTimeInterval left = deadline - NSProcessInfo.processInfo.systemUptime;
+            if ((canceled && canceled()) || left <= 0) {
                 c.canceled = YES;
-                c.error = VMUSBError(@"The guest USB service did not respond in time.");
+                c.error = VMUSBError(left <= 0 ? @"The guest USB service did not respond in time. Wake and unlock iPhone OS, then try again."
+                                               : @"Installation canceled.");
+                break;
             }
+            [_condition waitUntilDate:[NSDate dateWithTimeIntervalSinceNow:MIN(left, 0.25)]];
         }
     }
     NSError *failure = c.error;
