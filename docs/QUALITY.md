@@ -1509,3 +1509,52 @@ four to five wall-clock minutes; post-install reload took about one minute.
 Separating those waits from transfer time remains the next usability task.
 Native bulk throughput above 2 MB/s does not establish sustained Cydia or
 Internet-server throughput.
+
+### 2026-10-09: host-controlled Force Power Off
+
+Candidate `eb87b62` adds Force Power Off to Back and Machine Settings. Normal
+shutdown remains guest-driven, but Back stays enabled while it waits. Force-off
+requests emulator-thread teardown without touch, waits for USB/network/disk
+ownership to end, and then removes only the automatic-resume marker. It neither
+saves CPU state nor manufactures the PMU clean-shutdown witness used by jailbreak.
+The controller cancels a pending jailbreak and ignores superseded shutdown
+callbacks. Marker-removal failure keeps the stopped screen open with a retry.
+
+Local Windows CTest: 77/77 pass. The checkpoint executable passes 50 checks,
+including running/powered-off marker invalidation, payload retention, repeated
+invalidation, invalid paths, and refusal to unlink a directory. These C tests
+and the settings ownership guard do not substitute for UIKit/device testing.
+iOS build 37891273802 passed and produced a 2284860-byte IPA, SHA-256
+`c1d1a973a41d9b77610458823c7d11e81f36f9343d3d91875723f0970de69fd5`.
+
+On the physical iPhone 6s Plus / iOS 15.8.5, using `rc-ipa-validation`:
+
+- Machine Settings -> Force Power Off returned to Machines at the next
+  observation, 1.197 seconds after the confirmation tap (includes automation).
+- Reopening began a fresh kernel boot at 173 million instructions, rather than
+  restoring the old tens-of-billions checkpoint. Back -> Force Power Off worked
+  during that boot too.
+- A second fresh boot rejected a guest tap because no touch driver had announced
+  itself. Started ordinary Shut down, used the still-enabled Back button, and
+  confirmed Force Power Off. Machines was visible 1.129 seconds later, without a
+  stale shutdown-failure dialog. This directly exercises the reported no-touch
+  boot/shutdown failure rather than assuming a responsive SpringBoard.
+- The automatic-resume marker was absent after force-off. The old state and
+  sidecar remained, with their pre-test modification times, inert without it.
+- Cancel on the force-off confirmation left the guest running.
+- After these forced stops, the same disk cold-booted to the guest lock screen.
+  Ordinary Shut down still completed and returned to Machines after canceling
+  its force-off confirmation. Its new shutdown checkpoint and marker were
+  written at 15:06 local time; the validation machine was left closed.
+
+At device-test completion, core CI 37891273696 had passed the Windows/Linux/macOS
+build-and-test jobs, warnings-as-errors, ASan/UBSan, the exact APT adapter, and
+Linux JIT. Both macOS JIT jobs had passed their functional tests and were still
+running the pre-existing long measurement steps; their final results were not
+yet available. Main and the separate iOS 6 branch were not changed.
+
+Force-off is deliberately an unclean guest power loss. Host teardown does not
+flush writes still in guest RAM or guarantee an undamaged HFS volume. The next
+boot may need filesystem recovery. Normal shutdown remains preferable when
+the guest responds. A truly wedged host thread/process is outside this path:
+this stops the emulation loop, not an arbitrary deadlocked iOS process.
