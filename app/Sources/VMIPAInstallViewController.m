@@ -61,6 +61,11 @@
     _status = [message copy];
     self.navigationItem.hidesBackButton = busy;
     self.navigationController.interactivePopGestureRecognizer.enabled = !busy;
+    SEL contentPop = NSSelectorFromString(@"interactiveContentPopGestureRecognizer");
+    if ([self.navigationController respondsToSelector:contentPop]) {
+        UIGestureRecognizer *gesture = [self.navigationController valueForKey:NSStringFromSelector(contentPop)];
+        gesture.enabled = !busy;
+    }
     // Also gates iOS 26's content-wide pop gesture while a disk is in use.
     self.navigationController.view.userInteractionEnabled = !busy || (_liveTransport && _usbInstaller);
     if (_liveTransport) self.navigationController.modalInPresentation = busy;
