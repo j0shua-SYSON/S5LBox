@@ -283,15 +283,16 @@ done:
 static void apply_finish(void) {
     unsigned char action, expected[32], actual[32]; size_t size;
     if (!io(peer,&action,1,0) || !io(peer,expected,32,0)) return;
-    unsigned char *data=status_data(&size);
-    if (!data) { failure("No guest package database."); return; }
-    ios3_sha256(data,size,actual); free(data);
-    if (action!=pending || !action || !finish_ready || memcmp(expected,actual,32)) {
-        failure("Finish request or installed packages changed. Refresh Installed first."); return;
-    }
     int lockfd=open(DPKG_LOCK,O_RDWR|O_NOFOLLOW);
     struct flock lock; memset(&lock,0,sizeof lock); lock.l_type=F_WRLCK; lock.l_whence=SEEK_SET;
     if (lockfd<0 || fcntl(lockfd,F_SETLK,&lock)) { if (lockfd>=0) close(lockfd); failure("dpkg is busy. Finish that operation first."); return; }
+    // Read the planned-state witness only after holding the lock.
+    unsigned char *data=status_data(&size);
+    if (!data) { close(lockfd); failure("No guest package database."); return; }
+    ios3_sha256(data,size,actual); free(data);
+    if (action!=pending || !action || !finish_ready || memcmp(expected,actual,32)) {
+        close(lockfd); failure("Finish request or installed packages changed. Refresh Installed first."); return;
+    }
     // Keep this lock through the restart, preventing a concurrent dpkg launch.
 #ifdef S5LBOX_PACKAGE_TEST
     char *args[]={STATE "/finish",action==4 ? "reboot" : action==3 ? "reload" : "restart",NULL};

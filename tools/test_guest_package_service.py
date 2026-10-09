@@ -1,5 +1,6 @@
 """Loopback executor contract tests. Uses only a fake dpkg in a private cwd."""
 import hashlib
+import fcntl
 import os
 from pathlib import Path
 import socket
@@ -154,6 +155,10 @@ eval "printf 'finish:reboot\\nfinish:restart\\n' >&$fd"
             assert apply(3, b"x" * 32)[0][0] == b"E"  # stale installed database
             assert not (root / "finish-calls").exists()
             checks += 3
+            with (root / "lock").open("r+") as lock:
+                fcntl.lockf(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                assert apply(3)[0][0] == b"E"
+            checks += 1
             # Service restart preserves a completed-but-not-applied request.
             process.terminate(); process.wait(timeout=10)
             process = subprocess.Popen([binary], cwd=work)
@@ -180,6 +185,11 @@ eval "printf 'finish:reboot\\nfinish:restart\\n' >&$fd"
             # Emulate that and relaunch with the SAME boot timestamp: the
             # consumed reboot must not reappear. Never call a host reboot.
             assert change('fd=${CYDIA%% *}\neval "echo finish:reboot >&$fd"\n')[-2][1] == b"\x04\x01"
+            (root / "finish-fails").touch()
+            assert apply(4)[-1][0] == b"E"
+            assert finish_status() == b"\x04\x01"
+            (root / "finish-fails").unlink()
+            checks += 2
             (root / "finish").write_text('#!/bin/sh\nkill -TERM "$PPID"\n')
             with connect(b"F", modern=True) as sock:
                 sock.sendall(b"\x04" + hashlib.sha256(status).digest())
