@@ -144,6 +144,10 @@ static OSStatus ServiceWrite(SSLConnectionRef ref, const void *data, size_t *siz
     if (!status) status = SSLSetConnection(_tls, (__bridge SSLConnectionRef)self);
     if (!status) status = SSLSetProtocolVersionMin(_tls, kTLSProtocol1);
     if (!status) status = SSLSetProtocolVersionMax(_tls, kTLSProtocol1);
+    /* Legacy lockdown expects its four-byte plist length in one TLS record.
+     * BEAST 1/n-1 splitting is unnecessary on the private in-process cable
+     * and can make old service readers close an otherwise valid TLS session. */
+    if (!status) status = SSLSetSessionOption(_tls, kSSLSessionOptionSendOneByteRecord, false);
     if (!status) status = SSLSetCertificate(_tls, (__bridge CFArrayRef)certificates);
     if (!status) status = SSLSetSessionOption(_tls, kSSLSessionOptionBreakOnServerAuth, true);
     NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + 120.0;
