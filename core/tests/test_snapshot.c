@@ -1245,6 +1245,49 @@ static void test_restore_is_idempotent(void) {
     s5l8900_free(&cont); s5l8900_free(&b);
 }
 
+/* v32's only USB state was PCGCCTL. Build its exact MACH layout from a v33
+ * fixture by removing the 308 newly serialized bytes, then repair framing and
+ * hash. This also proves restoring over an enabled controller disables it. */
+static void test_v32_usb_migration(void) {
+    s5l8900_t a, b;
+    CHECK(s5l8900_init(&a, 0, RAMSZ), "v32 source init");
+    CHECK(s5l8900_init(&b, 0, RAMSZ), "v32 destination init");
+    a.usbotg.pcgcctl = 0x91c76a5du;
+    a.cpu.r[7] = 0xabcdu;
+    a.dmac[0].ch[0].src = 0x713580u;
+    uint8_t *buf = NULL; size_t len = 0;
+    CHECK(snapshot_save_mem(&a, &buf, &len) == SNAP_OK, "v33 fixture save");
+    if (buf) {
+        size_t mach = find_section(buf, len, 0x4843414du);
+        size_t at = 0, count = 0;
+        uint64_t size = mach ? rd64le(buf + mach + 8u) : 0;
+        for (size_t i = mach + 16u; mach && i + 4u <= mach + 16u + size; i++)
+            if (rd32le(buf + i) == a.usbotg.pcgcctl) { at = i + 4u; count++; }
+        CHECK(count == 1 && at + 308u < len, "unique USB boundary");
+        if (count == 1 && at + 308u < len) {
+            memmove(buf + at, buf + at + 308u, len - at - 308u);
+            len -= 308u;
+            wr32le(buf + 16, 32u);
+            wr64le(buf + 24, rd64le(buf + 24) - 308u);
+            wr64le(buf + mach + 8, size - 308u);
+            refresh_snapshot_hash(buf, len);
+            s5l_usbotg_enable(&b.usbotg);
+            s5l_usbotg_connect(&b.usbotg, true);
+            CHECK(snapshot_load_mem(&b, buf, len) == SNAP_OK, "load v32");
+            CHECK(b.usbotg.pcgcctl == a.usbotg.pcgcctl &&
+                  !b.usbotg.enabled && !b.usbotg.connected,
+                  "v32 controller must remain configuration-only");
+            CHECK(!memcmp(&a.usbotg, &b.usbotg, sizeof a.usbotg),
+                  "all added v32 USB state has a known zero value");
+            CHECK(a.cpu.r[7] == b.cpu.r[7] &&
+                  a.dmac[0].ch[0].src == b.dmac[0].ch[0].src,
+                  "v32 fields before and after USB remain aligned");
+        }
+        free(buf);
+    }
+    s5l8900_free(&a); s5l8900_free(&b);
+}
+
 int main(void) {
     printf("S5LBox snapshot tests\n");
     test_mbx_ta_fifo_midstream_round_trip();
@@ -1260,6 +1303,7 @@ int main(void) {
     test_checksum_valid_malformed_snapshots_are_transactional();
     test_restore_does_not_diverge();
     test_restore_is_idempotent();
+    test_v32_usb_migration();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

@@ -35,8 +35,8 @@ static const vm_option_t VM_OPTIONS[] = {
       "that failure can be reproduced on its own.",
       false, VM_OPT_GROUP_HARDWARE, VM_OPT_IMPL_HARNESS },
     { "usb-otg", "USB OTG  ·  /arm-io/usb-otg",
-      "Off: AppleSynopsysOTGDevice reads unmodelled configuration registers, "
-      "derives a self-inconsistent endpoint count and panics.",
+      "Experimental virtual USB transport. Requires a full shutdown and "
+      "fresh boot. Live app installation is not yet validated.",
       false, VM_OPT_GROUP_HARDWARE, VM_OPT_IMPL_HARNESS },
     { "multitouch", "Touchscreen  ·  /arm-io/spi1/multi-touch",
       "On. The digitizer is bootloaded exactly as the real part is -- Apple's "

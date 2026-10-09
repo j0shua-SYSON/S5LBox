@@ -25,6 +25,7 @@ add_library(emucore STATIC
     src/arm/a64_static_engine.c
     src/mmu.c
     src/snapshot.c
+    src/usb_host.c
     src/vm_source.c
     src/vm_block.c
     src/md_bridge.c
@@ -236,6 +237,10 @@ add_test(NAME vfp COMMAND test_vfp)
 add_executable(test_soc tests/test_soc.c)
 target_link_libraries(test_soc PRIVATE emucore)
 add_test(NAME s5l8900_machine COMMAND test_soc)
+
+add_executable(test_usbotg tests/test_usbotg.c)
+target_link_libraries(test_usbotg PRIVATE emucore)
+add_test(NAME usb_device_dma COMMAND test_usbotg)
 
 # The first decoded MBX2D packet. Separate from test_soc's aperture ownership
 # test because the defended property crosses command parsing, the GPU GART,

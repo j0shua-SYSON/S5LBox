@@ -44,10 +44,8 @@
 
 /*
  * Bump this whenever the serialised form changes in any way — a new field, a
- * reordered field, a changed section. There is deliberately no compatibility
- * shim: an old snapshot restored into a newer emulator would be a machine with
- * one register quietly holding the wrong value, which is the single most
- * expensive class of bug this feature exists to prevent.
+ * reordered field, a changed section. Earlier versions are refused unless an
+ * explicitly tested migration can reconstruct every added field exactly.
  */
 /* v2: the VFP register file (arm_cpu_t.vfp_s, s0-s31 aliasing d0-d15) joined
  *     the CPU section when real VFPv2 arithmetic was implemented. */
@@ -189,7 +187,10 @@
  *      only thing in this machine that can distinguish "the guest never
  *      programmed a transfer" from "it programmed one and this model refused
  *      it", and refused_flow/width/chain/softreq/endian name which refusal. */
-#define SNAPSHOT_VERSION   32u
+/* v33 adds opt-in DWC2 device DMA state. v32 remains readable: its USB model
+ * had only PCGCCTL, so all new state is exactly the disabled model's reset
+ * state. This does NOT enable USB in a guest booted without its device tree. */
+#define SNAPSHOT_VERSION   33u
 
 typedef enum {
     SNAP_OK = 0,

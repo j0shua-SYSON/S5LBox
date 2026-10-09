@@ -1627,6 +1627,14 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         fresh_boot_after_poweroff = true;
     }
 
+    /* Only a fresh boot may acquire the new USB hardware. A v32 running
+     * checkpoint still owns its old device tree and config-only controller. */
+    int usb_index = vm_option_index("usb-otg");
+    if (!restored && usb_index >= 0 &&
+        (unsigned)usb_index < report->options.count &&
+        report->options.row[usb_index].effective)
+        s5l_usbotg_enable(&machine->usbotg);
+
     /* Guest DRAM now holds its own copy of everything. */
     free(kernel);
     free(tree);

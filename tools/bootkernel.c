@@ -52,6 +52,7 @@ static rootfs_work_entry_t *g_jb_entries = NULL;
 #include "sha256.h"
 #include "snapshot.h"
 #include "soc.h"
+#include "usb_host.h"
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 #include "a64_static.h"
 #include "vfp.h"
@@ -510,12 +511,9 @@ static const boot_toggle_t BOOT_TOGGLES[] = {
       "baseband. Split from --baseband so either half of run29's failure can\n"
       "be reproduced alone; -B still enables both at once, as it always did." },
     { "usb-otg", "-u", NULL, false, BOOT_GROUP_HARDWARE, BOOT_FIELD(usb_otg),
-      "leave /arm-io/usb-otg matched. AppleSynopsysOTGDevice reads hardware-\n"
-      "configuration registers from an unmodelled block, derives a self-\n"
-      "inconsistent endpoint count and panics in findMaxEndpoints at about\n"
-      "8.73e9 instructions. Un-matching it costs boot progress -- daemons\n"
-      "retry against absent USB -- but it is the only configuration observed\n"
-      "to run past that panic." },
+      "leave /arm-io/usb-otg matched with the configuration-register model.\n"
+      "--usb-enumerate additionally enables experimental device-mode DMA\n"
+      "and an in-process host that requests the guest's own descriptors." },
     { "multitouch", NULL, NULL, false, BOOT_GROUP_HARDWARE,
       BOOT_FIELD(multitouch),
       "leave /arm-io/spi1/multi-touch matched. OFF BY DEFAULT SINCE\n"
@@ -33596,6 +33594,7 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "          [--touch <at>:<x>:<y>[:<hold>]] ...\n"
             "          [--drag <at>:<x0>:<y0>:<x1>:<y1>[:<steps>[:<span>]]] ...\n"
             "          [--fast] [--run-api] [--frame-meter]\n"
+            "          [--usb-enumerate] (virtual USB host; stops at usbmux configuration)\n"
             "          [--interpreter-control | --compact-raw-control]\n"
             "          [--canonical-bus]\n"
             "          [--no-direct-ram-writes]\n"
@@ -33929,6 +33928,7 @@ int main(int argc, char **argv) {
     /* --frame-meter: host-only publication observer beside --fast, not an
      * emulated-machine toggle and therefore not snapshot state. */
     bool frame_meter_requested = false;
+    bool usb_enumerate = false;
     /* --sequence-profile: full instruction-entry aggregation in the literal
      * runner. It implies --fast so no unrelated observer dominates the run. */
     bool sequence_profile_requested = false;
@@ -34226,6 +34226,12 @@ int main(int argc, char **argv) {
         }
         if (!strcmp(argv[i], "--frame-meter")) {
             frame_meter_requested = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--usb-enumerate")) {
+            usb_enumerate = true;
+            cfg.v.usb_otg = true;
+            run_api_hot = fast_hot = true;
             continue;
         }
         if (!strcmp(argv[i], "--sequence-profile")) {
@@ -34779,7 +34785,7 @@ int main(int argc, char **argv) {
     want_sha1hw        = cfg.v.sha1;
     want_baseband      = cfg.v.baseband;
     want_spi2          = cfg.v.spi2;
-    want_usb_otg       = cfg.v.usb_otg;
+    want_usb_otg       = cfg.v.usb_otg || usb_enumerate;
     want_fb            = cfg.v.framebuffer;
     v_display          = cfg.v.iomfb_display ? 1u : 0u;
     want_vram          = cfg.v.vram;
@@ -35391,6 +35397,8 @@ int main(int argc, char **argv) {
      * RAM disk has to live in DRAM alongside everything else. */
     s5l8900_t mach;
     if (!s5l8900_init(&mach, phys_base, ram_size)) { fprintf(stderr, "init failed\n"); return 1; }
+    usb_host_t usb_host = {0};
+    if (usb_enumerate) usb_host_init(&usb_host, &mach);
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     if (interpreter_control &&
         !s5l8900_static_a64_set_enabled(&mach, false)) {
@@ -37529,6 +37537,20 @@ external_md_work_ready:
         fflush(stdout);
 
         while (mach.cpu.cycles < steps) {
+            if (usb_enumerate) {
+                unsigned before = usb_host.stage;
+                usb_host_poll(&usb_host, &mach);
+                if (before != usb_host.stage || mach.cpu.cycles % 1000000000u < app_chunk) {
+                    printf("USB host: stage=%u control=%u at=%" PRIu64
+                           " VID/PID=%04x/%04x config=%u bulk=%u/%u %s\n",
+                           usb_host.stage, usb_host.control, mach.cpu.cycles,
+                           usb_host.vendor, usb_host.product, usb_host.configuration,
+                           usb_host.bulk_in, usb_host.bulk_out,
+                           usb_host.error ? usb_host.error : "");
+                    fflush(stdout);
+                }
+                if (usb_host_ready(&usb_host) || usb_host.error) break;
+            }
             /* VMEngine drains its input queues here, between app chunks.  The
              * absolute schedules below can split the preceding chunk so these
              * calls land exactly at the requested retired count. */
@@ -39646,6 +39668,17 @@ external_md_work_ready:
     }
 
     int exit_code = snapshot_unreached ? 5 : 0;
+    if (usb_enumerate) {
+        printf("USB result: stage=%u control=%u GAHB=%08x GINT=%08x/%08x "
+               "DCTL=%08x DAINT=%08x EP0=%08x/%08x size=%08x/%08x %s\n",
+               usb_host.stage, usb_host.control, mach.usbotg.gahbcfg,
+               s5l_usbotg_read(&mach.usbotg, USBOTG_GINTSTS), mach.usbotg.gintmsk,
+               mach.usbotg.dctl, s5l_usbotg_read(&mach.usbotg, USBOTG_DAINT),
+               mach.usbotg.ep[0][0].ctl, mach.usbotg.ep[1][0].ctl,
+               mach.usbotg.ep[0][0].size, mach.usbotg.ep[1][0].size,
+               usb_host.error ? usb_host.error : "");
+        if (!usb_host_ready(&usb_host)) exit_code = 6;
+    }
     if (bridge_halt_failure) exit_code = 7;
     else if (guest_fatal_entry_seen) exit_code = 10;
     else if (external_md && st != ARM_OK) {

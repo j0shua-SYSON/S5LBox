@@ -1176,6 +1176,12 @@ static s5l_wake_kind_t wake_edge_dmac(const s5l8900_t *m, uint32_t *ticks) {
     return S5L_WAKE_NEVER;
 }
 
+/* Host packets arrive only between batches, never inside a WFI fast-forward. */
+static s5l_wake_kind_t wake_edge_usb(const s5l8900_t *m, uint32_t *ticks) {
+    (void)m; (void)ticks;
+    return S5L_WAKE_NEVER;
+}
+
 static const s5l_wake_source_t WAKE_SOURCES[] = {
     { "timer", S5L8900_IRQ_TIMER, wake_edge_timer },
     { "clcd",  S5L8900_IRQ_CLCD,  wake_edge_clcd  },
@@ -1194,6 +1200,7 @@ static const s5l_wake_source_t WAKE_SOURCES[] = {
     { "uart4-rx", S5L8900_IRQ_UART4, wake_edge_uart4 },
     { "dmac0", S5L8900_IRQ_DMAC0, wake_edge_dmac },
     { "dmac1", S5L8900_IRQ_DMAC1, wake_edge_dmac },
+    { "usb-otg", S5L8900_IRQ_USB_OTG, wake_edge_usb },
 };
 #define NWAKE_SOURCES (sizeof WAKE_SOURCES / sizeof WAKE_SOURCES[0])
 
@@ -1736,7 +1743,8 @@ void s5l8900_load(s5l8900_t *m, uint32_t addr, const void *data, size_t len) {
 static uint32_t ext_inputs(const s5l8900_t *m) {
     return (uint32_t)m->uart4.rx_count
          | ((uint32_t)m->buttons.pressed << 8)
-         | ((uint32_t)(m->mtz2.atn ? 1u : 0u) << 16);
+         | ((uint32_t)(m->mtz2.atn ? 1u : 0u) << 16)
+         | ((uint32_t)s5l_usbotg_irq(&m->usbotg) << 17);
 }
 
 static void active_clock_reset_anchor(s5l8900_t *m) {
@@ -2146,6 +2154,8 @@ static void s5l8900_refresh(s5l8900_t *m, uint32_t tb) {
      * both the assertion and its own acknowledge.
      */
     s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_MBX, s5l_mbx_irq(&m->mbx));
+    s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_USB_OTG,
+                     s5l_usbotg_irq(&m->usbotg));
 
     bool tvout_irq = s5l_tvout_tick(&m->tvout, tb);
     s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_TVOUT, tvout_irq);

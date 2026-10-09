@@ -142,7 +142,7 @@ SNAP_SIZE_GUARD(s5l_gpio_t,        4192,  "snap_gpio");
 /* One held-button byte and three counters, padded to 8-byte alignment. */
 SNAP_SIZE_GUARD(s5l_buttons_t,     32,    "snap_buttons");
 SNAP_SIZE_GUARD(s5l_mtz2_t,        1600,  "snap_mtz2");
-SNAP_SIZE_GUARD(s5l_usbotg_t,      4,     "snap_usbotg");
+SNAP_SIZE_GUARD(s5l_usbotg_t,      312,   "snap_usbotg");
 /* Eight channels of five registers (160), the four controller-wide words, the
  * access and unknown-offset accounting, and the work/refusal counters. */
 SNAP_SIZE_GUARD(s5l_pl080_chan_t,  40,    "snap_pl080");
@@ -225,7 +225,9 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * Restore clears them; snap_mach() and SNAPSHOT_VERSION are unchanged. */
 /* 257000 adds the powered-down host wait's sub-tick RTC remainder, likewise
  * cleared on restore and deliberately absent from the serialized stream. */
-SNAP_SIZE_GUARD(s5l8900_t,         257000, "snap_mach");
+/* 257304 includes the serialized DWC2 device-DMA registers/endpoints;
+ * measured from the compiler's emitted allocation including alignment. */
+SNAP_SIZE_GUARD(s5l8900_t,         257304, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -247,6 +249,7 @@ typedef enum { SN_COUNT = 0, SN_SAVE, SN_LOAD, SN_VALIDATE } sn_mode_t;
 
 typedef struct {
     sn_mode_t mode;
+    uint32_t version;
     /* sink for SN_SAVE: exactly one of f / (buf,cap) is used */
     FILE     *f;
     uint8_t  *buf;
@@ -931,12 +934,30 @@ static void snap_spi(sn_io_t *io, s5l_spi_t *s) {
 }
 
 /*
- * The DWC2 block's only writable register. The GHWCFG straps are constants in
- * core/src/soc/usbotg.c, not fields, so there is nothing else here to serialize
- * — and a restored machine reads the same straps because it is the same build.
+ * DWC2 device state includes in-flight DMA cursors and pending interrupts.
+ * The virtual host is external: a frontend must disconnect/reconnect when it
+ * cannot restore its host-side protocol session. Straps remain constants.
  */
 static void snap_usbotg(sn_io_t *io, s5l_usbotg_t *u) {
+    if (sn_reading(io) && io->version == 32u) {
+        s5l_usbotg_reset(u);
+        F32(u->pcgcctl);
+        return;
+    }
     F32(u->pcgcctl);
+    F32(u->enabled); F32(u->connected);
+    F32(u->gotgint); F32(u->gahbcfg); F32(u->gusbcfg);
+    F32(u->gintsts); F32(u->gintmsk);
+    F32(u->grxfsiz); F32(u->gnptxfsiz); FA32(u->dptxfsiz, 15);
+    F32(u->dcfg); F32(u->dctl); F32(u->diepmsk); F32(u->doepmsk);
+    F32(u->daintmsk);
+    for (unsigned d = 0; d < 2u; d++)
+        for (unsigned n = 0; n < S5L_USB_ENDPOINTS; n++) {
+            s5l_usb_ep_t *e = &u->ep[d][n];
+            F32(e->ctl); F32(e->interrupt); F32(e->size); F32(e->dma);
+        }
+    if (sn_reading(io) && (u->enabled > 1u || u->connected > 1u ||
+        (!u->enabled && u->connected))) io->err = SNAP_ERR_CORRUPT;
 }
 
 static bool pl080_state_valid(const s5l_pl080_t *d) {
@@ -1318,12 +1339,13 @@ static void snap_header(sn_io_t *io, uint64_t *payload_len) {
     sn_u32(io, &hlen);
     sn_u64(io, payload_len);
     sn_u64(io, &flags);
+    io->version = version;
     io->hash = saved_hash;
 
     if (sn_reading(io) && io->err == SNAP_OK) {
         if (memcmp(magic, SNAPSHOT_MAGIC, SNAPSHOT_MAGIC_LEN) != 0)
             io->err = SNAP_ERR_MAGIC;
-        else if (version != SNAPSHOT_VERSION)
+        else if (version != SNAPSHOT_VERSION && version != 32u)
             io->err = SNAP_ERR_VERSION;
         else if (hlen != SNAP_HEADER_LEN)
             io->err = SNAP_ERR_CORRUPT;

@@ -118,6 +118,7 @@ static void note_unknown_read(s5l_pcf50635_t *pmu, uint8_t reg) {
 static uint8_t reg_read(s5l_pcf50635_t *pmu, uint8_t reg) {
     pmu->reg_reads++;
     if (is_rtc(reg)) return rtc_byte(pmu, reg);
+    if (reg == PCF50635_MBCS1) return pmu->regs[reg];
     /* INT1..INT5 are hardware event latches, not persistent configuration.
      * The PCF50633-family interface clears them as the host reads them. The
      * iPhone1,2 device tree's `STAT, 0x100` wake function selects INT2 bit 2,
@@ -138,6 +139,7 @@ static uint8_t reg_read(s5l_pcf50635_t *pmu, uint8_t reg) {
 
 static void reg_write(s5l_pcf50635_t *pmu, uint8_t reg, uint8_t val) {
     pmu->reg_writes++;
+    if (reg == PCF50635_MBCS1) return; /* physical supply status, read-only */
     /* This kernel's setCurrentDateTime path is a panic stub, so writes to its
      * computed RTC are unsupported and visible rather than silently accepted. */
     if (is_rtc(reg)) {
@@ -146,6 +148,18 @@ static void reg_write(s5l_pcf50635_t *pmu, uint8_t reg, uint8_t val) {
     }
     pmu->regs[reg] = val;
     pmu->written[reg] = 1u;
+}
+
+/* USB VBUS has a PMU path as well as the DWC2 B-session-valid signal.
+ * PCF5063x MBCS1 and INT1 definitions; openiBoot's S5L8900 PMU driver
+ * independently reads bit 0 of 0x4b to recognize a USB host supply. */
+void s5l_pcf50635_set_usb(s5l_pcf50635_t *pmu, bool connected) {
+    if (!pmu) return;
+    bool was_connected = (pmu->regs[PCF50635_MBCS1] & 1u) != 0;
+    if (was_connected == connected) return;
+    if (connected) pmu->regs[PCF50635_MBCS1] |= PCF50635_MBCS1_USB_PRESENT_VALID;
+    else pmu->regs[PCF50635_MBCS1] &= (uint8_t)~PCF50635_MBCS1_USB_PRESENT_VALID;
+    pmu->regs[PCF50635_INT1] |= connected ? PCF50635_INT1_USBINS : PCF50635_INT1_USBREM;
 }
 
 static bool pmu_start(void *ctx, bool read) {

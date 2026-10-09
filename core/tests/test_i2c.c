@@ -642,6 +642,27 @@ static void test_snapshot_rejects_invalid_i2c_and_pmu_state(void) {
     s5l8900_free(&m);
 }
 
+static void test_usb_supply_status_and_edges(void) {
+    s5l_i2c_t bus; s5l_pcf50635_t pmu;
+    setup_pmu(&bus, &pmu);
+    uint8_t status = 0, event = 0, write = 0xff;
+    s5l_pcf50635_set_usb(&pmu, true);
+    drive_read(&bus, PCF50635_I2C_ADDR, PCF50635_MBCS1, &status, 1);
+    CHECK(status == 3u, "USB must be present and valid");
+    drive_read(&bus, PCF50635_I2C_ADDR, PCF50635_INT1, &event, 1);
+    CHECK(event == PCF50635_INT1_USBINS, "USB insertion event");
+    s5l_pcf50635_set_usb(&pmu, true);
+    drive_read(&bus, PCF50635_I2C_ADDR, PCF50635_INT1, &event, 1);
+    CHECK(event == 0u, "unchanged VBUS must not retrigger");
+    drive_write(&bus, PCF50635_I2C_ADDR, PCF50635_MBCS1, &write, 1);
+    drive_read(&bus, PCF50635_I2C_ADDR, PCF50635_MBCS1, &status, 1);
+    CHECK(status == 3u, "supply status is not software writable");
+    s5l_pcf50635_set_usb(&pmu, false);
+    drive_read(&bus, PCF50635_I2C_ADDR, PCF50635_MBCS1, &status, 1);
+    drive_read(&bus, PCF50635_I2C_ADDR, PCF50635_INT1, &event, 1);
+    CHECK(status == 0u && event == PCF50635_INT1_USBREM, "USB disconnect edge");
+}
+
 int main(void) {
     printf("S5LBox S5L8900 I2C / PCF50635 tests\n");
     test_reset_and_attachment_are_bounded();
@@ -656,6 +677,7 @@ int main(void) {
     test_malformed_runtime_state_cannot_index_callbacks();
     test_snapshot_mid_transaction_rebinds_callbacks();
     test_snapshot_rejects_invalid_i2c_and_pmu_state();
+    test_usb_supply_status_and_edges();
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

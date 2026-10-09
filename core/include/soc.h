@@ -2245,6 +2245,10 @@ bool     s5l_i2c_irq(const s5l_i2c_t *bus);
 #define PCF50635_INT2_ONKEYR 0x01u
 #define PCF50635_INT2_EXTON1R 0x04u
 #define PCF50635_INT2_WAKE_BUTTON_HOLD PCF50635_INT2_EXTON1R
+#define PCF50635_INT1_USBINS 0x04u
+#define PCF50635_INT1_USBREM 0x08u
+#define PCF50635_MBCS1 0x4bu
+#define PCF50635_MBCS1_USB_PRESENT_VALID 0x03u
 #define PCF50635_OOCSHDWN_GO_STANDBY 0x01u
 #define PCF50635_OOCSHDWN_GO_HIBERNATE 0x02u
 #define PCF50635_RTCSC    0x59u
@@ -2280,6 +2284,7 @@ bool s5l_pcf50635_irq(const s5l_pcf50635_t *pmu);
 bool s5l_pcf50635_in_standby(const s5l_pcf50635_t *pmu);
 bool s5l_pcf50635_in_hibernation(const s5l_pcf50635_t *pmu);
 void s5l_pcf50635_wake_onkey(s5l_pcf50635_t *pmu);
+void s5l_pcf50635_set_usb(s5l_pcf50635_t *pmu, bool connected);
 /* Resume hibernation through a board GPIO, preserving all PMU event latches.
  * Refuses standby/shutdown (including conflicting shutdown command bits). */
 bool s5l_pcf50635_wake_gpio(s5l_pcf50635_t *pmu);
@@ -3594,11 +3599,9 @@ unsigned s5l_mtz2_encode(const s5l_mtz2_t *dev, const s5l_mt_contact_t *c,
  * measured from real S5L8900 silicon; we have no dump of this part's
  * configuration registers, and nothing here pretends otherwise.
  *
- * This is a configuration-register model, not a USB controller. No transfer,
- * FIFO, endpoint, DMA, PHY or interrupt behaviour is emulated, and the device
- * tree's interrupt 0x13 is deliberately not defined as a constant: nothing here
- * ever asserts it, and a constant that looks wired but is not is the same
- * landmine the SPI note above describes.
+ * Device-mode internal DMA is opt-in. With it disabled, the old configuration
+ * aperture is unchanged. The virtual host submits individual USB packets on
+ * the machine thread; no host pointer, socket or filesystem enters the device.
  */
 #define USBOTG_GHWCFG1 0x044u   /* per-endpoint direction, 2 bits per endpoint */
 #define USBOTG_GHWCFG2 0x048u   /* architecture + counts, incl. NumDevEps      */
@@ -3608,10 +3611,50 @@ unsigned s5l_mtz2_encode(const s5l_mtz2_t *dev, const s5l_mt_contact_t *c,
 #define S5L_DWC2_GHWCFG1 0x00000000u   /* every endpoint bidirectional */
 #define S5L_DWC2_GHWCFG2 0x228de550u   /* NumDevEps=9 -> 5 IN / 5 OUT  */
 #define S5L_DWC2_GHWCFG4 0x00000000u
+#define S5L8900_IRQ_USB_OTG 19u
+#define S5L_USB_ENDPOINTS 6u
+
+#define USBOTG_GOTGCTL  0x000u
+#define USBOTG_GOTGINT  0x004u
+#define USBOTG_GAHBCFG  0x008u
+#define USBOTG_GUSBCFG  0x00cu
+#define USBOTG_GRSTCTL  0x010u
+#define USBOTG_GINTSTS  0x014u
+#define USBOTG_GINTMSK  0x018u
+#define USBOTG_GRXFSIZ  0x024u
+#define USBOTG_GNPTXFSIZ 0x028u
+#define USBOTG_DCFG     0x800u
+#define USBOTG_DCTL     0x804u
+#define USBOTG_DSTS     0x808u
+#define USBOTG_DIEPMSK  0x810u
+#define USBOTG_DOEPMSK  0x814u
+#define USBOTG_DAINT    0x818u
+#define USBOTG_DAINTMSK 0x81cu
+#define USBOTG_DIEP(n)  (0x900u + 0x20u * (n))
+#define USBOTG_DOEP(n)  (0xb00u + 0x20u * (n))
+#define USBOTG_EP_ENABLE (1u << 31)
+#define USBOTG_EP_DISABLE (1u << 30)
+#define USBOTG_EP_SNAK  (1u << 27)
+#define USBOTG_EP_CNAK  (1u << 26)
+#define USBOTG_EP_STALL (1u << 21)
+#define USBOTG_EP_NAK   (1u << 17)
+#define USBOTG_EP_ACTIVE (1u << 15)
+#define USBOTG_INT_RESET (1u << 12)
+#define USBOTG_INT_ENUM  (1u << 13)
+#define USBOTG_INT_IN    (1u << 18)
+#define USBOTG_INT_OUT   (1u << 19)
 
 typedef struct {
-    /* The only writable state in this model. Reset 0. */
+    uint32_t ctl, interrupt, size, dma;
+} s5l_usb_ep_t;
+
+typedef struct {
     uint32_t pcgcctl;
+    uint32_t enabled, connected;
+    uint32_t gotgint, gahbcfg, gusbcfg, gintsts, gintmsk;
+    uint32_t grxfsiz, gnptxfsiz, dptxfsiz[15];
+    uint32_t dcfg, dctl, diepmsk, doepmsk, daintmsk;
+    s5l_usb_ep_t ep[2][S5L_USB_ENDPOINTS]; /* 0 = OUT, 1 = IN */
 } s5l_usbotg_t;
 
 void     s5l_usbotg_reset(s5l_usbotg_t *u);
@@ -3619,6 +3662,17 @@ void     s5l_usbotg_reset(s5l_usbotg_t *u);
  * what an unmapped access did before this window existed. */
 uint32_t s5l_usbotg_read(const s5l_usbotg_t *u, uint32_t off);
 void     s5l_usbotg_write(s5l_usbotg_t *u, uint32_t off, uint32_t val);
+void     s5l_usbotg_enable(s5l_usbotg_t *u);
+void     s5l_usbotg_connect(s5l_usbotg_t *u, bool connected);
+bool     s5l_usbotg_irq(const s5l_usbotg_t *u);
+bool     s5l_usbotg_bus_reset(s5l_usbotg_t *u);
+bool     s5l_usbotg_enumerated(s5l_usbotg_t *u);
+
+typedef enum { S5L_USB_OUT, S5L_USB_IN, S5L_USB_SETUP } s5l_usb_token_t;
+typedef enum {
+    S5L_USB_ACK, S5L_USB_NAK, S5L_USB_STALL,
+    S5L_USB_DISCONNECTED, S5L_USB_INVALID, S5L_USB_DMA_ERROR
+} s5l_usb_result_t;
 
 /* ------------------------------------------- ARM PrimeCell PL080 DMAC ---
  * The two DMA controllers, /arm-io/dmac0 and /arm-io/dmac1.
@@ -4690,6 +4744,11 @@ uint64_t s5l8900_pre_step_handled(const s5l8900_t *m);
 
 /* Copy a blob into guest RAM at a physical address. */
 void s5l8900_load(s5l8900_t *m, uint32_t addr, const void *data, size_t len);
+/* Virtual USB host: one packet, on the machine owner thread. IN length is
+ * capacity; OUT length is packet size. NAK consumes no bytes. */
+s5l_usb_result_t s5l8900_usb_packet(s5l8900_t *m, s5l_usb_token_t token,
+                                    unsigned ep, void *data, size_t length,
+                                    size_t *actual);
 
 /* Optional signed-static AArch64 engine. It uses ordinary executable text
  * produced at build time: no runtime code generation and no writable/executable

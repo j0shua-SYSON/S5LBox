@@ -39,6 +39,7 @@
 #import "VMInstancePaths.h"
 #import "VMInstanceStore.h"
 #import "VMSettings.h"
+#include "usb_host.h"
 
 #import <mach/mach.h>
 #import <pthread.h>
@@ -150,6 +151,8 @@ static double vm_engine_now_seconds(void) {
 
 @implementation VMEngine {
     s5l8900_t        _machine;
+    usb_host_t       _usbHost;
+    BOOL             _usbHostActive;
     /* The provisioning copy's byte counters; see -rootFilesystemProgress. */
     uint64_t         _prepareDone;
     uint64_t         _prepareTotal;
@@ -846,6 +849,15 @@ static double vm_engine_now_seconds(void) {
         pthread_mutex_unlock(&_lock);
         [self appendConsole:@"[vm] could not install the guest payload\n"];
         return NO;
+    }
+
+    _usbHostActive = _machine.usbotg.enabled != 0;
+    if (_usbHostActive) {
+        /* A saved guest retains its controller, not this process's host
+         * session. Deliver cable removal before starting a new host session. */
+        usb_host_disconnect(&_usbHost, &_machine);
+        usb_host_init(&_usbHost, &_machine);
+        [self appendConsole:@"[usb] virtual host attached; waiting for the guest USB driver\n"];
     }
 
     uint64_t after = [VMEngine physFootprintBytes];
@@ -1944,6 +1956,20 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
             }
 
             retired += s5l8900_run(&_machine, kVMChunkInstructions, &status);
+
+            if (_usbHostActive && !checkpoint) {
+                if (_machine.usbotg.enabled && !_machine.usbotg.connected)
+                    usb_host_init(&_usbHost, &_machine); /* guest reboot */
+                unsigned previous = _usbHost.stage;
+                usb_host_poll(&_usbHost, &_machine);
+                if (previous != _usbHost.stage) {
+                    [self appendConsole:[NSString stringWithFormat:
+                        @"[usb] stage=%u VID/PID=%04x/%04x configuration=%u bulk=%u/%u %s\n",
+                        _usbHost.stage, _usbHost.vendor, _usbHost.product,
+                        _usbHost.configuration, _usbHost.bulk_in, _usbHost.bulk_out,
+                        _usbHost.error ?: ""]];
+                }
+            }
 
             /* Taken here precisely because the chunk has ENDED: the machine is
              * between instructions, this thread owns it, and no lock is held. */
