@@ -38,6 +38,27 @@ Host API references: [Apple audio input](https://developer.apple.com/documentati
 and [microphone privacy](https://developer.apple.com/library/archive/documentation/Audio/Conceptual/AudioSessionProgrammingGuide/RequestingPermission/RequestingPermission.html).
 No reference implementation source is vendored into this feature.
 
+### Candidate checkpoint
+
+Code `2279d75` on `feature/audio-disk-presets`: local Windows **81/81 tests
+passed**. [iOS build and iOS 13 API check](https://github.com/j0shua-SYSON/S5LBox/actions/runs/37954602556)
+passed. Transport IPA SHA-256:
+`fee25b33c6a041d0d3e4158bf22e959c39b2c40b357b08f9cac4ef92e39efc42`.
+The artifact is an ad-hoc-signed lab transport, not a stock-install signing claim.
+
+The physical phone remained locked; this candidate has **not** replaced the
+installed app. A disposable desktop probe restored the older USB checkpoint and
+executed another 150 million instructions with three board-level power presses.
+It produced **zero PCM**, and its final display capture failed (no active RGB
+window). That attempt is not an audio pass and does not identify an audio cause.
+Logs are under project-local `work/audio-validation/lock-sound-02.*.log`.
+
+Next device checks: system click/lock sounds, media playback and volume/mute;
+enable microphone explicitly and record/replay a short Voice Memos clip;
+deny permission and verify silence; pause/resume, background, route changes,
+and save/reopen without replaying old host samples. Keep main unchanged until
+those tests and the large-disk gates in `DISK-SIZE-PRESETS.md` pass.
+
 ## Historical register bring-up
 
 <!--
