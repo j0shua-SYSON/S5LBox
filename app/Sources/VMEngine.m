@@ -305,8 +305,9 @@ static double vm_engine_now_seconds(void) {
 
 - (VMUSBTransport *)usbTransport { return _usbTransport; }
 - (BOOL)microphoneEnabled { return _audio.microphoneEnabled; }
-- (NSString *)audioStatus { return _audio.status; }
+- (NSString *)audioStatus { return _audio.status ?: @"Audio is unavailable on this host."; }
 - (void)setMicrophoneEnabled:(BOOL)enabled completion:(void (^)(BOOL, NSString *))completion {
+    if (!_audio) { if (completion) completion(NO, [self audioStatus]); return; }
     [_audio setMicrophoneEnabled:enabled completion:completion];
 }
 

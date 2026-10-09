@@ -7,7 +7,7 @@ static unsigned checks, failures;
     printf("FAIL line %d: %s\n", __LINE__, #x); } } while (0)
 static vm_audio_buffer_t pcm;
 static void start(void) {
-    vm_audio_buffer_init(&pcm);
+    CHECK(vm_audio_buffer_init(&pcm));
     vm_audio_buffer_active(&pcm, true);
     atomic_store(&pcm.host_running, true);
     vm_audio_render(&pcm, NULL, NULL, 0);

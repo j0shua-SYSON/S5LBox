@@ -11,7 +11,7 @@
 @end
 @implementation VMAudioStorage
 - (instancetype)init {
-    if ((self = [super init])) vm_audio_buffer_init(&pcm);
+    if ((self = [super init]) && !vm_audio_buffer_init(&pcm)) return nil;
     return self;
 }
 @end
@@ -27,6 +27,7 @@
 - (instancetype)init {
     if (!(self = [super init])) return nil;
     _storage = [VMAudioStorage new];
+    if (!_storage) return nil;
     _foreground = UIApplication.sharedApplication.applicationState == UIApplicationStateActive;
     _status = @"Audio is stopped.";
     _observers = [NSMutableArray array];
@@ -62,10 +63,11 @@
     }
     return self;
 }
-- (vm_audio_buffer_t *)buffer { return &_storage->pcm; }
+- (vm_audio_buffer_t *)buffer { return _storage ? &_storage->pcm : NULL; }
 - (BOOL)microphoneEnabled { return _microphoneEnabled; }
 - (NSString *)status { return _status; }
 - (void)stopGraph {
+    if (!_storage) return;
     atomic_store_explicit(&_storage->pcm.host_running, false, memory_order_release);
     atomic_store_explicit(&_storage->pcm.microphone_enabled, false, memory_order_release);
     atomic_fetch_add_explicit(&_storage->pcm.epoch, 1, memory_order_release);

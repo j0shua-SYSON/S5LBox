@@ -28,7 +28,8 @@ typedef struct {
     bool capture_primed;
     uint64_t rendered, playback_dropped, input_dropped; /* owner-thread counters */
 } vm_audio_buffer_t;
-void vm_audio_buffer_init(vm_audio_buffer_t *b);
+/* Refuses a platform whose actual scalar atomics require locks. */
+bool vm_audio_buffer_init(vm_audio_buffer_t *b);
 /* Emulator thread only. */
 void vm_audio_buffer_active(vm_audio_buffer_t *b, bool active);
 void vm_audio_guest_frame(void *ctx, unsigned direction, uint32_t rate, float samples[2]);

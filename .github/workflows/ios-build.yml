@@ -165,20 +165,22 @@ jobs:
           if [ -n "$latest" ]; then sudo xcode-select -s "$latest"; fi
           xcodebuild -version
 
-      - name: Check package UI against the iOS 13 API baseline
+      - name: Check package and audio UI against the iOS 13 API baseline
         # A build on a new SDK is not runtime proof for every OS. It can,
         # however, reject newer APIs accidentally used without availability
         # guards in the native package workspace and service boundary.
         run: |
           set -euo pipefail
           sdkroot="$(xcrun --sdk iphoneos --show-sdk-path)"
-          xcrun --sdk iphoneos clang -fobjc-arc -fmodules \
+          xcrun --sdk iphoneos clang -std=c11 -fobjc-arc -fmodules \
             -arch arm64 -miphoneos-version-min=13.0 -isysroot "$sdkroot" \
             -Werror=unguarded-availability -Werror=unguarded-availability-new \
             -Iapp/Sources -Icore/include -Itools -fsyntax-only \
             app/Sources/VMPackageCatalog.m app/Sources/VMPackageRepository.m \
             app/Sources/VMPackageBridge.m app/Sources/VMPackageManagerViewController.m \
-            app/Sources/VMUSBService.m app/Sources/VMUSBPairing.m
+            app/Sources/VMUSBService.m app/Sources/VMUSBPairing.m \
+            app/Sources/VMAudioOutput.m app/Sources/VMRuntimeSettingsViewController.m \
+            app/Sources/VMInstanceListViewController.m app/Sources/VMInstanceStore.m
 
       - name: Compile-check every JIT source for iphoneos
         # The app deliberately excludes jit/** until the run loop owns a code

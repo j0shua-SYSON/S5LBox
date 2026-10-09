@@ -2,8 +2,8 @@
 #include <string.h>
 #include <math.h>
 
-_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "audio indexes must be lock free");
-_Static_assert(ATOMIC_BOOL_LOCK_FREE == 2, "audio flags must be lock free");
+/* Feature macros need not promise universal lock freedom (MSVC). Check the
+ * actual scalar objects at initialization; never discover this in render. */
 
 static bool put(vm_audio_queue_t *q, const float x[2]) {
     uint32_t w = atomic_load_explicit(&q->write, memory_order_relaxed);
@@ -47,15 +47,23 @@ static void resample(vm_audio_resampler_t *s, vm_audio_queue_t *q,
     s->phase -= VM_AUDIO_RATE;
     memcpy(s->previous, x, sizeof s->previous);
 }
-void vm_audio_buffer_init(vm_audio_buffer_t *b) {
+bool vm_audio_buffer_init(vm_audio_buffer_t *b) {
+    if (!b) return false;
     memset(b, 0, sizeof *b);
     atomic_init(&b->playback.read, 0); atomic_init(&b->playback.write, 0);
     atomic_init(&b->microphone.read, 0); atomic_init(&b->microphone.write, 0);
     atomic_init(&b->active, false); atomic_init(&b->microphone_enabled, false);
     atomic_init(&b->host_running, false);
     atomic_init(&b->epoch, 0);
+    return atomic_is_lock_free(&b->playback.read) &&
+           atomic_is_lock_free(&b->playback.write) &&
+           atomic_is_lock_free(&b->microphone.read) &&
+           atomic_is_lock_free(&b->microphone.write) &&
+           atomic_is_lock_free(&b->active) && atomic_is_lock_free(&b->host_running) &&
+           atomic_is_lock_free(&b->microphone_enabled) && atomic_is_lock_free(&b->epoch);
 }
 void vm_audio_buffer_active(vm_audio_buffer_t *b, bool active) {
+    if (!b) return;
     if (atomic_load_explicit(&b->active, memory_order_relaxed) == active) return;
     memset(&b->guest_output, 0, sizeof b->guest_output);
     b->capture_primed = false; b->capture_phase = 0;
