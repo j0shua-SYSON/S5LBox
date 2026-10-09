@@ -165,8 +165,7 @@ visually checked; the generic activity heading is gone and list versions remain
 visible. A further real `p7zip` install/remove round trip passed on this exact
 candidate. The host download cache contained only the 187 KiB metadata plist
 after the earlier five-package operation, not retained archives. Core matrix
-37902474600 had seven successful jobs with both macOS JIT jobs still running
-at this handoff; do not describe that final matrix as completely passed yet.
+37902474600 subsequently completed with all nine jobs successful.
 
 The first physical setup attempt exposed a pre-existing Cydia-repair assumption:
 after Cydia reorganizes Applications into a symlink, its old repair probe reports
@@ -177,7 +176,8 @@ filesystem patch was used to bypass the refusal.
 Protocol/dependency references:
 [Debian relationships](https://www.debian.org/doc/debian-policy/ch-relationships.html)
 and [control/version fields](https://www.debian.org/doc/debian-policy/ch-controlfields.html).
-# Package finishing actions (candidate, October 9)
+
+## Package finishing actions (October 9)
 
 The native workspace now understands Cydia's ordered finish requests: return,
 reopen, restart, reload, reboot. A dedicated inherited descriptor is advertised
@@ -195,9 +195,13 @@ The reference is [Cydia's source](https://github.com/sbingner/cydia/blob/master/
 not a copied implementation.
 
 An authenticated `SPM2` response carries the pending action and whether the
-transaction completed. The root-private state survives helper/app disconnects
-within the same guest boot; a new guest boot clears the need. Failed dpkg does
-not enable the finish action. The native UI additionally checks that all dpkg
+transaction completed. The root-private state survives helper/app disconnects.
+A changed kernel boot timestamp expires old requests, but the emulator can
+reuse that timestamp. Explicitly accepted reboots therefore consume the request
+durably before executing the reboot command, restoring it on command failure.
+An unrelated force-off/cold boot with the same timestamp may conservatively
+leave a deferred request visible; it never executes one automatically. Failed
+dpkg does not enable the finish action. The native UI additionally checks that all dpkg
 records are configured or removed. The user can finish immediately or return to
 the action on the Packages tab after refreshing. A status hash and dpkg lock
 guard the finish request against stale state/concurrent package work.
@@ -208,12 +212,61 @@ reboot. The host app never runs host restart commands. A reboot acknowledgment
 means requested, not proven boot completion. Synthetic builds substitute a
 fixture executable and cannot run these real commands.
 
-Existing v1 setups require App Settings > Set up package manager again. Setup
-stages a new immutable `service-finish-v2` executable and rewrites only the exact
-recognized v1 launch job in the existing crash-safe image transaction. It does
+Existing v1/v2 setups require App Settings > Set up package manager again. Setup
+stages a new immutable `service-finish-v3` executable and rewrites only an exact
+recognized v1/v2 launch job in the existing crash-safe image transaction. It does
 not overwrite an unknown helper, resize its fork, or edit a running disk. The
-old 50 KiB executable is retained but no longer launched. The capability is kept.
+old approximately 50 KiB executable generations are retained but no longer
+launched. The capability is kept.
 
-ARMv6 cross-compilation passes. Expanded synthetic/host tests and physical
-acceptance are pending for this candidate; older acceptance below does not
-prove the new finish flow.
+ARMv6 cross-compilation passes. At `4e3d2fb`, 60 host planning checks, 48
+synthetic executor checks, 41 USB checks, the iOS 13 availability gate and the
+app build passed. Its nine-job core matrix also completed successfully. The
+availability gate now includes virtual USB pairing; an unguarded iOS 14 trust
+API was given an iOS 13 fallback.
+
+Physical acceptance on the iOS 15.8.5 lab phone, only in `rc-ipa-validation`:
+
+- Upgraded the original helper through the native stopped-machine setup.
+- Installed a disposable package whose real guest postinst writes Cydia finish
+  requests; the native result selected Restart SpringBoard. The button actually
+  restarted SpringBoard and returned the guest to its lock screen.
+- A second fixture requested restart, reboot and return. Reboot won, and the
+  pending action survived a saved guest and a host-app update/relaunch.
+- Reboot Guest reached `[vm] guest watchdog reboot 1: fresh firmware boot
+  started`, then the real guest lock screen. The host phone was not rebooted.
+- That test exposed the repeated-boot-timestamp bug above. `da3d87c` fixes it;
+  `e0cabbd` additionally checks the status witness under the dpkg lock and adds
+  reboot-failure/lock regression coverage. Native stopped-machine setup upgraded
+  the same guest to v3. Its extracted executable matched the bundled SHA-256
+  `21b200d39ba4588f403ed7b055afb7a3a557845d27a00c9cc15a5631d583dc0a`.
+- On `e0cabbd`, a second real reboot cleared the durable pending action. However,
+  package connections did not recover until Save & close / reopen of the same
+  guest. No helper or disk change was needed for that recovery, pointing to
+  stale host USB session state rather than a missing finish request.
+- A real removal script also requested restart; its completion button restarted
+  SpringBoard. Removing the reboot fixture correctly requested no restart.
+
+`43bc10a` adds an explicit host USB session reset at the firmware owner's
+successful watchdog reboot generation change. Old service connections and mux
+state are discarded before attaching to the replacement guest controller.
+Physical acceptance on that exact build passed: the reboot fixture installed,
+selected Reboot Guest, and booted to the guest lock screen. An early refresh
+while booting timed out; after waking/unlocking and allowing startup to finish,
+the package manager read all 37 installed records with no pending reboot, without
+Save & close or a host-app restart. Successful readback was observed about
+190 seconds after the action, including manual navigation and retries, not a
+measured minimum boot time. The same session then removed the fixture through
+real guest dpkg and verified the result with no restart requested. Both finish
+fixtures and their temporary LAN source were removed; the original repositories
+and unrelated guest packages were retained.
+
+At `43bc10a`, iOS build 37909087066 and all nine jobs of core matrix 37909087028
+passed. The iOS gate includes 60 native planning checks, 56 synthetic executor
+checks, 41 USB checks, and the iOS 13 API baseline. Locally, all 77 Windows CTests
+passed at `e0cabbd`; the changed firmware-boot test was rebuilt and passed again
+at `43bc10a`. Its optional real-firmware reboot fixture is separate from the
+ordinary unit-test pass. Physical host coverage remains iOS 15.8.5 only.
+
+The signal fixtures contain no injected tweak code. They prove the finish
+protocol and actions, not compatibility of arbitrary real-world tweaks.
