@@ -1922,6 +1922,7 @@ static void test_cydia_privilege_identities(void) {
         }
         digest[sizeof digest - 1u] = '\0';
         CHECK(strcmp(repair.path, "/Applications/Cydia.app/Cydia_") == 0 &&
+              repair.follow_parent_symlinks &&
               repair.expected_size == sizes[i] &&
               strcmp(digest, hashes[i]) == 0,
               "Cydia identity %zu is not the exact publisher executable", i);

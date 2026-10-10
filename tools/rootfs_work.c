@@ -7256,13 +7256,65 @@ static void rootfs_component_units(const char *path,
         units[index] = (uint16_t)(unsigned char)path[component->start + index];
 }
 
-/*
- * Resolve one absolute path without turning an absent component into catalog
- * corruption. The provisioner needs a missing parent to be an error because
- * it is creating a child; a metadata migration instead needs to report
- * MISSING so a first boot that has not unpacked the package yet is harmless.
- */
+/* Read a guest symlink's inline data fork, never a path on the host. */
+static bool catalog_read_parent_link(catalog_ctx_t *ctx, const uint8_t *data,
+                                     uint8_t *target, size_t *size,
+                                     rootfs_work_stage_t stage,
+                                     rootfs_work_result_t *result) {
+    uint64_t logical = read_be64(data + 88u);
+    uint32_t declared = read_be32(data + 100u);
+    uint32_t blocks = 0u;
+    size_t copied = 0u;
+    bool empty = false;
+    if (!logical || logical > ROOTFS_WORK_MAX_PATH) {
+        result_fail(result, ROOTFS_WORK_FILE_REPAIR_MISMATCH, stage, 0,
+                    "metadata-repair parent link has an invalid target size");
+        return false;
+    }
+    for (unsigned i = 0u; i < 8u; i++) {
+        uint32_t start = read_be32(data + 104u + i * 8u);
+        uint32_t count = read_be32(data + 108u + i * 8u);
+        if (!count) { empty = true; continue; }
+        if (empty || (uint64_t)start + count > ctx->total_blocks ||
+            UINT32_MAX - blocks < count) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                        "metadata-repair parent link has an invalid extent");
+            return false;
+        }
+        blocks += count;
+    }
+    if (blocks != declared || logical > (uint64_t)blocks * ctx->block_size) {
+        result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED, stage, 0,
+                    "metadata-repair parent link is not an inline data fork");
+        return false;
+    }
+    for (unsigned i = 0u; i < 8u && copied < (size_t)logical; i++) {
+        uint32_t start = read_be32(data + 104u + i * 8u);
+        uint32_t count = read_be32(data + 108u + i * 8u);
+        uint64_t capacity = (uint64_t)count * ctx->block_size;
+        size_t amount = (size_t)logical - copied;
+        if ((uint64_t)amount > capacity) amount = (size_t)capacity;
+        if (!checked_read(ctx->file, ctx->file_size,
+                          (uint64_t)start * ctx->block_size, target + copied,
+                          amount, stage, result)) return false;
+        copied += amount;
+    }
+    for (size_t i = 0u; i < copied; i++) {
+        if (target[i] < 0x20u || target[i] > 0x7eu || target[i] == ':') {
+            result_fail(result, ROOTFS_WORK_FILE_REPAIR_MISMATCH, stage, 0,
+                        "metadata-repair parent link has an invalid target byte");
+            return false;
+        }
+    }
+    *size = copied;
+    return true;
+}
+
+/* Resolve one absolute image path. Missing components remain a clean MISSING
+ * result for packages not yet unpacked. Parent-link traversal is opt-in;
+ * provisioning and content rewrites keep their existing no-link contract. */
 static bool catalog_find_path_record(catalog_ctx_t *ctx, const char *path,
+                                     bool follow_parent_symlinks,
                                      uint32_t *leaf, uint16_t *position,
                                      bool *found, uint8_t **record_data,
                                      rootfs_work_stage_t stage,
@@ -7272,11 +7324,17 @@ static bool catalog_find_path_record(catalog_ctx_t *ctx, const char *path,
     catalog_folder_ref_t folder;
     size_t count = 0u;
     size_t index;
+    unsigned links = 0u;
+    char resolved[ROOTFS_WORK_MAX_PATH + 1u];
 
     *leaf = 0u;
     *position = 0u;
     *found = false;
     *record_data = NULL;
+    if (!rootfs_path_split(path, components, &count, result)) return false;
+    memcpy(resolved, path, strlen(path) + 1u);
+    path = resolved;
+restart:
     if (!rootfs_path_split(path, components, &count, result) ||
         !catalog_root_folder(ctx, &folder, stage, result))
         return false;
@@ -7300,6 +7358,35 @@ static bool catalog_find_path_record(catalog_ctx_t *ctx, const char *path,
         if (index + 1u == count) {
             *record_data = data;
             return true;
+        }
+        if (follow_parent_symlinks && read_be16(data) == HFS_CAT_FILE_RECORD &&
+            (read_be16(data + 42u) & HFS_MODE_IFMT) == HFS_MODE_IFLNK) {
+            uint8_t target[ROOTFS_WORK_MAX_PATH];
+            char expanded[ROOTFS_WORK_MAX_PATH + 1u];
+            size_t target_size = 0u;
+            if (++links > 16u) {
+                result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage, 0,
+                            "metadata-repair parent links exceed 16 hops (possible loop)");
+                return false;
+            }
+            if (!catalog_read_parent_link(ctx, data, target, &target_size,
+                                          stage, result)) return false;
+            size_t prefix = target[0] == '/' ? 0u : components[index].start;
+            const char *suffix = path + components[index].start + components[index].length;
+            size_t tail = strlen(suffix);
+            /* The remaining path starts with '/'; avoid doubling a target's
+             * trailing separator, including a link to the image root. */
+            while (target_size && target[target_size - 1u] == '/') target_size--;
+            if (prefix + target_size + tail > ROOTFS_WORK_MAX_PATH) {
+                result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage, 0,
+                            "expanded metadata-repair path exceeds the path limit");
+                return false;
+            }
+            memcpy(expanded, path, prefix);
+            memcpy(expanded + prefix, target, target_size);
+            memcpy(expanded + prefix + target_size, suffix, tail + 1u);
+            memcpy(resolved, expanded, prefix + target_size + tail + 1u);
+            goto restart;
         }
         if (read_be16(data) != HFS_CAT_FOLDER_RECORD) {
             result_fail(result, ROOTFS_WORK_FILE_REPAIR_MISMATCH, stage, 0,
@@ -7470,7 +7557,8 @@ static bool catalog_file_repair(catalog_ctx_t *ctx,
                     "the file-metadata repair request is malformed");
         return false;
     }
-    if (!catalog_find_path_record(ctx, repair->path, &leaf, &position,
+    if (!catalog_find_path_record(ctx, repair->path,
+                                  repair->follow_parent_symlinks, &leaf, &position,
                                   &found, &data, stage, result))
         return false;
     if (!found) {
@@ -7563,7 +7651,7 @@ static bool catalog_file_rewrite(
                     "the exact file-rewrite request is malformed");
         return false;
     }
-    if (!catalog_find_path_record(ctx, rewrite->path, &leaf, &position,
+    if (!catalog_find_path_record(ctx, rewrite->path, false, &leaf, &position,
                                   &found, &data, stage, result))
         return false;
     if (!found) {

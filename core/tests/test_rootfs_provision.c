@@ -2791,6 +2791,140 @@ static void test_exact_file_metadata_repair(void) {
     free(fx);
 }
 
+static void test_stashed_file_metadata_repair(void) {
+    static const char body[] = "exact stashed Cydia executable";
+    static const char file_path[] = "/private/var/stash/Applications.fixture/Cydia.app/Cydia_";
+    fixture_t *fx = fx_create_depth2(0);
+    rootfs_work_entry_t entries[16];
+    rootfs_work_file_repair_t repair = {0};
+    rootfs_work_file_repair_state_t state;
+    rootfs_work_result_t probe;
+    run_t first, second;
+    char long_target[ROOTFS_WORK_MAX_PATH + 1u];
+    if (!fx) { CHECK(0, "stash fixture allocation failed"); return; }
+    entry_directory(&entries[0], "/private", 0755u);
+    entry_directory(&entries[1], "/private/var", 0755u);
+    entry_directory(&entries[2], "/private/var/stash", 0755u);
+    entry_directory(&entries[3], "/private/var/stash/Applications.fixture", 0755u);
+    entry_directory(&entries[4], "/private/var/stash/Applications.fixture/Cydia.app", 0755u);
+    entry_file(&entries[5], file_path, body, sizeof(body) - 1u, 0755u);
+    entry_symlink(&entries[6], "/var", "private/var", 0755u);
+    entry_symlink(&entries[7], "/Applications", "/var/stash/Applications.fixture/", 0755u);
+    entry_symlink(&entries[8], "/RelativeApps", "var/stash/Applications.fixture", 0755u);
+    entry_symlink(&entries[9], "/loop", "/loop", 0755u);
+    entry_symlink(&entries[10], "/broken", "/missing", 0755u);
+    entry_symlink(&entries[11], "/fileparent", "/beta/note.txt", 0755u);
+    entry_symlink(&entries[12], "/dotparent", "../private", 0755u);
+    entry_symlink(&entries[13], "/CydiaAlias", file_path, 0755u);
+    entry_symlink(&entries[14], "/rootAlias", "/", 0755u);
+    memset(long_target, 'a', ROOTFS_WORK_MAX_PATH);
+    long_target[ROOTFS_WORK_MAX_PATH] = '\0';
+    entry_symlink(&entries[15], "/longparent", long_target, 0755u);
+    if (!run_provision(&first, fx, "stashbase", entries, 16u, 32u * FX_BLOCK_SIZE)) {
+        CHECK(0, "stash base setup failed"); free(fx); return;
+    }
+    expect_success(&first, "stashed executable fixture");
+    if (!first.output) { run_release(&first); free(fx); return; }
+    repair.path = "/Applications/Cydia.app/Cydia_";
+    repair.expected_size = sizeof(body) - 1u;
+    CHECK(ios3_sha256((const uint8_t *)body, sizeof(body) - 1u, repair.expected_sha256),
+          "stash identity hashing failed");
+    repair.expected_permissions = 0755u;
+    repair.desired_permissions = 06755u;
+    CHECK(rootfs_work_probe_file_repair(first.destination, &repair, &state, &probe) ==
+          ROOTFS_WORK_FILE_REPAIR_MISMATCH, "parent links became enabled by default");
+    repair.follow_parent_symlinks = true;
+    const char *aliases[] = {repair.path, "/RelativeApps/Cydia.app/Cydia_",
+                            "/rootAlias/Applications/Cydia.app/Cydia_", file_path};
+    for (size_t i = 0u; i < sizeof aliases / sizeof aliases[0]; i++) {
+        repair.path = aliases[i];
+        CHECK(rootfs_work_probe_file_repair(first.destination, &repair, &state, &probe) ==
+              ROOTFS_WORK_OK && state == ROOTFS_WORK_FILE_REPAIR_NEEDED,
+              "stash alias %zu did not reach the exact executable: %s", i, probe.detail);
+    }
+    repair.path = aliases[0];
+    if (run_repair_existing_image(&second, first.output, first.output_size, "stashrepair", &repair)) {
+        expect_success(&second, "repair stashed executable");
+        CHECK(second.result.file_repairs_applied == 1u, "stash repair did not apply exactly once");
+        for (size_t i = 0u; i < sizeof aliases / sizeof aliases[0]; i++) {
+            repair.path = aliases[i];
+            CHECK(rootfs_work_probe_file_repair(second.destination, &repair, &state, &probe) ==
+                  ROOTFS_WORK_OK && state == ROOTFS_WORK_FILE_REPAIR_SATISFIED,
+                  "repaired stash alias %zu is not idempotent: %s", i, probe.detail);
+        }
+        tr_volume_t before, after;
+        if (second.output && tr_open(first.output, first.output_size, &before)) {
+            if (tr_open(second.output, second.output_size, &after)) {
+                tr_record_t a, b;
+                CHECK(tr_find(&before, FX_ROOT, "Applications", &a) &&
+                      tr_find(&after, FX_ROOT, "Applications", &b) &&
+                      memcmp(a.data, b.data, 248u) == 0,
+                      "repair rewrote the Applications symlink record");
+                tr_close(&after);
+            } else CHECK(0, "repaired stash catalog did not open");
+            tr_close(&before);
+        } else CHECK(0, "stash catalog did not open");
+        size_t source_size = 0u;
+        uint8_t *source = read_file(second.source, &source_size);
+        CHECK(source && source_size == first.output_size &&
+              memcmp(source, first.output, source_size) == 0,
+              "stashed repair modified its source image");
+        free(source);
+        run_release(&second);
+    } else CHECK(0, "stash repair setup failed");
+
+    static const struct { const char *path; rootfs_work_status_t status; } bad[] = {
+        {"/loop/Cydia_", ROOTFS_WORK_PROVISION_LIMIT},
+        {"/fileparent/Cydia_", ROOTFS_WORK_FILE_REPAIR_MISMATCH},
+        {"/dotparent/Cydia_", ROOTFS_WORK_PROVISION_INVALID},
+        {"/CydiaAlias", ROOTFS_WORK_FILE_REPAIR_MISMATCH},
+        {"/longparent/Cydia_", ROOTFS_WORK_PROVISION_LIMIT}
+    };
+    for (size_t i = 0u; i < sizeof bad / sizeof bad[0]; i++) {
+        repair.path = bad[i].path;
+        CHECK(rootfs_work_probe_file_repair(first.destination, &repair, &state, &probe) == bad[i].status,
+              "unsafe stash path %zu was not refused: %s", i, probe.detail);
+        if (run_repair_existing_image(&second, first.output, first.output_size, "stashrefuse", &repair)) {
+            CHECK(second.status == bad[i].status && !second.result.published &&
+                  !path_exists(second.destination), "unsafe stash repair %zu published an image", i);
+            run_release(&second);
+        } else CHECK(0, "stash refusal setup failed");
+    }
+    repair.path = "/broken/Cydia_";
+    CHECK(rootfs_work_probe_file_repair(first.destination, &repair, &state, &probe) == ROOTFS_WORK_OK &&
+          state == ROOTFS_WORK_FILE_REPAIR_MISSING, "broken stash link was not missing: %s", probe.detail);
+    repair.path = aliases[0];
+    repair.expected_sha256[0] ^= 1u;
+    CHECK(rootfs_work_probe_file_repair(first.destination, &repair, &state, &probe) ==
+          ROOTFS_WORK_FILE_REPAIR_MISMATCH, "stash links bypassed the exact file hash");
+    repair.expected_sha256[0] ^= 1u;
+    repair.expected_permissions = 0700u;
+    CHECK(rootfs_work_probe_file_repair(first.destination, &repair, &state, &probe) ==
+          ROOTFS_WORK_FILE_REPAIR_MISMATCH, "stash links bypassed the exact metadata tuple");
+    repair.expected_permissions = 0755u;
+    tr_volume_t vol;
+    if (tr_open(first.output, first.output_size, &vol)) {
+        tr_record_t link;
+        if (tr_find(&vol, FX_ROOT, "Applications", &link)) {
+            size_t offset = (size_t)get_be32(link.data + 104u) * vol.block_size;
+            uint8_t saved = first.output[offset];
+            static const uint8_t invalid[] = {0u, 0x80u, ':'};
+            for (size_t i = 0u; i < sizeof invalid; i++) {
+                first.output[offset] = invalid[i];
+                if (run_repair_existing_image(&second, first.output, first.output_size, "stashbytes", &repair)) {
+                    CHECK(second.status == ROOTFS_WORK_FILE_REPAIR_MISMATCH && !second.result.published &&
+                          !path_exists(second.destination), "invalid stash target byte %u was accepted", invalid[i]);
+                    run_release(&second);
+                } else CHECK(0, "invalid stash target setup failed");
+            }
+            first.output[offset] = saved;
+        } else CHECK(0, "stash link missing for malformed-target checks");
+        tr_close(&vol);
+    } else CHECK(0, "stash image could not be opened for malformed-target checks");
+    run_release(&first);
+    free(fx);
+}
+
 static void test_exact_file_content_rewrite(void) {
     static const char legacy[] = "fixture configuration generation one\n";
     static const char desired[] =
@@ -6599,6 +6733,7 @@ int main(void) {
     test_existing_directory_reuse_is_explicit_and_type_safe();
     test_existing_symlink_reuse_requires_the_same_target();
     test_exact_file_metadata_repair();
+    test_stashed_file_metadata_repair();
     test_exact_file_content_rewrite();
     test_full_leaf_is_refused_not_split();
     test_out_of_space_is_refused();

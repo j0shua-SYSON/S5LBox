@@ -324,6 +324,11 @@ typedef struct rootfs_work_file_repair {
     uint32_t desired_owner_id;
     uint32_t desired_group_id;
     uint16_t desired_permissions;
+    /* Opt-in for stashed guest directories (e.g. Cydia's /Applications).
+     * Follow at most 16 parent links, only inside this image. Targets must be
+     * canonical printable-ASCII paths without dot components. The final
+     * object must still be the exact regular file; no host links are followed. */
+    bool follow_parent_symlinks;
 } rootfs_work_file_repair_t;
 
 typedef enum rootfs_work_file_repair_state {

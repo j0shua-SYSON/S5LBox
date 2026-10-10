@@ -79,6 +79,7 @@ static void build_cydia_privilege_repair(
     rootfs_work_file_repair_t *repair, bool legacy) {
     memset(repair, 0, sizeof *repair);
     repair->path = "/Applications/Cydia.app/Cydia_";
+    repair->follow_parent_symlinks = true;
     repair->expected_size = legacy ? UINT64_C(320704) : UINT64_C(330896);
     memcpy(repair->expected_sha256,
            legacy ? VM_CYDIA_LEGACY_EXECUTABLE_SHA256
