@@ -58,6 +58,7 @@ typedef NS_ENUM(NSInteger, VMSettingsSection) {
  * performance choice a non-developer needs before opening a new machine. */
 typedef NS_ENUM(NSInteger, VMGeneralRow) {
     VMGeneralRowManual = 0,
+    VMGeneralRowInterface,
     VMGeneralRowGraphicsMode,
     VMGeneralRowJailbreak,
     VMGeneralRowInstallIPA,
@@ -124,6 +125,7 @@ static NSString *VMStringFromC(const char *text) {
 - (void)inlineConsoleChanged:(UISwitch *)sender;
 - (void)developerModeToggled:(UISwitch *)sender;
 - (void)chooseGraphicsMode;
+- (void)chooseEmulatorInterface;
 /* These two were missing, which the comment above says cannot happen: clang
  * late-parses method bodies inside an @implementation, so a call before the
  * definition compiles anyway and the invariant this block exists to hold was
@@ -500,6 +502,11 @@ titleForFooterInSection:(NSInteger)section {
             cell.textLabel.text = @"Manual";
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        } else if (indexPath.row == VMGeneralRowInterface) {
+            cell.textLabel.text = @"Emulator interface";
+            cell.detailTextLabel.text = _settings.legacyEmulatorUI ? @"Legacy" : @"Modern";
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.accessibilityIdentifier = @"s5lbox.settings.interface";
         } else if (indexPath.row == VMGeneralRowGraphicsMode) {
             VMGraphicsMode mode = [_settings graphicsModeForNewMachines];
             cell.textLabel.text = @"Graphics for new machines";
@@ -780,6 +787,8 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
                 [self.navigationController pushViewController:m animated:YES];
         } else if (indexPath.row == VMGeneralRowGraphicsMode) {
             [self chooseGraphicsMode];
+        } else if (indexPath.row == VMGeneralRowInterface) {
+            [self chooseEmulatorInterface];
         } else if (indexPath.row == VMGeneralRowJailbreak) {
             [self confirmGuestInstall];
         } else if (indexPath.row == VMGeneralRowInstallIPA) {
@@ -951,6 +960,27 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     popover.sourceRect = CGRectMake(CGRectGetMidX(self.view.bounds),
                                     CGRectGetMidY(self.view.bounds), 1.0, 1.0);
     popover.permittedArrowDirections = 0;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)chooseEmulatorInterface {
+    UIAlertController *picker = [UIAlertController alertControllerWithTitle:@"Emulator interface"
+        message:@"Modern has a Home button and a separate Device Controls sheet. Legacy keeps the original five-button row and toolbar."
+        preferredStyle:UIAlertControllerStyleAlert];
+    __weak VMSettingsViewController *weakSelf = self;
+    for (NSNumber *choice in @[@NO, @YES]) {
+        BOOL legacy = choice.boolValue;
+        NSString *title = legacy ? @"Legacy" : @"Modern";
+        if (_settings.legacyEmulatorUI == legacy) title = [title stringByAppendingString:@" (current)"];
+        [picker addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault
+            handler:^(__unused UIAlertAction *action) {
+                VMSettingsViewController *controller = weakSelf;
+                if (!controller) return;
+                controller->_settings.legacyEmulatorUI = legacy;
+                [controller.tableView reloadData];
+            }]];
+    }
+    [picker addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:picker animated:YES completion:nil];
 }
 

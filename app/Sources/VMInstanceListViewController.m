@@ -24,6 +24,8 @@ static NSString *const kCell = @"machine";
 static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
 
 @interface VMInstanceListViewController ()
+- (NSUInteger)indexForMachineID:(NSString *)identifier;
+- (BOOL)performMachineAction:(NSString *)name identifier:(NSString *)identifier;
 - (BOOL)openInstanceAtIndex:(NSUInteger)index animated:(BOOL)animated
              afterShutdown:(void (^)(void))afterShutdown;
 - (void)prepareGuestInstall:(UIViewController *)install
@@ -55,7 +57,7 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
         initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
                              target:self action:@selector(addTapped)];
     UIBarButtonItem *settings = [[UIBarButtonItem alloc]
-        initWithImage:[UIImage systemImageNamed:@"gearshape"]
+        initWithImage:[UIImage systemImageNamed:@"gear"]
                  style:UIBarButtonItemStylePlain
                 target:self action:@selector(settingsTapped)];
     settings.accessibilityLabel = @"Settings";
@@ -394,12 +396,15 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
 - (void)renameAtIndex:(NSUInteger)index {
     NSDictionary *row = [[VMInstanceStore sharedStore] instanceAtIndex:index];
     if (!row) return;
+    NSString *identifier = row[@"id"];
     [self promptWithTitle:@"Rename"
                      text:row[@"name"]
                    accept:@"Rename"
                   handler:^(NSString *name) {
         NSError *err = nil;
-        if (![[VMInstanceStore sharedStore] renameInstanceAtIndex:index
+        NSUInteger current = [self indexForMachineID:identifier];
+        if (current == NSNotFound) return;
+        if (![[VMInstanceStore sharedStore] renameInstanceAtIndex:current
                                                                 to:name
                                                              error:&err])
             [self showError:err doing:@"Could not rename the machine"];
@@ -423,6 +428,7 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
 - (void)confirmDeleteAtIndex:(NSUInteger)index {
     NSDictionary *row = [[VMInstanceStore sharedStore] instanceAtIndex:index];
     if (!row) return;
+    NSString *identifier = row[@"id"];
     UIAlertController *a = [UIAlertController
         alertControllerWithTitle:[NSString stringWithFormat:@"Delete “%@”?",
                                   row[@"name"]]
@@ -436,7 +442,9 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
                                         handler:^(UIAlertAction *action) {
         (void)action;
         NSError *err = nil;
-        if (![[VMInstanceStore sharedStore] deleteInstanceAtIndex:index error:&err])
+        NSUInteger current = [self indexForMachineID:identifier];
+        if (current == NSNotFound) return;
+        if (![[VMInstanceStore sharedStore] deleteInstanceAtIndex:current error:&err])
             [self showError:err doing:@"Could not delete the machine"];
     }]];
     [self presentViewController:a animated:YES completion:nil];
@@ -474,12 +482,7 @@ titleForHeaderInSection:(NSInteger)section {
 - (NSString *)tableView:(UITableView *)tableView
 titleForFooterInSection:(NSInteger)section {
     (void)tableView; (void)section;
-    return [NSString stringWithFormat:
-            @"New machines keep their recorded graphics mode and their own "
-            @"files. Legacy machines keep the app-wide graphics setting; their "
-            @"old option bits are not treated as evidence. %@ Only one machine "
-            @"runs at a time.",
-            [VMEngine firmwareReadinessSummary]];
+    return @"Touch and hold a machine to rename, duplicate, or delete it. Only one machine runs at a time.";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView
@@ -529,8 +532,17 @@ titleForFooterInSection:(NSInteger)section {
         [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
     cell.detailTextLabel.adjustsFontForContentSizeCategory = YES;
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-    cell.accessibilityHint = @"Opens this machine.";
+    cell.accessibilityHint = @"Opens this machine. Actions are available to rename, duplicate, or delete it.";
     NSString *identifier = row[@"id"];
+    __weak VMInstanceListViewController *weakSelf = self;
+    NSMutableArray *actions = [NSMutableArray array];
+    for (NSString *name in @[@"Rename", @"Duplicate configuration", @"Delete"]) {
+        [actions addObject:[[UIAccessibilityCustomAction alloc] initWithName:name
+            actionHandler:^BOOL(__unused UIAccessibilityCustomAction *action) {
+                return [weakSelf performMachineAction:name identifier:identifier];
+            }]];
+    }
+    cell.accessibilityCustomActions = actions;
     cell.accessibilityIdentifier = identifier.length
         ? [kAutomationMachinePrefix stringByAppendingString:identifier]
         : @"s5lbox.machine.unknown";
@@ -602,63 +614,63 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [self openInstanceAtIndex:(NSUInteger)indexPath.row animated:YES];
 }
 
-/* Swipe actions rather than only an edit-mode delete: rename and duplicate are
- * the two things people reach for most, and burying them costs more than the
- * few lines this takes. */
+/* Resolve the identity when an action is invoked, not the row at menu creation.
+ * The list can change while a context menu or a confirmation alert is open. */
+- (NSUInteger)indexForMachineID:(NSString *)identifier {
+    VMInstanceStore *store = VMInstanceStore.sharedStore;
+    for (NSUInteger index = 0; index < store.count; ++index)
+        if ([[store instanceAtIndex:index][@"id"] isEqual:identifier]) return index;
+    return NSNotFound;
+}
+
+- (BOOL)performMachineAction:(NSString *)name identifier:(NSString *)identifier {
+    if (self.navigationController.topViewController != self || self.presentedViewController) return NO;
+    NSUInteger index = [self indexForMachineID:identifier];
+    if (index == NSNotFound) return NO;
+    if ([name isEqualToString:@"Rename"]) [self renameAtIndex:index];
+    else if ([name isEqualToString:@"Duplicate configuration"]) [self duplicateAtIndex:index];
+    else if ([name isEqualToString:@"Delete"]) [self confirmDeleteAtIndex:index];
+    else return NO;
+    return YES;
+}
+
+- (UIContextMenuConfiguration *)tableView:(UITableView *)tableView
+    contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point {
+    (void)tableView; (void)point;
+    if (self.editing) return nil;
+    NSDictionary *row = [VMInstanceStore.sharedStore instanceAtIndex:(NSUInteger)indexPath.row];
+    NSString *identifier = row[@"id"];
+    if (!identifier.length) return nil;
+    __weak VMInstanceListViewController *weakSelf = self;
+    return [UIContextMenuConfiguration configurationWithIdentifier:identifier previewProvider:nil
+        actionProvider:^UIMenu *(__unused NSArray<UIMenuElement *> *suggested) {
+            NSMutableArray *actions = [NSMutableArray array];
+            NSArray *names = @[@"Rename", @"Duplicate configuration", @"Delete"];
+            NSArray *symbols = @[@"pencil", @"doc.on.doc", @"trash"];
+            for (NSUInteger i = 0; i < names.count; ++i) {
+                NSString *name = names[i];
+                UIAction *action = [UIAction actionWithTitle:name image:[UIImage systemImageNamed:symbols[i]]
+                    identifier:nil handler:^(__unused UIAction *selected) {
+                        [weakSelf performMachineAction:name identifier:identifier];
+                    }];
+                if (i == 2) action.attributes = UIMenuElementAttributesDestructive;
+                [actions addObject:action];
+            }
+            return [UIMenu menuWithTitle:@"" children:actions];
+        }];
+}
+
+/* Empty, not nil: nil permits UIKit's fallback swipe-to-delete because this
+ * table still intentionally supports the Edit button's delete controls. */
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
     trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
-    (void)tableView;
-    NSUInteger index = (NSUInteger)indexPath.row;
-
-    UIContextualAction *del = [UIContextualAction
-        contextualActionWithStyle:UIContextualActionStyleDestructive
-                            title:@"Delete"
-                          handler:^(UIContextualAction *a, UIView *v,
-                                    void (^done)(BOOL)) {
-        (void)a; (void)v;
-        [self confirmDeleteAtIndex:index];
-        done(NO);       /* the alert decides; do not animate the row away yet */
-    }];
-
-    UIContextualAction *dup = [UIContextualAction
-        contextualActionWithStyle:UIContextualActionStyleNormal
-                            title:@"Duplicate"
-                          handler:^(UIContextualAction *a, UIView *v,
-                                    void (^done)(BOOL)) {
-        (void)a; (void)v;
-        [self duplicateAtIndex:index];
-        done(YES);
-    }];
-
-    UIContextualAction *ren = [UIContextualAction
-        contextualActionWithStyle:UIContextualActionStyleNormal
-                            title:@"Rename"
-                          handler:^(UIContextualAction *a, UIView *v,
-                                    void (^done)(BOOL)) {
-        (void)a; (void)v;
-        [self renameAtIndex:index];
-        done(YES);
-    }];
-
-    /*
-     * Three actions need three colours. UIContextualActionStyleNormal has no
-     * colour of its own, so Duplicate and Rename both came out the same grey
-     * and were told apart only by reading them — which is the one thing a
-     * swipe action is meant to avoid, since the row is under your thumb.
-     *
-     * Delete keeps the red its destructive style gives it. Blue sits between
-     * red and orange in the swipe order, so the two warm colours are never
-     * adjacent — red beside orange is the pair most likely to be misread at a
-     * glance, and it is the pair where the mistake is unrecoverable.
-     *
-     * The colours are an aid, not the signal: every action still carries its
-     * own word, which is what a colour-blind reader and VoiceOver both use.
-     */
-    dup.backgroundColor = [UIColor systemBlueColor];
-    ren.backgroundColor = [UIColor systemOrangeColor];
-
-    return [UISwipeActionsConfiguration
-        configurationWithActions:@[ del, dup, ren ]];
+    (void)tableView; (void)indexPath;
+    return [UISwipeActionsConfiguration configurationWithActions:@[]];
+}
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
+    leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView; (void)indexPath;
+    return [UISwipeActionsConfiguration configurationWithActions:@[]];
 }
 
 /* Edit-mode delete, for the same reason: it is what the Edit button implies. */

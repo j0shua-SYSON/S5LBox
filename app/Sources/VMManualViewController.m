@@ -79,7 +79,7 @@ typedef struct {
               @"3.1.3 kernel instead: the same segments at the same addresses, "
               @"the same device tree with the same values written into it, and "
               @"the same boot arguments the desktop version of this project "
-              @"uses. The status line under the screen says which of the two "
+              @"uses. The developer console says which of the two "
               @"is running, and it is never a guess — it reports what was "
               @"actually installed.\n\nOn-device runs have booted Apple's "
               @"kernel and launchd. The newest complete SpringBoard and MBX "
@@ -95,7 +95,7 @@ typedef struct {
               @"not happen to the others.\n\nWhat they SHARE is the firmware "
               @"you imported, which nothing ever writes to, and App Settings "
               @"defaults. Machine Settings controls only the open session.\n\n"
-              @"Swipe a machine for Rename, Duplicate and Delete. Duplicate "
+              @"Touch and hold a machine for Rename, Duplicate and Delete. Duplicate "
               @"copies the settings, not the disk: the copy builds its own the "
               @"first time you open it. Delete removes that machine's disk too, "
               @"which is most of the space it uses.\n\n"
@@ -108,16 +108,18 @@ typedef struct {
 
     [e addObject:@{ @"h": @"The screen and the buttons",
         @"b": @"The picture is the guest's own display, copied out of emulated "
-              @"video memory when its pixels change and published at most "
-              @"thirty times a second. Thirty is a host-side cap, not a claim "
-              @"that the guest currently produces 30 fps. Nothing on it is "
-              @"drawn by iOS.\n\nThe buttons below it are the five an iPhone 3G "
-              @"has: Home, Power, Volume Up, Volume Down and the Ringer switch. "
+              @"video memory when its pixels change. Nothing inside the guest "
+              @"display is drawn by host iOS.\n\nBelow it are Machine Settings, "
+              @"Home, and Device Controls. Home supports a press or a hold. "
+              @"Device Controls contains Sleep / Wake (hold for the guest power "
+              @"menu), Silent mode, volume, and session actions. Pause freezes "
+              @"emulation; it is different from putting the guest display to sleep. "
+              @"App Settings → Emulator interface → Legacy restores the original "
+              @"five-button row, diagnostics, and toolbar.\n\n"
               @"Touching the screen is passed to the guest as a real touch "
               @"report, in the same format the original digitizer used.\n\n"
-              @"If the guest is not listening — and the built-in test program "
-              @"never is — the app says so rather than pretending the press "
-              @"worked." }];
+              @"The guest must have loaded its input drivers to respond. "
+              @"Developer Mode exposes delivery diagnostics in Console." }];
 
     [e addObject:@{ @"h": @"Why it needs firmware, and why none is included",
         @"b": @"To run iPhone OS this needs Apple's own software: the kernel, "

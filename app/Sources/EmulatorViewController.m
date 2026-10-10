@@ -29,6 +29,8 @@
 //
 #import "EmulatorViewController.h"
 #import "VMButtonBar.h"
+#import "VMHardwareButton.h"
+#import "VMDeviceControlsViewController.h"
 #import "VMEngine.h"
 #import "VMConsoleViewController.h"
 #import "VMFramebufferView.h"
@@ -85,7 +87,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 @interface EmulatorViewController () <VMButtonBarDelegate,
                                       VMFramebufferViewTouchDelegate,
                                       VMSnapshotListDelegate,
-                                      VMRuntimeSettingsDelegate>
+                                      VMDeviceControlsDelegate>
 - (NSString *)snapshotsDirectory;
 - (void)startEmulator;
 - (void)launchEngine;
@@ -121,6 +123,11 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 - (void)shutDownTapped:(id)sender;
 - (void)forcePowerOffTapped:(id)sender;
 - (void)forcePowerOff;
+- (void)buildModernControls;
+- (void)applyInterfaceStyle;
+- (void)refreshModernControls;
+- (void)layoutModernInterface;
+- (void)deviceControlsTapped:(id)sender;
 @end
 
 @implementation VMDisplayLinkProxy {
@@ -161,6 +168,12 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     UILabel           *_stats;
     UITextView        *_console;
     UIToolbar         *_toolbar;
+    UIView            *_dock;
+    VMHardwareButton  *_homeButton;
+    UIButton          *_settingsButton, *_deviceControlsButton;
+    UIStackView       *_machineHeading;
+    UILabel           *_machineTitle, *_machineStatus;
+    BOOL               _legacyInterface;
     NSMutableString   *_consoleText;
     BOOL               _consoleDirty;
 
@@ -229,6 +242,11 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     /* UINavigationController may finish installing its iOS 26 recognizer as
      * the push completes. Re-run the idempotent block after that transition. */
     [self blockSystemPopGestures];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [_homeButton releasePress];
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
@@ -376,6 +394,8 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     _toolbar.barStyle = UIBarStyleBlack;
     _toolbar.translucent = NO;
     [self.view addSubview:_toolbar];
+    [self buildModernControls];
+    [self applyInterfaceStyle];
     [self refreshRunControls];
 
     [self append:@"S5LBox  ·  on-device self-test"];
@@ -554,6 +574,9 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     _screen.userInteractionEnabled = !busy;
     _keys.userInteractionEnabled = !busy;
     _toolbar.userInteractionEnabled = !busy;
+    _dock.userInteractionEnabled = !busy;
+    if (busy) [_homeButton releasePress];
+    [self refreshModernControls];
     [self refreshPrepareOverlay];
 }
 
@@ -790,6 +813,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
      * -refreshRunControls short-circuiting when the play/pause glyph has not
      * changed, which is the usual case here. */
     _toolbarBuilt = NO;
+    [self applyInterfaceStyle];
     [self refreshRunControls];
     /* The inline-console setting changes the layout, not just the chrome. */
     [self.view setNeedsLayout];
@@ -841,6 +865,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
  * tapped, so a machine that stopped on its own — a halt, or a reached
  * instruction cap — is shown as stopped without anything having to notice. */
 - (void)refreshRunControls {
+    [self refreshModernControls];
     const BOOL showPlay = (_engine == nil) || [_engine isPaused] ||
                           ![_engine isRunning];
     if (_toolbarBuilt && showPlay == _toolbarShowsPlay) return;
@@ -893,7 +918,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
      * thread appends to _consoleText continuously, and handing that mutable
      * string straight to another view would be a data race across a screen
      * transition. */
-    vc.text = [_consoleText copy];
+    vc.text = [NSString stringWithFormat:@"%@\n\n%@", _stats.text ?: @"", _consoleText ?: @""];
     [self.navigationController pushViewController:vc animated:YES];
 }
 
@@ -996,13 +1021,26 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     UINavigationController *nav = [[UINavigationController alloc]
         initWithRootViewController:settings];
     // The emulator screen is black; a white sheet over it would be a jolt.
-    nav.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    if (_legacyInterface) nav.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     /* Session changes are immediate through the delegate. Dismissal never
      * saves app defaults, restarts the guest or changes another machine. */
     [self presentViewController:nav animated:YES completion:nil];
 }
 
 #pragma mark - Current-session settings
+
+- (NSString *)deviceButtonUnavailableReason {
+    if (![self runtimeCanControlGuest]) return @"Device buttons are unavailable while the machine is stopped or busy.";
+    /* The instance method is a diagnostic history (including "nothing sent
+     * yet"), not a capability gate. Using it here would prevent the FIRST press. */
+    return [VMEngine buttonUnavailableReason];
+}
+- (BOOL)deviceSilent { return [_engine isButtonPressed:VMButtonRingerSilent]; }
+- (void)setDeviceButton:(VMButton)button pressed:(BOOL)pressed {
+    /* Releases must always reach the engine, even after a pause/busy transition. */
+    if (pressed && ([self deviceButtonUnavailableReason].length || [_engine isPaused])) return;
+    [_engine setButton:button pressed:pressed];
+}
 
 - (BOOL)runtimeCanControlGuest {
     return [_engine isRunning] && !_savingCheckpoint && !_restarting && !_shuttingDown && !_forcePowerOffRequested;
@@ -1124,6 +1162,143 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
 #pragma mark - Layout
 
+- (UIButton *)dockButtonWithSymbol:(NSString *)symbol label:(NSString *)label action:(SEL)action {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    [button setImage:[UIImage systemImageNamed:symbol] forState:UIControlStateNormal];
+    [button setPreferredSymbolConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:23
+        weight:UIImageSymbolWeightRegular] forImageInState:UIControlStateNormal];
+    button.tintColor = UIColor.labelColor;
+    button.backgroundColor = UIColor.tertiarySystemFillColor;
+    button.layer.cornerRadius = 24;
+    button.accessibilityLabel = label;
+    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    [_dock addSubview:button];
+    return button;
+}
+
+- (void)buildModernControls {
+    _dock = [UIView new];
+    _dock.backgroundColor = UIColor.secondarySystemBackgroundColor;
+    _dock.layer.cornerRadius = 38;
+    _dock.accessibilityIdentifier = @"s5lbox.modern-dock";
+    [self.view addSubview:_dock];
+    _settingsButton = [self dockButtonWithSymbol:@"gear" label:@"Machine settings" action:@selector(settingsTapped:)];
+    _settingsButton.accessibilityIdentifier = @"s5lbox.dock.settings";
+    _deviceControlsButton = [self dockButtonWithSymbol:@"slider.horizontal.3" label:@"Device controls"
+        action:@selector(deviceControlsTapped:)];
+    _deviceControlsButton.accessibilityHint = @"Sleep, silent mode, volume, and session controls.";
+    _deviceControlsButton.accessibilityIdentifier = @"s5lbox.dock.controls";
+    _homeButton = [[VMHardwareButton alloc] initWithFrame:CGRectZero];
+    [_homeButton setImage:[UIImage systemImageNamed:@"square"] forState:UIControlStateNormal];
+    [_homeButton setPreferredSymbolConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:25
+        weight:UIImageSymbolWeightRegular] forImageInState:UIControlStateNormal];
+    _homeButton.tintColor = UIColor.labelColor;
+    _homeButton.backgroundColor = UIColor.systemBackgroundColor;
+    _homeButton.layer.cornerRadius = 32;
+    _homeButton.layer.borderWidth = 2;
+    _homeButton.accessibilityLabel = @"Guest Home button";
+    _homeButton.accessibilityHint = @"Press to go Home. Press and hold for the guest's hold action.";
+    _homeButton.accessibilityIdentifier = @"s5lbox.dock.home";
+    __weak EmulatorViewController *weakSelf = self;
+    _homeButton.pressChanged = ^(BOOL pressed) { [weakSelf setDeviceButton:VMButtonHome pressed:pressed]; };
+    [_dock addSubview:_homeButton];
+    _machineTitle = [UILabel new];
+    _machineTitle.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
+    _machineTitle.textAlignment = NSTextAlignmentCenter;
+    _machineTitle.lineBreakMode = NSLineBreakByTruncatingTail;
+    _machineStatus = [UILabel new];
+    _machineStatus.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption2];
+    _machineStatus.textColor = UIColor.secondaryLabelColor;
+    _machineStatus.textAlignment = NSTextAlignmentCenter;
+    _machineHeading = [[UIStackView alloc] initWithArrangedSubviews:@[_machineTitle, _machineStatus]];
+    _machineHeading.axis = UILayoutConstraintAxisVertical;
+    _machineHeading.spacing = 1;
+    _machineHeading.isAccessibilityElement = YES;
+    _machineHeading.accessibilityTraits = UIAccessibilityTraitHeader;
+}
+
+- (void)applyInterfaceStyle {
+    [_homeButton releasePress];
+    _legacyInterface = VMSettings.sharedSettings.legacyEmulatorUI;
+    _keys.hidden = _stats.hidden = _toolbar.hidden = !_legacyInterface;
+    _dock.hidden = _legacyInterface;
+    _screen.layer.borderWidth = _legacyInterface ? 1 : 0;
+    self.view.backgroundColor = _legacyInterface ? UIColor.blackColor : UIColor.systemBackgroundColor;
+    self.navigationItem.titleView = _legacyInterface ? nil : _machineHeading;
+    self.navigationItem.rightBarButtonItem = !_legacyInterface && VMSettings.sharedSettings.developerMode
+        ? [[UIBarButtonItem alloc] initWithTitle:@"Console" style:UIBarButtonItemStylePlain
+            target:self action:@selector(consoleTapped:)] : nil;
+    [self refreshModernControls];
+    [self.view setNeedsLayout];
+    [self setNeedsStatusBarAppearanceUpdate];
+}
+
+- (void)refreshModernControls {
+    if (!_dock || _legacyInterface) return;
+    _homeButton.enabled = ![self deviceButtonUnavailableReason].length && ![_engine isPaused];
+    NSString *status = _forcePowerOffRequested ? @"Powering off"
+        : _savingCheckpoint ? @"Saving" : _shuttingDown ? @"Shutting down"
+        : _restarting ? @"Restarting" : [_engine isPreparingRootFilesystem] ? @"Preparing"
+        : !_engine ? @"Starting" : [_engine isPaused] ? @"Paused"
+        : [_engine isRunning] ? @"Running" : @"Stopped";
+    _machineTitle.text = self.title ?: @"Machine";
+    _machineStatus.text = status;
+    _machineHeading.accessibilityLabel = [NSString stringWithFormat:@"%@, %@", _machineTitle.text, status];
+}
+
+- (void)deviceControlsTapped:(id)sender {
+    (void)sender;
+    if (_savingCheckpoint || _restarting || _shuttingDown || _forcePowerOffRequested || self.presentedViewController) return;
+    [_homeButton releasePress];
+    VMDeviceControlsViewController *controls = [VMDeviceControlsViewController new];
+    controls.controlDelegate = self;
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:controls];
+    nav.modalPresentationStyle = UIModalPresentationPageSheet;
+    if (@available(iOS 15.0, *)) {
+        nav.sheetPresentationController.detents = @[UISheetPresentationControllerDetent.largeDetent];
+        nav.sheetPresentationController.prefersGrabberVisible = YES;
+    }
+    [self presentViewController:nav animated:YES completion:nil];
+}
+
+- (void)layoutModernInterface {
+    CGRect area = UIEdgeInsetsInsetRect(self.view.bounds, self.view.safeAreaInsets);
+    area = CGRectInset(area, 12, 8);
+    BOOL landscape = area.size.width > area.size.height;
+    if (landscape) {
+        CGFloat height = MIN(236, area.size.height);
+        _dock.frame = CGRectMake(CGRectGetMaxX(area) - 76, CGRectGetMidY(area) - height / 2, 76, height);
+        _homeButton.frame = CGRectMake(6, (height - 64) / 2, 64, 64);
+        _settingsButton.frame = CGRectMake(14, 10, 48, 48);
+        _deviceControlsButton.frame = CGRectMake(14, height - 58, 48, 48);
+        area.size.width = MAX(0, area.size.width - 92);
+    } else {
+        CGFloat width = MIN(300, area.size.width);
+        _dock.frame = CGRectMake(CGRectGetMidX(area) - width / 2, CGRectGetMaxY(area) - 76, width, 76);
+        _homeButton.frame = CGRectMake((width - 64) / 2, 6, 64, 64);
+        _settingsButton.frame = CGRectMake(14, 14, 48, 48);
+        _deviceControlsButton.frame = CGRectMake(width - 62, 14, 48, 48);
+        area.size.height = MAX(0, area.size.height - 88);
+    }
+    _homeButton.layer.borderColor = UIColor.systemBlueColor.CGColor;
+    BOOL inlineConsole = _sessionInlineConsole && VMSettings.sharedSettings.developerMode;
+    CGFloat band = inlineConsole ? floor(area.size.height * 0.62) : area.size.height;
+    CGFloat scale = MAX(0, MIN(area.size.width / VM_FB_WIDTH, band / VM_FB_HEIGHT));
+    CGFloat width = VM_FB_WIDTH * scale, height = VM_FB_HEIGHT * scale;
+    _screen.frame = CGRectMake(CGRectGetMidX(area) - width / 2, area.origin.y + (band - height) / 2, width, height);
+    _prepareScrim.frame = _screen.frame;
+    _prepareLabel.frame = CGRectMake(width * .1, height / 2 - 50, width * .8, 86);
+    _prepareBar.frame = CGRectMake(width * .1, height / 2 + 44, width * .8, 4);
+    _console.hidden = !inlineConsole;
+    _console.frame = inlineConsole ? CGRectMake(area.origin.x, area.origin.y + band + 6,
+        area.size.width, MAX(0, area.size.height - band - 6)) : CGRectZero;
+    // Navigation bars have a fixed height even at accessibility text sizes.
+    _machineTitle.font = [UIFont systemFontOfSize:MIN(20, [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline].pointSize)
+        weight:UIFontWeightSemibold];
+    _machineStatus.font = [UIFont systemFontOfSize:MIN(13, [UIFont preferredFontForTextStyle:UIFontTextStyleCaption2].pointSize)];
+    _machineHeading.frame = CGRectMake(0, 0, MIN(220, MAX(80, self.view.bounds.size.width - 150)), 40);
+}
+
 /*
  * The preparing overlay, refreshed on the same throttled tick as the status
  * line -- eight frames is far finer than a 433 MB copy changes on.
@@ -1187,6 +1362,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
+    if (!_legacyInterface) { [self layoutModernInterface]; return; }
 
     CGRect b = self.view.bounds;
     UIEdgeInsets safe = self.view.safeAreaInsets;
@@ -1262,8 +1438,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 }
 
 - (UIStatusBarStyle)preferredStatusBarStyle {
-    // The whole screen is black; the default dark clock would be invisible.
-    return UIStatusBarStyleLightContent;
+    return _legacyInterface ? UIStatusBarStyleLightContent : UIStatusBarStyleDefault;
 }
 
 #pragma mark - Presentation

@@ -33,6 +33,7 @@ static NSString *const kVMInstructionCapKey = @"vm.diag.instructionCap";
 static NSString *const kVMPauseInBackground = @"vm.diag.pauseInBackground";
 static NSString *const kVMDeveloperMode = @"VMDeveloperMode";
 static NSString *const kVMInlineConsole = @"VMInlineConsole";
+static NSString *const kVMLegacyEmulatorUI = @"VMLegacyEmulatorUI";
 
 /*
  * The instruction caps the screen cycles through. 0 first because no limit is
@@ -80,6 +81,12 @@ static const uint64_t kVMInstructionCaps[] = {
      * thread here: everything that writes is a control in a table view. */
     [[NSNotificationCenter defaultCenter]
         postNotificationName:VMSettingsDidChangeNotification object:self];
+}
+
+- (BOOL)legacyEmulatorUI { return [[self defaults] boolForKey:kVMLegacyEmulatorUI]; }
+- (void)setLegacyEmulatorUI:(BOOL)legacy {
+    [[self defaults] setBool:legacy forKey:kVMLegacyEmulatorUI];
+    [self publishChange];
 }
 
 #pragma mark - Recorded only
@@ -481,6 +488,7 @@ static const uint64_t kVMInstructionCaps[] = {
     }
     [defaults removeObjectForKey:kVMInstructionCapKey];
     [defaults removeObjectForKey:kVMPauseInBackground];
+    [defaults removeObjectForKey:kVMLegacyEmulatorUI];
     [self publishChange];
 }
 

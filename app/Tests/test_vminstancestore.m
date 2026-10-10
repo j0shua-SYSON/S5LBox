@@ -1,9 +1,52 @@
 // Exercise the real Foundation persistence owner in an isolated test directory.
 // Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 #import "VMInstanceStore.h"
+#import "VMSettings.h"
 #include <assert.h>
 
 static NSString *testRoot;
+@interface VMSettings (InterfaceTest)
+- (NSUserDefaults *)defaults;
+@end
+@interface TestInterfaceSettings : VMSettings
+@property(nonatomic, strong) NSUserDefaults *testDefaults;
+@end
+@implementation TestInterfaceSettings
+- (NSUserDefaults *)defaults { return self.testDefaults; }
+@end
+
+static void testInterfaceChoice(void) {
+    NSString *suite = [@"S5LBox.InterfaceTests." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    TestInterfaceSettings *settings = [TestInterfaceSettings new];
+    settings.testDefaults = defaults;
+    assert(!settings.legacyEmulatorUI);
+    [settings setInstructionCap:10000000];
+    [settings setPausesInBackground:NO];
+    [settings setGraphicsModeForNewMachines:VMGraphicsModeSoftware];
+    NSDictionary *before = [defaults persistentDomainForName:suite];
+    __block NSUInteger changes = 0;
+    id observer = [NSNotificationCenter.defaultCenter addObserverForName:VMSettingsDidChangeNotification
+        object:settings queue:nil usingBlock:^(__unused NSNotification *note) { ++changes; }];
+    settings.legacyEmulatorUI = YES;
+    assert(settings.legacyEmulatorUI && changes == 1);
+    TestInterfaceSettings *reopened = [TestInterfaceSettings new];
+    reopened.testDefaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    assert(reopened.legacyEmulatorUI);
+    assert(settings.instructionCap == 10000000 && !settings.pausesInBackground);
+    assert(settings.graphicsModeForNewMachines == VMGraphicsModeSoftware);
+    NSMutableDictionary *after = [[defaults persistentDomainForName:suite] mutableCopy];
+    [after removeObjectForKey:@"VMLegacyEmulatorUI"];
+    assert([before isEqual:after]); // The UI choice does not rewrite emulator defaults.
+    settings.legacyEmulatorUI = NO;
+    assert(!reopened.legacyEmulatorUI && changes == 2);
+    settings.legacyEmulatorUI = YES;
+    [settings resetToDefaults];
+    assert(!settings.legacyEmulatorUI && changes == 4);
+    [NSNotificationCenter.defaultCenter removeObserver:observer];
+    [defaults removePersistentDomainForName:suite];
+    puts("interface settings: Modern default, Legacy persistence, notifications, reset and unrelated values passed");
+}
 @interface VMInstanceStore (PersistenceTest)
 - (NSString *)containerDirectory;
 - (NSString *)storePath;
@@ -40,6 +83,7 @@ static NSSet *files(void) {
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        testInterfaceChoice();
         assert(argc == 2);
         testRoot = [[NSString stringWithUTF8String:argv[1]]
             stringByAppendingPathComponent:NSUUID.UUID.UUIDString];

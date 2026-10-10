@@ -71,6 +71,9 @@ typedef NS_ENUM(NSInteger, VMGraphicsMode) {
 
 + (instancetype)sharedSettings;
 
+/* App-wide presentation only; NO (Modern) by default. */
+@property(nonatomic) BOOL legacyEmulatorUI;
+
 #pragma mark - Recorded only (see the file note)
 
 /* `index` is an index into VMOptions.c's table. This is the effective launch
@@ -120,7 +123,7 @@ typedef NS_ENUM(NSInteger, VMGraphicsMode) {
  * DEVELOPER MODE. Off by default, and it is the switch that decides which app
  * this is.
  *
- * Off, the app shows a screen, five buttons, and a short settings list whose
+ * Off, the app shows the guest, device controls, and a short settings list whose
  * rows are things a person can decide. On, it additionally shows the sixteen
  * device-tree and kernel-patch toggles that mirror the desktop harness, the
  * instruction cap, the raw guest console, and the diagnostics pages.
