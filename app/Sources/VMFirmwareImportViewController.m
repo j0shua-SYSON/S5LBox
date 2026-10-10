@@ -336,9 +336,8 @@ static BOOL VMProbeFirmware(vm_firmware_boot_state_t *out) {
     if (_running) [visible addObject:@(VMImportSectionProgress)];
     if (_haveReport) [visible addObject:@(VMImportSectionResults)];
 
-    /* A key row exists only where the report says a key is what is missing --
-     * not merely where an artefact failed. A row offering the wrong fix is
-     * worse than no row. */
+    /* Advanced overrides remain available independently of the last report;
+     * ordinary imports resolve the bundled public keys without these rows. */
     _keyRows = @[@(VM_FW_KERNEL), @(VM_FW_DEVICE_TREE), @(VM_FW_ROOT_FILESYSTEM)];
     if (!_running) [visible addObject:@(VMImportSectionKeys)];
 
@@ -686,8 +685,8 @@ estimatedHeightForRowAtIndexPath:(NSIndexPath *)indexPath {
                 (vm_fw_artefact_t)_keyRows[(NSUInteger)row].intValue;
             const BOOL isRoot = (which == VM_FW_ROOT_FILESYSTEM);
 
-            /* "you supply" in the row itself, not only in the footer: a row
-             * that just said "Kernel key" could be read as a key the app has. */
+            /* Make the distinction between automatic keys and manual overrides
+             * visible on each row, not only in the section footer. */
             cell.textLabel.text = [NSString stringWithFormat:@"%@ %@",
                 VMStringFromC(vm_fw_artefact_title(which)),
                 isRoot ? @"key" : @"key and IV"];

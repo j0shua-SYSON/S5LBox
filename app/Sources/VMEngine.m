@@ -425,14 +425,9 @@ static double vm_engine_now_seconds(void) {
                  * valid UTF-8, so neither result is used unguarded. */
                 NSString *summary =
                     [NSString stringWithUTF8String:report.summary];
-                /*
-                 * A SUCCESSFUL BOOT STILL OWES THE USER THIS. Twelve of the
-                 * fourteen switches do not reach the request, and six of them
-                 * disagree with what the machine did on an installation
-                 * nobody has touched. Saying nothing here would be the exact
-                 * failure this class was built to end -- the settings screen
-                 * showing one configuration and the machine running another.
-                 */
+                /* Keep the full settings account in the console. Only actual
+                 * requested/effective mismatches need an alert; describing
+                 * successfully provisioned defaults must not interrupt setup. */
                 NSString *switches =
                     [NSString stringWithUTF8String:report.options.summary];
                 if (switches.length)
@@ -465,7 +460,7 @@ static double vm_engine_now_seconds(void) {
                 }
                 /* Actionable, not merely alarming: the settings screen is
                  * where each of these now says what happens instead. */
-                NSString *said = switches.length
+                NSString *said = report.options.overridden && switches.length
                     ? [switches stringByAppendingString:
                         @" Each one says what the machine does instead, under "
                         @"its own switch in Settings."]
@@ -495,15 +490,10 @@ static double vm_engine_now_seconds(void) {
          * The three imported files are here but the writable root filesystem
          * has not been made. That copy is ~450 MB and takes long enough to be
          * killed by the watchdog if it ran here, so it runs on its own thread
-         * and this machine gets the demo guest. Reopening the machine after it
-         * finishes boots the real kernel.
+         * and this machine temporarily gets the demo guest. On success, the
+         * view consumes a one-shot request and uses the normal stop/restart
+         * path to boot the real kernel after ownership is safely released.
          */
-        /* Says what the bar means and what happens next, and NOTHING MORE.
-         * A first draft of this string promised "iPhone OS starts by itself
-         * when the copy finishes"; it does not -- the completion path below
-         * says "Reopen it to boot iPhone OS" -- and a message that tells a
-         * user to wait for something that never happens is worse than the
-         * vague one it replaced. */
         note = @"Preparing this machine's writable disk. iPhone OS will start "
                @"automatically when preparation finishes.";
         BOOL alreadyRunning;

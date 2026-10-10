@@ -27,6 +27,34 @@ static UILabel *SetupLabel(NSString *text, UIFontTextStyle style) {
     return label;
 }
 
+static NSString *SetupFailureDetail(const vm_fw_report_t *report) {
+    switch (report->status) {
+        case VM_FW_ERR_CANCELLED:
+            return @"Nothing was changed. Tap Try again to restart preparation.";
+        case VM_FW_ERR_NOT_AN_ARCHIVE:
+        case VM_FW_ERR_ARCHIVE_MALFORMED:
+            return @"This file isn’t a valid IPSW archive. Choose the original, complete IPSW and try again.";
+        case VM_FW_ERR_ARCHIVE_UNREADABLE:
+            return @"S5LBox couldn’t read this file. Make sure it has finished downloading in Files, then choose it again.";
+        case VM_FW_ERR_NO_MANIFEST:
+        case VM_FW_ERR_MANIFEST_TOO_BIG:
+        case VM_FW_ERR_MANIFEST_MALFORMED:
+        case VM_FW_ERR_MANIFEST_INCOMPLETE:
+            return @"The firmware information is missing or damaged. Choose an unmodified IPSW for iPhone 3G, iPhone OS 3.1.3 (7E18).";
+        case VM_FW_ERR_UNSUPPORTED_DEVICE:
+        case VM_FW_ERR_UNSUPPORTED_BUILD:
+            return @"This firmware isn’t supported. Choose iPhone1,2_3.1.3_7E18_Restore.ipsw for iPhone 3G.";
+        case VM_FW_ERR_VERIFICATION:
+            return @"The extracted firmware didn’t pass verification. Use an unmodified IPSW. If you entered manual keys, reset them in Settings.";
+        case VM_FW_ERR_OUT_OF_MEMORY:
+            return @"There wasn’t enough memory to prepare the firmware. Close other apps and try again.";
+        default: {
+            NSString *detail = [NSString stringWithUTF8String:report->detail];
+            return detail.length ? detail : @"Choose the supported IPSW and try again. Details are available in Settings.";
+        }
+    }
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"Welcome";
@@ -128,7 +156,7 @@ static UILabel *SetupLabel(NSString *text, UIFontTextStyle style) {
     [_chooseAnother.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
     [_chooseAnother addTarget:self action:@selector(presentPicker) forControlEvents:UIControlEventTouchUpInside];
     [actions addArrangedSubview:_chooseAnother];
-    UILabel *notice = SetupLabel(@"No Apple firmware is included or downloaded. Use an IPSW you are entitled to use. Advanced options are in Settings.", UIFontTextStyleFootnote);
+    UILabel *notice = SetupLabel(@"Apple firmware isn’t included. Use an IPSW you are entitled to use. Advanced options are in Settings.", UIFontTextStyleFootnote);
     notice.textColor = UIColor.secondaryLabelColor;
     [stack addArrangedSubview:notice];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(becameActive)
@@ -186,7 +214,7 @@ static UILabel *SetupLabel(NSString *text, UIFontTextStyle style) {
         _status.text = report.status == VM_FW_ERR_CANCELLED ? @"Import cancelled" : @"Couldn’t prepare firmware";
         _statusIcon.image = [UIImage systemImageNamed:@"exclamationmark.circle"];
         _statusIcon.tintColor = UIColor.systemOrangeColor;
-        _detail.text = [NSString stringWithUTF8String:report.detail] ?: @"Choose the supported IPSW and try again.";
+        _detail.text = SetupFailureDetail(&report);
         if (_ready) _detail.text = [_detail.text stringByAppendingString:@"\nYour previously configured firmware is still available."];
     } else if (_ready) {
         _status.text = @"Ready to start";

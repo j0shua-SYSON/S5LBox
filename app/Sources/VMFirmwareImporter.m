@@ -33,10 +33,18 @@ NSNotificationName const VMFirmwareImportDidChangeNotification = @"VMFirmwareImp
 - (void)performImportOfURL:(NSURL *)url scoped:(BOOL)scoped;
 - (vm_fw_status_t)runImportOfURL:(NSURL *)url intoReport:(vm_fw_report_t *)report;
 - (NSString *)firmwareRootDirectory;
+- (NSArray<NSString *> *)detectedArchivePaths;
 - (vm_fw_status_t)extractURL:(NSURL *)url intoReport:(vm_fw_report_t *)report outputDirectory:(NSString *)outDir;
 - (void)finishWithStatus:(vm_fw_status_t)status
                   report:(const vm_fw_report_t *)report;
 @end
+
+static NSString *vmfw_archive_signature(NSString *path) {
+    path = path.stringByStandardizingPath.stringByResolvingSymlinksInPath;
+    NSDictionary *info = [NSFileManager.defaultManager attributesOfItemAtPath:path error:NULL];
+    if (![info[NSFileType] isEqual:NSFileTypeRegular] || ![info[NSFileSize] unsignedLongLongValue]) return nil;
+    return [NSString stringWithFormat:@"%@|%@|%@", path, info[NSFileSize], info[NSFileModificationDate]];
+}
 
 /* ------------------------------------------------------------------------ */
 /* Run state shared with the C core                                          */
@@ -96,17 +104,12 @@ static size_t vmfw_ipsw_pread(void *ctx, uint64_t offset,
 /* Where the results go                                                      */
 /* ------------------------------------------------------------------------ */
 /*
- * Two directories, chosen by the name the core asks for:
- *
- *   "kernel.macho", "devicetree.bin", "rootfs.img"  -> the firmware directory
- *   anything ending in ".part"                      -> NSTemporaryDirectory()
- *
- * The ".part" file is the one large intermediate -- the root filesystem member
- * as it sits in the archive, before decryption -- and it is deleted on close,
- * because the core always closes it with keep=false. It goes to the temporary
- * directory both because it is not a result and because iOS will reclaim it if
- * the app is killed with a run in flight, which is the only way it can be left
- * behind.
+ * Results and the large encrypted rootfs ".part" intermediate belong to this
+ * import's private staging generation. The intermediate is deleted on close
+ * (keep=false); failure or cancellation removes the entire staging directory.
+ * If the process is killed, an unused generation may remain, but no partial
+ * firmware set becomes active because publication happens only after all
+ * three results have passed verification.
  */
 typedef struct {
     char out_dir[VMFW_PATH_CAP];
@@ -402,6 +405,9 @@ static void vmfw_strip_trailing_slash(char *path) {
      * why the answer is carried rather than assumed.
      */
     const BOOL scoped = [url startAccessingSecurityScopedResource];
+    // A cancelled or failed picker selection must not be retried implicitly
+    // when the same archive is later detected on returning from Settings.
+    _lastDetectedSignature = vmfw_archive_signature(url.path);
 
     /*
      * Deliberately strong, and the reason the two raw pointers handed to the C
@@ -544,7 +550,7 @@ static void vmfw_strip_trailing_slash(char *path) {
         return vmfw_fail(report, VM_FW_ERR_SCRATCH_REFUSED,
                          "There is no temporary directory to unpack through.");
 
-    /* NSTemporaryDirectory() ends in a slash; the paths below join with one. */
+    /* The paths below join directory and filename with exactly one slash. */
     vmfw_strip_trailing_slash(files_ctx.out_dir);
     vmfw_strip_trailing_slash(files_ctx.scratch_dir);
 
@@ -676,16 +682,19 @@ static void vmfw_strip_trailing_slash(char *path) {
 }
 
 - (BOOL)importDetectedIPSWIfNeeded {
-    if ([self isRunning] || [VMFirmwareImporter hasConfiguredFirmware]) return NO;
-    NSString *path = VMSettings.sharedSettings.detectedArchivePaths.firstObject;
-    if (!path) return NO;
-    NSDictionary *info = [NSFileManager.defaultManager attributesOfItemAtPath:path error:NULL];
-    if (![info[NSFileType] isEqual:NSFileTypeRegular] || ![info[NSFileSize] unsignedLongLongValue]) return NO;
-    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@", path, info[NSFileSize], info[NSFileModificationDate]];
+    if ([self isRunning] || [VMFirmwareStore hasPreparedFilesInDirectory:
+        [VMFirmwareStore activeDirectoryInRoot:self.firmwareRootDirectory]]) return NO;
+    NSString *path = self.detectedArchivePaths.firstObject;
+    NSString *signature = path ? vmfw_archive_signature(path) : nil;
+    if (!signature) return NO;
     if ([signature isEqual:_lastDetectedSignature]) return NO;
     _lastDetectedSignature = signature;
     [self importIPSWAtURL:[NSURL fileURLWithPath:path]];
     return YES;
+}
+
+- (NSArray<NSString *> *)detectedArchivePaths {
+    return VMSettings.sharedSettings.detectedArchivePaths;
 }
 
 #pragma mark - Keys the user supplies

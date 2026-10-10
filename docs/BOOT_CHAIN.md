@@ -67,20 +67,18 @@ loader:
 3. Records whether `SHSH` and `CERT` are present, but **does not verify their RSA
    signatures**. Parsing/decryption is therefore not a secure-boot trust result.
 
-## Firmware & keys — you supply your own
+## Firmware — you supply your own
 
 **S5LBox ships no Apple firmware.** Apple firmware is copyrighted; distributing
-it is not something this project does. Instead, at runtime you provide:
-
-1. **An iPhone OS 3.1.3 IPSW** for the matching device (an S5L8900 model). IPSWs
-   are still widely archived; you download your own.
-2. **The decryption key and IV** for each encrypted image. The repository has no
-   `keys.json` loader: pass these values explicitly to the relevant tool or
-   provide already-extracted inputs to the CLI harness.
+it is not something this project does. At runtime you provide an **iPhone1,2 /
+iPhone OS 3.1.3 / 7E18 IPSW**. The app and `fwimport --auto` resolve this build's
+publicly documented keys automatically. Low-level tools still accept explicit
+key arguments, and the emulator CLI accepts already-extracted inputs.
 
 The repository-root `firmware/` directory is ignored by default. That is a
 convenience, not a security boundary: inspect staged files before every push and
-never force-add firmware, keys or decrypted Apple payloads. You are responsible
+never force-add firmware, private credentials or decrypted Apple payloads. The
+reviewed public-key catalog is source code, not Apple firmware. You are responsible
 for using material you are entitled to use and for following applicable law.
 
 ### The app can now do the unpacking itself
@@ -182,9 +180,10 @@ python tools/udif.py extract $S/rootfs.dmg firmware/rootfs.img Apple_HFSX
 
 Keys are published per build and per device on The iPhone Wiki, under the build
 codename rather than the version -- for 7E18 the page is named for the build,
-not for "3.1.3". Pass them on the command line; the repository has no key
-loader and no key belongs in a file, a log or a commit. Note that the iPhone1,1
-page for the same build carries a *different* RootFS key; the device matters.
+not for "3.1.3". The manual procedure above accepts explicit keys; the modular
+`VMFirmwareKeys.c` catalog powers the simpler `fwimport --auto` and app paths.
+Note that the iPhone1,1 page for the same build carries a *different* RootFS key;
+the device matters.
 
 Four things that cost time and are easy to get wrong:
 

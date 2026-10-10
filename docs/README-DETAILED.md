@@ -375,13 +375,12 @@ debug, increased-memory or jailbreak entitlement and needs only the normal app
 sandbox. A jailbroken development phone makes testing easier; it is not a
 product dependency.
 
-**Supply firmware:** for the desktop harness, put your **own** iPhone OS 3.1.3
-files and keys in the git-ignored `firmware/` directory; see
-[`docs/BOOT_CHAIN.md`](BOOT_CHAIN.md). In the iOS app, open Settings from
-the machine list and choose **Import from an IPSW**. The importer reads an IPSW
-you already possess, asks only for keys absent from that archive, and validates
-the three produced artefacts. Nothing is downloaded, no key list is bundled,
-and no Apple firmware is committed or shipped.
+**Supply firmware:** first-run setup imports your **own iPhone1,2 / iPhone OS
+3.1.3 / 7E18 IPSW**, resolves the bundled public keys, and verifies all three
+prepared components before activating them. Import and manual overrides also
+remain available in Settings. The desktop `fwimport --auto` path uses the same
+catalog; see [`docs/BOOT_CHAIN.md`](BOOT_CHAIN.md). Nothing is downloaded, and
+no Apple firmware is committed or shipped.
 
 For a controlled graphics comparison, choose **Graphics for new machines** in
 Settings *before* opening a newly created machine for the first time.

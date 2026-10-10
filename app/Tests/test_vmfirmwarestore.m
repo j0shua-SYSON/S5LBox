@@ -9,9 +9,11 @@
 static NSString *testRoot;
 @interface TestImporter : VMFirmwareImporter <VMFirmwareImporterDelegate>
 @property unsigned completions;
+@property (copy) NSArray<NSString *> *archives;
 @end
 @implementation TestImporter
 - (NSString *)firmwareRootDirectory { return testRoot; }
+- (NSArray<NSString *> *)detectedArchivePaths { return self.archives ?: @[]; }
 - (void)importer:(VMFirmwareImporter *)importer didFinishWithStatus:(vm_fw_status_t)status report:(const vm_fw_report_t *)report {
     (void)importer;
     assert(NSThread.isMainThread && report && status != VM_FW_OK);
@@ -93,6 +95,22 @@ int main(int argc, const char *argv[]) {
         assert([importer getLastReport:&report] && report.status == VM_FW_ERR_CANCELLED);
         assert([[NSSet setWithArray:[fm contentsOfDirectoryAtPath:testRoot error:NULL]] isEqual:filesBefore]);
         assert([[VMFirmwareStore activeDirectoryInRoot:testRoot] isEqual:second]);
+        // A picker cancellation is not undone by Files auto-detection on return.
+        NSString *fixtureRoot = testRoot;
+        testRoot = [fixtureRoot stringByAppendingPathComponent:@"auto-detection"];
+        assert([fm createDirectoryAtPath:testRoot withIntermediateDirectories:NO attributes:nil error:NULL]);
+        importer.archives = @[archive];
+        assert(![importer importDetectedIPSWIfNeeded]);
+        // Replacing the archive is a new import opportunity, exactly once.
+        assert([@"a replacement archive fixture" writeToFile:archive atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        assert([importer importDetectedIPSWIfNeeded]);
+        deadline = [NSDate dateWithTimeIntervalSinceNow:15];
+        while (importer.isRunning && deadline.timeIntervalSinceNow > 0)
+            [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+        assert(!importer.isRunning && importer.completions == 4);
+        assert(![importer importDetectedIPSWIfNeeded]);
+        assert([fm contentsOfDirectoryAtPath:testRoot error:NULL].count == 0);
+        testRoot = fixtureRoot;
         assert([fm removeItemAtPath:testRoot error:NULL]); // Only this test's UUID root.
         puts("firmware store: publication, rollback, legacy paths, cancellation and retained importer state passed");
     }
