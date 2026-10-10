@@ -73,7 +73,7 @@ static void VMGuestInstallBuildProgress(
 
     _headline = [[UILabel alloc] initWithFrame:CGRectZero];
     _headline.translatesAutoresizingMaskIntoConstraints = NO;
-    _headline.text = @"Jailbreaking\u2026";
+    _headline.text = self.packageManagerOnly ? @"Setting up Packages\u2026" : @"Jailbreaking\u2026";
     _headline.textColor = [UIColor whiteColor];
     _headline.font = [UIFont preferredFontForTextStyle:UIFontTextStyleTitle2];
     _headline.adjustsFontForContentSizeCategory = YES;
@@ -331,10 +331,10 @@ static void VMGuestInstallBuildProgress(
                 [self_ failWithHeadline:@"Package setup failed" description:error.localizedDescription]; return;
             }
             dispatch_async(dispatch_get_main_queue(),^{
-                self_->_finished = YES;
                 self_->_openPackagesWhenReady = YES;
                 [self_ endBackgroundTime];
                 [self_ setFraction:1 stage:@"Package manager ready. Starting the guest…"];
+                self_->_finished = YES;
                 if (self_.readyHandler) self_.readyHandler();
             });
             return;
