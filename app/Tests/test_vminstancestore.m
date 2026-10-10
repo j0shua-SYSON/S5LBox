@@ -52,7 +52,8 @@ int main(int argc, const char *argv[]) {
             object:store queue:nil usingBlock:^(NSNotification *note) { (void)note; notifications++; }];
         for (NSNumber *gib in @[@2, @4, @8]) {
             NSError *error = nil;
-            assert([store createInstanceNamed:[NSString stringWithFormat:@"Disk %@", gib]
+            NSString *name = [NSString stringWithFormat:@"Disk %@", gib];
+            assert([store createInstanceNamed:name
                 diskSizeGiB:gib.unsignedIntegerValue error:&error] && !error);
         }
         for (NSUInteger i = 0; i < 3; ++i) {
