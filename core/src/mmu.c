@@ -377,6 +377,8 @@ uint32_t arm_mmu_translate(arm_cpu_t *c, uint32_t va, arm_access_t acc,
     /* Straight into the caller's pa, so the untouched-on-fault contract is the
      * walk's own rather than something restated here. */
     uint32_t fsr = mmu_walk(c, va, acc, priv, pa, NULL);
+    if (fsr == 0u && acc == ARM_ACCESS_FETCH && c->bus->prepare_fetch)
+        c->bus->prepare_fetch(c->bus->prepare_fetch_ctx, va, *pa, priv);
     c->tlb[slot].gen = c->tlb_gen;
     c->tlb[slot].tag = tag;
     c->tlb[slot].fsr = fsr;

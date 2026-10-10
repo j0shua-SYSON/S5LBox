@@ -70,6 +70,11 @@ static bool snapshot_restart_probe(void *ctx) {
     return ctx != NULL;
 }
 
+static void snapshot_prepare_fetch_probe(void *ctx, uint32_t va, uint32_t pa,
+                                         bool privileged) {
+    (void)ctx; (void)va; (void)pa; (void)privileged;
+}
+
 /* --------------------------------------------------------------- helpers --- */
 
 /* Save `a` to memory, restore it into a freshly initialised `b`. */
@@ -261,6 +266,8 @@ static void test_cpu_state_round_trips(void) {
 
     CHECK(s5l8900_set_direct_ram_writes(b, true),
           "destination direct-write opt-in");
+    b->bus.prepare_fetch = snapshot_prepare_fetch_probe;
+    b->bus.prepare_fetch_ctx = b;
     b->cpu.dread[0].host = b->ram;
     b->cpu.dread[0].tag = 1u;
     b->cpu.dread[0].gen = b->cpu.tlb_gen;
@@ -294,6 +301,9 @@ static void test_cpu_state_round_trips(void) {
      * machine's own bus, not at the machine the snapshot came from. */
     CHECK(b->cpu.bus == &b->bus, "restored cpu->bus must point at its own machine");
     CHECK(b->bus.ctx == b, "restored bus ctx must point at its own machine");
+    CHECK(b->bus.prepare_fetch == snapshot_prepare_fetch_probe &&
+          b->bus.prepare_fetch_ctx == b,
+          "restore replaced live FETCH preparation policy with source wiring");
     CHECK(b->bus.host_ram_write == b->bus.host_ram,
           "restore did not preserve live direct-write consent");
     CHECK(b->cpu.dread[0].host == NULL && b->cpu.dwrite[0].host == NULL,

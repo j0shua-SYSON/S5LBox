@@ -449,6 +449,7 @@ add_executable(test_vmfirmwareboot
     ../app/Tests/test_vmfirmwareboot.c
     ../app/Sources/VMFrameTelemetry.c
     ../app/Sources/VMFirmwareBoot.c
+    ../app/Sources/VMFirmwareAudio.c
     ../app/Sources/VMGuestInstall.c
     ../app/Sources/VMNetworkSession.c
     ../app/Sources/VMResumeCheckpoint.c
@@ -472,6 +473,19 @@ if(NOT WIN32 AND NOT APPLE)
     target_link_libraries(test_vmaudiobuffer PRIVATE m)
 endif()
 add_test(NAME app_audio_handoff COMMAND test_vmaudiobuffer)
+add_executable(test_vmfirmwareaudio
+    ../app/Tests/test_vmfirmwareaudio.c ../app/Sources/VMFirmwareAudio.c)
+target_include_directories(test_vmfirmwareaudio PRIVATE ../app/Sources ../tools)
+target_link_libraries(test_vmfirmwareaudio PRIVATE emucore host_sha256)
+set_target_properties(test_vmfirmwareaudio PROPERTIES
+    C_STANDARD 11 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_vmfirmwareaudio PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_vmfirmwareaudio PRIVATE
+        -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
+endif()
+add_test(NAME app_firmware_audio_policy COMMAND test_vmfirmwareaudio)
 target_include_directories(test_vmfirmwareboot PRIVATE ../app/Sources ../tools)
 target_link_libraries(test_vmfirmwareboot PRIVATE
     emucore host_ios3_bringup_gate host_file_block host_rootfs_work nethost)
@@ -846,6 +860,7 @@ add_executable(test_vminstancepaths
     ../app/Sources/VMInstancePaths.c
     ../app/Sources/VMInstances.c
     ../app/Sources/VMFirmwareBoot.c
+    ../app/Sources/VMFirmwareAudio.c
     ../app/Sources/VMGuestInstall.c
     ../app/Sources/VMNetworkSession.c
     ../app/Sources/VMResumeCheckpoint.c

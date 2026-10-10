@@ -206,6 +206,15 @@ typedef arm_svc_result_t (*arm_privileged_svc_handler_t)(void *ctx,
  * This invalidates derived read proofs; it never performs the write itself. */
 typedef void (*arm_ram_changed_fn)(void *ctx, uint32_t pa, uint32_t length);
 
+/* Optional firmware policy, called only after a successful FETCH page walk,
+ * before its translation becomes reusable. It may publish a guarded RAM
+ * fixup, but must not change CPU/MMU state, page tables, mappings or faults.
+ * No invocation on data accesses, faulting walks, TLB hits or MMU-off fetches.
+ * Install before execution (and flush translations when changing policy).
+ * This is host configuration, never snapshot state. */
+typedef void (*arm_prepare_fetch_fn)(void *ctx, uint32_t va, uint32_t pa,
+                                     bool privileged);
+
 typedef struct arm_bus {
     void    *ctx;
     uint32_t (*read32)(void *ctx, uint32_t addr);
@@ -305,6 +314,8 @@ typedef struct arm_bus {
      */
     arm_privileged_svc_handler_t privileged_svc_handler;
     void                         *privileged_svc_ctx;
+    arm_prepare_fetch_fn prepare_fetch;
+    void *prepare_fetch_ctx;
 } arm_bus_t;
 
 /*

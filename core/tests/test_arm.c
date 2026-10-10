@@ -2364,6 +2364,64 @@ static void test_fetch_cache_refill_requires_an_exact_live_witness(void) {
           "non-RAM translation produced a direct fetch pointer");
 }
 
+typedef struct {
+    unsigned calls;
+    uint32_t va, pa;
+    bool privileged;
+} fetch_prepare_probe_t;
+
+static void prepare_fetch_probe(void *opaque, uint32_t va, uint32_t pa,
+                                 bool privileged) {
+    fetch_prepare_probe_t *probe = opaque;
+    probe->calls++;
+    probe->va = va; probe->pa = pa; probe->privileged = privileged;
+    if (pa == 0x100u) m_w32(NULL, pa, 0xe3a0002au); /* mov r0,#42 */
+}
+
+static void test_prepare_fetch_obeys_translation_boundary(void) {
+    arm_bus_t bus = g_bus;
+    arm_cpu_t c;
+    fetch_prepare_probe_t probe = {0};
+    uint32_t pa = 0u;
+    bus.host_ram = m_host_ram;
+    bus.prepare_fetch = prepare_fetch_probe;
+    bus.prepare_fetch_ctx = &probe;
+    memset(g_ram, 0, sizeof g_ram);
+    arm_reset(&c, &bus);
+    CHECK(arm_mmu_translate(&c, 0x100u, ARM_ACCESS_FETCH, false, &pa) == 0u &&
+          probe.calls == 0u, "MMU-off fetch invoked firmware policy");
+    m_w32(NULL, 0x4000u + (0x800u << 2), (3u << 10) | 2u);
+    c.cp15.ttbr0 = 0x4000u;
+    c.cp15.dacr = 1u;
+    c.cp15.sctlr = ARM_SCTLR_M;
+    CHECK(arm_mmu_translate(&c, 0x80000100u, ARM_ACCESS_READ, false, &pa) == 0u &&
+          arm_mmu_translate(&c, 0x80000100u, ARM_ACCESS_WRITE, false, &pa) == 0u &&
+          probe.calls == 0u, "data translations invoked FETCH policy");
+    pa = 0xdeadbeefu;
+    CHECK(arm_mmu_translate(&c, 0x90000100u, ARM_ACCESS_FETCH, false, &pa) != 0u &&
+          pa == 0xdeadbeefu && probe.calls == 0u,
+          "faulting FETCH invoked policy or changed its output address");
+    CHECK(arm_mmu_translate(&c, 0x80000100u, ARM_ACCESS_FETCH, false, &pa) == 0u &&
+          probe.calls == 1u && probe.va == 0x80000100u && probe.pa == 0x100u &&
+          !probe.privileged, "successful user FETCH did not prepare exact mapping");
+    CHECK(arm_mmu_translate(&c, 0x80000100u, ARM_ACCESS_FETCH, false, &pa) == 0u &&
+          probe.calls == 1u, "FETCH TLB hit repeated policy callback");
+    CHECK(arm_fetch_cache_try_refill(&c, 0x80000100u, false) && probe.calls == 1u,
+          "native FETCH refill repeated policy instead of using prepared witness");
+    arm_set_mode(&c, ARM_MODE_USR);
+    c.r[15] = 0x80000100u;
+    CHECK(arm_step(&c) == ARM_OK && c.r[0] == 42u && probe.calls == 1u,
+          "instruction fetch did not observe pre-publication RAM fixup");
+    c.cp15.context_id++;
+    CHECK(arm_mmu_translate(&c, 0x80000100u, ARM_ACCESS_FETCH, true, &pa) == 0u &&
+          probe.calls == 2u && probe.privileged,
+          "new address space did not supply its own privilege/mapping");
+    bus.prepare_fetch = NULL;
+    arm_mmu_tlb_flush(&c);
+    CHECK(arm_mmu_translate(&c, 0x80000100u, ARM_ACCESS_FETCH, false, &pa) == 0u &&
+          probe.calls == 2u, "disabled policy callback was invoked");
+}
+
 static void test_data_cache_refill_requires_an_exact_live_witness(void) {
     arm_bus_t bus = g_bus;
     arm_cpu_t c;
@@ -6067,6 +6125,7 @@ int main(void) {
     test_ldrd_strd_stop_after_the_first_faulting_word();
     test_xn_blocks_fetch_from_a_small_page();
     test_xn_on_a_section_and_the_xp_gate();
+    test_prepare_fetch_obeys_translation_boundary();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

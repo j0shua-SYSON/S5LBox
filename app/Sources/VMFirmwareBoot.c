@@ -10,6 +10,7 @@
 #include "VMNetworkSession.h"
 #include "VMSnapshotCow.h"
 #include "VMFirmwareHLE.h"
+#include "VMFirmwareAudio.h"
 #include "VMResumeCheckpoint.h"
 #include "ios3_bringup_gate.h"
 #include "rootfs_work.h"
@@ -1813,6 +1814,10 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
             return false;
         }
     }
+
+    /* The exact-kernel gate has passed and all reset/restore branches have
+     * finished. Demand-paged audio code is checked on its first FETCH walk. */
+    vm_firmware_audio_enable(machine);
 
 #if defined(S5LBOX_IOS3_HLE_EXPERIMENT)
     /*

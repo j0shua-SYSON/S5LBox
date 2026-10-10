@@ -100,7 +100,7 @@ resumed the fixture and its callback count continued. This establishes nonzero
 guest PCM through DMA, codec gain and host handoff, not an independently heard
 speaker result, uninterrupted timing or general media compatibility.
 
-Voice Memos remains a separate failing case: replay progress reached 0:08 while
+Voice Memos was a separate failing case at this checkpoint: replay reached 0:08 while
 the live host queue still held zeros. Switching its speaker route did not
 establish nonzero output. The fixture then compared that same recording with a
 host-decoded PCM WAV through the guest's `AVAudioPlayer`. WAV preparation and
@@ -142,11 +142,51 @@ and their playback positions advanced. The original memo produced 8,186/8,192
 nonzero live host samples (peak 0.0019074708); AAC produced 8,192/8,192 (peak
 0.12641458). Both captures reported zero host queue drops. This isolates a
 working early software-decoder route, but **only in the private fixture**:
-ordinary Voice Memos and other apps have not acquired that policy automatically.
+ordinary Voice Memos and other apps had not acquired that policy automatically.
 No framework patch or emulator-wide fallback was shipped by this test.
+
+A narrower RAM-only experiment made the exact AudioCodecs
+`ACTransformerManager::HardwareIsAvailable` leaf return false. Its 48-byte
+identity was checked and the two changed instructions survived save/reopen,
+which also discarded host instruction caches. This did not establish working
+Voice Memos replay: the position stayed at zero and the host queue remained
+silent. Merely denying that availability query is not a demonstrated general
+fallback. Normal shutdown completed and the next launch used a fresh boot;
+the temporary alteration was never applied to a firmware or rootfs file.
 Do not describe the entire transport as silent or full media playback as fixed.
 Private fixtures and captures live under
 `work/audio-validation`, not in the shipping app.
+
+The next RAM-only experiment changed the default selector in the authenticated
+7E18 `AudioQueueObject::ChooseCodec`: the branch at `3354ced8` goes to its existing
+software-only path (`3354cf34`), leaving explicit policy switch entries intact.
+The 1 KiB window at `3354cc00` had the same SHA-256 in the cache file and captured
+guest RAM. After save/reopen discarded host instruction caches, the fixture's
+**default** AudioQueue progressed beyond the old six-callback stall and produced
+8,178/8,192 nonzero host samples (peak 0.0022842598). More importantly, unmodified
+**Voice Memos** replay advanced from 1 to 11 seconds and produced 8,184/8,192
+nonzero host samples (peak 0.0022399065, 4,033,536 rendered frames, zero queue
+drops). Host volume was zero: this is decoded-PCM handoff proof, not an
+independently heard speaker or uninterrupted-playback claim.
+
+The candidate implementation is `VMFirmwareAudio.c`, enabled only after the
+app's exact 7E18 boot/restore gate. On a successful user-mode instruction-fetch
+page walk, it authenticates the complete 1 KiB code window and publishes just
+that branch through the normal RAM-write path. Unknown code, other addresses,
+ARMv7, privileged fetches and out-of-RAM mappings are refused. No framework,
+firmware or rootfs **file** is patched. This is an explicit software-codec
+compatibility policy, **not AMC hardware emulation**; decoding still runs inside
+the guest. Explicit hardware-only requests are not made to succeed.
+
+The optional bus callback runs before a FETCH TLB entry is published, not on
+instruction-cache/TLB hits or every instruction. It does not install the
+pre-step hook that disables native fast paths. Its context belongs to the live
+machine, not the snapshot stream; the saved-state format is unchanged. Tests
+cover fault/data/MMU-off refusal, normal and native fetch visibility, snapshot
+wiring, full-digest refusal and optional private-cache execution of all five
+policy switch targets. Local Windows validation passed **82/82 CTest cases**
+and all **20 private-cache checks**. The integrated candidate still needs a clean
+physical boot test; the RAM-only experiment is not a substitute for that gate.
 
 Earlier, a disposable desktop probe restored the older USB checkpoint and
 executed another 150 million instructions with three board-level power presses.
@@ -154,7 +194,7 @@ It produced **zero PCM**, and its final display capture failed (no active RGB
 window). That attempt is not an audio pass and does not identify an audio cause.
 Logs are under project-local `work/audio-validation/lock-sound-02.*.log`.
 
-Next device checks: resolve compressed-media preparation and verify actual
+Next device checks: cold-boot the integrated codec policy and verify actual
 speaker output, system click/lock sounds, media playback and volume/mute;
 deny permission and verify silence; pause/resume, background, route changes,
 and save/reopen without replaying old host samples. Keep main unchanged until

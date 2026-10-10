@@ -227,7 +227,10 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * cleared on restore and deliberately absent from the serialized stream. */
 /* 257304 includes the serialized DWC2 device-DMA registers/endpoints;
  * measured from the compiler's emitted allocation including alignment. */
-SNAP_SIZE_GUARD(s5l8900_t,         258552, "snap_mach");
+/* 258568 adds the host-only FETCH preparation callback/context (16), measured
+ * by the compiler. Like the other bus hooks these are excluded from MACH and
+ * retained from the destination on load. No serialized byte/version changes. */
+SNAP_SIZE_GUARD(s5l8900_t,         258568, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
