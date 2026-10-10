@@ -63,6 +63,7 @@ def main():
                                ("/bin/chmod", "mock_chmod"),
                                ("/usr/bin/killall", "mock_killall"),
                                ("/bin/su", "mock_su"),
+                               ("/bin/grep", "grep"),
                                ("/bin/sync", ":"),
                                ("/bin/sleep", "mock_sleep")]:
             body = body.replace(original, mock)
