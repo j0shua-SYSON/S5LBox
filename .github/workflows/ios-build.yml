@@ -74,6 +74,21 @@ jobs:
           sudo /tmp/xcodegen/xcodegen/install.sh
           xcodegen --version
 
+      - name: Test machine-list persistence and disk presets
+        run: |
+          set -euo pipefail
+          mkdir -p work/instance-store-tests
+          xcrun clang -std=c11 -Wall -Wextra -Werror -I app/Sources \
+            -c app/Sources/VMInstances.c -o work/instance-store-tests/instances.o
+          xcrun clang -std=c11 -Wall -Wextra -Werror -I app/Sources \
+            -c app/Sources/VMOptions.c -o work/instance-store-tests/options.o
+          xcrun clang -fobjc-arc -Wall -Wextra -Werror -framework Foundation \
+            -I app/Sources -I core/include -I tools \
+            app/Sources/VMInstanceStore.m app/Sources/VMSettings.m app/Tests/test_vminstancestore.m \
+            work/instance-store-tests/instances.o work/instance-store-tests/options.o \
+            -o work/instance-store-tests/test_store
+          work/instance-store-tests/test_store "$GITHUB_WORKSPACE/work/instance-store-tests"
+
       - name: Test Files-visible IPA library
         run: |
           set -euo pipefail

@@ -368,6 +368,15 @@ static NSString *VMGraphicsRecordText(BOOL mbxEnabled,
         postNotificationName:VMInstanceStoreDidChangeNotification object:self];
 }
 
+/* User-requested list edits must not appear successful until durable.
+ * History counters remain best-effort; these edits do not. */
+- (BOOL)saveReportingError:(NSError **)error {
+    if ([self save]) return YES;
+    if (error) *error = [NSError errorWithDomain:kErrorDomain code:1002
+        userInfo:@{NSLocalizedDescriptionKey:@"The machine list could not be saved. Check available storage."}];
+    return NO;
+}
+
 #pragma mark - Errors
 
 - (NSError *)errorFor:(vm_instance_status_t)status {
@@ -502,12 +511,10 @@ static NSString *VMGraphicsRecordText(BOOL mbxEnabled,
      * creation, is when the image-time setting becomes immutable. This also
      * lets the automatically created first row follow a choice made before it
      * is opened. */
-    if (![self save]) {
+    if (![self saveReportingError:error]) {
         (void)vm_instance_remove(&_list, added);
         [NSFileManager.defaultManager removeItemAtPath:
             [[self containerDirectory] stringByAppendingPathComponent:identifier] error:nil];
-        if (error) *error = [NSError errorWithDomain:kErrorDomain code:1002
-            userInfo:@{NSLocalizedDescriptionKey:@"The machine list could not be saved. Check available storage."}];
         return nil;
     }
     [NSNotificationCenter.defaultCenter postNotificationName:VMInstanceStoreDidChangeNotification object:self];
@@ -517,10 +524,15 @@ static NSString *VMGraphicsRecordText(BOOL mbxEnabled,
 - (BOOL)renameInstanceAtIndex:(NSUInteger)index
                            to:(NSString *)name
                         error:(NSError **)error {
+    vm_instance_list_t before = _list;
     vm_instance_status_t s =
         vm_instance_rename(&_list, (unsigned)index, name.UTF8String);
     if (![self report:s to:error]) return NO;
-    [self changed];
+    if (![self saveReportingError:error]) {
+        _list = before;
+        return NO;
+    }
+    [NSNotificationCenter.defaultCenter postNotificationName:VMInstanceStoreDidChangeNotification object:self];
     return YES;
 }
 
@@ -620,16 +632,27 @@ static NSString *VMGraphicsRecordText(BOOL mbxEnabled,
         if (error) *error = graphicsError;
         return nil;
     }
-    [self changed];
+    if (![self saveReportingError:error]) {
+        (void)vm_instance_remove(&_list, added);
+        [NSFileManager.defaultManager removeItemAtPath:
+            [[self containerDirectory] stringByAppendingPathComponent:identifier] error:nil];
+        return nil;
+    }
+    [NSNotificationCenter.defaultCenter postNotificationName:VMInstanceStoreDidChangeNotification object:self];
     return identifier;
 }
 
 - (BOOL)deleteInstanceAtIndex:(NSUInteger)index error:(NSError **)error {
     NSDictionary *row = [self instanceAtIndex:index];
+    vm_instance_list_t before = _list;
     vm_instance_status_t s = vm_instance_remove(&_list, (unsigned)index);
     if (![self report:s to:error]) return NO;
+    if (![self saveReportingError:error]) {
+        _list = before;
+        return NO;
+    }
 
-    /* The record is gone; take its files with it. Deliberately after the
+    /* The record is durably gone; take its files with it. Deliberately after the
      * record is removed, so a failure to delete files leaves an orphan
      * directory rather than a machine the list still shows but cannot run. */
     if (row[@"id"]) {
@@ -637,7 +660,7 @@ static NSString *VMGraphicsRecordText(BOOL mbxEnabled,
                             stringByAppendingPathComponent:row[@"id"]];
         [[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
     }
-    [self changed];
+    [NSNotificationCenter.defaultCenter postNotificationName:VMInstanceStoreDidChangeNotification object:self];
     return YES;
 }
 
