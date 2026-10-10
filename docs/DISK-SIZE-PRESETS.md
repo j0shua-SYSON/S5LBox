@@ -94,6 +94,25 @@ including its retained 119 MiB snapshot, allocated about 573 MiB. The two
 staging directories were removed by successful publication. This is physical
 maintenance/space evidence, not proof of high-offset guest data I/O.
 
+A subsequent ARMv6 guest fixture on the physical phone exercised real HFS I/O
+beyond 4 GiB. Through ordinary guest file APIs it preallocated only 64 KiB using
+`F_PREALLOCATE` / `F_VOLPOSMODE`, wrote a deterministic pattern, called `fsync`,
+closed/reopened with caching/read-ahead disabled, and compared all 65,536 bytes.
+The guest returned a pass and `F_LOG2PHYS` reported `0x110010000`. The image's
+HFS catalog independently placed the file at allocation block 1,114,128 for
+16 blocks (4 KiB each), the same physical offset. Read-only host extraction
+matched every byte; SHA-256:
+`e9667a3592507f860c75e37d3563b5769c541ef90110adb5b8e230feb188ba7b`.
+The corresponding truncated 32-bit location `0x10010000` did not contain the
+marker. This proves the tested high-offset write/read, not every disk boundary
+or an unchanged hash of the entire lower 4 GiB. The first fixture queried an
+unwritten HFS extent and received device offset -512; checking placement after
+the write corrected the fixture, not the emulator. Test data stayed in the
+disposable guest's app Documents directory; no raw guest disk writes were used.
+Normal shutdown returned to Machines. After a fresh boot, the fixture reopened
+the existing file read-only, repeated the uncached read/compare, and again
+reported `PASS @ 110010000`. It did not rewrite the marker on that path.
+
 Current Windows evidence (2026-10-10): **81/81 CTest tests passed**;
 `test_rootfs_work --large-disks`: **28 checks passed** for synthetic 4/8 GiB
 images, sparse maintenance copies and high-offset marker preservation.

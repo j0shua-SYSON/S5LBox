@@ -127,9 +127,23 @@ temporary **RAM-only** device-tree unmatch was verified before a test cold
 boot. That experiment did **not** pass: preparation returned -308 and later
 buffer allocation returned 22 even for WAV. It is not a shipping fix or proof
 that hiding AMC alone enables fallback. Repeated reset boots also logged
-filesystem I/O errors; a clean-shutdown/reboot control is required before
-attributing the new failure. Normal shutdown of that experimental boot did
-complete. Firmware files and the emulator's shipping policy were not changed.
+filesystem I/O errors. Normal shutdown of that experimental boot completed;
+a subsequent clean, unmodified boot restored working WAV playback, failing
+default ALAC preparation (`nope`), and working software-policy ALAC queues.
+This control does not establish lasting filesystem damage or make the AMC-hide
+experiment a usable fallback. Firmware files and the emulator's shipping policy
+were not changed.
+
+The next private fixture selected `UseSoftwareOnly` **before** AVAudioPlayer's
+first preparation: it invoked the exact 7E18 queue-allocation helper, set the
+public AudioQueue codec policy, then called the original preparation helper.
+The original memo, generated ALAC and generated AAC all prepared successfully
+and their playback positions advanced. The original memo produced 8,186/8,192
+nonzero live host samples (peak 0.0019074708); AAC produced 8,192/8,192 (peak
+0.12641458). Both captures reported zero host queue drops. This isolates a
+working early software-decoder route, but **only in the private fixture**:
+ordinary Voice Memos and other apps have not acquired that policy automatically.
+No framework patch or emulator-wide fallback was shipped by this test.
 Do not describe the entire transport as silent or full media playback as fixed.
 Private fixtures and captures live under
 `work/audio-validation`, not in the shipping app.
