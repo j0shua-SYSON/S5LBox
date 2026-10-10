@@ -2,6 +2,7 @@
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "arm.h"
 #include "arm_ram_map.h"
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
