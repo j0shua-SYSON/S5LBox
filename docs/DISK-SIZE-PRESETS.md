@@ -1,7 +1,7 @@
-# Disk-size presets: candidate implementation
+# Disk-size presets
 
-Status on 2026-10-10: implemented on `feature/audio-disk-presets`, not merged
-into main or released. The original guarded geometry foundation is retained.
+Status on 2026-10-10: verified for prerelease integration into main; no release
+has been published. The original guarded geometry foundation is retained.
 New Machine offers 2 (default), 4 and 8 GiB; a strict `disk-size-v1` record
 travels with each machine. Fresh provisioning and jailbreak honor it, duplicates
 copy the choice, and missing records retain legacy behavior. Existing disks are
@@ -29,7 +29,7 @@ the authority for addresses and register contracts. Apple's corresponding
 [XNU memory-disk source](https://raw.githubusercontent.com/apple-oss-distributions/xnu/xnu-1456.1.26/bsd/dev/memdev.c)
 helps identify the operations; it is not substituted for exact-build proof.
 
-## Implemented, but kept off the RC
+## Guarded geometry implementation
 
 `ios3_bringup_gate_configure` selects the extended manifest only when its
 already-assigned root medium exceeds 2 GiB. Smaller media retain all original
@@ -75,7 +75,7 @@ These are **not** proof of an 8 GiB HFS boot, a completed jailbreak, snapshot
 restore, a filled filesystem or physical-phone execution of the new branch.
 No existing machine, firmware input, installed app or disk was modified.
 
-## Release validation still required
+## Device and regression validation (2026-10-10)
 
 Physical iPhone 6s Plus / iOS 15.8.5 (2026-10-10): new disposable machines
 selected through the native picker provisioned exact 4/8 GiB images, each
@@ -113,42 +113,56 @@ Normal shutdown returned to Machines. After a fresh boot, the fixture reopened
 the existing file read-only, repeated the uncached read/compare, and again
 reported `PASS @ 110010000`. It did not rewrite the marker on that path.
 
-Current Windows evidence (2026-10-10): **81/81 CTest tests passed**;
+Current Windows evidence (2026-10-10): **82/82 CTest tests passed**;
 `test_rootfs_work --large-disks`: **28 checks passed** for synthetic 4/8 GiB
 images, sparse maintenance copies and high-offset marker preservation.
 The private authenticated-kernel suites were rerun: **1,496 manifest checks**
 and **245 bring-up checks** passed. Their short boot smoke remains only 200,000
 instructions, not a completed large-disk boot.
 
-The implementation now includes the picker, persistence, provisioning and sparse
-maintenance copy described below. Host regression tests exercise synthetic HFS
-growth, high-offset data preservation and allocated size; `test_rootfs_work
---large-disks` covers actual 4/8 GiB logical images. This remains distinct from
-guest boot/jailbreak/save/reopen and physical iOS allocation checks.
+The final picker pass also created a fresh default 2 GiB machine, booted it to
+SpringBoard, saved/reopened it and completed normal shutdown. Guest Settings >
+General > About showed 2.0, 4.0 and 8.0 GB for the three presets (the legacy
+guest UI labels binary capacities as GB). Both HFS volume headers agreed with
+each logical image size. Host allocation was approximately 413, 415 and 488 MiB
+respectively at that checkpoint, not the full selected capacity. The 4/8 GiB
+machines restored saved state; the existing high-offset marker still matched.
+The disposable 2 GiB machine was removed after the check.
 
-The original validation checklist is retained to make the outstanding device
-gates explicit; implementation of a checkbox is not proof of its live outcome.
+An 8 GiB duplicate retained its capacity record. A malformed `s5lbox-disk-v1 3`
+record on a disposable fixture refused provisioning and duplication without
+creating a work image or another list entry. A duplicate is a fresh machine
+with copied configuration, not a clone of the source's installed apps or disk.
 
-1. Preserve sparse space during maintenance copies. `rootfs_work.c` creates
-   sparse growth, but `copy_source` subsequently writes every source chunk.
-   A mostly empty 8 GiB source can therefore become an allocated 8 GiB clone.
-   Verify logical bytes, actual allocation and crash-safe publication on both
-   Windows and iOS. Do not promise that capacity equals physical usage.
-2. Create disposable real 4/8 GiB HFS images; validate primary/alternate headers,
-   allocation bitmap growth, reads and writes beyond 4 GiB, and no low-offset
-   aliasing. Do not edit imported firmware or an existing user's machine.
-3. Boot those images with the app's actual boot owner and verify guest-reported
-   capacity, file creation, clean shutdown, reopen and saved-state restore.
-4. Persist the selected size per new machine, using a strict versioned record
-   or a deliberate schema migration. Missing records must preserve legacy
-   behavior; malformed records must not silently choose a different size.
-5. Make new-image creation and fresh jailbreak rebuilding honor the same
-   choice. Maintenance must retain larger existing volumes, never shrink them.
-   Validate duplicates and failure/rollback paths too.
-6. Only then add the small native creation picker, with 2 GiB as the default,
-   and physically test creation plus jailbreak on disposable machines.
+### Persistence failure fix
 
-Do not merge this experiment into the RC merely because the boundary tests pass.
+Device fault injection exposed a real bug: duplication ignored a failed machine
+list save, showed a successful row and left an orphan directory. Create,
+duplicate, rename and delete now report save failure and roll back the in-memory
+edit. Deletion saves the updated list **before** removing any machine files.
+No success notification is emitted for an edit that could not be persisted.
+
+`app/Tests/test_vminstancestore.m` runs the real Foundation store in macOS CI,
+not a reimplementation. It covers all three capacities, duplicate/reload,
+rename/delete, a forced save failure and an actual failed atomic write to a path
+whose parent is a regular file. It checks unchanged serialized bytes, rows and
+directories, absence of success notifications and preservation of a sentinel
+work image on refused deletion.
+
+The corrected `1d8f2de` iPhone build also passed one-shot save-failure injection
+through the actual Duplicate, Rename and Delete UI actions. Each showed its error,
+left the serialized list byte-identical and preserved existing machine files;
+failed duplication left no orphan directory. Normal duplication retained 8 GiB.
+The same build restored the 8 GiB guest and displayed its correct capacity.
+
+### Remaining validation limits
+
+These checks do not certify a completely filled 8 GiB filesystem, physical
+power-loss behavior during publication, every disk boundary or every host iOS
+version. Sparse maintenance copies are implemented and tested; reclaiming host
+allocation after arbitrary guest file deletion is not promised. Existing user
+machines are never resized automatically. Integration into main does not turn
+these bounded device and host results into those broader guarantees.
 
 ## Reproducing the private checks
 

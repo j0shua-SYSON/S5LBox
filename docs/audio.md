@@ -1,6 +1,6 @@
 # Current audio implementation (2026-10-10 candidate)
 
-The `feature/audio-disk-presets` branch adds timed codec-side I²S DMA playback
+The current implementation adds timed codec-side I²S DMA playback
 and capture, plus an iOS 13+ AVAudioEngine backend. Physical-device microphone
 recording and decoded Voice Memos replay through host PCM are verified;
 audible playback and routing remain candidate gates.
@@ -256,8 +256,11 @@ switch; denied microphone permission; external headphone/Bluetooth routes.
 Investigate the intermittent guest wake delay after live IPA installation if
 it reproduces: a later short Home tap woke it and it then unlocked, but the
 earlier long-press/black-screen sequence has no established cause or fix.
-Keep main unchanged until
-those tests and the large-disk gates in `DISK-SIZE-PRESETS.md` pass.
+The user authorized prerelease integration into main on 2026-10-10 after the
+disk-preset validation and persistence-failure fix described in
+`DISK-SIZE-PRESETS.md`. That integration does not certify the outstanding audio
+listening, route, permission-denial or intermittent-wake checks above. Those
+remain explicit release-validation limits, not claimed fixes.
 
 ## Historical register bring-up
 
