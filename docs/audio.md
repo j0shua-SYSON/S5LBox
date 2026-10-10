@@ -2,7 +2,8 @@
 
 The `feature/audio-disk-presets` branch adds timed codec-side I²S DMA playback
 and capture, plus an iOS 13+ AVAudioEngine backend. Physical-device microphone
-recording is verified; audible playback and routing remain candidate gates.
+recording and decoded Voice Memos replay through host PCM are verified;
+audible playback and routing remain candidate gates.
 The older investigation below is preserved
 as historical evidence; its performance numbers and missing-PL080 statements
 do not describe the current emulator.
@@ -185,8 +186,64 @@ machine, not the snapshot stream; the saved-state format is unchanged. Tests
 cover fault/data/MMU-off refusal, normal and native fetch visibility, snapshot
 wiring, full-digest refusal and optional private-cache execution of all five
 policy switch targets. Local Windows validation passed **82/82 CTest cases**
-and all **20 private-cache checks**. The integrated candidate still needs a clean
-physical boot test; the RAM-only experiment is not a substitute for that gate.
+and all **20 private-cache checks**. The signed ARM64 refill's direct structure
+offsets were updated with the new bus layout; portable layout guards and
+capability revocation tests cover that integration too.
+
+`a8112a1` passed the [iPhone build and iOS 13 API check](https://github.com/j0shua-SYSON/S5LBox/actions/runs/38045419012)
+and was installed on the same physical iPhone 6s Plus / iOS 15.8.5. IPA SHA-256:
+`b25685f557aa79fdf6b1fac6ae11ec4d3e745a1b3ef5a2214a62526acc0bfd5c`.
+The disposable 8 GiB machine had shut down normally; the new app explicitly
+reported a **fresh boot after powered-off checkpoint**, not snapshot restore.
+No debugger writes were performed on this boot. Before starting Voice Memos,
+the fresh host queue held zero samples. Ordinary Voice Memos then replayed the
+retained 26-second recording: the displayed position reached 0:05, and the
+live queue capture held 8,186/8,192 nonzero samples, peak 0.0014645124,
+6,032,896 rendered frames and zero queue drops. Microphone input was off.
+This passes the integrated cold-boot decoded-playback gate, not speaker
+audibility, timing continuity or route-change behavior. Read-only debugger
+captures briefly stop execution and cannot certify uninterrupted playback.
+
+A live-installed private fixture then used **only public AVAudioPlayer APIs**,
+with no private helper or codec-policy override. The original ALAC memo,
+generated ALAC control, generated AAC control and decoded WAV all prepared,
+played and advanced their positions. Host captures respectively contained
+8,186 / 8,192 / 8,192 / 8,180 nonzero float samples, with peaks 0.0030347290 /
+0.12243547 / 0.12703037 / 0.0023194123. All reported zero playback queue drops.
+The same AAC playback was paused/resumed and backgrounded/foregrounded through
+the app UI: both stop cases disabled guest/host audio and drained pending output,
+and both return cases resumed fresh nonzero samples with advancing write counts.
+Enabling microphone switched to the duplex host route without losing playback;
+input samples arrived. This playback-only guest did not consume microphone data,
+so its bounded input ring filled and correctly counted discarded input. Turning
+microphone off drained that ring and cleared the permission-to-feed flag.
+These are bounded live-path checks, not an underrun-free or acoustic-quality
+claim, nor a physical headphones/Bluetooth test.
+
+Save/close/reopen during a default-policy ALAC AudioQueue also passed on this
+build. The restored guest's callback count continued to 23; the new host buffer
+contained 8,180 nonzero samples (peak 0.0019496002, zero playback drops), while
+its microphone ring was empty and zeroed. In a separate constant ALAC tone
+test, guest Volume Down produced all-zero queued PCM and Volume Up restored
+8,192 nonzero samples (peak 0.12243582). Host volume stayed at zero for these
+checks; this verifies guest digital-volume behavior, not ringer-switch policy.
+
+A short acoustic loop check temporarily set host volume to 20%, enabled the
+host microphone during the 441 Hz ALAC tone, captured the bounded input ring,
+then repeated at zero volume. The output ring's dominant band was correctly
+near 440 Hz, but the 85 ms microphone windows were dominated by lower-frequency
+transients. This is **inconclusive** for speaker audibility/quality, not a new
+playback failure or a listening pass. Host volume was restored to zero and
+microphone access switched off. No full-room recording is retained.
+
+Latest code checkpoint `e6398ce` passed the complete
+[cross-platform core/JIT/static-ARM64/sanitizer suite](https://github.com/j0shua-SYSON/S5LBox/actions/runs/38045620385)
+and [iPhone build / iOS 13 API check](https://github.com/j0shua-SYSON/S5LBox/actions/runs/38045620397).
+Its post-`a8112a1` changes only repair portable test declarations and reserve
+8 MiB for the MSVC stress-test executable's nested full CPU copies; app/runtime
+source is identical to the physically tested build. Local CTest passed 82/82
+and the exact private audio-cache test passed all 20 checks. These validations
+do not certify runtime behavior on every supported host iOS version.
 
 Earlier, a disposable desktop probe restored the older USB checkpoint and
 executed another 150 million instructions with three board-level power presses.
@@ -194,10 +251,12 @@ It produced **zero PCM**, and its final display capture failed (no active RGB
 window). That attempt is not an audio pass and does not identify an audio cause.
 Logs are under project-local `work/audio-validation/lock-sound-02.*.log`.
 
-Next device checks: cold-boot the integrated codec policy and verify actual
-speaker output, system click/lock sounds, media playback and volume/mute;
-deny permission and verify silence; pause/resume, background, route changes,
-and save/reopen without replaying old host samples. Keep main unchanged until
+Next device checks: listening/continuity, system click/lock sounds and ringer
+switch; denied microphone permission; external headphone/Bluetooth routes.
+Investigate the intermittent guest wake delay after live IPA installation if
+it reproduces: a later short Home tap woke it and it then unlocked, but the
+earlier long-press/black-screen sequence has no established cause or fix.
+Keep main unchanged until
 those tests and the large-disk gates in `DISK-SIZE-PRESETS.md` pass.
 
 ## Historical register bring-up
