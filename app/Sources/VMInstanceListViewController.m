@@ -226,11 +226,8 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
     }];
 }
 
-- (void)settingsTapped {
-    VMSettingsViewController *settings =
-        [[VMSettingsViewController alloc] init];
+- (void)beginGuestInstallForID:(NSString *)identifier name:(NSString *)name packagesOnly:(BOOL)packagesOnly {
     __weak VMInstanceListViewController *weakSelf = self;
-    void (^prepareGuest)(NSString *, NSString *, BOOL) = ^(NSString *identifier, NSString *name, BOOL packagesOnly) {
         VMInstanceListViewController *self_ = weakSelf;
         UINavigationController *navigation = self_.navigationController;
         if (!self_ || !navigation || navigation.topViewController != self_)
@@ -250,7 +247,10 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
             for (NSUInteger index = 0u; index < store.count; index++) {
                 NSDictionary *row = [store instanceAtIndex:index];
                 if ([row[@"id"] isEqualToString:identifier]) {
-                    [list openInstanceAtIndex:index animated:YES];
+                    if ([list openInstanceAtIndex:index animated:YES]) {
+                        EmulatorViewController *machine = (EmulatorViewController *)nav.topViewController;
+                        machine.openPackagesWhenRunning = screen.openPackagesWhenReady;
+                    }
                     return;
                 }
             }
@@ -268,9 +268,17 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
          * Jailbreak explicitly discards saved CPU state and strictly validates
          * the stopped disk. Do not boot it just to drive a guest Power slider. */
         [navigation pushViewController:install animated:YES];
+}
+
+- (void)settingsTapped {
+    VMSettingsViewController *settings = [[VMSettingsViewController alloc] init];
+    __weak VMInstanceListViewController *weakSelf = self;
+    settings.guestInstallRequest = ^(NSString *identifier, NSString *name) {
+        [weakSelf beginGuestInstallForID:identifier name:name packagesOnly:NO];
     };
-    settings.guestInstallRequest = ^(NSString *identifier, NSString *name) { prepareGuest(identifier,name,NO); };
-    settings.guestPackageSetupRequest = ^(NSString *identifier, NSString *name) { prepareGuest(identifier,name,YES); };
+    settings.guestPackageSetupRequest = ^(NSString *identifier, NSString *name) {
+        [weakSelf beginGuestInstallForID:identifier name:name packagesOnly:YES];
+    };
     settings.guestIPARequest = ^{
         VMInstanceListViewController *list = weakSelf;
         UINavigationController *navigation = list.navigationController;
@@ -615,6 +623,11 @@ titleForFooterInSection:(NSInteger)section {
      * initWithInstanceID:]. */
     vc.instanceID = row[@"id"];
     vc.guestShutdownCompletion = afterShutdown;
+    __weak VMInstanceListViewController *weakSelf = self;
+    NSString *identifier = row[@"id"], *name = row[@"name"];
+    vc.packageSetupRequest = ^{
+        [weakSelf beginGuestInstallForID:identifier name:name packagesOnly:YES];
+    };
     [navigation pushViewController:vc animated:animated];
     return YES;
 }

@@ -20,7 +20,7 @@ static NSData *Capability(NSString *identifier, BOOL create, NSError **error) {
     NSData *data = [NSData dataWithContentsOfURL:path options:0 error:NULL];
     if (data.length == 32) return data;
     if (!create || [NSFileManager.defaultManager fileExistsAtPath:path.path]) {
-        if (error) *error = VMPackageError(@"Package manager is not prepared for this machine. Save and close it, then use App Settings > Set up package manager."); return nil;
+        if (error) *error = VMPackageError(@"This machine needs package setup. Choose Set up Packages in the package manager."); return nil;
     }
     unsigned char bytes[32];
     if (SecRandomCopyBytes(kSecRandomDefault,sizeof bytes,bytes) != errSecSuccess) {
@@ -35,6 +35,9 @@ static NSData *Capability(NSString *identifier, BOOL create, NSError **error) {
 @implementation VMPackageBridge {
     VMUSBTransport *_transport;
     NSString *_identifier;
+}
++ (BOOL)hasCapabilityForInstance:(NSString *)identifier {
+    return Capability(identifier, NO, NULL).length == 32;
 }
 - (instancetype)initWithTransport:(VMUSBTransport *)transport instanceID:(NSString *)identifier {
     self = [super init]; if (self) { _transport = transport; _identifier = [identifier copy]; } return self;
@@ -78,7 +81,7 @@ static NSData *Capability(NSString *identifier, BOOL create, NSError **error) {
     VMUSBService *service = [self connect:'S' error:error];
     NSData *data = service ? [self receive:service terminal:'S' error:error] : nil; [service close];
     if (!data && !self.canceled && error) *error=VMPackageError([NSString stringWithFormat:
-        @"Guest package helper unavailable. Finish booting and wake the guest, or run App Settings > Set up package manager. %@",(*error).localizedDescription ?: @""]);
+        @"Cannot connect to the guest. Let it finish booting, or choose Repair package setup. %@",(*error).localizedDescription ?: @""]);
     return data;
 }
 - (BOOL)number:(uint32_t)n service:(VMUSBService *)service error:(NSError **)error {

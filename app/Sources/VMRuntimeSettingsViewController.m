@@ -228,10 +228,10 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
     if (path.section == VMRuntimeSectionApps) {
         if (!self.usbTransport || ![self.runtimeDelegate runtimeCanControlGuest] || [self.runtimeDelegate runtimePaused]) return;
         if (path.row == 1) {
-            VMPackageManagerViewController *packages = [[VMPackageManagerViewController alloc]
-                initWithTransport:self.usbTransport instanceID:self.instanceID];
-            packages.modalPresentationStyle = UIModalPresentationFullScreen;
-            [self presentViewController:packages animated:YES completion:nil]; return;
+            id<VMRuntimeSettingsDelegate> owner = self.runtimeDelegate;
+            UIViewController *presenter = self.navigationController.presentingViewController;
+            [presenter dismissViewControllerAnimated:YES completion:^{ [owner openRuntimePackages]; }];
+            return;
         }
         VMIPALibraryViewController *library = [[VMIPALibraryViewController alloc] init];
         __weak VMRuntimeSettingsViewController *weakSelf = self;

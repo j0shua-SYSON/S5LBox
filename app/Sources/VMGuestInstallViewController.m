@@ -12,6 +12,7 @@
 #import "VMResumeCheckpoint.h"
 
 @interface VMGuestInstallViewController ()
+- (void)offerPackagesIfVisible:(NSNotification * _Nullable)notification;
 - (void)startInstall;
 - (void)runBuilderWithPackageDirectory:(NSURL *)packageDirectory;
 - (void)failWithHeadline:(NSString *)headline
@@ -39,6 +40,7 @@ static void VMGuestInstallBuildProgress(
     VMGuestPackageDownloader *_downloader;
     dispatch_queue_t _buildQueue;
     UIBackgroundTaskIdentifier _backgroundTask;
+    BOOL _packageOfferPending;
     BOOL _started;
     BOOL _finished;
 }
@@ -137,6 +139,8 @@ static void VMGuestInstallBuildProgress(
 
     _buildQueue = dispatch_queue_create(
         "com.j0shua.S5LBox.GuestInstallBuild", DISPATCH_QUEUE_SERIAL);
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(offerPackagesIfVisible:)
+        name:UIApplicationDidBecomeActiveNotification object:nil];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -150,6 +154,7 @@ static void VMGuestInstallBuildProgress(
         _started = YES;
         [self startInstall];
     }
+    [self offerPackagesIfVisible:nil];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -161,6 +166,7 @@ static void VMGuestInstallBuildProgress(
 }
 
 - (void)dealloc {
+    [NSNotificationCenter.defaultCenter removeObserver:self];
     [_downloader cancel];
     if (_backgroundTask != UIBackgroundTaskInvalid)
         [[UIApplication sharedApplication] endBackgroundTask:_backgroundTask];
@@ -268,13 +274,35 @@ static void VMGuestInstallBuildProgress(
             self->_headline.text = @"Finishing jailbreak";
             self->_detail.text = @"Starting iPhone OS to finish installing Cydia. The Home screen will restart automatically; keep the machine running.";
         }
-        void (^ready)(void) = [self.readyHandler copy];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                      (int64_t)(0.8 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            if (ready) ready();
+            self->_packageOfferPending = YES;
+            [self offerPackagesIfVisible:nil];
         });
     });
+}
+
+- (void)offerPackagesIfVisible:(NSNotification *)notification {
+    (void)notification;
+    if (!_packageOfferPending || !self.view.window || self.presentedViewController ||
+        UIApplication.sharedApplication.applicationState != UIApplicationStateActive ||
+        self.navigationController.topViewController != self) return;
+    _packageOfferPending = NO;
+    void (^ready)(void) = [self.readyHandler copy];
+    UIAlertController *offer = [UIAlertController alertControllerWithTitle:@"Use S5LBox Packages?"
+        message:@"Browse sources and install tweaks from S5LBox. Cydia stays available inside the guest."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [offer addAction:[UIAlertAction actionWithTitle:@"Not now" style:UIAlertActionStyleCancel
+        handler:^(__unused UIAlertAction *action) {
+            [self dismissViewControllerAnimated:YES completion:ready];
+        }]];
+    [offer addAction:[UIAlertAction actionWithTitle:@"Open Packages" style:UIAlertActionStyleDefault
+        handler:^(__unused UIAlertAction *action) {
+            self->_openPackagesWhenReady = YES;
+            [self dismissViewControllerAnimated:YES completion:ready];
+        }]];
+    [self presentViewController:offer animated:YES completion:nil];
 }
 
 - (void)startInstall {
@@ -303,6 +331,8 @@ static void VMGuestInstallBuildProgress(
                 [self_ failWithHeadline:@"Package setup failed" description:error.localizedDescription]; return;
             }
             dispatch_async(dispatch_get_main_queue(),^{
+                self_->_finished = YES;
+                self_->_openPackagesWhenReady = YES;
                 [self_ endBackgroundTime];
                 [self_ setFraction:1 stage:@"Package manager ready. Starting the guest…"];
                 if (self_.readyHandler) self_.readyHandler();

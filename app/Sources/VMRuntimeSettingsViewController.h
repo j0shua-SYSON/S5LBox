@@ -27,6 +27,7 @@ typedef NS_ENUM(NSInteger, VMRuntimeAction) {
 - (uint64_t)runtimeInstructionCap;
 - (void)setRuntimeInstructionCap:(uint64_t)cap;
 - (void)performRuntimeAction:(VMRuntimeAction)action;
+- (void)openRuntimePackages;
 @end
 
 @interface VMRuntimeSettingsViewController : UITableViewController

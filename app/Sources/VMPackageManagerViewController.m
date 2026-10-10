@@ -61,6 +61,8 @@ static UIImage *Tile(NSString *symbol) {
 - (void)render:(VMPackageScreen *)screen;
 - (void)select:(NSDictionary *)row screen:(VMPackageScreen *)screen;
 - (void)refresh;
+- (void)connectGuest;
+- (void)scheduleGuestConnection;
 - (void)closePackages;
 - (void)addSource;
 - (void)cancel;
@@ -162,6 +164,9 @@ static UIImage *Tile(NSString *symbol) {
     NSData *_status;
     NSString *_message;
     BOOL _busy, _idleWasDisabled;
+    BOOL _connecting, _needsSetup, _closed, _loadedSources;
+    NSString *_instanceID;
+    NSUInteger _connectionGeneration;
     NSUInteger _finishAction;
     BOOL _finishReady;
     UIBackgroundTaskIdentifier _background;
@@ -171,6 +176,7 @@ static UIImage *Tile(NSString *symbol) {
     self=[super init]; if (!self) return nil;
     _catalog=[VMPackageCatalog new]; _repository=[VMPackageRepository new];
     _bridge=[[VMPackageBridge alloc] initWithTransport:transport instanceID:identifier];
+    _instanceID=[identifier copy];
     _queue=dispatch_queue_create("com.j0shua.S5LBox.packages",DISPATCH_QUEUE_SERIAL);
     _background=UIBackgroundTaskInvalid;
     _sources=[[NSUserDefaults.standardUserDefaults arrayForKey:@"PackageManagerSources-v1"] mutableCopy];
@@ -213,7 +219,55 @@ static UIImage *Tile(NSString *symbol) {
     __weak VMPackageManagerViewController *weakSelf=self;
     _repository.progress=^(NSString *text) { [weakSelf report:text]; };
     _bridge.progress=^(NSString *text) { [weakSelf report:text]; };
-    [self refresh];
+    [self connectGuest];
+}
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    if (!_status && !_connecting && !_busy && !_closed) [self connectGuest];
+}
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    if (self.isBeingDismissed || !self.presentingViewController) {
+        _closed=YES; ++_connectionGeneration; _bridge.canceled=YES;
+    }
+}
+- (void)connectGuest {
+    if (_closed || _busy || _connecting) return;
+    if (self.presentedViewController) { [self scheduleGuestConnection]; return; }
+    _needsSetup=![VMPackageBridge hasCapabilityForInstance:_instanceID];
+    if (_needsSetup) {
+        _message=@"Add the guest helper to install tweaks from S5LBox. Cydia stays available.";
+        [self renderAll]; return;
+    }
+    _connecting=YES; _bridge.canceled=NO;
+    NSUInteger generation=++_connectionGeneration;
+    _message=@"Waiting for the guest. Keep it running; Packages connects automatically when ready.";
+    [self renderAll];
+    dispatch_async(_queue,^{
+        NSError *error=nil; BOOL connected=[self readInstalled:&error];
+        dispatch_async(dispatch_get_main_queue(),^{
+            self->_connecting=NO;
+            if (self->_closed || generation!=self->_connectionGeneration) return;
+            if (connected) {
+                self->_message=@"Connected to your guest.";
+                [self renderAll];
+                if (!self->_loadedSources) [self refresh];
+            } else {
+                self->_status=nil;
+                [self renderAll];
+                [self scheduleGuestConnection];
+            }
+        });
+    });
+}
+- (void)scheduleGuestConnection {
+    NSUInteger generation=_connectionGeneration;
+    __weak VMPackageManagerViewController *weakSelf=self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5*NSEC_PER_SEC),dispatch_get_main_queue(),^{
+        VMPackageManagerViewController *owner=weakSelf;
+        if (owner && !owner->_closed && generation==owner->_connectionGeneration && owner.view.window)
+            [owner connectGuest];
+    });
 }
 - (UINavigationController *)activeNavigation { return (UINavigationController *)self.selectedViewController; }
 - (NSArray *)installedPackages {
@@ -271,15 +325,20 @@ static UIImage *Tile(NSString *symbol) {
     if ([kind isEqual:@"home"]) {
         NSMutableDictionary *hero=[Row(@"S5LBox Packages",@"Tweaks and tools for iPhone OS 3",@"shippingbox.fill",nil) mutableCopy]; hero[@"hero"]=@YES;
         [sections addObject:Section(nil,@[hero],nil)];
+        if (!_status && self.setupRequest) {
+            [sections addObject:Section(nil,@[Row(_needsSetup ? @"Set up Packages" : @"Repair package setup",
+                _needsSetup ? @"Install the helper and return here automatically." : @"Use this if the guest has finished booting but still cannot connect.",
+                @"shippingbox",_busy ? nil : @"setup")],nil)];
+        }
         if (_finishAction) [sections addObject:Section(nil,@[Row(FinishTitle(_finishAction),
             _finishReady ? @"Required by your package changes. Only affects the emulated guest." : @"Finish or repair the package operation, then refresh Installed.",
             @"arrow.clockwise",_finishReady && !_busy ? @"finish-guest" : nil)],nil)];
         [sections addObject:Section(@"Discover",@[
             Row(@"All packages",@"Browse your sources",@"square.grid.2x2",@"all"),
             Row(@"Categories",@"Tweaks, themes, utilities and more",@"square.stack.3d.up",@"categories")],nil)];
-        NSMutableDictionary *status=[Row(_busy ? @"Refreshing packages" : _status ? @"Connected to your guest" : @"Guest connection needed",
+        NSMutableDictionary *status=[Row(_busy ? @"Refreshing packages" : _status ? @"Connected to your guest" : _needsSetup ? @"Setup needed" : @"Waiting for your guest",
             _message,_status ? @"checkmark.circle" : @"cable.connector",_busy ? nil : @"refresh") mutableCopy];
-        status[@"spinner"]=@(_busy);
+        status[@"spinner"]=@(_busy || _connecting);
         [sections addObject:Section(@"Your machine",@[status,
             Row(@"Installed packages",[NSString stringWithFormat:@"%lu packages",(unsigned long)[self installedPackages].count],@"checkmark.seal",@"installed"),
             Row(@"Sources",[NSString stringWithFormat:@"%lu repositories",(unsigned long)_sources.count],@"tray.2",@"sources")],
@@ -330,7 +389,7 @@ static UIImage *Tile(NSString *symbol) {
         BOOL older=old && VMPackageVersionCompare(p[@"Version"],old[@"Version"])<0;
         NSString *action=available ? old && [old[@"Version"] isEqual:p[@"Version"]] ? @"Installed" : newer ? @"Update" : @"Install" : @"Remove";
         UIBarButtonItem *button=[[UIBarButtonItem alloc] initWithTitle:action style:UIBarButtonItemStyleDone target:self action:@selector(packageAction)];
-        button.enabled=!_busy && !protected && !older && ![action isEqual:@"Installed"];
+        button.enabled=!_busy && !_connecting && _status && !protected && !older && ![action isEqual:@"Installed"];
         screen.navigationItem.rightBarButtonItem=button;
         NSMutableDictionary *hero=[[self packageRow:p] mutableCopy]; hero[@"action"]=@""; hero[@"hero"]=@YES;
         hero[@"detail"]=[NSString stringWithFormat:@"%@\n%@",p[@"Version"] ?: @"",old ? [@"Installed: " stringByAppendingString:old[@"Version"]] : @"Not installed"];
@@ -394,6 +453,11 @@ static UIImage *Tile(NSString *symbol) {
     else if ([action isEqual:@"installed"]) self.selectedIndex=3;
     else if ([action isEqual:@"sources"]) self.selectedIndex=1;
     else if ([action isEqual:@"refresh"]) [self refresh];
+    else if ([action isEqual:@"setup"]) {
+        ++_connectionGeneration; _bridge.canceled=YES;
+        if (self.setupRequest) self.setupRequest();
+        [self scheduleGuestConnection];
+    }
     else if ([action isEqual:@"finish-guest"]) [self applyGuestFinish];
     else if ([action isEqual:@"bigboss"]) [self sourcePrompt:YES];
     else if ([action isEqual:@"remove-source"]) [self removeSource:screen.context[@"sourceRecord"]];
@@ -405,7 +469,11 @@ static UIImage *Tile(NSString *symbol) {
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
     [self.activeNavigation.topViewController presentViewController:alert animated:YES completion:nil];
 }
-- (void)closePackages { if (!_busy) [self dismissViewControllerAnimated:YES completion:nil]; }
+- (void)closePackages {
+    if (_busy) return;
+    _closed=YES; ++_connectionGeneration; _bridge.canceled=YES;
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
 - (void)setWorking:(BOOL)busy {
     _busy=busy; self.modalInPresentation=busy;
     for (UINavigationController *nav in self.viewControllers) {
@@ -454,7 +522,10 @@ static UIImage *Tile(NSString *symbol) {
     return YES;
 }
 - (void)refresh {
+    if (_closed || _connecting) return;
+    if (!_status) { [self connectGuest]; return; }
     if (!_queue || _busy) return; _operation=nil; [self setWorking:YES]; [self report:@"Loading repositories…"];
+    _loadedSources=YES;
     NSArray *sources=[_sources copy];
     dispatch_async(_queue,^{
         NSError *guestError=nil,*repoError=nil;
@@ -503,7 +574,7 @@ static UIImage *Tile(NSString *symbol) {
     [self plan:screen.context removing:screen.context[@"Filename"]==nil];
 }
 - (void)plan:(NSDictionary *)package removing:(BOOL)removing {
-    if (_busy || !package) return; [self setWorking:YES]; [self report:@"Checking dependencies…"];
+    if (_busy || _connecting || !_status || !package) return; [self setWorking:YES]; [self report:@"Checking dependencies…"];
     dispatch_async(_queue,^{
         NSError *error=nil; NSArray *plan=nil;
         if ([self readInstalled:&error]) {

@@ -37,6 +37,7 @@
 #import "VMGuest.h"
 #import "VMSettings.h"
 #import "VMRuntimeSettingsViewController.h"
+#import "VMPackageManagerViewController.h"
 #import "VMSnapshotListViewController.h"
 #import "VMInstanceStore.h"
 #include "VMSnapshotStore.h"
@@ -204,6 +205,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     BOOL               _shuttingDown;
     BOOL               _forcePowerOffRequested;
     BOOL               _forcePoweringOff;
+    BOOL               _packageSetupRequested;
     BOOL               _restoreIdleTimer;
     BOOL               _previousIdleTimerDisabled;
     UIBackgroundTaskIdentifier _checkpointBackgroundTask;
@@ -711,6 +713,13 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
         screen->_forcePoweringOff = NO;
         [screen setCheckpointSaving:NO];
         if (finished) {
+            if (screen->_packageSetupRequested && screen.packageSetupRequest) {
+                void (^setup)(void) = [screen.packageSetupRequest copy];
+                screen->_packageSetupRequested = NO;
+                [screen.navigationController popViewControllerAnimated:NO];
+                setup();
+                return;
+            }
             [screen.navigationController popViewControllerAnimated:YES];
             return;
         }
@@ -1028,6 +1037,33 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 }
 
 #pragma mark - Current-session settings
+
+- (void)openRuntimePackages {
+    if (![self runtimeCanControlGuest] || [_engine isPaused] || self.presentedViewController) return;
+    VMPackageManagerViewController *packages = [[VMPackageManagerViewController alloc]
+        initWithTransport:_engine.usbTransport instanceID:self.instanceID];
+    packages.modalPresentationStyle = UIModalPresentationFullScreen;
+    __weak EmulatorViewController *weakSelf = self;
+    __weak VMPackageManagerViewController *weakPackages = packages;
+    packages.setupRequest = ^{
+        EmulatorViewController *owner = weakSelf;
+        VMPackageManagerViewController *workspace = weakPackages;
+        if (!owner || !workspace || ![owner runtimeCanForcePowerOff] || !owner.packageSetupRequest) return;
+        UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Set up Packages?"
+            message:@"The guest will power off and restart. Unsaved guest work may be lost; guest files are kept. Packages will reopen automatically."
+            preferredStyle:UIAlertControllerStyleAlert];
+        [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+        [confirm addAction:[UIAlertAction actionWithTitle:@"Power Off & Set Up" style:UIAlertActionStyleDestructive
+            handler:^(__unused UIAlertAction *action) {
+                [owner dismissViewControllerAnimated:YES completion:^{
+                    owner->_packageSetupRequested = YES;
+                    [owner forcePowerOff];
+                }];
+            }]];
+        [workspace presentViewController:confirm animated:YES completion:nil];
+    };
+    [self presentViewController:packages animated:YES completion:nil];
+}
 
 - (NSString *)deviceButtonUnavailableReason {
     if (![self runtimeCanControlGuest]) return @"Device buttons are unavailable while the machine is stopped or busy.";
@@ -1475,6 +1511,12 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
     // Keep status work at its previous cadence, independent of pixel updates.
     if ((++_ticks % 16) == 0) {
+        if (self.openPackagesWhenRunning && self.view.window &&
+            self.navigationController.topViewController == self &&
+            !self.transitionCoordinator && !self.presentedViewController && [self runtimeCanControlGuest]) {
+            self.openPackagesWhenRunning = NO;
+            [self openRuntimePackages];
+        }
         [self refreshStatusLine];
         // A machine can stop on its own, so the toolbar has to keep asking.
         [self refreshRunControls];

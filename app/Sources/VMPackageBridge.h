@@ -1,6 +1,8 @@
 #import <Foundation/Foundation.h>
 @class VMUSBTransport;
 @interface VMPackageBridge : NSObject
+/* Local preflight only: a capability does not prove that the guest is ready. */
++ (BOOL)hasCapabilityForInstance:(NSString *)identifier;
 - (instancetype)initWithTransport:(VMUSBTransport *)transport instanceID:(NSString *)identifier;
 @property (atomic) BOOL canceled;
 @property (nonatomic, copy) void (^progress)(NSString *text);
