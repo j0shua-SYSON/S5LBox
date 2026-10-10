@@ -83,7 +83,16 @@ initially allocating about 414 MiB on APFS. Both booted to SpringBoard and
 saved/reopened; the 8 GiB guest also cold-booted again and created a Voice Memos
 recording. Primary and alternate 8 GiB HFS headers both report 4 KiB blocks and
 2,097,152 blocks. Existing user machines were not modified. This does not yet
-prove guest I/O beyond 4 GiB, a completed large-disk jailbreak, or clean shutdown.
+prove guest I/O beyond 4 GiB.
+
+The 8 GiB guest subsequently completed normal UI shutdown (the app's PMU-witness
+path returned to Machines). With `6eb0652` installed, the native Jailbreak flow
+completed both the jailbreak transaction and package-service preparation, then
+automatically started the guest. The live image stayed exactly 8 GiB; its
+recorded Voice Memos file survived maintenance. The whole machine directory,
+including its retained 119 MiB snapshot, allocated about 573 MiB. The two
+staging directories were removed by successful publication. This is physical
+maintenance/space evidence, not proof of high-offset guest data I/O.
 
 Current Windows evidence (2026-10-10): **81/81 CTest tests passed**;
 `test_rootfs_work --large-disks`: **28 checks passed** for synthetic 4/8 GiB

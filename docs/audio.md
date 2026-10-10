@@ -79,14 +79,69 @@ effective read path, including old snapshots. Explicit writes of zero still
 mute. Bus reads, PCM output, attenuation and saved-state regression tests cover
 the distinction; no guessed volume boost or application-specific patch is used.
 
+`6eb0652` passed 81/81 local tests (250 I2S, 542 codec and 64,016 host-handoff
+checks in the focused executables) and the [iOS build / iOS 13 API check](https://github.com/j0shua-SYSON/S5LBox/actions/runs/37959714684).
+It was installed in-place on the unlocked iPhone. IPA SHA-256:
+`6bf567d1a52ea6a529dd56c6416d7ec774f651df4134fad878495b15bf97c63f`.
+Loading the actual replay snapshot with this core changes the effective speaker
+gain from zero to unity. The original Voice Memos replay capture still contained
+zero-valued queued PCM; that observation was not an audible-playback pass.
+
+A subsequent physical-device isolation test on the same build installed an
+authored ARMv6 AudioQueue app in `audio-disk-8g-test` over virtual USB (AppSync
+for OS 3.1 was installed in that disposable guest). A continuous 44.1 kHz,
+16-bit stereo triangle wave exercised the real guest audio stack. The guest
+reported successful queue operations, repeated buffer callbacks and hardware
+volume 0.50. A **live** read of the host playback queue found 8,192/8,192 nonzero
+float samples, peak 0.09822945, 3,425,280 rendered frames and zero queue drops.
+The matching guest snapshot had 1,369,113 TX frames, zero core FIFO xruns,
+unity codec gains and nonzero samples throughout the DMA ring. Save/reopen
+resumed the fixture and its callback count continued. This establishes nonzero
+guest PCM through DMA, codec gain and host handoff, not an independently heard
+speaker result, uninterrupted timing or general media compatibility.
+
+Voice Memos remains a separate failing case: replay progress reached 0:08 while
+the live host queue still held zeros. Switching its speaker route did not
+establish nonzero output. The fixture then compared that same recording with a
+host-decoded PCM WAV through the guest's `AVAudioPlayer`. WAV preparation and
+playback succeeded, the position advanced and guest metering was nonzero. The
+live host queue contained 8,186/8,192 nonzero float samples, peak 0.0019651793.
+Opening the original ALAC succeeded, but `prepareToPlay` returned false. The
+fixture's displayed -3 is its own failure sentinel, **not** an OSStatus.
+An explicit AudioQueue comparison then decoded the original ALAC using
+`UseSoftwareOnly`: 8,186/8,192 live host samples were nonzero, peak 0.0026305886,
+with zero host queue drops. A fresh-launch default-policy test started without
+an API error but stalled at six buffer callbacks and produced all-zero host
+samples. Its snapshot still showed the supported 16-bit serial mode, unity
+gain, zero core FIFO xruns and an already-silent DMA ring. This puts the
+difference upstream of PCM transport; successful queue startup alone was not
+a decoder pass.
+
+The private 7E18 fixture obtained the underlying `prepareToPlayQueue` status
+instead of the public BOOL wrapper: the original memo, a host-generated ALAC
+control and a host-generated AAC control all returned `0x6e6f7065` (`nope`).
+WAV still played. This is broader than one recording's container metadata.
+The exact firmware contains both software and transformer-backed decoders,
+and its AMC driver binds `arm-io/amc`, an unimplemented accelerator. A
+temporary **RAM-only** device-tree unmatch was verified before a test cold
+boot. That experiment did **not** pass: preparation returned -308 and later
+buffer allocation returned 22 even for WAV. It is not a shipping fix or proof
+that hiding AMC alone enables fallback. Repeated reset boots also logged
+filesystem I/O errors; a clean-shutdown/reboot control is required before
+attributing the new failure. Normal shutdown of that experimental boot did
+complete. Firmware files and the emulator's shipping policy were not changed.
+Do not describe the entire transport as silent or full media playback as fixed.
+Private fixtures and captures live under
+`work/audio-validation`, not in the shipping app.
+
 Earlier, a disposable desktop probe restored the older USB checkpoint and
 executed another 150 million instructions with three board-level power presses.
 It produced **zero PCM**, and its final display capture failed (no active RGB
 window). That attempt is not an audio pass and does not identify an audio cause.
 Logs are under project-local `work/audio-validation/lock-sound-02.*.log`.
 
-Next device checks: verify output after the speaker-default fix, then
-system click/lock sounds, media playback and volume/mute;
+Next device checks: resolve compressed-media preparation and verify actual
+speaker output, system click/lock sounds, media playback and volume/mute;
 deny permission and verify silence; pause/resume, background, route changes,
 and save/reopen without replaying old host samples. Keep main unchanged until
 those tests and the large-disk gates in `DISK-SIZE-PRESETS.md` pass.
