@@ -965,7 +965,7 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
 
 - (void)chooseEmulatorInterface {
     UIAlertController *picker = [UIAlertController alertControllerWithTitle:@"Emulator interface"
-        message:@"Modern has a Home button and a separate Device Controls sheet. Legacy keeps the original five-button row and toolbar."
+        message:@"Use the modern dock or the original five-button layout."
         preferredStyle:UIAlertControllerStyleAlert];
     __weak VMSettingsViewController *weakSelf = self;
     for (NSNumber *choice in @[@NO, @YES]) {

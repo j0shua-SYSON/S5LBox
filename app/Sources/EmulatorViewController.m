@@ -1360,8 +1360,9 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
      * code -- "error: unexpected character <U+2014>". Plain ASCII and explicit
      * escapes cannot fail that way, and no glyph here needed to be typographic. */
     _prepareLabel.text = [NSString stringWithFormat:
-        @"Preparing iPhone OS\n%.0f%% - copying the root filesystem\n"
-         "You can leave this screen; it keeps going.", f * 100.0];
+        _legacyInterface ? @"Preparing iPhone OS\n%.0f%% - copying the root filesystem\n"
+         "You can leave this screen; it keeps going."
+        : @"Preparing iPhone OS\nCopying filesystem: %.0f%%\nYou can leave this screen.", f * 100.0];
 }
 
 - (void)viewDidLayoutSubviews {

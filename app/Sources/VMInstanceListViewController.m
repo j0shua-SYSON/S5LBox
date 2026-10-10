@@ -19,11 +19,12 @@
 #import "VMSettingsViewController.h"
 #import "VMFirmwareImporter.h"
 #import "VMSetupViewController.h"
+#include <math.h>
 
 static NSString *const kCell = @"machine";
 static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
 
-@interface VMInstanceListViewController ()
+@interface VMInstanceListViewController () <UIGestureRecognizerDelegate>
 - (NSUInteger)indexForMachineID:(NSString *)identifier;
 - (BOOL)performMachineAction:(NSString *)name identifier:(NSString *)identifier;
 - (BOOL)openInstanceAtIndex:(NSUInteger)index animated:(BOOL)animated
@@ -37,6 +38,7 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
 
 @implementation VMInstanceListViewController {
     BOOL _presentedSetup;
+    UIPanGestureRecognizer *_rowSwipeGuard;
 }
 
 - (instancetype)init {
@@ -71,6 +73,12 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
      * first, which made initial setup feel backwards. */
     self.navigationItem.rightBarButtonItems = @[ add, settings ];
     self.navigationItem.leftBarButtonItem = self.editButtonItem;
+    /* With swipe actions removed, UIKit can interpret a horizontal drag that
+     * ends inside a cell as selection. Consume that drag without opening a VM. */
+    _rowSwipeGuard = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(ignoreRowSwipe:)];
+    _rowSwipeGuard.delegate = self;
+    _rowSwipeGuard.maximumNumberOfTouches = 1;
+    [self.tableView addGestureRecognizer:_rowSwipeGuard];
 
     [[NSNotificationCenter defaultCenter]
         addObserver:self
@@ -92,6 +100,18 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
 
 - (void)storeChanged {
     [self.tableView reloadData];
+}
+
+- (void)ignoreRowSwipe:(UIPanGestureRecognizer *)gesture { (void)gesture; }
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
+    if (gesture != _rowSwipeGuard) return YES;
+    CGPoint velocity = [_rowSwipeGuard velocityInView:self.tableView];
+    return fabs(velocity.x) > fabs(velocity.y);
+}
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gesture
+    shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    return (gesture == _rowSwipeGuard && other == self.tableView.panGestureRecognizer) ||
+           (other == _rowSwipeGuard && gesture == self.tableView.panGestureRecognizer);
 }
 
 /* The footer's claim about what opening a machine does depends on files this
@@ -649,7 +669,7 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
             NSArray *symbols = @[@"pencil", @"doc.on.doc", @"trash"];
             for (NSUInteger i = 0; i < names.count; ++i) {
                 NSString *name = names[i];
-                UIAction *action = [UIAction actionWithTitle:name image:[UIImage systemImageNamed:symbols[i]]
+                UIAction *action = [UIAction actionWithTitle:(i == 1 ? @"Duplicate" : name) image:[UIImage systemImageNamed:symbols[i]]
                     identifier:nil handler:^(__unused UIAction *selected) {
                         [weakSelf performMachineAction:name identifier:identifier];
                     }];
