@@ -210,6 +210,12 @@ add_test(NAME arm_interp COMMAND test_arm)
 add_executable(test_arm_bulk tests/test_arm_bulk.c)
 target_include_directories(test_arm_bulk PRIVATE ../tools)
 target_link_libraries(test_arm_bulk PRIVATE emucore)
+if(MSVC)
+    # The differential oracle nests several complete CPU copies (~197 KiB
+    # each). Match the usual Unix test stack reserve, not MSVC's 1 MiB default.
+    # This changes only the stress-test executable, never the emulator/app.
+    target_link_options(test_arm_bulk PRIVATE /STACK:8388608)
+endif()
 add_test(NAME arm_bulk COMMAND test_arm_bulk)
 
 add_executable(test_arm_ram_window tests/test_arm_ram_window.c)
