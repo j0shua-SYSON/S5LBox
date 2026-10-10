@@ -76,9 +76,6 @@ static UILabel *ControlLabel(NSString *text, UIFontTextStyle style) {
         [stack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-20],
         [stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-40]
     ]];
-    UILabel *intro = ControlLabel(@"These buttons control the guest iPhone.", UIFontTextStyleSubheadline);
-    intro.textColor = UIColor.secondaryLabelColor;
-    [stack addArrangedSubview:intro];
     VMHardwareButton *power = [self hardwareButton:VMButtonPower title:@"Sleep / Wake" symbol:@"power"];
     power.accessibilityHint = @"Press and hold to show the guest power menu.";
     [stack addArrangedSubview:power];
@@ -113,7 +110,7 @@ static UILabel *ControlLabel(NSString *text, UIFontTextStyle style) {
     volumeLabel.textColor = UIColor.secondaryLabelColor;
     [stack addArrangedSubview:volumeLabel];
     UIStackView *volume = [[UIStackView alloc] initWithArrangedSubviews:@[
-        [self hardwareButton:VMButtonVolumeDown title:@"Quieter" symbol:@"speaker.fill"],
+        [self hardwareButton:VMButtonVolumeDown title:@"Quieter" symbol:@"minus"],
         [self hardwareButton:VMButtonVolumeUp title:@"Louder" symbol:@"plus"]]];
     volume.axis = UIContentSizeCategoryIsAccessibilityCategory(self.traitCollection.preferredContentSizeCategory)
         ? UILayoutConstraintAxisVertical : UILayoutConstraintAxisHorizontal;

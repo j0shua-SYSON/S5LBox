@@ -57,7 +57,7 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
         initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
                              target:self action:@selector(addTapped)];
     UIBarButtonItem *settings = [[UIBarButtonItem alloc]
-        initWithImage:[UIImage systemImageNamed:@"gear"]
+        initWithImage:([UIImage systemImageNamed:@"gearshape"] ?: [UIImage systemImageNamed:@"gear"])
                  style:UIBarButtonItemStylePlain
                 target:self action:@selector(settingsTapped)];
     settings.accessibilityLabel = @"Settings";

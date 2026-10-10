@@ -1164,7 +1164,9 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
 - (UIButton *)dockButtonWithSymbol:(NSString *)symbol label:(NSString *)label action:(SEL)action {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-    [button setImage:[UIImage systemImageNamed:symbol] forState:UIControlStateNormal];
+    UIImage *icon = [UIImage systemImageNamed:symbol];
+    if (!icon && [symbol isEqualToString:@"gearshape"]) icon = [UIImage systemImageNamed:@"gear"];
+    [button setImage:icon forState:UIControlStateNormal];
     [button setPreferredSymbolConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:23
         weight:UIImageSymbolWeightRegular] forImageInState:UIControlStateNormal];
     button.tintColor = UIColor.labelColor;
@@ -1182,7 +1184,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     _dock.layer.cornerRadius = 38;
     _dock.accessibilityIdentifier = @"s5lbox.modern-dock";
     [self.view addSubview:_dock];
-    _settingsButton = [self dockButtonWithSymbol:@"gear" label:@"Machine settings" action:@selector(settingsTapped:)];
+    _settingsButton = [self dockButtonWithSymbol:@"gearshape" label:@"Machine settings" action:@selector(settingsTapped:)];
     _settingsButton.accessibilityIdentifier = @"s5lbox.dock.settings";
     _deviceControlsButton = [self dockButtonWithSymbol:@"slider.horizontal.3" label:@"Device controls"
         action:@selector(deviceControlsTapped:)];
@@ -1222,7 +1224,8 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     _legacyInterface = VMSettings.sharedSettings.legacyEmulatorUI;
     _keys.hidden = _stats.hidden = _toolbar.hidden = !_legacyInterface;
     _dock.hidden = _legacyInterface;
-    _screen.layer.borderWidth = _legacyInterface ? 1 : 0;
+    _screen.layer.borderWidth = _legacyInterface ? 1 : 0.5;
+    _screen.layer.borderColor = (_legacyInterface ? [UIColor colorWithWhite:0.25 alpha:1] : UIColor.separatorColor).CGColor;
     self.view.backgroundColor = _legacyInterface ? UIColor.blackColor : UIColor.systemBackgroundColor;
     self.navigationItem.titleView = _legacyInterface ? nil : _machineHeading;
     self.navigationItem.rightBarButtonItem = !_legacyInterface && VMSettings.sharedSettings.developerMode
@@ -1281,6 +1284,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
         area.size.height = MAX(0, area.size.height - 88);
     }
     _homeButton.layer.borderColor = UIColor.systemBlueColor.CGColor;
+    _screen.layer.borderColor = UIColor.separatorColor.CGColor;
     BOOL inlineConsole = _sessionInlineConsole && VMSettings.sharedSettings.developerMode;
     CGFloat band = inlineConsole ? floor(area.size.height * 0.62) : area.size.height;
     CGFloat scale = MAX(0, MIN(area.size.width / VM_FB_WIDTH, band / VM_FB_HEIGHT));
