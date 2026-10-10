@@ -325,10 +325,17 @@ static UIImage *Tile(NSString *symbol) {
     if ([kind isEqual:@"home"]) {
         NSMutableDictionary *hero=[Row(@"S5LBox Packages",@"Tweaks and tools for iPhone OS 3",@"shippingbox.fill",nil) mutableCopy]; hero[@"hero"]=@YES;
         [sections addObject:Section(nil,@[hero],nil)];
-        if (!_status && self.setupRequest) {
-            [sections addObject:Section(nil,@[Row(_needsSetup ? @"Set up Packages" : @"Repair package setup",
+        NSMutableDictionary *status=[Row(_busy ? @"Refreshing packages" : _status ? @"Connected to your guest" : _needsSetup ? @"Setup needed" : @"Waiting for your guest",
+            _message,_status ? @"checkmark.circle" : @"cable.connector",_busy ? nil : @"refresh") mutableCopy];
+        status[@"spinner"]=@(_busy || _connecting);
+        if (!_status) {
+            // Make boot/setup progress visible before browsing, not below the
+            // fold where the user could mistake normal startup for a failure.
+            NSMutableArray *connectionRows=[NSMutableArray arrayWithObject:status];
+            if (self.setupRequest) [connectionRows addObject:Row(_needsSetup ? @"Set up Packages" : @"Repair package setup",
                 _needsSetup ? @"Install the helper and return here automatically." : @"Use this if the guest has finished booting but still cannot connect.",
-                @"shippingbox",_busy ? nil : @"setup")],nil)];
+                @"shippingbox",_busy ? nil : @"setup")];
+            [sections addObject:Section(nil,connectionRows,nil)];
         }
         if (_finishAction) [sections addObject:Section(nil,@[Row(FinishTitle(_finishAction),
             _finishReady ? @"Required by your package changes. Only affects the emulated guest." : @"Finish or repair the package operation, then refresh Installed.",
@@ -336,12 +343,12 @@ static UIImage *Tile(NSString *symbol) {
         [sections addObject:Section(@"Discover",@[
             Row(@"All packages",@"Browse your sources",@"square.grid.2x2",@"all"),
             Row(@"Categories",@"Tweaks, themes, utilities and more",@"square.stack.3d.up",@"categories")],nil)];
-        NSMutableDictionary *status=[Row(_busy ? @"Refreshing packages" : _status ? @"Connected to your guest" : _needsSetup ? @"Setup needed" : @"Waiting for your guest",
-            _message,_status ? @"checkmark.circle" : @"cable.connector",_busy ? nil : @"refresh") mutableCopy];
-        status[@"spinner"]=@(_busy || _connecting);
-        [sections addObject:Section(@"Your machine",@[status,
+        NSMutableArray *machineRows=[NSMutableArray array];
+        if (_status) [machineRows addObject:status];
+        [machineRows addObjectsFromArray:@[
             Row(@"Installed packages",[NSString stringWithFormat:@"%lu packages",(unsigned long)[self installedPackages].count],@"checkmark.seal",@"installed"),
-            Row(@"Sources",[NSString stringWithFormat:@"%lu repositories",(unsigned long)_sources.count],@"tray.2",@"sources")],
+            Row(@"Sources",[NSString stringWithFormat:@"%lu repositories",(unsigned long)_sources.count],@"tray.2",@"sources")]];
+        [sections addObject:Section(@"Your machine",machineRows,
             @"Browsing and downloads run natively. Installation runs inside your guest.")];
         [sections addObject:Section(nil,@[Row(@"About package safety",@"Compatibility, sources and recovery",@"info.circle",@"safety")],nil)];
     } else if ([kind isEqual:@"sources"]) {
