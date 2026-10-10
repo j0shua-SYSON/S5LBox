@@ -116,6 +116,8 @@ const char *vm_fw_strerror(vm_fw_status_t st) {
         case VM_FW_ERR_NO_ROOT_PARTITION:    return "the disk image contains no Apple_HFSX partition";
         case VM_FW_ERR_OUTPUT_REFUSED:       return "the destination would not accept the result";
         case VM_FW_ERR_SCRATCH_REFUSED:      return "there is nowhere to put the temporary copy this needs";
+        case VM_FW_ERR_UNSUPPORTED_BUILD:    return "Choose iPhone OS 3.1.3 (7E18) for iPhone 3G (iPhone1,2).";
+        case VM_FW_ERR_VERIFICATION:         return "Firmware verification failed. Choose an unmodified IPSW and try again.";
         default:                             return "unknown import error";
     }
 }
@@ -1203,6 +1205,27 @@ vm_fw_status_t vm_fw_import_run(const vm_fw_import_t *cfg,
     r.ref = find_reference(report->product_type, report->build);
     report->reference_build = (r.ref != NULL);
 
+    vm_fw_keys_t resolved;
+    vm_fw_keys_clear(&resolved);
+    bool known = cfg->resolve_keys && cfg->resolve_keys(report, &resolved);
+    if (cfg->require_supported && (!known || !r.ref)) {
+        vm_fw_keys_clear(&resolved);
+        report->status = VM_FW_ERR_UNSUPPORTED_BUILD;
+        snprintf(report->detail, sizeof report->detail,
+                 "This IPSW is %s %s (%s). %s", report->product_type,
+                 report->product_version, report->build,
+                 vm_fw_strerror(report->status));
+        return report->status;
+    }
+    if (cfg->keys) {
+        if (cfg->keys->kernel.present) resolved.kernel = cfg->keys->kernel;
+        if (cfg->keys->device_tree.present) resolved.device_tree = cfg->keys->device_tree;
+        if (cfg->keys->root_present) {
+            resolved.root_present = true;
+            memcpy(resolved.root, cfg->keys->root, sizeof resolved.root);
+        }
+    }
+
     report_progress(&r, VM_FW_KERNEL, VM_FW_STAGE_LOCATING, 0, 0);
 
     /* Kernel. */
@@ -1220,11 +1243,12 @@ vm_fw_status_t vm_fw_import_run(const vm_fw_import_t *cfg,
         set_detail(ar->detail, sizeof ar->detail,
                    "This archive contains no kernelcache.");
     } else if (cancelled(&r)) {
+        vm_fw_keys_clear(&resolved);
         report->status = VM_FW_ERR_CANCELLED;
         return report->status;
     } else {
         import_img3_artefact(&r, VM_FW_KERNEL, &entry,
-                             cfg->keys ? &cfg->keys->kernel : NULL);
+                             &resolved.kernel);
     }
 
     /*
@@ -1248,11 +1272,12 @@ vm_fw_status_t vm_fw_import_run(const vm_fw_import_t *cfg,
         set_detail(ar->detail, sizeof ar->detail,
                    "This archive contains no device tree for this board.");
     } else if (cancelled(&r)) {
+        vm_fw_keys_clear(&resolved);
         report->status = VM_FW_ERR_CANCELLED;
         return report->status;
     } else {
         import_img3_artefact(&r, VM_FW_DEVICE_TREE, &entry,
-                             cfg->keys ? &cfg->keys->device_tree : NULL);
+                             &resolved.device_tree);
     }
 
     /* Root filesystem. */
@@ -1271,11 +1296,13 @@ vm_fw_status_t vm_fw_import_run(const vm_fw_import_t *cfg,
                      : "The manifest does not say which member is the root "
                        "filesystem.");
     } else if (cancelled(&r)) {
+        vm_fw_keys_clear(&resolved);
         report->status = VM_FW_ERR_CANCELLED;
         return report->status;
     } else {
-        import_root_filesystem(&r, &entry, cfg->keys);
+        import_root_filesystem(&r, &entry, &resolved);
     }
+    vm_fw_keys_clear(&resolved);
 
     report_progress(&r, VM_FW_ROOT_FILESYSTEM, VM_FW_STAGE_DONE, 0, 0);
 
@@ -1302,6 +1329,17 @@ vm_fw_status_t vm_fw_import_run(const vm_fw_import_t *cfg,
 
     report->status = VM_FW_OK;
     return VM_FW_OK;
+}
+
+bool vm_fw_report_is_verified(const vm_fw_report_t *report) {
+    if (!report || report->status != VM_FW_OK || !report->manifest_read ||
+        !report->reference_build) return false;
+    for (unsigned i = 0; i < VM_FW_ARTEFACT_COUNT; ++i) {
+        const vm_fw_artefact_report_t *a = &report->artefacts[i];
+        if (a->state != VM_FW_STATE_VERIFIED || !a->sha256_valid ||
+            !a->reference_known || !a->matches_reference || !a->produced) return false;
+    }
+    return true;
 }
 
 /* ------------------------------------------------------------------------ */

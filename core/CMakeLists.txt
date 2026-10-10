@@ -976,6 +976,7 @@ add_test(NAME app_option_table_mbx_experiment
 # and needs no key.
 add_executable(fwimport
     ../tools/fwimport.c
+    ../app/Sources/VMFirmwareKeys.c
     ../app/Sources/VMFirmwareInflate.c
     ../app/Sources/VMFirmwareDigest.c
     ../app/Sources/VMFirmwarePlist.c
@@ -992,6 +993,7 @@ set_target_properties(fwimport PROPERTIES
 
 add_executable(test_vmfirmwareimport
     ../app/Tests/test_vmfirmwareimport.c
+    ../app/Sources/VMFirmwareKeys.c
     ../app/Tests/test_vmfw_inflate.c
     ../app/Tests/test_vmfw_digest.c
     ../app/Tests/test_vmfw_plist.c

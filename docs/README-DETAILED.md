@@ -413,13 +413,14 @@ value cannot. Results from such a hybrid do not test the newly selected mode.
 
   NOT established: which iOS versions or devices this works on in general. Two
   hosts are two data points, not a compatibility matrix.
-- **Firmware:** your own iPhone OS 3.1.3 image and keys. **No Apple firmware
-  image or decryption key is bundled.**
+- **Firmware:** your own iPhone1,2 / iPhone OS 3.1.3 / 7E18 IPSW. Public keys
+  for that build are bundled; **no Apple firmware image is included**.
 
 ## Legal
 
 S5LBox is an independently written emulator under the MIT license. It ships
-**no Apple firmware images or decryption keys.** You supply firmware you are
+**no Apple firmware images.** It includes publicly documented keys for the
+supported build; you supply firmware you are
 entitled to use. "iPhone", "iOS", and "iPhone OS" are trademarks of Apple Inc.;
 this project is not affiliated with or endorsed by Apple.
 

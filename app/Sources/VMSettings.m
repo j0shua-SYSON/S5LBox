@@ -8,6 +8,7 @@
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //
 #import "VMSettings.h"
+#import "VMFirmwareStore.h"
 
 #include <limits.h>
 #include <stdlib.h>
@@ -373,18 +374,19 @@ static const uint64_t kVMInstructionCaps[] = {
             @"\n"
             @"Put an IPSW here. Any file ending in .ipsw in this folder (or one\n"
             @"level up, in the S5LBox folder itself) is found by the Firmware\n"
-            @"screen's \"Detect IPSW\" row -- no file picker needed.\n"
+            @"setup screen automatically when you return -- no file picker needed.\n"
             @"\n"
-            @"The importer produces three files, and they end up here too:\n"
+            @"Verified imports live in a prepared-* folder selected by\n"
+            @"current-firmware.txt. Existing loose firmware files still work.\n"
+            @"The importer produces:\n"
             @"\n"
             @"    kernel.macho      the kernelcache, decrypted and decompressed\n"
             @"    devicetree.bin    the device tree, decrypted\n"
             @"    rootfs.img        the root filesystem, decrypted and expanded\n"
             @"\n"
-            @"Every payload inside a 3.x IPSW is encrypted and the keys are NOT\n"
-            @"in the archive. S5LBox ships none and cannot compute any. The\n"
-            @"Firmware screen says which artefact needs which key; you supply\n"
-            @"them, and they are held in memory for that session only.\n"
+            @"Public keys for iPhone1,2 / iPhone OS 3.1.3 / 7E18 are included.\n"
+            @"Import your IPSW; no key entry is required. Advanced manual\n"
+            @"overrides in Settings are held only for the current app session.\n"
             @"\n"
             @"Nothing here is downloaded. Use firmware you are entitled to use.\n";
         [text writeToFile:readme atomically:YES
@@ -439,7 +441,7 @@ static const uint64_t kVMInstructionCaps[] = {
      * path handed to rootfs_work.c. */
     NSString *root = [self documentsDirectory];
     if (root.length == 0) return nil;
-    return [root stringByAppendingPathComponent:@"firmware"];
+    return [VMFirmwareStore activeDirectoryInRoot:[root stringByAppendingPathComponent:@"firmware"]];
 }
 
 - (NSString *)firmwarePathForFile:(NSString *)file {

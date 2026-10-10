@@ -17,6 +17,8 @@
 #import "VMInstances.h"
 #import "VMSettings.h"
 #import "VMSettingsViewController.h"
+#import "VMFirmwareImporter.h"
+#import "VMSetupViewController.h"
 
 static NSString *const kCell = @"machine";
 static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
@@ -31,12 +33,15 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
        instanceID:(NSString *)identifier machineName:(NSString *)name;
 @end
 
-@implementation VMInstanceListViewController
+@implementation VMInstanceListViewController {
+    BOOL _presentedSetup;
+}
 
 - (instancetype)init {
     self = [super initWithStyle:UITableViewStyleInsetGrouped];
     if (!self) return nil;
     self.title = @"Machines";
+    _showsSetupWhenNeeded = YES;
     return self;
 }
 
@@ -95,6 +100,32 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self.tableView reloadData];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    if (!_showsSetupWhenNeeded || _presentedSetup || self.presentedViewController ||
+        [VMFirmwareImporter hasConfiguredFirmware]) return;
+    _presentedSetup = YES;
+    VMSetupViewController *setup = [VMSetupViewController new];
+    UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:setup];
+    navigation.modalPresentationStyle = UIModalPresentationFullScreen;
+    __weak VMInstanceListViewController *weakSelf = self;
+    setup.completion = ^(BOOL start) {
+        [weakSelf dismissViewControllerAnimated:YES completion:^{
+            VMInstanceListViewController *list = weakSelf;
+            if (!start || !list) return;
+            if (VMInstanceStore.sharedStore.count == 0) {
+                NSError *error = nil;
+                if (![VMInstanceStore.sharedStore createInstanceNamed:@"iPhone OS 3.1.3" error:&error]) {
+                    [list showError:error doing:@"Could not create the machine"];
+                    return;
+                }
+            }
+            [list openInstanceAtIndex:0 animated:YES];
+        }];
+    };
+    [self presentViewController:navigation animated:YES completion:nil];
 }
 
 #pragma mark - Alerts

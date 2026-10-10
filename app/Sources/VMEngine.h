@@ -189,6 +189,9 @@ typedef void (^VMEngineStopCompletion)(void);
 - (void)setMicrophoneEnabled:(BOOL)enabled completion:(void (^)(BOOL, NSString *))completion;
 - (NSString *)bringUpNote;
 - (BOOL)isPreparingRootFilesystem;
+/* One-shot handoff after successful first-boot provisioning. The UI restarts
+ * through the normal stop-completion ownership boundary, never mid-copy. */
+- (BOOL)takePreparedFirmwareBootRequest;
 
 /*
  * How far the one slow first-boot step has got, 0.0..1.0, or -1.0 when it is

@@ -93,11 +93,34 @@ each result against the SHA-256 of the known-good artefact. Verified end to end
 against the real 7E18 archive: all three outputs are byte-identical to the files
 in `firmware/`.
 
-It ships no keys and fetches none. Every payload in a 3.x IPSW is AES-encrypted
-and the keys are not in the archive, so the app asks the user for the ones it
-needs and says precisely which artefact is waiting on which key. Without keys it
-still opens the archive, identifies the build, locates every member and parses
-every container -- which is most of what the procedure below is for.
+The app bundles the public keys for **iPhone1,2 / 3.1.3 / 7E18** in the separate
+`VMFirmwareKeys.c` catalog, transcribed from [The Apple Wiki's published key
+record](https://theapplewiki.com/index.php?title=Keys:SUNorthstarTwo_7E18_(iPhone1,2)&oldid=206002).
+No Apple firmware is bundled or downloaded. Keys resolve only after all five
+manifest identity fields match: product, version, build, board and platform.
+Unknown builds are refused by the app before any component output is opened.
+Session-only manual overrides remain in Settings; they cannot bypass size or
+SHA-256 authentication. The rootfs key is an AES+HMAC blob; the DMG decoder
+derives per-block IVs rather than using a fixed rootfs IV.
+
+New imports stream into a private generation directory. Only a fully verified
+three-file set is activated by atomically writing `current-firmware.txt`.
+Failure/cancellation removes that attempt, leaving active firmware unchanged.
+The previous app-owned generation is reclaimed after successful publication;
+legacy loose files and the user's IPSW are never deleted. A process kill before
+publication can leave an unused generation, but cannot activate a partial set.
+Existing loose-file installations remain supported without migration.
+
+First launch presents native setup when the three prepared files are absent.
+Picker selection starts immediately; a Files-app drop is detected when setup
+or the firmware screen becomes active. The shared importer retains progress,
+selection and errors across navigation. Entering a manual override retries the
+selection without reopening Settings. First machine preparation automatically
+hands off to a firmware boot using the existing stop-completion boundary.
+
+Host verification: `fwimport <ipsw> --auto --out <disposable-directory>` exercises
+the same resolver and decoder without any manual key arguments. Public CI uses
+synthetic archives; private full-IPSW checks must be reported separately.
 
 ## Inspecting your IPSW
 

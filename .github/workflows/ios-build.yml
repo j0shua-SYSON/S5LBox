@@ -84,10 +84,28 @@ jobs:
             -c app/Sources/VMOptions.c -o work/instance-store-tests/options.o
           xcrun clang -fobjc-arc -Wall -Wextra -Werror -framework Foundation \
             -I app/Sources -I core/include -I tools \
-            app/Sources/VMInstanceStore.m app/Sources/VMSettings.m app/Tests/test_vminstancestore.m \
+            app/Sources/VMInstanceStore.m app/Sources/VMSettings.m app/Sources/VMFirmwareStore.m app/Tests/test_vminstancestore.m \
             work/instance-store-tests/instances.o work/instance-store-tests/options.o \
             -o work/instance-store-tests/test_store
           work/instance-store-tests/test_store "$GITHUB_WORKSPACE/work/instance-store-tests"
+
+      - name: Test firmware publication and retained import state
+        run: |
+          set -euo pipefail
+          mkdir -p work/firmware-tests
+          for source in app/Sources/VMFirmwareImport.c app/Sources/VMFirmwareKeys.c \
+            app/Sources/VMFirmwareZip.c app/Sources/VMFirmwarePlist.c \
+            app/Sources/VMFirmwareInflate.c app/Sources/VMFirmwareDigest.c app/Sources/VMFirmwareDMG.c \
+            app/Sources/VMOptions.c core/src/firmware/aes.c core/src/firmware/img3.c \
+            core/src/firmware/lzss.c tools/sha256.c; do
+            xcrun clang -std=c11 -Wall -Wextra -Werror -I app/Sources -I core/include -I tools \
+              -c "$source" -o "work/firmware-tests/$(basename "$source" .c).o"
+          done
+          xcrun clang -fobjc-arc -Wall -Wextra -Werror -framework Foundation \
+            -I app/Sources -I core/include -I tools \
+            app/Sources/VMFirmwareImporter.m app/Sources/VMFirmwareStore.m app/Sources/VMSettings.m \
+            app/Tests/test_vmfirmwarestore.m work/firmware-tests/*.o -o work/firmware-tests/test_firmware
+          work/firmware-tests/test_firmware "$GITHUB_WORKSPACE/work/firmware-tests"
 
       - name: Test Files-visible IPA library
         run: |

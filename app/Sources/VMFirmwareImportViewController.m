@@ -271,22 +271,15 @@ static BOOL VMProbeFirmware(vm_firmware_boot_state_t *out) {
     _intro.adjustsFontForContentSizeCategory = YES;
     _intro.textColor = [UIColor secondaryLabelColor];
     _intro.text =
-        @"This turns an IPSW you already have into the three files the "
-        @"emulator accepts: kernel.macho, devicetree.bin and rootfs.img. "
-        @"Nothing is downloaded, and no firmware ships with the app.\n\n"
-        @"Two ways in. Copy the IPSW into S5LBox > firmware using the Files "
-        @"app and tap Detect IPSW below — the file is read where it lands, so "
-        @"a 239 MB archive is not copied twice. Or use Choose an IPSW to pick "
-        @"one from anywhere else.\n\n"
-        @"Every payload inside a 3.x IPSW is encrypted, and the keys are not "
-        @"in the archive and cannot be worked out from it. S5LBox has none of "
-        @"them. Where one is needed, this screen says which file needs it and "
-        @"what kind it is, and you supply it.";
+        @"Import iPhone OS 3.1.3 (7E18) for iPhone 3G. Public keys are selected "
+        @"automatically; no key entry is needed. No Apple firmware is included or downloaded.";
     UIView *header = [[UIView alloc] initWithFrame:CGRectZero];
     [header addSubview:_intro];
     self.tableView.tableHeaderView = header;
 
     [self rebuildSections];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(checkDetectedArchive)
+        name:UIApplicationDidBecomeActiveNotification object:nil];
 }
 
 /*
@@ -321,13 +314,9 @@ static BOOL VMProbeFirmware(vm_firmware_boot_state_t *out) {
 }
 
 - (void)dealloc {
-    /*
-     * Backing out of this screen is a decision to stop. The core deletes every
-     * partly written output when a run is cancelled, so nothing half-made is
-     * left behind in the firmware directory for the emulator's own gate to
-     * reject later.
-     */
-    [_importer cancelImport];
+    [NSNotificationCenter.defaultCenter removeObserver:self];
+    // The shared operation survives navigation. Only Cancel cancels it.
+    if (_importer.delegate == self) _importer.delegate = nil;
 }
 
 #pragma mark - Table shape
@@ -350,13 +339,8 @@ static BOOL VMProbeFirmware(vm_firmware_boot_state_t *out) {
     /* A key row exists only where the report says a key is what is missing --
      * not merely where an artefact failed. A row offering the wrong fix is
      * worse than no row. */
-    NSMutableArray<NSNumber *> *keyRows = [NSMutableArray array];
-    if (_haveReport) {
-        for (int i = 0; i < VM_FW_ARTEFACT_COUNT; i++)
-            if (_report.artefacts[i].awaiting_key) [keyRows addObject:@(i)];
-    }
-    _keyRows = [keyRows copy];
-    if (_keyRows.count > 0) [visible addObject:@(VMImportSectionKeys)];
+    _keyRows = @[@(VM_FW_KERNEL), @(VM_FW_DEVICE_TREE), @(VM_FW_ROOT_FILESYSTEM)];
+    if (!_running) [visible addObject:@(VMImportSectionKeys)];
 
     if (_haveReport) [visible addObject:@(VMImportSectionReport)];
     _visible = [visible copy];
@@ -394,7 +378,7 @@ static BOOL VMProbeFirmware(vm_firmware_boot_state_t *out) {
         case VMImportSectionChoose:   return _chooseRowCount;
         case VMImportSectionProgress: return VMImportProgressRowCount;
         case VMImportSectionResults:  return VM_FW_ARTEFACT_COUNT + 1;
-        case VMImportSectionKeys:     return (NSInteger)_keyRows.count;
+        case VMImportSectionKeys:     return (NSInteger)_keyRows.count + 1;
         case VMImportSectionReport:   return 1;
         default:                      return 0;
     }
@@ -406,7 +390,7 @@ titleForHeaderInSection:(NSInteger)section {
     switch ((VMImportSection)[self sectionAt:section]) {
         case VMImportSectionProgress: return @"Running";
         case VMImportSectionResults:  return @"Results";
-        case VMImportSectionKeys:     return @"Keys you supply";
+        case VMImportSectionKeys:     return @"Advanced · Manual key overrides";
         case VMImportSectionChoose:
         case VMImportSectionReport:
         default:                      return nil;
@@ -418,19 +402,11 @@ titleForFooterInSection:(NSInteger)section {
     (void)tableView;
     switch ((VMImportSection)[self sectionAt:section]) {
         case VMImportSectionChoose:
-            return @"The archive is read where it sits -- nothing is copied "
-                    "into the app first, because an IPSW is around 430 MB. "
-                    "Unpacking needs room for the finished root filesystem, "
-                    "433 MB for a 3.1.3 iPhone1,2 build, and for a temporary "
-                    "copy of the encrypted disk image alongside it. Leave the "
-                    "app in front while it runs: iOS suspends what it cannot "
-                    "see.";
+            return @"Choose an IPSW from Files, or place it in S5LBox > firmware. "
+                    "Allow about 700 MB of free space for preparation. Keep the app open.";
 
         case VMImportSectionProgress:
-            return @"Cancelling stops at the next block. Everything written so "
-                    "far is deleted -- a half-written file that the emulator "
-                    "would reject only after you had trusted it is worse than "
-                    "no file at all.";
+            return @"Cancel discards this attempt. Previously prepared firmware is kept.";
 
         case VMImportSectionResults:
             return [NSString stringWithFormat:
@@ -443,28 +419,11 @@ titleForFooterInSection:(NSInteger)section {
                         ?: @"(no documents directory)"];
 
         case VMImportSectionReadiness:
-            return @"The emulator boots Apple firmware whenever all three "
-                    "files are present and the right size -- there is nothing "
-                    "to switch on. If they are not, it runs a small test guest "
-                    "instead, which is what this row exists to tell you.\n\n"
-                    "This row is about the three SHARED files. Each machine "
-                    "also needs its own writable copy of the root filesystem, "
-                    "made once when you first open it; a screen with no "
-                    "machine selected cannot say whether any particular "
-                    "machine has one yet.";
+            return @"Firmware is shared. Each machine creates its own writable disk on first boot.";
 
         case VMImportSectionKeys:
-            return @"These are yours, not the app's. S5LBox ships no keys, "
-                    "downloads none, and cannot compute any -- they were "
-                    "recovered from hardware, this app has no list of them, "
-                    "and it will not fetch one or suggest where to look.\n\n"
-                    "Anything typed here is held in memory for this session "
-                    "only. It is not written to a file, not put in the app's "
-                    "settings or the keychain, and not printed to any log.\n\n"
-                    "You are responsible for using firmware you are entitled "
-                    "to use.\n\n"
-                    "Setting a key does not re-read the archive. Use the "
-                    "import row at the top once the keys are in.";
+            return @"Optional overrides, held only for this app session. Saving an override "
+                    "retries the selected IPSW immediately. Use automatic keys to clear overrides.";
 
         case VMImportSectionReport:
             return @"Everything above as plain text, including the SHA-256 of "
@@ -589,12 +548,8 @@ estimatedHeightForRowAtIndexPath:(NSIndexPath *)indexPath {
                     cell.textLabel.text = @"Firmware imported";
                     cell.textLabel.textColor = [UIColor systemGreenColor];
                     cell.detailTextLabel.text =
-                        @"The first time you open a machine it copies about "
-                        @"450 MB to make that machine's own writable root "
-                        @"filesystem, and shows \u201cPreparing iPhone OS\u201d "
-                        @"while it does. The test guest runs meanwhile. Close "
-                        @"and reopen the machine when it finishes and it boots "
-                        @"iPhone OS 3.1.3.";
+                        @"Open a machine to start iPhone OS. On first boot its writable disk "
+                        @"is prepared automatically, with progress shown on screen.";
                     break;
                 case VM_FW_BOOT_INCOMPLETE:
                 default:
@@ -719,6 +674,12 @@ estimatedHeightForRowAtIndexPath:(NSIndexPath *)indexPath {
             UITableViewCell *cell =
                 [self cellWithIdentifier:kVMImportPlainCell
                                    style:UITableViewCellStyleSubtitle];
+            if (row == (NSInteger)_keyRows.count) {
+                cell.textLabel.text = @"Use automatic keys";
+                cell.detailTextLabel.text = @"Clear manual overrides and retry the selected IPSW.";
+                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+                return cell;
+            }
             if (row < 0 || (NSUInteger)row >= _keyRows.count) return cell;
 
             const vm_fw_artefact_t which =
@@ -727,12 +688,12 @@ estimatedHeightForRowAtIndexPath:(NSIndexPath *)indexPath {
 
             /* "you supply" in the row itself, not only in the footer: a row
              * that just said "Kernel key" could be read as a key the app has. */
-            cell.textLabel.text = [NSString stringWithFormat:@"%@ %@  -  you supply",
+            cell.textLabel.text = [NSString stringWithFormat:@"%@ %@",
                 VMStringFromC(vm_fw_artefact_title(which)),
                 isRoot ? @"key" : @"key and IV"];
             cell.detailTextLabel.text = [_importer haveKeyForArtefact:which]
                 ? @"set for this session, tap to replace"
-                : @"not set, tap to type or paste one";
+                : @"automatic for iPhone1,2 · 7E18";
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
             return cell;
         }
@@ -793,6 +754,13 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
             return;
 
         case VMImportSectionKeys: {
+            if (_running) return;
+            if (row == (NSInteger)_keyRows.count) {
+                [_importer forgetKeys];
+                [self refresh];
+                [self startImportOfURL:_importer.selectedURL];
+                return;
+            }
             if (row < 0 || (NSUInteger)row >= _keyRows.count) return;
             [self presentKeyAlertForArtefact:
                 (vm_fw_artefact_t)_keyRows[(NSUInteger)row].intValue];
@@ -903,6 +871,23 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
      */
     _importer.delegate = self;
     _running = [_importer isRunning];
+    _pickedURL = _importer.selectedURL;
+    _haveReport = [_importer getLastReport:&_report];
+    _stage = _importer.stage;
+    _stageArtefact = _importer.stageArtefact;
+    _fraction = _importer.fraction;
+    [self refresh];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    [self checkDetectedArchive];
+}
+- (void)checkDetectedArchive {
+    if (!self.view.window || self.presentedViewController || self.navigationController.topViewController != self) return;
+    _importer.delegate = self;
+    [_importer importDetectedIPSWIfNeeded];
+    _pickedURL = _importer.selectedURL;
     [self refresh];
 }
 
@@ -917,15 +902,11 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
     NSString *message = isRoot
         ? [NSString stringWithFormat:
-            @"One hexadecimal value that you supply: %u characters, an AES key "
-            @"followed by an HMAC key. S5LBox does not have it, cannot work it "
-            @"out from the IPSW, and will not look for it.",
+            @"Optional override: %u hexadecimal characters (AES + HMAC). "
+            @"Leave automatic keys enabled for the supported IPSW.",
             (unsigned)(VMFW_DMG_KEY_BLOB_SIZE * 2u)]
-        : @"Two hexadecimal values that you supply: the key (32, 48 or 64 "
-          @"characters) and the IV (32 characters). S5LBox has neither, cannot "
-          @"work either out from the IPSW, and will not look for them.\n\n"
-          @"The IV is the published one, not the value inside the container -- "
-          @"that one is wrapped and would corrupt the first block.";
+        : @"Optional override: key (32, 48 or 64 hexadecimal characters) and IV "
+          @"(32 characters). The published IV is not the wrapped value inside IMG3.";
 
     UIAlertController *alert =
         [UIAlertController alertControllerWithTitle:title
@@ -1014,6 +995,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     }
 
     [self refresh];
+    [self startImportOfURL:_importer.selectedURL];
 }
 
 #pragma mark - The report
@@ -1034,10 +1016,14 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
    didReachStage:(vm_fw_stage_t)stage
      forArtefact:(vm_fw_artefact_t)artefact
         fraction:(double)fraction {
-    (void)importer;
+    BOOL wasRunning = _running;
+    _running = importer.isRunning;
+    _pickedURL = importer.selectedURL;
+    _haveReport = NO;
     _stage = stage;
     _stageArtefact = artefact;
     _fraction = fraction;
+    if (!wasRunning) [self refresh];
 
     /*
      * The one cell that moves is updated in place. Reloading the row several

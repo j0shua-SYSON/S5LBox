@@ -9,6 +9,7 @@
 #import "VMSettings.h"
 #import "VMInstanceListViewController.h"
 #import "VMIPALibrary.h"
+#import "VMFirmwareImporter.h"
 
 static NSString *const kAutomationOpenFirstMachineArgument =
     @"--s5lbox-automation-open-first-machine";
@@ -115,6 +116,8 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
 
 @interface AppDelegate ()
 @property (strong, nonatomic) VMDeviceAutomation *deviceAutomation;
+@property (nonatomic) BOOL importKeepsAwake;
+@property (nonatomic) BOOL previousIdleTimerDisabled;
 @end
 
 @implementation AppDelegate
@@ -154,6 +157,9 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
      * to the list is the common action once there is more than one machine. */
     VMInstanceListViewController *machines =
         [[VMInstanceListViewController alloc] init];
+    machines.showsSetupWhenNeeded = !automationRequested;
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(firmwareImportChanged)
+        name:VMFirmwareImportDidChangeNotification object:nil];
     UINavigationController *nav = [[VMNavigationController alloc]
         initWithRootViewController:machines];
     nav.navigationBar.prefersLargeTitles = YES;
@@ -214,6 +220,19 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
         });
     }
     return YES;
+}
+
+- (void)firmwareImportChanged {
+    BOOL running = VMFirmwareImporter.sharedImporter.isRunning;
+    UIApplication *application = UIApplication.sharedApplication;
+    if (running && !self.importKeepsAwake) {
+        self.previousIdleTimerDisabled = application.idleTimerDisabled;
+        application.idleTimerDisabled = YES;
+        self.importKeepsAwake = YES;
+    } else if (!running && self.importKeepsAwake) {
+        application.idleTimerDisabled = self.previousIdleTimerDisabled;
+        self.importKeepsAwake = NO;
+    }
 }
 
 @end

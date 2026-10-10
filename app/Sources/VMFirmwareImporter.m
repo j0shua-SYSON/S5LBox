@@ -6,6 +6,8 @@
 #import "VMFirmwareImporter.h"
 
 #import "VMSettings.h"
+#import "VMFirmwareKeys.h"
+#import "VMFirmwareStore.h"
 
 #import <errno.h>
 #import <fcntl.h>
@@ -20,6 +22,7 @@
  * here rather than included, so this file depends on one fewer header and
  * every buffer below is bounded by a constant you can see. */
 #define VMFW_PATH_CAP 1024u
+NSNotificationName const VMFirmwareImportDidChangeNotification = @"VMFirmwareImportDidChangeNotification";
 
 // Declared up front so every call below is checked against a prototype.
 @interface VMFirmwareImporter ()
@@ -29,6 +32,8 @@
                total:(uint64_t)total;
 - (void)performImportOfURL:(NSURL *)url scoped:(BOOL)scoped;
 - (vm_fw_status_t)runImportOfURL:(NSURL *)url intoReport:(vm_fw_report_t *)report;
+- (NSString *)firmwareRootDirectory;
+- (vm_fw_status_t)extractURL:(NSURL *)url intoReport:(vm_fw_report_t *)report outputDirectory:(NSString *)outDir;
 - (void)finishWithStatus:(vm_fw_status_t)status
                   report:(const vm_fw_report_t *)report;
 @end
@@ -236,12 +241,15 @@ static size_t vmfw_files_pread(void *ctx, void *handle, uint64_t offset,
 }
 
 static void vmfw_files_close(void *ctx, void *handle, bool keep) {
-    (void)ctx;
+    vmfw_file_ctx_t *fc = (vmfw_file_ctx_t *)ctx;
     vmfw_out_file_t *file = (vmfw_out_file_t *)handle;
     if (!file) return;
 
     if (file->fp) {
-        fclose(file->fp);
+        if (fclose(file->fp) != 0) {
+            vmfw_note_open_failure(fc, file->path, "The file could not be flushed. Check available storage.");
+            keep = false;
+        }
         file->fp = NULL;
     }
     /*
@@ -304,6 +312,9 @@ static void vmfw_strip_trailing_slash(char *path) {
     NSLock      *_keysLock;
     vm_fw_keys_t _keys;
     NSFileCoordinator *_fileCoordinator; // protected by @synchronized(self)
+    vm_fw_report_t _lastReport;
+    BOOL _haveReport;
+    NSString *_lastDetectedSignature;
 }
 
 #pragma mark - Lifecycle
@@ -326,6 +337,7 @@ static void vmfw_strip_trailing_slash(char *path) {
 
     _keysLock = [[NSLock alloc] init];
     vm_fw_keys_clear(&_keys);
+    _fraction = -1;
 
     /* Utility, not user-initiated: the user is watching a bar, but a 433 MB
      * root filesystem is minutes of work, and that is the class Apple names
@@ -370,6 +382,13 @@ static void vmfw_strip_trailing_slash(char *path) {
     bool idle = false;
     if (!atomic_compare_exchange_strong(&_state->running, &idle, true)) return;
     atomic_store(&_state->cancel, false);
+    _selectedURL = url;
+    _haveReport = NO;
+    _stage = VM_FW_STAGE_OPENING;
+    _stageArtefact = VM_FW_KERNEL;
+    _fraction = -1;
+    [self replayStateToDelegate];
+    [NSNotificationCenter.defaultCenter postNotificationName:VMFirmwareImportDidChangeNotification object:self];
 
     /*
      * In open mode the picker hands back a security-scoped URL. Access is taken
@@ -448,14 +467,53 @@ static void vmfw_strip_trailing_slash(char *path) {
     });
 }
 
+- (NSString *)firmwareRootDirectory {
+    NSString *documents = VMSettings.sharedSettings.documentsDirectory;
+    return documents.length ? [documents stringByAppendingPathComponent:@"firmware"] : nil;
+}
+
 - (vm_fw_status_t)runImportOfURL:(NSURL *)url intoReport:(vm_fw_report_t *)report {
+    NSString *root = [self firmwareRootDirectory];
+    if (!root.length)
+        return vmfw_fail(report, VM_FW_ERR_OUTPUT_REFUSED, "The app's storage is unavailable.");
+    NSError *error = nil;
+    NSString *staging = [VMFirmwareStore createStagingDirectoryInRoot:root error:&error];
+    if (!staging)
+        return vmfw_fail(report, VM_FW_ERR_OUTPUT_REFUSED, error.localizedDescription.UTF8String);
+    vm_fw_status_t status = [self extractURL:url intoReport:report outputDirectory:staging];
+    BOOL published = NO;
+    if (atomic_load(&_state->cancel)) {
+        status = VM_FW_ERR_CANCELLED;
+        snprintf(report->detail, sizeof report->detail, "Import cancelled. Existing firmware was kept.");
+    } else if (status == VM_FW_OK && vm_fw_report_is_verified(report)) {
+        published = [VMFirmwareStore publishDirectory:staging inRoot:root error:&error];
+        if (!published) {
+            status = VM_FW_ERR_OUTPUT_REFUSED;
+            snprintf(report->detail, sizeof report->detail, "Firmware could not be saved: %s",
+                     error.localizedDescription.UTF8String ?: "Check available storage.");
+        }
+    } else if (status == VM_FW_OK) {
+        status = VM_FW_ERR_VERIFICATION;
+        for (unsigned i = 0; i < VM_FW_ARTEFACT_COUNT; ++i) {
+            const vm_fw_artefact_report_t *a = &report->artefacts[i];
+            if (a->state == VM_FW_STATE_VERIFIED) continue;
+            snprintf(report->detail, sizeof report->detail, "%s: %.240s",
+                vm_fw_artefact_title((vm_fw_artefact_t)i), a->detail[0] ? a->detail : vm_fw_strerror(status));
+            break;
+        }
+    }
+    if (!published) [NSFileManager.defaultManager removeItemAtPath:staging error:NULL];
+    report->status = status;
+    return status;
+}
+
+- (vm_fw_status_t)extractURL:(NSURL *)url intoReport:(vm_fw_report_t *)report outputDirectory:(NSString *)outDir {
     if (!url.isFileURL)
         return vmfw_fail(report, VM_FW_ERR_ARCHIVE_UNREADABLE,
                          "That is not a file S5LBox can open.");
 
     /* Where the three results go. Created if absent: on a fresh install nobody
      * has put anything in Documents/firmware, so it does not exist yet. */
-    NSString *outDir = [[VMSettings sharedSettings] firmwareDirectory];
     if (outDir.length == 0)
         return vmfw_fail(report, VM_FW_ERR_OUTPUT_REFUSED,
                          "This app has no documents directory to write into.");
@@ -479,7 +537,7 @@ static void vmfw_strip_trailing_slash(char *path) {
         return vmfw_fail(report, VM_FW_ERR_OUTPUT_REFUSED,
                          "The firmware directory's path is too long to use.");
 
-    NSString *scratchDir = NSTemporaryDirectory();
+    NSString *scratchDir = outDir; // Owned by this run; removed on failure/cancel.
     if (scratchDir.length == 0 ||
         ![scratchDir getFileSystemRepresentation:files_ctx.scratch_dir
                                        maxLength:sizeof files_ctx.scratch_dir])
@@ -539,8 +597,10 @@ static void vmfw_strip_trailing_slash(char *path) {
     cfg.progress_ctx = (__bridge void *)self;
     cfg.cancel       = vmfw_cancel_cb;
     cfg.cancel_ctx   = _state;
+    cfg.resolve_keys = vm_fw_resolve_public_keys;
+    cfg.require_supported = true;
 
-    const vm_fw_status_t status = vm_fw_import_run(&cfg, report);
+    vm_fw_status_t status = vm_fw_import_run(&cfg, report);
 
     vm_fw_keys_clear(&keys);
     close(source.fd);
@@ -554,6 +614,7 @@ static void vmfw_strip_trailing_slash(char *path) {
                  report->detail, report->detail[0] ? "  " : "",
                  files_ctx.open_error);
         memcpy(report->detail, merged, sizeof merged);
+        report->status = status = VM_FW_ERR_OUTPUT_REFUSED;
     }
 
     return status;
@@ -569,6 +630,9 @@ static void vmfw_strip_trailing_slash(char *path) {
 
     VMFirmwareImporter *keptAlive = self;
     dispatch_async(dispatch_get_main_queue(), ^{
+        keptAlive->_stage = stage;
+        keptAlive->_stageArtefact = which;
+        keptAlive->_fraction = fraction;
         id<VMFirmwareImporterDelegate> delegate = keptAlive.delegate;
         if ([delegate respondsToSelector:
                 @selector(importer:didReachStage:forArtefact:fraction:)])
@@ -584,11 +648,44 @@ static void vmfw_strip_trailing_slash(char *path) {
     /* Cleared here rather than on the import queue, so -isRunning stays YES
      * until the delegate has actually been told the run is over. */
     if (_state) atomic_store(&_state->running, false);
+    if (report) { _lastReport = *report; _haveReport = YES; }
 
     id<VMFirmwareImporterDelegate> delegate = self.delegate;
     if (report &&
         [delegate respondsToSelector:@selector(importer:didFinishWithStatus:report:)])
         [delegate importer:self didFinishWithStatus:status report:report];
+    [NSNotificationCenter.defaultCenter postNotificationName:VMFirmwareImportDidChangeNotification object:self];
+}
+
++ (BOOL)hasConfiguredFirmware {
+    return [VMFirmwareStore hasPreparedFilesInDirectory:VMSettings.sharedSettings.firmwareDirectory];
+}
+
+- (BOOL)getLastReport:(vm_fw_report_t *)report {
+    if (!_haveReport || !report) return NO;
+    *report = _lastReport;
+    return YES;
+}
+
+- (void)replayStateToDelegate {
+    id<VMFirmwareImporterDelegate> delegate = self.delegate;
+    if ([self isRunning] && [delegate respondsToSelector:@selector(importer:didReachStage:forArtefact:fraction:)])
+        [delegate importer:self didReachStage:_stage forArtefact:_stageArtefact fraction:_fraction];
+    else if (_haveReport && [delegate respondsToSelector:@selector(importer:didFinishWithStatus:report:)])
+        [delegate importer:self didFinishWithStatus:_lastReport.status report:&_lastReport];
+}
+
+- (BOOL)importDetectedIPSWIfNeeded {
+    if ([self isRunning] || [VMFirmwareImporter hasConfiguredFirmware]) return NO;
+    NSString *path = VMSettings.sharedSettings.detectedArchivePaths.firstObject;
+    if (!path) return NO;
+    NSDictionary *info = [NSFileManager.defaultManager attributesOfItemAtPath:path error:NULL];
+    if (![info[NSFileType] isEqual:NSFileTypeRegular] || ![info[NSFileSize] unsignedLongLongValue]) return NO;
+    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@", path, info[NSFileSize], info[NSFileModificationDate]];
+    if ([signature isEqual:_lastDetectedSignature]) return NO;
+    _lastDetectedSignature = signature;
+    [self importIPSWAtURL:[NSURL fileURLWithPath:path]];
+    return YES;
 }
 
 #pragma mark - Keys the user supplies

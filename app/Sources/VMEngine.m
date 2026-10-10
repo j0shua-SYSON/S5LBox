@@ -166,6 +166,7 @@ static double vm_engine_now_seconds(void) {
     /* The provisioning copy's byte counters; see -rootFilesystemProgress. */
     uint64_t         _prepareDone;
     uint64_t         _prepareTotal;
+    BOOL             _preparedFirmwareBootRequest;
     BOOL             _machineReady;
 
     /*
@@ -503,10 +504,8 @@ static double vm_engine_now_seconds(void) {
          * says "Reopen it to boot iPhone OS" -- and a message that tells a
          * user to wait for something that never happens is worse than the
          * vague one it replaced. */
-        note = @"Preparing this machine's writable root filesystem — first "
-               @"boot only. The bar on the screen is the real copy progress "
-               @"and keeps going if you leave. Reopen this machine when it "
-               @"reaches the end.";
+        note = @"Preparing this machine's writable disk. iPhone OS will start "
+               @"automatically when preparation finishes.";
         BOOL alreadyRunning;
         pthread_mutex_lock(&_lock);
         alreadyRunning = _preparingRootFS;
@@ -631,10 +630,10 @@ static double vm_engine_now_seconds(void) {
         NSString *said = [NSString stringWithUTF8String:detail];
         pthread_mutex_lock(&_lock);
         _preparingRootFS = NO;
+        _preparedFirmwareBootRequest = ok;
         _bringUpNote = ok
             ? [NSString stringWithFormat:
-                @"This machine's root filesystem is ready. Reopen it to boot "
-                @"iPhone OS. %@", said ?: @""]
+                @"The writable disk is ready. Starting iPhone OS. %@", said ?: @""]
             : (said ?: @"The root filesystem could not be prepared.");
         pthread_mutex_unlock(&_lock);
         /* Two literal format strings rather than one chosen by a ternary: a
@@ -643,7 +642,7 @@ static double vm_engine_now_seconds(void) {
          * different refusal paths. */
         [self appendConsole:ok
             ? [NSString stringWithFormat:
-                @"[vm] root filesystem prepared; reopen to boot iPhone OS "
+                @"[vm] root filesystem prepared; requesting firmware boot "
                 @"(%s)\n", detail]
             : [NSString stringWithFormat:
                 @"[vm] could not prepare the root filesystem: %s\n", detail]];
@@ -2691,6 +2690,14 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
     BOOL preparing = _preparingRootFS;
     pthread_mutex_unlock(&_lock);
     return preparing;
+}
+
+- (BOOL)takePreparedFirmwareBootRequest {
+    pthread_mutex_lock(&_lock);
+    BOOL ready = _preparedFirmwareBootRequest && !_preparingRootFS;
+    if (ready) _preparedFirmwareBootRequest = NO;
+    pthread_mutex_unlock(&_lock);
+    return ready;
 }
 
 - (double)rootFilesystemProgress {

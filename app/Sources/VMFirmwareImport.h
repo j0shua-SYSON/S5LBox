@@ -18,9 +18,9 @@
  * key/IV stored in that KBAG do not decrypt the payload -- they are wrapped, so
  * decrypting with them produces noise rather than "complzss".
  *
- * So this code:
- *   - ships no keys, embeds no key table, and performs no network access;
- *   - accepts keys the USER supplies, and labels them that way everywhere;
+ * The parser performs no network access. Its caller may supply a build-specific
+ * key resolver (the app uses VMFirmwareKeys) and explicit manual overrides.
+ * This code:
  *   - when a key is absent, says exactly which artefact needs one and what kind
  *     it is, rather than failing vaguely or hanging.
  *
@@ -132,7 +132,9 @@ typedef enum {
 
     /* output */
     VM_FW_ERR_OUTPUT_REFUSED,
-    VM_FW_ERR_SCRATCH_REFUSED
+    VM_FW_ERR_SCRATCH_REFUSED,
+    VM_FW_ERR_UNSUPPORTED_BUILD,
+    VM_FW_ERR_VERIFICATION
 } vm_fw_status_t;
 
 const char *vm_fw_strerror(vm_fw_status_t st);
@@ -141,9 +143,8 @@ const char *vm_fw_strerror(vm_fw_status_t st);
 /* Keys the user supplies                                                    */
 /* ------------------------------------------------------------------------ */
 /*
- * There is deliberately no loader here: no file format, no bundled table, no
- * fetch. The only way a key enters this program is a caller passing one in,
- * and the only way it enters the app is the user typing or pasting it.
+ * No key source is hardwired into the decoder. A caller can resolve published
+ * keys from an exact manifest identity or provide session-only manual keys.
  *
  * The IMG3 artefacts take a key and an IV as separate hex strings, because the
  * published values are separate and the IV in the container is a different,
@@ -323,7 +324,16 @@ typedef struct {
     void             *progress_ctx;
     vm_fw_cancel_fn   cancel;
     void             *cancel_ctx;
+    /* Optional, called only after parsing Restore.plist. Manual keys override
+     * resolved components. Zero-initialized legacy callers keep their behavior. */
+    bool (*resolve_keys)(const vm_fw_report_t *identity, vm_fw_keys_t *out);
+    /* Refuse before opening outputs unless both the resolver and the reference
+     * digest catalog recognize this identity. Enabled by the shipping app. */
+    bool require_supported;
 } vm_fw_import_t;
+
+/* Completion is not readiness: VM_FW_OK alone may mean identify-only. */
+bool vm_fw_report_is_verified(const vm_fw_report_t *report);
 
 /*
  * Run the whole import. Always fills `report` -- including on failure, because

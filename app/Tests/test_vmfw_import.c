@@ -26,6 +26,7 @@
 #include "VMFirmwareTest.h"
 #include "VMFirmwareFixtures.h"
 #include "VMFirmwareImport.h"
+#include "VMFirmwareKeys.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -385,6 +386,92 @@ static void count_progress(void *ctx, vm_fw_artefact_t which,
 void vmfw_test_import(vmfw_test_t *t) {
     static ipsw_t ip;
     static memfs_t fs;
+
+    VMFW_T_SECTION(t, "import/public-keys");
+    {
+        vm_fw_report_t identity;
+        memset(&identity, 0, sizeof identity);
+        identity.manifest_read = true;
+        strcpy(identity.product_type, "iPhone1,2");
+        strcpy(identity.product_version, "3.1.3");
+        strcpy(identity.build, "7E18");
+        strcpy(identity.board, "n82ap");
+        strcpy(identity.platform, "s5l8900x");
+        vm_fw_keys_t keys;
+        vm_fw_keys_clear(&keys);
+        VMFW_T_CHECK(t, vm_fw_resolve_public_keys(&identity, &keys), "exact public identity resolves");
+        VMFW_T_CHECK(t, keys.kernel.present && keys.device_tree.present && keys.root_present,
+                     "all required keys are bundled");
+        VMFW_T_EQ_U(t, keys.kernel.key_bits, 128u, "published kernel key length");
+        VMFW_T_EQ_U(t, keys.kernel.key[0], 0xd0u, "kernel key fact");
+        VMFW_T_EQ_U(t, keys.kernel.iv[15], 0xa1u, "kernel IV fact");
+        VMFW_T_EQ_U(t, keys.device_tree.key[15], 0x35u, "device tree key fact");
+        VMFW_T_EQ_U(t, keys.root[35], 0x05u, "root AES+HMAC fact");
+        vm_fw_keys_t before = keys;
+        char *fields[] = {identity.product_type, identity.product_version, identity.build,
+                          identity.board, identity.platform};
+        for (unsigned i = 0; i < sizeof fields / sizeof fields[0]; ++i) {
+            char first = fields[i][0];
+            fields[i][0] = 'X';
+            VMFW_T_CHECK(t, !vm_fw_resolve_public_keys(&identity, &keys), "wrong identity field refuses");
+            VMFW_T_CHECK(t, !memcmp(&before, &keys, sizeof keys), "refusal preserves caller keys");
+            fields[i][0] = 0;
+            VMFW_T_CHECK(t, !vm_fw_resolve_public_keys(&identity, &keys), "missing identity field refuses");
+            fields[i][0] = first;
+        }
+        identity.manifest_read = false;
+        VMFW_T_CHECK(t, !vm_fw_resolve_public_keys(&identity, &keys), "never identify by filename alone");
+        VMFW_T_CHECK(t, !vm_fw_resolve_public_keys(NULL, &keys), "null identity refuses");
+        VMFW_T_CHECK(t, !vm_fw_resolve_public_keys(&identity, NULL), "null destination refuses");
+        VMFW_T_CHECK(t, strstr(vm_fw_public_keys_source(), "oldid=206002") != NULL, "source revision recorded");
+        VMFW_T_CHECK(t, !vm_fw_report_is_verified(&identity), "OK status alone is not readiness");
+        identity.manifest_read = identity.reference_build = true;
+        for (unsigned i = 0; i < VM_FW_ARTEFACT_COUNT; ++i) {
+            identity.artefacts[i].state = VM_FW_STATE_VERIFIED;
+            identity.artefacts[i].sha256_valid = identity.artefacts[i].reference_known = true;
+            identity.artefacts[i].matches_reference = true;
+            identity.artefacts[i].produced = 1;
+        }
+        VMFW_T_CHECK(t, vm_fw_report_is_verified(&identity), "complete verified report is ready");
+        for (unsigned i = 0; i < VM_FW_ARTEFACT_COUNT; ++i) {
+            identity.artefacts[i].matches_reference = false;
+            VMFW_T_CHECK(t, !vm_fw_report_is_verified(&identity), "every component must match");
+            identity.artefacts[i].matches_reference = true;
+        }
+        identity.status = VM_FW_ERR_CANCELLED;
+        VMFW_T_CHECK(t, !vm_fw_report_is_verified(&identity), "cancelled result never publishes");
+
+        ipsw_spec_t spec = k_reference_spec;
+        VMFW_T_CHECK(t, build_ipsw(&ip, &spec), "synthetic supported identity");
+        fx_blob_t blob = {0};
+        blob.data = ip.archive; blob.len = ip.len;
+        vm_fw_files_t files = {mem_open, mem_write, mem_pread, mem_close, &fs};
+        vm_fw_import_t imp;
+        memset(&imp, 0, sizeof imp);
+        imp.pread = fx_blob_pread; imp.pread_ctx = &blob; imp.size = ip.len; imp.files = &files;
+        imp.resolve_keys = vm_fw_resolve_public_keys; imp.require_supported = true;
+        vm_fw_report_t report;
+        memset(&fs, 0, sizeof fs);
+        (void)vm_fw_import_run(&imp, &report);
+        VMFW_T_CHECK(t, !report.artefacts[0].awaiting_key, "automatic resolver supplied kernel key");
+        VMFW_T_CHECK(t, !vm_fw_report_is_verified(&report), "forged manifest cannot authenticate synthetic payloads");
+        vm_fw_keys_clear(&keys);
+        (void)vm_fw_keys_set_img3(&keys, VM_FW_KERNEL, k_kernel_key_hex, k_kernel_iv_hex);
+        (void)vm_fw_keys_set_img3(&keys, VM_FW_DEVICE_TREE, k_dtree_key_hex, k_dtree_iv_hex);
+        (void)vm_fw_keys_set_root(&keys, k_root_key_hex);
+        imp.keys = &keys;
+        memset(&fs, 0, sizeof fs);
+        (void)vm_fw_import_run(&imp, &report);
+        VMFW_T_EQ_U(t, report.artefacts[0].produced, KERNEL_PLAIN_LEN, "manual override takes precedence");
+        VMFW_T_EQ_U(t, report.artefacts[0].state, VM_FW_STATE_MISMATCH, "override cannot bypass verification");
+        spec.build = "UNKNOWN";
+        VMFW_T_CHECK(t, build_ipsw(&ip, &spec), "unsupported build fixture");
+        blob.len = ip.len; imp.size = ip.len;
+        memset(&fs, 0, sizeof fs);
+        VMFW_T_EQ_U(t, vm_fw_import_run(&imp, &report), VM_FW_ERR_UNSUPPORTED_BUILD, "unsupported build refuses early");
+        VMFW_T_EQ_U(t, fs.count, 0u, "unknown build opens no output even with manual keys");
+        vm_fw_keys_clear(&keys);
+    }
 
     /* ---------------- hex parsing -------------------------------------- */
     VMFW_T_SECTION(t, "import/hex");

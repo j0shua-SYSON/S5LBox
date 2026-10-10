@@ -8,12 +8,9 @@
 //  whatever the user picked, and progress and completion handed back on the
 //  main queue.
 //
-//  WHAT IT DOES NOT DO, stated first because it is the question people ask.
-//  This class holds no keys. There is no bundled key table, no download, no
-//  keychain item and no NSUserDefaults key. The setters below take the text the
-//  user typed, hand it straight to the C parser, and keep the parsed bytes in
-//  this object's own memory until -forgetKeys or -dealloc overwrites them.
-//  Nothing here writes a key to a file, a log, or the pasteboard.
+//  Public keys are resolved by the modular VMFirmwareKeys catalog after the
+//  manifest is identified. Manual overrides stay in session memory only.
+//  No firmware download, keychain entry or private key persistence is involved.
 //
 //  THREADING, stated once so no caller has to guess. Call every method on the
 //  main queue. The import itself runs on a private serial queue, and both
@@ -30,6 +27,8 @@
 #import "VMFirmwareImport.h"
 
 NS_ASSUME_NONNULL_BEGIN
+
+FOUNDATION_EXPORT NSNotificationName const VMFirmwareImportDidChangeNotification;
 
 @class VMFirmwareImporter;
 
@@ -74,7 +73,7 @@ NS_ASSUME_NONNULL_BEGIN
  * had been lost. Worse, dismissing the screen during a 433 MB extraction
  * destroyed the importer mid-run.
  *
- * The keys are still never written anywhere -- not to a file, not to
+ * Manual overrides are still never written anywhere -- not to a file, not to
  * NSUserDefaults, not to the keychain -- which was always the point. What
  * changed is that "this session" now means the app, not the view.
  */
@@ -84,6 +83,17 @@ NS_ASSUME_NONNULL_BEGIN
 
 /* Safe from any thread. */
 - (BOOL)isRunning;
++ (BOOL)hasConfiguredFirmware;
+@property (nonatomic, readonly, nullable) NSURL *selectedURL;
+@property (nonatomic, readonly) vm_fw_stage_t stage;
+@property (nonatomic, readonly) vm_fw_artefact_t stageArtefact;
+@property (nonatomic, readonly) double fraction;
+- (BOOL)getLastReport:(vm_fw_report_t *)report;
+/* Resume screen state without starting another import. Main queue only. */
+- (void)replayStateToDelegate;
+/* Checks Files-visible locations once per changed archive, only while firmware
+ * is missing. Selection via the picker always imports immediately. */
+- (BOOL)importDetectedIPSWIfNeeded;
 
 /*
  * Start. Does nothing at all -- no callback, no delegate message -- if a run is

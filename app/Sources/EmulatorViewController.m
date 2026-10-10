@@ -486,6 +486,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
      * prevent. Asked of the engine, which knows.
      */
     BOOL preparing = [_engine isPreparingRootFilesystem];
+    if (preparing) return; // The progress overlay is sufficient; do not block automatic boot with an alert.
     NSString *title = preparing        ? @"Preparing iPhone OS"
                     : [_engine isRunningFirmware] ? @"Running iPhone OS"
                                                   : @"Not running iPhone OS";
@@ -1311,6 +1312,14 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
          * same sentence every sixteen frames.
          */
         [self refreshPrepareOverlay];
+
+        if (!_savingCheckpoint && !_restarting && !_shuttingDown && !_forcePowerOffRequested &&
+            !self.presentedViewController && self.navigationController.topViewController == self &&
+            UIApplication.sharedApplication.applicationState == UIApplicationStateActive &&
+            [_engine takePreparedFirmwareBootRequest]) {
+            [self resetTapped:nil];
+            return;
+        }
 
         NSString *note = [_engine bringUpNote];
         if (note.length && ![note isEqualToString:_lastBringUpNote]) {

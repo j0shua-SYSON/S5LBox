@@ -9,6 +9,7 @@
 #import "VMEngine.h"            /* +firmwareReadinessSummary, used below */
 #import "VMJitProbe.h"          /* the explicit, recoverable execution test */
 #import "VMFirmwareImportViewController.h"
+#import "VMFirmwareImporter.h"
 #import "VMGuestInstall.h"
 #import "VMInstanceStore.h"
 #import "VMOptions.h"
@@ -193,6 +194,15 @@ static NSString *VMStringFromC(const char *text) {
     UIView *header = [[UIView alloc] initWithFrame:CGRectZero];
     [header addSubview:_banner];
     self.tableView.tableHeaderView = header;
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(firmwareChanged)
+        name:VMFirmwareImportDidChangeNotification object:nil];
+}
+
+- (void)dealloc { [NSNotificationCenter.defaultCenter removeObserver:self]; }
+- (void)firmwareChanged {
+    [self refreshBanner];
+    [self.tableView reloadData];
+    [self.view setNeedsLayout];
 }
 
 /* Coming back from the importer, the three firmware rows may be describing
@@ -200,6 +210,7 @@ static NSString *VMStringFromC(const char *text) {
  * is expensive enough for a full reload to matter. */
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    [self refreshBanner];
     [self.tableView reloadData];
 }
 

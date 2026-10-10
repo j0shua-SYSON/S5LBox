@@ -35,6 +35,7 @@
 #endif
 
 #include "VMFirmwareImport.h"
+#include "VMFirmwareKeys.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -83,7 +84,7 @@ static void *out_open(void *ctx, const char *name) {
     char path[1200];
     if (!safe_name(name)) return NULL;
     snprintf(path, sizeof path, "%s/%s", o->dir, name);
-    return fopen(path, "wb");
+    return fopen(path, "w+b"); // The encrypted DMG scratch file is read back.
 }
 static bool out_write(void *ctx, void *h, const uint8_t *d, size_t n) {
     (void)ctx;
@@ -140,6 +141,7 @@ int main(int argc, char **argv) {
         fprintf(stderr,
             "usage: fwimport <archive.ipsw> [options]\n"
             "  --out <dir>            produce the three files there\n"
+            "  --auto                 resolve bundled public keys for supported builds\n"
             "  --kernel <key> <iv>    IMG3 key and IV for the kernelcache\n"
             "  --devicetree <key> <iv>  the same for the device tree\n"
             "  --rootfs <key>         the root filesystem key\n"
@@ -173,10 +175,13 @@ int main(int argc, char **argv) {
     vm_fw_keys_t keys;
     vm_fw_keys_clear(&keys);
     bool have_keys = false;
+    bool automatic = false;
     const char *outdir = NULL;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--out") && i + 1 < argc) {
             outdir = argv[++i];
+        } else if (!strcmp(argv[i], "--auto")) {
+            automatic = true;
         } else if (!strcmp(argv[i], "--kernel") && i + 2 < argc) {
             if (vm_fw_keys_set_img3(&keys, VM_FW_KERNEL, argv[i + 1],
                                     argv[i + 2]) != VM_FW_OK) {
@@ -222,6 +227,8 @@ int main(int argc, char **argv) {
     in.files       = outdir ? &files : NULL;
     in.keys        = have_keys ? &keys : NULL;
     in.progress    = on_progress;
+    in.resolve_keys = automatic ? vm_fw_resolve_public_keys : NULL;
+    in.require_supported = automatic;
 
     vm_fw_report_t rep;
     memset(&rep, 0, sizeof rep);
@@ -261,5 +268,5 @@ int main(int argc, char **argv) {
      * environment variable -- the same promise the app makes. */
     vm_fw_keys_clear(&keys);
     fclose(src.f);
-    return st == VM_FW_OK ? 0 : 1;
+    return st == VM_FW_OK && (!automatic || !outdir || vm_fw_report_is_verified(&rep)) ? 0 : 1;
 }

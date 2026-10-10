@@ -4,7 +4,8 @@ Run real **iPhone OS 3.1.3** inside an app on a modern iPhone.
 
 S5LBox emulates the S5L8900 hardware used by the iPhone 3G. It runs Apple's
 actual operating system—not a recreation of its interface. You supply the
-firmware; no Apple firmware or decryption keys are included.
+firmware; no Apple firmware is included. Public decryption keys for the
+supported build are bundled, so importing an IPSW requires no key entry.
 
 [![core-tests](https://github.com/j0shua-SYSON/S5LBox/actions/workflows/core-tests.yml/badge.svg)](https://github.com/j0shua-SYSON/S5LBox/actions/workflows/core-tests.yml)
 [![ios-build](https://github.com/j0shua-SYSON/S5LBox/actions/workflows/ios-build.yml/badge.svg)](https://github.com/j0shua-SYSON/S5LBox/actions/workflows/ios-build.yml)
@@ -27,7 +28,7 @@ Old websites and package repositories may also be unavailable or incompatible.
 ## Get started
 
 You need an ARM64 iPhone running **iOS 13 or later**, your own supported
-**iPhone 3G / iPhone1,2, iPhone OS 3.1.3 (7E18)** firmware and its required keys.
+**iPhone 3G / iPhone1,2, iPhone OS 3.1.3 (7E18)** IPSW.
 The deployment target is not a guarantee that every device/version has been
 tested. Keep several gigabytes of storage free for import, guest disks and
 temporary installation copies.
@@ -37,12 +38,14 @@ temporary installation copies.
    for the branch you intend to test. The Actions artifact is only ad-hoc signed:
    **re-sign it with your own valid provisioning profile before installing on
    stock iOS**.
-2. Open S5LBox. From **Machines**, tap the gear and choose **Import from an IPSW**.
-   Select your firmware and provide the keys requested by the importer.
+2. Open S5LBox and tap **Import IPSW** on the setup screen. Select your firmware;
+   S5LBox identifies, decrypts and verifies it automatically. Then tap
+   **Start iPhone OS**. Configured installations skip setup on later launches.
+   Firmware import and manual key overrides remain available in App Settings.
 3. New machines default to **MBX** graphics (experimental), with the CPU
    software-renderer override off. **CPU software** remains a compatibility
-   option. Return to Machines and open a machine. Initial disk preparation
-   and a cold boot take longer than reopening a saved session.
+   option. Initial disk preparation continues into a cold boot automatically;
+   it takes longer than reopening a saved session.
 4. Use **Back** and choose **Save & close** to resume later, or **Shut down** to
    power off iPhone OS and cold-boot next time. Keep S5LBox open until it returns
    to Machines before force-quitting or copying machine files.

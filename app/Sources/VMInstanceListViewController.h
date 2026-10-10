@@ -17,6 +17,7 @@
 #import <UIKit/UIKit.h>
 
 @interface VMInstanceListViewController : UITableViewController
+@property (nonatomic) BOOL showsSetupWhenNeeded;
 
 /*
  * A deliberately narrow device-automation hook. Normal launches and taps do

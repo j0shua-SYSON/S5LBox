@@ -187,6 +187,8 @@ typedef NS_ENUM(NSInteger, VMGraphicsMode) {
 - (NSArray<NSString *> *)detectedArchivePaths;
 
 - (NSString *)firmwareDirectory;
+/* Canonical Documents root shared by Files-visible import/library owners. */
+- (NSString *)documentsDirectory;
 
 /* The full path if that file is present there, or nil. */
 - (NSString *)firmwarePathForFile:(NSString *)file;
