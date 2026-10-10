@@ -2181,11 +2181,11 @@ _Static_assert(ARM_RAM_MAP_ENTRIES == 4096u &&
                    offsetof(a64_compact_ram_map_stats_t, fetch) == 16u &&
                    sizeof(a64_compact_ram_map_stats_t) == 24u,
                "persistent native RAM map layout drifted");
-_Static_assert(offsetof(arm_ram_window_t, read_host) == 104u &&
-                   offsetof(arm_ram_window_t, write_host) == 112u &&
-                   offsetof(arm_ram_window_t, base) == 120u &&
-                   offsetof(arm_ram_window_t, bytes) == 124u &&
-                   sizeof(arm_ram_window_t) == 128u,
+_Static_assert(offsetof(arm_ram_window_t, read_host) == 120u &&
+                   offsetof(arm_ram_window_t, write_host) == 128u &&
+                   offsetof(arm_ram_window_t, base) == 136u &&
+                   offsetof(arm_ram_window_t, bytes) == 140u &&
+                   sizeof(arm_ram_window_t) == 144u,
                "compact raw RAM capability layout drifted");
 _Static_assert(ARM_TLB_ENTRIES == 4096u && ARM_DREAD_ENTRIES == 4096u &&
                    sizeof(((arm_cpu_t *)0)->tlb[0]) == 16u &&

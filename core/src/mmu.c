@@ -214,6 +214,8 @@ bool arm_ram_window_current(const arm_ram_window_t *w, const arm_cpu_t *c) {
     const arm_bus_t *b = c->bus;
     return b->ctx == w->bus.ctx && b->host_ram == w->bus.host_ram &&
         b->host_ram_write == w->bus.host_ram_write &&
+        b->prepare_fetch == w->bus.prepare_fetch &&
+        b->prepare_fetch_ctx == w->bus.prepare_fetch_ctx &&
         b->read32 == w->bus.read32 && b->read16 == w->bus.read16 &&
         b->read8 == w->bus.read8 && b->write32 == w->bus.write32 &&
         b->write16 == w->bus.write16 && b->write8 == w->bus.write8;

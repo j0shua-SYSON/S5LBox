@@ -2956,21 +2956,21 @@ def compact_tlb_refill_body(fetch: bool, thumb: bool = False) -> list[str]:
         "    ldr w0, [x0, #8]",
         "    tst w0, #0x3ff",
         f"    b.ne {fail}",
-        "    ldr w1, [x5, #120]",
+        "    ldr w1, [x5, #136]",
         "    cmp w0, w1",
         f"    b.lo {fail}",
         "    sub w0, w0, w1",
-        "    ldr w1, [x5, #124]",
+        "    ldr w1, [x5, #140]",
         "    sub w1, w1, #1024",
         "    cmp w0, w1",
         f"    b.hi {fail}",
     ]
     if fetch:
-        out += ["    ldr x1, [x5, #104]"]
+        out += ["    ldr x1, [x5, #120]"]
     else:
         out += [
-            "    ldr x1, [x5, #104]",
-            "    ldr x2, [x5, #112]",
+            "    ldr x1, [x5, #120]",
+            "    ldr x2, [x5, #128]",
             "    cmp w4, #1",
             "    csel x1, x2, x1, eq",
             f"    cbz x1, {fail}",
