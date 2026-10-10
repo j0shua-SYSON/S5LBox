@@ -241,7 +241,7 @@ static UIImage *Tile(NSString *symbol) {
     }
     _connecting=YES; _bridge.canceled=NO;
     NSUInteger generation=++_connectionGeneration;
-    _message=@"Waiting for the guest. Keep it running; Packages connects automatically when ready.";
+    _message=@"Connecting automatically when iPhone OS is ready. If it is asleep or locked, tap Done to wake and unlock the guest.";
     [self renderAll];
     dispatch_async(_queue,^{
         NSError *error=nil; BOOL connected=[self readInstalled:&error];
