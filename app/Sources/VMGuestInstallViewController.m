@@ -236,7 +236,7 @@ static void VMGuestInstallBuildProgress(
                               : (aptTrustInstalled ? @"Cydia trust ready"
                               : (storageUpgraded ? @"Storage upgraded"
                               : (alreadyPresent ? @"Jailbreak already installed"
-                                                : @"Jailbreak ready"))))));
+                                                : @"Finishing jailbreak"))))));
         NSString *baseDetail = cydiaPrivilegesRepaired && cydiaSourcesAdded
             ? (storageUpgraded
                 ? @"Starting iPhone OS with a 2 GiB guest disk. Cydia's executable permissions were repaired and the period-compatible BigBoss repository was added without removing existing data."
@@ -251,7 +251,7 @@ static void VMGuestInstallBuildProgress(
                 : @"Starting iPhone OS. The exact legacy Cydia executable permissions were repaired; no guest data was removed.")
             : (storageUpgraded
                 ? @"Starting iPhone OS with a 2 GiB guest disk. Existing Cydia data was preserved."
-                : @"Starting iPhone OS. The first boot finishes package configuration inside the guest.")));
+                : @"Starting iPhone OS to finish installing Cydia. The Home screen will restart automatically; keep the machine running.")));
         NSString *trustDetail = aptTrustInstalled
             ? [baseDetail stringByAppendingString:
                 @" BigBoss's verified legacy public key was installed; APT signature checks remain enabled."]
@@ -262,8 +262,12 @@ static void VMGuestInstallBuildProgress(
             : trustDetail;
         self->_detail.text = cydiaCacheStaged
             ? [verifierDetail stringByAppendingString:
-                @" A retryable boot job will build and validate Cydia's package caches before enabling Cydia; this screen proves staging, not guest-side completion."]
+                @" Repository caches will be prepared in the background during boot."]
             : verifierDetail;
+        if (!alreadyPresent) {
+            self->_headline.text = @"Finishing jailbreak";
+            self->_detail.text = @"Starting iPhone OS to finish installing Cydia. The Home screen will restart automatically; keep the machine running.";
+        }
         void (^ready)(void) = [self.readyHandler copy];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                      (int64_t)(0.8 * NSEC_PER_SEC)),

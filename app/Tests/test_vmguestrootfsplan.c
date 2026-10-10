@@ -19,6 +19,7 @@
 
 static unsigned checks;
 static unsigned failures;
+static const char *script_output;
 
 #define CHECK(condition, ...) do {                                         \
     checks++;                                                              \
@@ -509,10 +510,10 @@ static void test_complete_synthetic_plan(void) {
                  "[ -u \"$cydia\" ] && [ -g \"$cydia\" ] || exit 1")
         : NULL;
     CHECK(configured && apt_cache_ready && cydia_owner && cydia_mode &&
-          cydia_mode_check && configured < apt_cache_ready &&
-          apt_cache_ready < cydia_owner && cydia_owner < cydia_mode &&
+          cydia_mode_check && configured < cydia_owner &&
+          cydia_owner < cydia_mode &&
           cydia_mode < cydia_mode_check,
-          "Cydia caches are not validated before its root 6755 executable is published");
+          "Cydia is not configured and given root 6755 permissions before registration");
     const char *mobile_cache = script
         ? strstr((const char *)script->content,
                  "/bin/grep -aq 'com.saurik.Cydia' \"$cache\" || exit 1")
@@ -523,7 +524,7 @@ static void test_complete_synthetic_plan(void) {
         : NULL;
     const char *icon_cache = script
         ? strstr((const char *)script->content,
-                 "[ -s \"$icon_cache/com.saurik.Cydia\" ] || exit 1")
+                 "[ -s \"$icon_cache/com.saurik.Cydia\" ]; then")
         : NULL;
     const char *respring = script
         ? strstr((const char *)script->content,
@@ -535,16 +536,32 @@ static void test_complete_synthetic_plan(void) {
         : NULL;
     CHECK(springboard_ready && mobile_cache && icon_cache && respring &&
           completion && cydia_mode_check < springboard_ready &&
-          springboard_ready < mobile_cache && mobile_cache < icon_cache &&
-          icon_cache < respring &&
-          respring < completion,
-          "the install can complete before SpringBoard is ready or Cydia is visibly cached and resprung");
+          springboard_ready < mobile_cache && mobile_cache < respring &&
+          respring < icon_cache && icon_cache < apt_cache_ready &&
+          apt_cache_ready < completion,
+          "Cydia registration/respring is blocked by its icon cache or optional repository refresh");
+    CHECK(script &&
+          strstr((const char *)script->content,
+                 "if [ ! -e \"$state/springboard-refreshed\" ]; then") != NULL &&
+          strstr((const char *)script->content,
+                 "Waiting for SpringBoard to publish Cydia; retrying without another respring") != NULL,
+          "a delayed icon cache can cause repeated resprings");
     CHECK(script &&
           strstr((const char *)script->content,
                  "/usr/bin/killall SpringBoard || true") == NULL &&
           strstr((const char *)script->content,
                  "[ \"$attempt\" -lt 60 ] || exit 1") != NULL,
           "the first-boot cache refresh still hides a missing SpringBoard process");
+
+    if (script_output && script) {
+        FILE *output = fopen(script_output, "wb");
+        CHECK(output != NULL, "could not open script fixture output");
+        if (output) {
+            CHECK(fwrite(script->content, 1u, script->content_size, output) ==
+                  script->content_size, "could not write script fixture");
+            CHECK(fclose(output) == 0, "could not close script fixture");
+        }
+    }
 
     vm_guest_rootfs_stats_t stats;
     vm_guest_rootfs_plan_get_stats(plan, &stats);
@@ -559,10 +576,10 @@ static void test_complete_synthetic_plan(void) {
     CHECK(vm_guest_rootfs_plan_manifest_sha256(plan, digest),
           "plan manifest identity was not produced");
     static const uint8_t EXPECTED[VM_GUEST_PACKAGE_SHA256_SIZE] = {
-        0xc1u, 0xc9u, 0xd8u, 0x92u, 0x06u, 0x03u, 0xe3u, 0x95u,
-        0xdeu, 0x38u, 0x86u, 0x91u, 0x49u, 0x10u, 0x3fu, 0x89u,
-        0x62u, 0xeeu, 0x5eu, 0xc1u, 0xd2u, 0x4cu, 0x3fu, 0xddu,
-        0x0au, 0x75u, 0x15u, 0x94u, 0xeeu, 0xb9u, 0xf3u, 0x14u
+        0xf4u, 0x76u, 0x14u, 0x35u, 0x23u, 0xf1u, 0x4eu, 0x13u,
+        0x40u, 0x0eu, 0x2cu, 0xd4u, 0x28u, 0x0eu, 0xf0u, 0x30u,
+        0x67u, 0xfdu, 0x32u, 0x2bu, 0x7eu, 0xaeu, 0x3du, 0x2du,
+        0x50u, 0xb1u, 0x64u, 0xa7u, 0x5du, 0x46u, 0x08u, 0x17u
     };
     CHECK(memcmp(digest, EXPECTED, sizeof digest) == 0,
           "synthetic plan identity changed");
@@ -738,7 +755,11 @@ static void test_real_packages_when_supplied(void) {
     vm_guest_rootfs_plan_close(&plan);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc == 3 && strcmp(argv[1], "--write-install-script") == 0)
+        script_output = argv[2];
+    else if (argc != 1)
+        return 2;
     printf("== guest rootfs plan ==\n");
     test_complete_synthetic_plan();
     test_identity_and_compression_refusals();

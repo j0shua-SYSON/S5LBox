@@ -673,6 +673,18 @@ add_test(NAME app_guest_rootfs_plan COMMAND test_vmguestrootfsplan)
 set_tests_properties(app_guest_rootfs_plan PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
+# Exercise the generated launchd script, including a cache which appears only
+# after respring. C-only consumers can still build without Python or bash.
+find_package(Python3 QUIET COMPONENTS Interpreter)
+find_program(S5LBOX_TEST_BASH bash)
+if(Python3_Interpreter_FOUND AND S5LBOX_TEST_BASH)
+    add_test(NAME app_guest_first_boot
+        COMMAND "${Python3_EXECUTABLE}" -B
+            "${CMAKE_CURRENT_SOURCE_DIR}/../app/Tests/test_guest_first_boot.py"
+            $<TARGET_FILE:test_vmguestrootfsplan> "${S5LBOX_TEST_BASH}"
+            "${CMAKE_CURRENT_BINARY_DIR}")
+endif()
+
 add_executable(test_vmguestinstallbuild
     ../app/Tests/test_vmguestinstallbuild.c
     ../app/Sources/VMGuestInstallBuild.c
