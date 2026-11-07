@@ -1649,6 +1649,7 @@ static void multiply_setup(arm_cpu_t *cpu, arm_bulk_memory_t *memory,
 
 static void multiply_differential(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
                                     unsigned budget, bool native) {
+    unsigned stride = memory->code_bytes / 4u;
     arm_cpu_t initial = *cpu, slow = *cpu;
     static uint8_t output[RAM_SIZE];
     memcpy(before_ram, ram, sizeof ram);
@@ -1663,7 +1664,8 @@ static void multiply_differential(arm_cpu_t *cpu, const arm_bulk_memory_t *memor
             memory->code_base, memory->code_bytes, budget, native_fallback, &context,
             &options, NULL, &stats, NULL, &retired, &signed_retired, &fallback),
               "multiply native wrapper refused");
-        CHECK(stats.calls > 0u && stats.retired == retired && !fallback,
+        CHECK((stats.calls > 0u) == (budget >= stride) &&
+              stats.retired <= retired && retired - stats.retired < stride && !fallback,
               "multiply missed compiled loop: bulk=%llu retired=%u fallback=%u",
               (unsigned long long)stats.retired, retired, fallback);
 #else
@@ -1671,16 +1673,17 @@ static void multiply_differential(arm_cpu_t *cpu, const arm_bulk_memory_t *memor
 #endif
     } else {
         retired = arm_bulk_multiply_try(cpu, memory, budget);
-        CHECK(retired && retired <= budget && retired % 23u == 0u, "multiply budget");
+        CHECK(retired && retired <= budget && retired % stride == 0u, "arithmetic budget");
         arm_cpu_t expected = initial;
         memcpy(expected.r, cpu->r, sizeof expected.r); expected.cpsr = cpu->cpsr;
-        expected.dread_hits += retired / 23u * 4u;
-        expected.dwrite_hits += retired / 23u;
+        expected.dread_hits += retired / stride * (stride == 23u ? 4u : 2u);
+        expected.dwrite_hits += retired / stride;
         CHECK(memcmp(cpu, &expected, sizeof expected) == 0, "multiply changed unrelated CPU state");
         cpu->cycles += retired;
     }
     CHECK(bus_reads == reads && bus_writes == writes, "multiply touched bus");
-    CHECK(cpu->r[15] == CODE + sizeof multiply_code || retired == budget / 23u * 23u,
+    CHECK(cpu->r[15] == CODE + memory->code_bytes ||
+          retired == (native ? budget : budget / stride * stride),
           "multiply stopped before its admitted budget or exit");
     memcpy(output, ram, sizeof ram); memcpy(ram, before_ram, sizeof ram);
     for (unsigned i = 0u; i < retired; i++)
@@ -1760,15 +1763,82 @@ static void test_multiply_loop(void) {
         for (unsigned seed = 0u; seed < 32u; seed++) {
             arm_cpu_t cpu; arm_bulk_memory_t memory;
             multiply_setup(&cpu, &memory, seed);
-            multiply_differential(&cpu, &memory, 23u * (1u + seed % 32u), true);
+            multiply_differential(&cpu, &memory,
+                seed < 2u ? 1u + seed * 21u : 23u * (1u + seed % 32u) + seed % 23u, true);
         }
     }
 #endif
     puts("arm_bulk multiply: exact arithmetic, aliases, budgets and refusal checks");
 }
 
+static const uint32_t square_code[] = {
+    0xe15930b2u, 0xe00c0593u, 0xe6ff307cu, 0xe1a02083u,
+    0xe15e30b2u, 0xe0823003u, 0xe0832001u, 0xe1a0382cu,
+    0xe14e20b2u, 0xe1a03083u, 0xe0831822u, 0xe2803001u,
+    0xe1a0c00eu, 0xe6ff0073u, 0xe1540000u, 0xe2899002u,
+    0xe28ee002u, 0x8affffedu,
+};
+static void square_setup(arm_cpu_t *cpu, arm_bulk_memory_t *memory, unsigned seed) {
+    multiply_setup(cpu, memory, seed);
+    for (unsigned i = 0u; i < 18u; i++) w32(NULL, CODE + i * 4u, square_code[i]);
+    memory->code_bytes = sizeof square_code;
+    cpu->r[0] = 0u; cpu->r[1] = cpu->r[2]; cpu->r[4] = 1u + seed % 64u;
+    cpu->r[9] = 0x1802u; cpu->r[14] = 0x2002u;
+}
+static void test_square_loop(void) {
+    const unsigned budgets[] = {18u, 36u, 179u, 512u, 4096u};
+    for (unsigned seed = 0u; seed < 64u; seed++) {
+        for (unsigned b = 0u; b < sizeof budgets / sizeof budgets[0]; b++) {
+            arm_cpu_t cpu; arm_bulk_memory_t memory;
+            square_setup(&cpu, &memory, seed);
+            multiply_differential(&cpu, &memory, budgets[b], false);
+        }
+    }
+    for (unsigned shape = 0u; shape < 5u; shape++) {
+        arm_cpu_t cpu; arm_bulk_memory_t memory;
+        split_mapping = shape == 4u;
+        square_setup(&cpu, &memory, 63u);
+        if (shape == 0u) cpu.r[9] = cpu.r[14];
+        if (shape == 1u) cpu.r[9] = cpu.r[14] - 2u;
+        if (shape == 2u) { cpu.r[0] = UINT32_MAX; cpu.r[4] = 65536u; }
+        if (shape >= 3u) { cpu.r[9] = 0x13fcu; cpu.r[14] = 0x23feu; }
+        multiply_differential(&cpu, &memory, 4096u, false);
+        split_mapping = false;
+    }
+    for (unsigned word = 0u; word < 18u; word++) {
+        arm_cpu_t cpu; arm_bulk_memory_t memory;
+        square_setup(&cpu, &memory, 31u); ram[CODE + word * 4u] ^= 1u;
+        refusal(&cpu, &memory, 4096u);
+    }
+    for (unsigned fault = 0u; fault < 9u; fault++) {
+        arm_cpu_t cpu; arm_bulk_memory_t memory;
+        square_setup(&cpu, &memory, 31u);
+        if (fault == 0u) memory.write_cache = false;
+        if (fault == 1u) cpu.dwrite[0x2000u >> 10].host = NULL;
+        if (fault == 2u) cpu.dread[0x2000u >> 10].host = NULL;
+        if (fault == 3u) cpu.dread[0x1800u >> 10].host = NULL;
+        if (fault == 4u) cpu.r[9]++;
+        if (fault == 5u) cpu.r[14]++;
+        if (fault == 6u) cpu.r[14] = CODE + 2u;
+        if (fault == 7u) memory.code_bytes--;
+        refusal(&cpu, &memory, fault == 8u ? 17u : 4096u);
+    }
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    if (a64_static_host_available()) {
+        for (unsigned seed = 0u; seed < 32u; seed++) {
+            arm_cpu_t cpu; arm_bulk_memory_t memory;
+            square_setup(&cpu, &memory, seed);
+            multiply_differential(&cpu, &memory,
+                seed < 2u ? 1u + seed * 16u : 18u * (1u + seed % 32u) + seed % 18u, true);
+        }
+    }
+#endif
+    puts("arm_bulk square: exact arithmetic, aliases, budgets and refusal checks");
+}
+
 int main(void) {
     test_multiply_loop();
+    test_square_loop();
     test_lengths();
     test_refusals();
     test_cached_boundaries();

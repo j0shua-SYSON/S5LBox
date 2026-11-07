@@ -58,11 +58,7 @@ static OSStatus ServiceWrite(SSLConnectionRef ref, const void *data, size_t *siz
     _operationDeadline = deadline;
     if (![self checkOperation:error]) return nil;
     NSTimeInterval timeout = deadline ? MIN(120, deadline - NSProcessInfo.processInfo.systemUptime) : 120;
-    NSTimeInterval connectionStart = NSProcessInfo.processInfo.systemUptime;
-    if (port == 62078) NSLog(@"[usb-timing] opening lockdown port");
     _socketFD = [transport openPort:port timeout:timeout canceled:_canceled allowGuestWake:allowGuestWake error:error];
-    if (port == 62078) NSLog(@"[usb-timing] lockdown port %.3fs connected=%d",
-        NSProcessInfo.processInfo.systemUptime-connectionStart, _socketFD >= 0);
     if (_socketFD < 0) return nil;
     return self;
 }
@@ -165,8 +161,6 @@ static OSStatus ServiceWrite(SSLConnectionRef ref, const void *data, size_t *siz
     return [self sendPlist:plist error:error] ? [self receivePlist:error] : nil;
 }
 - (BOOL)enableTLSWithIdentity:(SecIdentityRef)identity expectedKey:(SecKeyRef)key error:(NSError **)error {
-    NSTimeInterval tlsStart = NSProcessInfo.processInfo.systemUptime;
-    NSLog(@"[usb-timing] TLS begin");
     if (_tls || !identity || !key) {
         if (error) *error = ServiceError(@"A valid guest pairing identity is required."); return NO;
     }
@@ -207,10 +201,7 @@ static OSStatus ServiceWrite(SSLConnectionRef ref, const void *data, size_t *siz
         else if (status == errSSLWouldBlock && ![self waitUntil:deadline error:error]) return NO;
         else if (status != errSSLWouldBlock) break;
     }
-    if (!status && pinned) {
-        NSLog(@"[usb-timing] TLS ready %.3fs", NSProcessInfo.processInfo.systemUptime-tlsStart);
-        return YES;
-    }
+    if (!status && pinned) return YES;
     if (error) *error = ServiceError([NSString stringWithFormat:@"Guest TLS pairing failed (%d).", (int)status]);
     return NO;
 }

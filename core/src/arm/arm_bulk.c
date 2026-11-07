@@ -109,6 +109,15 @@ static const uint32_t multiply_words[] = {
     0xe1a03009u, 0x11a02008u, 0x1affffe8u,
 };
 
+/* The matching big-integer square cross-product loop. */
+static const uint32_t square_words[] = {
+    0xe15930b2u, 0xe00c0593u, 0xe6ff307cu, 0xe1a02083u,
+    0xe15e30b2u, 0xe0823003u, 0xe0832001u, 0xe1a0382cu,
+    0xe14e20b2u, 0xe1a03083u, 0xe0831822u, 0xe2803001u,
+    0xe1a0c00eu, 0xe6ff0073u, 0xe1540000u, 0xe2899002u,
+    0xe28ee002u, 0x8affffedu,
+};
+
 static uint32_t read32(const uint8_t *p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 |
            (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
@@ -166,6 +175,22 @@ static uint16_t read16(const uint8_t *p) {
     return (uint16_t)((uint16_t)p[0] | (uint16_t)p[1] << 8);
 }
 
+static uint8_t *half_store_at(const arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
+                                uint32_t va) {
+    unsigned slot = (va >> 10) & (ARM_DREAD_ENTRIES - 1u);
+    if ((va & 1u) || !cpu->dwrite[slot].host ||
+        cpu->dwrite[slot].tag != (va & ~UINT32_C(1023)) ||
+        cpu->dwrite[slot].gen != cpu->tlb_gen) return NULL;
+    uint8_t *dest = cpu->dwrite[slot].host + (va & 1023u);
+    /* Include physical aliases: a store cannot invalidate the instruction
+     * proof used for this invocation. Other writes retain DWRITE's normal
+     * consent contract, including refusal of watched data pages. */
+    if ((uintptr_t)dest - (uintptr_t)memory->code < memory->code_bytes ||
+        (uintptr_t)(dest + 1) - (uintptr_t)memory->code < memory->code_bytes)
+        return NULL;
+    return dest;
+}
+
 static unsigned multiply_loop(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
                                 unsigned budget) {
     if (memory->flat_ram || !memory->write_cache || !cpu->bus ||
@@ -186,17 +211,8 @@ static unsigned multiply_loop(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
             r[4] > UINT32_MAX - 2u || r[1] > UINT32_MAX - 2u) break;
         const uint8_t *source = word_at(cpu, memory, r[4] - 2u);
         const uint8_t *ahead = word_at(cpu, memory, r[1] + 2u);
-        unsigned slot = (r[1] >> 10) & (ARM_DREAD_ENTRIES - 1u);
-        if (!source || !ahead || !cpu->dwrite[slot].host ||
-            cpu->dwrite[slot].tag != (r[1] & ~UINT32_C(1023)) ||
-            cpu->dwrite[slot].gen != cpu->tlb_gen) break;
-        uint8_t *dest = cpu->dwrite[slot].host + (r[1] & 1023u);
-        /* Include physical aliases: a store cannot invalidate the instruction
-         * proof used for this invocation. Other writes retain DWRITE's normal
-         * consent contract, including refusal of watched data pages. */
-        if ((uintptr_t)dest - (uintptr_t)memory->code < memory->code_bytes ||
-            (uintptr_t)(dest + 1) - (uintptr_t)memory->code < memory->code_bytes)
-            break;
+        uint8_t *dest = half_store_at(cpu, memory, r[1]);
+        if (!source || !ahead || !dest) break;
         r[9] = read16(source);
         uint32_t sum = r[12] + r[2];
         uint32_t mask = read32(literal);
@@ -223,6 +239,39 @@ static unsigned multiply_loop(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
     memcpy(cpu->r, r, sizeof r); cpu->cpsr = flags;
     cpu->dread_hits += (retired / 23u) * 4u;
     cpu->dwrite_hits += retired / 23u;
+    return retired;
+}
+
+static unsigned square_loop(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
+                              unsigned budget) {
+    if (memory->flat_ram || !memory->write_cache || !cpu->bus ||
+        !cpu->bus->host_ram_write || budget < 18u) return 0u;
+    uint32_t r[16]; memcpy(r, cpu->r, sizeof r);
+    uint32_t flags = cpu->cpsr;
+    unsigned retired = 0u;
+    while (budget - retired >= 18u) {
+        if ((r[9] & 1u) || (r[14] & 1u) || r[9] < 2u || r[14] < 2u ||
+            r[9] > UINT32_MAX - 2u || r[14] > UINT32_MAX - 2u) break;
+        const uint8_t *source = word_at(cpu, memory, r[9] - 2u);
+        const uint8_t *current = word_at(cpu, memory, r[14] - 2u);
+        uint8_t *dest = half_store_at(cpu, memory, r[14] - 2u);
+        if (!source || !current || !dest) break;
+        uint32_t product = (uint32_t)read16(source) * r[5];
+        r[2] = ((product & 65535u) << 1) + read16(current) + r[1];
+        dest[0] = (uint8_t)r[2]; dest[1] = (uint8_t)(r[2] >> 8);
+        r[1] = ((product >> 16) << 1) + (r[2] >> 16);
+        r[3] = r[0] + 1u;
+        r[12] = r[14];
+        r[0] = r[3] & 65535u;
+        flags = compare_flags(flags, r[4], r[0]);
+        r[9] += 2u; r[14] += 2u;
+        retired += 18u;
+        if (r[4] <= r[0]) { r[15] += sizeof square_words; break; }
+    }
+    if (!retired) return 0u;
+    memcpy(cpu->r, r, sizeof r); cpu->cpsr = flags;
+    cpu->dread_hits += retired / 18u * 2u;
+    cpu->dwrite_hits += retired / 18u;
     return retired;
 }
 
@@ -909,6 +958,10 @@ static unsigned bulk_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
         return count ? count : thumb_filtered_chain(cpu, memory, offset, budget);
     }
     uint32_t first = read32(memory->code + offset);
+    if (first == square_words[0]) {
+        if (!matches(memory, offset, square_words, 18u)) return 0u;
+        return square_loop(cpu, memory, budget);
+    }
     if (first == multiply_words[0]) {
         if (!matches(memory, offset, multiply_words, 23u)) return 0u;
         return multiply_loop(cpu, memory, budget);

@@ -39,11 +39,7 @@ static NSTimeZone *VMUSBValidatedTimeZone(id identifier) {
 - (NSDictionary *)request:(NSString *)request values:(NSDictionary *)values error:(NSError **)error {
     NSMutableDictionary *query = [@{@"Label":@"S5LBox", @"Request":request} mutableCopy];
     if (values) [query addEntriesFromDictionary:values];
-    NSTimeInterval requestStart = NSProcessInfo.processInfo.systemUptime;
-    NSLog(@"[usb-timing] request %@ begin", request);
     NSDictionary *reply = [_service request:query error:error];
-    NSLog(@"[usb-timing] request %@ %.3fs reply=%d", request,
-        NSProcessInfo.processInfo.systemUptime-requestStart, reply != nil);
     if (!reply) return nil;
     if (![reply[@"Request"] isEqual:request] || reply[@"Error"] ||
         (reply[@"Result"] && ![reply[@"Result"] isEqual:@"Success"])) {
@@ -71,9 +67,7 @@ static NSTimeZone *VMUSBValidatedTimeZone(id identifier) {
     if (![key[@"Value"] isKindOfClass:NSData.class]) {
         if (error) *error = LockdownError(@"The guest did not return a pairing key."); return nil;
     }
-    NSTimeInterval pairingStart = NSProcessInfo.processInfo.systemUptime;
     client->_pairing = [[VMUSBPairing alloc] initWithInstanceID:identifier devicePublicKey:key[@"Value"] error:error];
-    NSLog(@"[usb-timing] host identity %.3fs", NSProcessInfo.processInfo.systemUptime-pairingStart);
     if (!client->_pairing) return nil;
     NSDictionary *record = client->_pairing.record;
     NSDictionary *pairValues = @{@"PairRecord":record, @"ProtocolVersion":@"2"};

@@ -1815,7 +1815,6 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
     BOOL clockSyncPending = YES;
     unsigned clockSyncAttempts = 0;
     double clockSyncRetryAt = 0;
-    double usbTraceNext = 0;
 
     /* Emulator-thread only, so it is a local and not an ivar: nothing else may
      * read it and no lock can be forgotten. */
@@ -2145,13 +2144,6 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
                         usb_host_init(&_usbHost, &_machine); /* guest reboot */
                     unsigned previous = _usbHost.stage;
                     usb_host_poll(&_usbHost, &_machine);
-                    if (!_usbHost.stage && usbNow >= usbTraceNext) {
-                        usbTraceNext = usbNow + 10;
-                        NSLog(@"[usb-timing] driver wait ahb=%x mask=%x gate=%x ctl=%x cable=%u pmu=%x pc=%x",
-                            _machine.usbotg.gahbcfg, _machine.usbotg.gintmsk,
-                            _machine.usbotg.pcgcctl, _machine.usbotg.dctl,
-                            _machine.usbotg.connected, _machine.pmu.regs[PCF50635_MBCS1], _machine.cpu.r[15]);
-                    }
                     if (!usb_host_ready(&_usbHost) && _usbMux) {
                         [_usbTransport reconnectSession:@"Guest USB controller reset"];
                         usb_mux_cancel(_usbMux, "Guest USB controller reset");
