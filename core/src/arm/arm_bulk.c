@@ -97,6 +97,18 @@ static const uint32_t compare_words[] = {
     0x0afffff6u,
 };
 
+/* The complete 23-instruction halfword multiply/add loop, including its
+ * back edge. Used by the legacy big-integer library during service startup.
+ * Match instructions, not a firmware address, symbol or cryptographic key. */
+static const uint32_t multiply_words[] = {
+    0xe15490b2u, 0xe08c2002u, 0xe59fc158u, 0xe000039bu,
+    0xe00e0a99u, 0xe1a08820u, 0xe00e300cu, 0xe0823003u,
+    0xe0832005u, 0xe000300cu, 0xe0822003u, 0xe1f150b2u,
+    0xe1a03822u, 0xe083c82eu, 0xe14120b2u, 0xe2863001u,
+    0xe59d2014u, 0xe6ff6073u, 0xe1520006u, 0xe2844002u,
+    0xe1a03009u, 0x11a02008u, 0x1affffe8u,
+};
+
 static uint32_t read32(const uint8_t *p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 |
            (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
@@ -152,6 +164,66 @@ static uint32_t compare_flags(uint32_t cpsr, uint32_t a, uint32_t b) {
 
 static uint16_t read16(const uint8_t *p) {
     return (uint16_t)((uint16_t)p[0] | (uint16_t)p[1] << 8);
+}
+
+static unsigned multiply_loop(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
+                                unsigned budget) {
+    if (memory->flat_ram || !memory->write_cache || !cpu->bus ||
+        !cpu->bus->host_ram_write || budget < 23u ||
+        (cpu->r[13] & 3u) || cpu->r[13] > UINT32_MAX - 20u ||
+        cpu->r[15] > UINT32_MAX - 0x168u) return 0u;
+    /* LDR's literal needs a READ grant even though its address is in code.
+     * The loop may alias its stack limit or input; preserve actual load/store
+     * order and re-read the limit AFTER STRH, rather than assuming a C ABI. */
+    const uint8_t *literal = word_at(cpu, memory, cpu->r[15] + 0x168u);
+    const uint8_t *limit = word_at(cpu, memory, cpu->r[13] + 20u);
+    if (!literal || !limit) return 0u;
+    uint32_t r[16]; memcpy(r, cpu->r, sizeof r);
+    uint32_t flags = cpu->cpsr;
+    unsigned retired = 0u;
+    while (budget - retired >= 23u) {
+        if ((r[1] & 1u) || (r[4] & 1u) || r[4] < 2u ||
+            r[4] > UINT32_MAX - 2u || r[1] > UINT32_MAX - 2u) break;
+        const uint8_t *source = word_at(cpu, memory, r[4] - 2u);
+        const uint8_t *ahead = word_at(cpu, memory, r[1] + 2u);
+        unsigned slot = (r[1] >> 10) & (ARM_DREAD_ENTRIES - 1u);
+        if (!source || !ahead || !cpu->dwrite[slot].host ||
+            cpu->dwrite[slot].tag != (r[1] & ~UINT32_C(1023)) ||
+            cpu->dwrite[slot].gen != cpu->tlb_gen) break;
+        uint8_t *dest = cpu->dwrite[slot].host + (r[1] & 1023u);
+        /* Include physical aliases: a store cannot invalidate the instruction
+         * proof used for this invocation. Other writes retain DWRITE's normal
+         * consent contract, including refusal of watched data pages. */
+        if ((uintptr_t)dest - (uintptr_t)memory->code < memory->code_bytes ||
+            (uintptr_t)(dest + 1) - (uintptr_t)memory->code < memory->code_bytes)
+            break;
+        r[9] = read16(source);
+        uint32_t sum = r[12] + r[2];
+        uint32_t mask = read32(literal);
+        r[0] = r[11] * r[3];
+        r[14] = r[9] * r[10];
+        r[8] = r[0] >> 16;
+        sum += r[14] & mask;
+        sum += r[5];
+        sum += r[0] & mask;
+        r[1] += 2u;
+        r[5] = read16(ahead);
+        r[12] = (sum >> 16) + (r[14] >> 16);
+        dest[0] = (uint8_t)sum; dest[1] = (uint8_t)(sum >> 8);
+        r[2] = read32(limit);
+        r[6] = (r[6] + 1u) & 65535u;
+        flags = compare_flags(flags, r[2], r[6]);
+        r[4] += 2u;
+        r[3] = r[9];
+        retired += 23u;
+        if (r[2] == r[6]) { r[15] += sizeof multiply_words; break; }
+        r[2] = r[8];
+    }
+    if (!retired) return 0u;
+    memcpy(cpu->r, r, sizeof r); cpu->cpsr = flags;
+    cpu->dread_hits += (retired / 23u) * 4u;
+    cpu->dwrite_hits += retired / 23u;
+    return retired;
 }
 
 /* One invocation is serialized and read-only: no guest store, callback or
@@ -836,6 +908,10 @@ unsigned arm_bulk_string_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
         return count ? count : thumb_filtered_chain(cpu, memory, offset, budget);
     }
     uint32_t first = read32(memory->code + offset);
+    if (first == multiply_words[0]) {
+        if (!matches(memory, offset, multiply_words, 23u)) return 0u;
+        return multiply_loop(cpu, memory, budget);
+    }
     if (first == compare_words[5]) {
         if (offset < 20u || !matches(memory, offset - 20u, compare_words, 9u))
             return 0u;

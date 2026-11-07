@@ -4844,7 +4844,12 @@ def compact_raw_function() -> list[str]:
         "    mov w15, #0x20d0",
         "    movk w15, #0xe1d0, lsl #16",
         "    cmp w9, w15",
+        "    b.eq .La64cr_bulk_extra_candidate",
+        "    mov w15, #0x90b2",
+        "    movk w15, #0xe154, lsl #16",
+        "    cmp w9, w15",
         "    b.ne .La64cr_extra_transfer",
+        ".La64cr_bulk_extra_candidate:",
         "    mov w0, #2",
         "    b .La64cr_bulk_call",
         # Preserve every live decode operand/table pointer on refusal. The C

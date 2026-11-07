@@ -28,6 +28,8 @@ typedef struct {
     const uint8_t *flat_ram;
     size_t flat_size;
     bool data_cache;
+    /* Stores also require live User DWRITE grants, never just readable RAM. */
+    bool write_cache;
     /* Read-only loops can resolve cold READ pages with the shared MMU decoder
      * only when both descriptors and data fit this immutable RAM capability.
      * Cached mappings/faults still take precedence. No bus access or cache
@@ -42,7 +44,7 @@ typedef struct {
 /* Returns the exact number of original instructions represented, bounded by
  * budget. The caller owns cycle/device accounting. Zero changes no architectural
  * CPU state, cache counters or guest bytes. Capturing a write witness can revoke
- * derived DWRITE grants. No bus access, MMIO or executable write occurs.
+ * derived DWRITE grants. No bus access, MMIO or write to the code witness occurs.
  * Matching proves the witnessed instruction pattern and complete admitted
  * control flow, never a name or assumed PC.
  * A long loop may return an exact prefix at its header for bounded resumption.

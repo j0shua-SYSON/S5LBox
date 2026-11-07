@@ -1606,7 +1606,169 @@ static void test_long_chain_index(bool fragmented) {
     }
 }
 
+static const uint32_t multiply_code[] = {
+    0xe15490b2u, 0xe08c2002u, 0xe59fc158u, 0xe000039bu,
+    0xe00e0a99u, 0xe1a08820u, 0xe00e300cu, 0xe0823003u,
+    0xe0832005u, 0xe000300cu, 0xe0822003u, 0xe1f150b2u,
+    0xe1a03822u, 0xe083c82eu, 0xe14120b2u, 0xe2863001u,
+    0xe59d2014u, 0xe6ff6073u, 0xe1520006u, 0xe2844002u,
+    0xe1a03009u, 0x11a02008u, 0x1affffe8u,
+};
+static const arm_bus_t multiply_bus = {
+    .read32 = r32, .read16 = r16, .read8 = r8,
+    .write32 = w32, .write16 = w16, .write8 = w8,
+    .host_ram = host_ram, .host_ram_write = host_ram,
+};
+static void multiply_setup(arm_cpu_t *cpu, arm_bulk_memory_t *memory,
+                             unsigned seed) {
+    uint32_t random = seed + 1u;
+    for (unsigned i = 0u; i < sizeof ram; i++) {
+        random = random * 1664525u + 1013904223u;
+        ram[i] = (uint8_t)(random >> 24);
+    }
+    memset(cpu, 0, sizeof *cpu);
+    arm_reset(cpu, &multiply_bus);
+    cpu->cpsr = ARM_MODE_USR | ARM_CPSR_I | ARM_CPSR_F | ARM_CPSR_Q |
+        (0xau << 16) | ((seed & 15u) << 28);
+    for (unsigned i = 0u; i < 15u; i++) {
+        random = random * 1664525u + 1013904223u; cpu->r[i] = random;
+    }
+    cpu->r[1] = 0x2000u; cpu->r[4] = 0x1802u;
+    cpu->r[6] = 0u; cpu->r[13] = 0x3000u; cpu->r[15] = CODE;
+    cpu->cycles = 127u; cpu->excl_valid = true; cpu->excl_addr = 0x2000u;
+    for (unsigned i = 0u; i < 23u; i++) w32(NULL, CODE + i * 4u, multiply_code[i]);
+    w32(NULL, CODE + 0x168u, seed & 1u ? 65535u : random);
+    w32(NULL, 0x3014u, 1u + seed % 64u);
+    *memory = (arm_bulk_memory_t){.code = ram + CODE, .code_base = CODE,
+        .code_bytes = sizeof multiply_code, .data_cache = true, .write_cache = true};
+    for (uint32_t a = 0u; a < RAM_SIZE; a += 1024u) {
+        CHECK(arm_data_cache_try_refill(cpu, a, ARM_ACCESS_READ, false), "multiply READ grant");
+        CHECK(arm_data_cache_try_refill(cpu, a, ARM_ACCESS_WRITE, false), "multiply WRITE grant");
+    }
+}
+
+static void multiply_differential(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
+                                    unsigned budget, bool native) {
+    arm_cpu_t initial = *cpu, slow = *cpu;
+    static uint8_t output[RAM_SIZE];
+    memcpy(before_ram, ram, sizeof ram);
+    unsigned retired = 0u, reads = bus_reads, writes = bus_writes;
+    if (native) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+        native_context_t context = {cpu, memory};
+        unsigned signed_retired = 0u, fallback = 0u;
+        a64_compact_bulk_stats_t stats = {0};
+        const a64_compact_raw_options_t options = {.bulk_enabled = true};
+        CHECK(a64_compact_raw_run_code_window_resident_options(cpu, memory->code,
+            memory->code_base, memory->code_bytes, budget, native_fallback, &context,
+            &options, NULL, &stats, NULL, &retired, &signed_retired, &fallback),
+              "multiply native wrapper refused");
+        CHECK(stats.calls > 0u && stats.retired == retired && !fallback,
+              "multiply missed compiled loop: bulk=%llu retired=%u fallback=%u",
+              (unsigned long long)stats.retired, retired, fallback);
+#else
+        CHECK(false, "native multiply requested without static engine");
+#endif
+    } else {
+        retired = arm_bulk_string_try(cpu, memory, budget);
+        CHECK(retired && retired <= budget && retired % 23u == 0u, "multiply budget");
+        arm_cpu_t expected = initial;
+        memcpy(expected.r, cpu->r, sizeof expected.r); expected.cpsr = cpu->cpsr;
+        expected.dread_hits += retired / 23u * 4u;
+        expected.dwrite_hits += retired / 23u;
+        CHECK(memcmp(cpu, &expected, sizeof expected) == 0, "multiply changed unrelated CPU state");
+        cpu->cycles += retired;
+    }
+    CHECK(bus_reads == reads && bus_writes == writes, "multiply touched bus");
+    CHECK(cpu->r[15] == CODE + sizeof multiply_code || retired == budget / 23u * 23u,
+          "multiply stopped before its admitted budget or exit");
+    memcpy(output, ram, sizeof ram); memcpy(ram, before_ram, sizeof ram);
+    for (unsigned i = 0u; i < retired; i++)
+        CHECK(arm_step(&slow) == ARM_OK, "multiply oracle fault");
+    CHECK(memcmp(cpu->r, slow.r, sizeof slow.r) == 0, "multiply registers differ");
+    CHECK(cpu->cpsr == slow.cpsr && cpu->cycles == slow.cycles, "multiply flags/cycles differ");
+    CHECK(cpu->excl_valid == slow.excl_valid && cpu->excl_addr == slow.excl_addr,
+          "multiply exclusive monitor differs");
+    CHECK(memcmp(output, ram, sizeof ram) == 0, "multiply memory differs");
+}
+
+static void test_multiply_loop(void) {
+    const unsigned budgets[] = {23u, 46u, 247u, 512u, 4096u};
+    for (unsigned seed = 0u; seed < 64u; seed++) {
+        for (unsigned b = 0u; b < sizeof budgets / sizeof budgets[0]; b++) {
+            arm_cpu_t cpu; arm_bulk_memory_t memory;
+            multiply_setup(&cpu, &memory, seed);
+            multiply_differential(&cpu, &memory, budgets[b], false);
+        }
+    }
+    /* Alias input/output, the post-store stack limit, and the literal. Cross
+     * a 1KiB boundary, including a physically noncontiguous input mapping. */
+    for (unsigned shape = 0u; shape < 7u; shape++) {
+        arm_cpu_t cpu; arm_bulk_memory_t memory;
+        split_mapping = shape == 6u;
+        multiply_setup(&cpu, &memory, 63u);
+        if (shape == 0u) cpu.r[1] = cpu.r[4] - 2u;
+        if (shape == 1u) cpu.r[4] = cpu.r[1] + 2u;
+        if (shape == 2u) cpu.r[1] = cpu.r[13] + 20u;
+        if (shape == 3u) cpu.r[1] = CODE + 0x168u;
+        if (shape == 4u) { cpu.r[6] = 65534u; w32(NULL, 0x3014u, 0u); }
+        if (shape >= 5u) { cpu.r[4] = 0x13fcu; cpu.r[1] = 0x23feu; }
+        multiply_differential(&cpu, &memory, 4096u, false);
+        split_mapping = false;
+    }
+    for (unsigned word = 0u; word < 23u; word++) {
+        arm_cpu_t cpu; arm_bulk_memory_t memory;
+        multiply_setup(&cpu, &memory, 31u); ram[CODE + word * 4u] ^= 1u;
+        refusal(&cpu, &memory, 4096u);
+    }
+    for (unsigned fault = 0u; fault < 16u; fault++) {
+        arm_cpu_t cpu; arm_bulk_memory_t memory;
+        multiply_setup(&cpu, &memory, 31u);
+        if (fault == 0u) memory.write_cache = false;
+        if (fault == 1u) cpu.dwrite[0x2000u >> 10].host = NULL;
+        if (fault == 2u) cpu.dwrite[0x2000u >> 10].gen--;
+        if (fault == 3u) cpu.dwrite[0x2000u >> 10].tag |= 1u;
+        if (fault == 4u) cpu.dread[0u].host = NULL;
+        if (fault == 5u) cpu.dread[0x3000u >> 10].host = NULL;
+        if (fault == 6u) cpu.r[13]++;
+        if (fault == 7u) cpu.r[1]++;
+        if (fault == 8u) cpu.r[4]++;
+        if (fault == 9u) cpu.r[1] = CODE;
+        if (fault == 10u) cpu.dwrite[0x2000u >> 10].host = ram; // physical code alias
+        if (fault == 10u) cpu.r[1] += CODE;
+        if (fault == 11u) cpu.bus = &bus; // read consent alone is insufficient
+        if (fault == 13u) memory.code_bytes--;
+        if (fault == 14u) cpu.cp15.ttbr0 ^= 0x4000u;
+        if (fault == 15u) cpu.dread[0x1800u >> 10].host = NULL;
+        refusal(&cpu, &memory, fault == 12u ? 22u : 4096u);
+    }
+    {
+        arm_cpu_t cpu; arm_bulk_memory_t memory;
+        multiply_setup(&cpu, &memory, 31u);
+        arm_ram_watch_t *watch = arm_ram_watch_create(ram, 0u, sizeof ram);
+        CHECK(watch != NULL, "multiply write watch allocation");
+        if (watch) {
+            CHECK(arm_ram_watch_capture(watch, &cpu, ram + 0x2000u) != 0u,
+                  "multiply write watch capture");
+            memory.watch = watch;
+            refusal(&cpu, &memory, 4096u);
+            arm_ram_watch_destroy(watch);
+        }
+    }
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    if (a64_static_host_available()) {
+        for (unsigned seed = 0u; seed < 32u; seed++) {
+            arm_cpu_t cpu; arm_bulk_memory_t memory;
+            multiply_setup(&cpu, &memory, seed);
+            multiply_differential(&cpu, &memory, 23u * (1u + seed % 32u), true);
+        }
+    }
+#endif
+    puts("arm_bulk multiply: exact arithmetic, aliases, budgets and refusal checks");
+}
+
 int main(void) {
+    test_multiply_loop();
     test_lengths();
     test_refusals();
     test_cached_boundaries();

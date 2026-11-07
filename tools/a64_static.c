@@ -2235,6 +2235,7 @@ unsigned a64_compact_raw_bulk_try(a64_compact_raw_context_t *context,
     arm_bulk_memory_t memory = {
         .code = code, .code_base = code_base, .code_bytes = code_bytes,
         .data_cache = context->dread != NULL,
+        .write_cache = context->dwrite != NULL,
         .ram_window = context->bulk_ram_window,
         .cache = context->bulk_cache,
         .watch = context->bulk_watch,
