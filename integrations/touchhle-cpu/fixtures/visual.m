@@ -103,7 +103,10 @@ extern int alGetError(void);
 - (void)cancelled:(id)sender { (void)sender; cancelled++; }
 @end
 @interface UIApplication : NSObject
++ (id)sharedApplication;
 - (void)setStatusBarHidden:(BOOL)hidden;
+- (BOOL)isIdleTimerDisabled;
+- (void)setIdleTimerDisabled:(BOOL)disabled;
 @end
 extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
 @interface HLEVisualDelegate : NSObject {
@@ -119,6 +122,7 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     unsigned _motionSamples;
     UITextField *_textField;
     unsigned _edits;
+    UIButton *_idleButton;
 }
 @end
 @implementation HLEVisualDelegate
@@ -145,6 +149,11 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     [_textField setText:[NSString stringWithUTF8String:savedText]];
     [_textField addTarget:self action:@selector(textChanged:) forControlEvents:(1u<<17)];
     [_window addSubview:_textField];
+    _idleButton=[UIButton buttonWithType:1];
+    [_idleButton setFrame:(CGRect){{50,195},{220,35}}];
+    [_idleButton setTitle:@"Keep awake: Off" forState:0];
+    [_idleButton addTarget:self action:@selector(idleTapped:) forControlEvents:64];
+    [_window addSubview:_idleButton];
     UIButton *button=[UIButton buttonWithType:1];
     [button setFrame:(CGRect){{50,245},{220,64}}];
     [button setTitle:@"Test guest touch" forState:0];
@@ -188,6 +197,13 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     (void)sender;
     UIAccelerometer *motion=[UIAccelerometer sharedAccelerometer];
     [motion setUpdateInterval:0.25]; [motion setDelegate:self];
+}
+- (void)idleTapped:(id)sender {
+    (void)sender;
+    UIApplication *application=[UIApplication sharedApplication];
+    BOOL disabled=![application isIdleTimerDisabled];
+    [application setIdleTimerDisabled:disabled];
+    [_idleButton setTitle:disabled?@"Keep awake: On":@"Keep awake: Off" forState:0];
 }
 - (void)accelerometer:(UIAccelerometer *)sensor didAccelerate:(UIAcceleration *)sample {
     (void)sensor;

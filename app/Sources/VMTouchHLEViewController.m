@@ -143,6 +143,7 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     CMMotionManager *_motion;
     const s5lbox_hle_control *_control;
     BOOL _paused,_closing,_forceAvailable,_finished,_inactive,_wantsTextInput;
+    BOOL _wantsIdleTimerDisabled,_holdsIdleTimer,_previousIdleTimerDisabled;
 }
 - (void)viewDidLoad {
     [super viewDidLoad]; self.view.backgroundColor=UIColor.systemBackgroundColor;
@@ -175,6 +176,12 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
         if (!owner) return;
         owner->_wantsTextInput=enabled;
         [owner updateInputState];
+    };
+    _surface.idleTimerChanged=^(BOOL enabled) {
+        HLERunViewController *owner=weakSelf;
+        if (!owner) return;
+        owner->_wantsIdleTimerDisabled=!enabled;
+        [owner updateIdleTimerState];
     };
     _surface.accelerationRequested=^{
         HLERunViewController *owner=weakSelf;
@@ -282,9 +289,22 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     else [_display resignFirstResponder];
     _link.paused=_paused||_inactive;
     [self updateMotionState];
+    [self updateIdleTimerState];
     if (!_closing && !_finished) {
         _status.text=_paused?@"Paused":@"Opening app…";
         _status.hidden=!_paused && _surface.frameCount>0;
+    }
+}
+- (void)updateIdleTimerState {
+    BOOL hold=_wantsIdleTimerDisabled && !(_paused||_inactive||_closing||_finished);
+    UIApplication *application=UIApplication.sharedApplication;
+    if (hold && !_holdsIdleTimer) {
+        _previousIdleTimerDisabled=application.idleTimerDisabled;
+        application.idleTimerDisabled=YES;
+        _holdsIdleTimer=YES;
+    } else if (!hold && _holdsIdleTimer) {
+        application.idleTimerDisabled=_previousIdleTimerDisabled;
+        _holdsIdleTimer=NO;
     }
 }
 - (void)updateMotionState {
@@ -337,7 +357,10 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     sheet.popoverPresentationController.sourceView=_controls; sheet.popoverPresentationController.sourceRect=_controls.bounds;
     [self presentViewController:sheet animated:YES completion:nil];
 }
-- (void)dealloc { [_motion stopAccelerometerUpdates]; [NSNotificationCenter.defaultCenter removeObserver:self]; [_link invalidate]; }
+- (void)dealloc {
+    if (_holdsIdleTimer) UIApplication.sharedApplication.idleTimerDisabled=_previousIdleTimerDisabled;
+    [_motion stopAccelerometerUpdates]; [NSNotificationCenter.defaultCenter removeObserver:self]; [_link invalidate];
+}
 @end
 
 @implementation VMTouchHLECoordinator {
