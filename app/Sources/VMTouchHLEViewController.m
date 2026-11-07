@@ -468,7 +468,7 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
     VMPackageBridge *_setup;
     NSArray<VMGuestApplication *> *_apps;
     NSString *_pendingSelection;
-    BOOL _busy;
+    BOOL _busy,_connecting;
     UILabel *_message;
 }
 - (instancetype)initWithTransport:(VMUSBTransport *)transport instanceID:(NSString *)identifier {
@@ -495,9 +495,27 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
         _discovery.canceled=YES;
 }
 - (void)refresh {
-    if (_busy) return; _busy=YES; [self message:_apps.count?nil:@"Loading installed apps…"];
+    if (_busy) return; _busy=YES; _connecting=YES;
+    [self message:_apps.count?nil:@"Connecting to iPhone OS…"];
     _discovery=[[VMGuestApplications alloc] initWithTransport:_transport instanceID:_instanceID];
     VMGuestApplications *discovery=_discovery;
+    __weak VMTouchHLEAppsViewController *weakSelf=self;
+    __weak VMGuestApplications *weakDiscovery=discovery;
+    discovery.progress=^(VMGuestApplicationsStage stage) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            VMTouchHLEAppsViewController *owner=weakSelf;
+            if (!owner || owner->_discovery!=weakDiscovery || weakDiscovery.canceled || !owner->_busy) return;
+            owner->_connecting=stage==VMGuestApplicationsConnecting;
+            [owner message:owner->_apps.count?nil:owner->_connecting?
+                @"Connecting to iPhone OS…":@"Loading installed apps…"];
+        });
+    };
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,8*NSEC_PER_SEC),dispatch_get_main_queue(), ^{
+        VMTouchHLEAppsViewController *owner=weakSelf;
+        if (owner && owner->_discovery==discovery && !discovery.canceled &&
+            owner->_busy && owner->_connecting && !owner->_apps.count)
+            [owner message:@"Waiting for iPhone OS…\nLet the guest finish booting and unlock it."];
+    });
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
         NSError *error=nil; NSArray *apps=[discovery installedApplications:&error];
         dispatch_async(dispatch_get_main_queue(), ^{

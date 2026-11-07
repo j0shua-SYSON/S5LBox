@@ -102,6 +102,27 @@ package 1.1.1. All three CI workflows passed for both builds. No new host
 crash report appeared during these checks. These are observations, not a
 claim that every UIKit API or every app is supported.
 
+On 2026-11-07, optimized build `c1ca099a` passed the following additional
+checks on the same device and guest support version:
+
+- Run an ARMv6 fixture with an endless CPU loop, request Home, and use Force
+  Close after the graceful-close deadline. The host process stays alive.
+- Immediately launch another interpreted app, then its native version, and
+  read the same saved UTF-8 document. The stopped runtime releases its file
+  lease; neither a host restart nor a guest reboot is required.
+- Recover from Geekbench's unsupported class through **Try iPhone OS** in the
+  same host process using the optimized, unwinding-enabled Rust library.
+- Uninstall the hanging fixture through SpringBoard and verify that it
+  disappears from touchHLE's authoritative installed-app list.
+
+The optimized build's three CI workflows passed. Its Windows native-window
+unit suite passed 62 tests; three audio tests were skipped on Windows and
+tested with a null backend in macOS CI. The phone also recorded a CPU-resource
+report during cold boot, with no termination action. Cold-boot app discovery
+can wait over a minute for the guest USB driver. After boot and unlock, a
+fresh query completed; subsequent warm queries took about four seconds.
+This is a startup limitation, not a measured discovery speedup.
+
 The pre-existing upstream Objective-C TestApp also passed **107/107 CLI
 tests** through the portable interpreter on Windows. Those cover additional
 Foundation, Objective-C and C-library behavior; they are desktop framework

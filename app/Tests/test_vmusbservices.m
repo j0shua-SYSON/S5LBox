@@ -498,10 +498,17 @@ static void testGuestApps(void) {
     NSMutableDictionary *alias=[record mutableCopy]; alias[@"Path"]=[@"/private" stringByAppendingString:record[@"Path"]];
     CHECK([[VMGuestApplication fromInstallationRecord:alias].homeDirectory isEqual:home]);
     AppsFixture *fixture=[AppsFixture new]; fixture.service=[AppsService new];
+    NSMutableArray *stages=[NSMutableArray array];
+    fixture.progress=^(VMGuestApplicationsStage stage) { [stages addObject:@(stage)]; };
     [fixture.service.replies addObjectsFromArray:@[@{@"CurrentList":@[record],@"CurrentAmount":@1},@{@"Status":@"Complete"}]];
     NSArray *apps=[fixture installedApplications:NULL];
     CHECK(apps.count==1 && fixture.service.closed);
+    CHECK(([stages isEqual:@[@(VMGuestApplicationsConnecting),@(VMGuestApplicationsReading)]]));
     CHECK([fixture.service.queries[0][@"Command"] isEqual:@"Browse"]);
+    // A connection failure must not claim that the installed-app list is loading.
+    [stages removeAllObjects]; fixture.service=nil;
+    CHECK([fixture installedApplications:NULL]==nil);
+    CHECK(([stages isEqual:@[@(VMGuestApplicationsConnecting)]]));
     for (NSDictionary *bad in @[@{@"CurrentList":@[record],@"CurrentAmount":@2},
         @{@"CurrentList":@[record,record],@"Status":@"Complete"},@{@"CurrentList":@"invalid"},@{@"Error":@"Failed"}]) {
         fixture.service=[AppsService new]; [fixture.service.replies addObject:bad]; NSError *error=nil;

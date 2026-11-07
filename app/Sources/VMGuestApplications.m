@@ -54,8 +54,10 @@ static NSString *String(id value,NSUInteger limit) {
     return service;
 }
 - (NSArray<VMGuestApplication *> *)installedApplications:(NSError **)error {
+    if (self.progress) self.progress(VMGuestApplicationsConnecting);
     VMUSBService *service=[self connect:error]; if (!service) return nil;
     @try {
+        if (self.progress) self.progress(VMGuestApplicationsReading);
         if (![service sendPlist:@{@"Command":@"Browse",@"ClientOptions":@{@"ApplicationType":@"User"}} error:error]) return nil;
         NSMutableArray *apps=[NSMutableArray array]; NSMutableSet *identifiers=[NSMutableSet set];
         NSUInteger records=0;

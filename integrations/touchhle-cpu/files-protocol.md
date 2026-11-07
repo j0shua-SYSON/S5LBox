@@ -1,13 +1,14 @@
 # Live application files
 
-This component is under development and is not yet enabled in S5LBox.
+This component is enabled in the touchHLE feature build, not release 1.1.0.
 It operates **inside the emulated guest**, never against the physical iPhone's
 filesystem. The guest kernel remains the sole HFS writer. No mirror is copied
 back into a running disk image.
 
 The authenticated package helper forks a child, closes inherited file
-descriptors except its connection, then calls `s5lbox_hle_files`. Launch
-coordination must be installed and device-verified before exposing it to users.
+descriptors except its connection, then calls `s5lbox_hle_files`. The integrated
+app requires the guest support package for launch coordination. See the
+[device verification record](README.md#verified-behavior) for tested paths.
 The child reads a 36-byte application-container UUID, takes a single-session
 lease, enters that installed application's directory with `chroot`, and drops
 all supplementary groups and root privileges. It replies with an empty result
