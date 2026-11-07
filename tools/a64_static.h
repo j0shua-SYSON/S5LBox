@@ -298,9 +298,11 @@ bool a64_compact_raw_run_code_window_resident_cached(
     unsigned *completed, unsigned *native_completed,
     unsigned *fallback_completed);
 
-/* Same execution contract, with independently gated witnessed bulk loops.
- * Bulk retirements are a subset of native_completed, never extra guest time.
- * The switch is host policy only and defaults off in existing entry points. */
+/* Same execution contract, with independently gated string/search loops.
+ * Their host-policy switch defaults off. Exact arithmetic loops are available
+ * in the resident runner using only existing User READ/WRITE grants; they do
+ * not enable search caches or cold translation. These counters include both
+ * paths. Retirements are a subset of native_completed, never extra guest time. */
 typedef struct {
     uint64_t calls, retired;
 } a64_compact_bulk_stats_t;

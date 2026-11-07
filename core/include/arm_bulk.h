@@ -48,7 +48,8 @@ typedef struct {
  * Matching proves the witnessed instruction pattern and complete admitted
  * control flow, never a name or assumed PC.
  * A long loop may return an exact prefix at its header for bounded resumption.
- * Ordinary execution enables this only through an explicit host-policy gate. */
+ * String/search paths require an explicit host-policy gate. The arithmetic
+ * entry below excludes those paths and their optional derived-data caches. */
 unsigned arm_bulk_string_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
                              unsigned budget);
 

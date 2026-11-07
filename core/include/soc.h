@@ -4860,6 +4860,7 @@ uint64_t s5l8900_static_a64_compact_ram_map_write(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_tlb_fetch(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_tlb_read(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_tlb_write(const s5l8900_t *m);
+/* Includes default exact arithmetic as well as optional string/search work. */
 uint64_t s5l8900_static_a64_compact_bulk_calls(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_bulk_retired(const s5l8900_t *m);
 /* Current summary-cache epoch, not a lifetime retirement counter. */

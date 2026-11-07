@@ -2,7 +2,7 @@
 
 This crate exposes S5LBox's ARMv6 user-mode interpreter to Rust. It executes
 ARM and Thumb instructions without generating host code or requesting
-executable memory. The existing full-system emulator remains unchanged.
+executable memory. It runs alongside the existing full-system emulator.
 
 `Cpu` owns one interpreter on one worker thread. A `Memory` provider supplies
 bounded reads and writes during execution; its callbacks cannot unwind into C.
@@ -121,7 +121,32 @@ tested with a null backend in macOS CI. The phone also recorded a CPU-resource
 report during cold boot, with no termination action. Cold-boot app discovery
 can wait over a minute for the guest USB driver. After boot and unlock, a
 fresh query completed; subsequent warm queries took about four seconds.
-This is a startup limitation, not a measured discovery speedup.
+Those measurements precede the arithmetic changes described below.
+
+Subsequent guest CPU sampling identified big-integer multiply and square loops
+executing before the USB driver became ready. The signed ARM64 interpreter now
+executes those exact, instruction-checked loops in bounded compiled C. It uses
+existing user-mode memory grants, preserves registers, flags and instruction
+budgets, and falls back to ordinary execution when a check fails. It does not
+enable optional string/search caches or introduce JIT compilation.
+
+On the same guest, the measured interval from the first USB-driver wait sample
+to a successful lockdown connection fell from 179 seconds to 92 and 82 seconds
+in two runs with build `38260e93`. Warm app discovery took 3.4 seconds. These
+are observed startup improvements, not a general app-performance multiplier.
+Build `80030483` also handles the square loop and removes the temporary logging.
+Its clean UI test populated the app list automatically about 87 seconds after
+the guest entered Running. That UI measurement has a different starting point;
+it does not establish a further speedup from the square loop. Cold startup can
+still take over a minute.
+
+All three workflows passed for both builds. The final portable arithmetic suite
+passed 48,144,748 checks; native ARM64 CI additionally exercised fallback and
+budgets ending partway through a loop iteration. On the iPhone, the clean build
+also installed a fixture update through live virtual USB, retained its runtime
+choice and documents, and launched it through its guest icon. A subsequent
+native launch read the new counter written by touchHLE. Packages, media files
+and the full guest filesystem remained accessible without restarting the host.
 
 The pre-existing upstream Objective-C TestApp also passed **107/107 CLI
 tests** through the portable interpreter on Windows. Those cover additional
