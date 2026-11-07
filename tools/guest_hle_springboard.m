@@ -25,6 +25,10 @@ extern Method class_getInstanceMethod(Class,SEL);
 extern Method class_getClassMethod(Class,SEL);
 extern const char *method_getTypeEncoding(Method);
 extern IMP method_setImplementation(Method,IMP);
+/* The Darwin runtime takes an erased implementation address, not a call
+ * through IMP's generic prototype. Match the void-pointer conversion used
+ * for saved implementations below; signature() validates every method ABI. */
+#define HLE_IMP(function) ((IMP)(void *)(function))
 __attribute__((objc_root_class)) @interface NSObject { Class isa; } @end
 @interface NSString : NSObject
 - (const char *)UTF8String;
@@ -242,10 +246,10 @@ void s5lbox_hle_guard_install(void) {
     if (!signature(class_getClassMethod(controller,sel_registerName("sharedInstance")),"@@:") ||
         !signature(class_getInstanceMethod(controller,sel_registerName("allApplications")),"@@:") ||
         !signature(class_getClassMethod(utilities,sel_registerName("allJobLabels")),"@@:")) return;
-    original_launch=(void *)method_setImplementation(methods[0],(IMP)launch);
-    original_exit=(void *)method_setImplementation(methods[1],(IMP)exited);
-    original_failed=(void *)method_setImplementation(methods[2],(IMP)failed);
-    original_dealloc=(void *)method_setImplementation(methods[3],(IMP)deallocated);
+    original_launch=(void *)method_setImplementation(methods[0],HLE_IMP(launch));
+    original_exit=(void *)method_setImplementation(methods[1],HLE_IMP(exited));
+    original_failed=(void *)method_setImplementation(methods[2],HLE_IMP(failed));
+    original_dealloc=(void *)method_setImplementation(methods[3],HLE_IMP(deallocated));
     Class icon=objc_getClass("SBApplicationIcon"),ui=objc_getClass("SBUIController");
     Method icon_method=icon?class_getInstanceMethod(icon,sel_registerName("launch")):NULL;
     if (signature(icon_method,"v@:") &&
@@ -253,15 +257,15 @@ void s5lbox_hle_guard_install(void) {
         signature(class_getInstanceMethod(app,sel_registerName("bundleIdentifier")),"@@:") &&
         signature(class_getClassMethod(ui,sel_registerName("sharedInstance")),"@@:") &&
         signature(class_getInstanceMethod(ui,sel_registerName("activateApplicationAnimated:")),"v@:@"))
-        original_icon_launch=(void *)method_setImplementation(icon_method,(IMP)icon_launch);
+        original_icon_launch=(void *)method_setImplementation(icon_method,HLE_IMP(icon_launch));
     Class springboard=objc_getClass("SpringBoard");
     if (springboard) {
         Method idle_method=class_getInstanceMethod(springboard,sel_registerName("didIdle"));
         Method lock_method=class_getInstanceMethod(springboard,sel_registerName("autoLock"));
         if (signature(idle_method,"v@:") && signature(lock_method,"v@:") &&
             signature(class_getInstanceMethod(springboard,sel_registerName("resetIdleTimer")),"v@:")) {
-            original_idle=(void *)method_setImplementation(idle_method,(IMP)idle);
-            original_auto_lock=(void *)method_setImplementation(lock_method,(IMP)auto_lock);
+            original_idle=(void *)method_setImplementation(idle_method,HLE_IMP(idle));
+            original_auto_lock=(void *)method_setImplementation(lock_method,HLE_IMP(auto_lock));
         }
         has_lock_state=signature(class_getClassMethod(springboard,sel_registerName("sharedApplication")),"@@:") &&
             signature(class_getInstanceMethod(springboard,sel_registerName("isLocked")),"c@:");
