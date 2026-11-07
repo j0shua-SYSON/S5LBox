@@ -1658,7 +1658,7 @@ static void multiply_differential(arm_cpu_t *cpu, const arm_bulk_memory_t *memor
         native_context_t context = {cpu, memory};
         unsigned signed_retired = 0u, fallback = 0u;
         a64_compact_bulk_stats_t stats = {0};
-        const a64_compact_raw_options_t options = {.bulk_enabled = true};
+        const a64_compact_raw_options_t options = {.bulk_enabled = false};
         CHECK(a64_compact_raw_run_code_window_resident_options(cpu, memory->code,
             memory->code_base, memory->code_bytes, budget, native_fallback, &context,
             &options, NULL, &stats, NULL, &retired, &signed_retired, &fallback),
@@ -1670,7 +1670,7 @@ static void multiply_differential(arm_cpu_t *cpu, const arm_bulk_memory_t *memor
         CHECK(false, "native multiply requested without static engine");
 #endif
     } else {
-        retired = arm_bulk_string_try(cpu, memory, budget);
+        retired = arm_bulk_multiply_try(cpu, memory, budget);
         CHECK(retired && retired <= budget && retired % 23u == 0u, "multiply budget");
         arm_cpu_t expected = initial;
         memcpy(expected.r, cpu->r, sizeof expected.r); expected.cpsr = cpu->cpsr;

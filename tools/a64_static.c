@@ -2111,6 +2111,7 @@ typedef struct {
     const arm_ram_window_t *bulk_ram_window;
     arm_bulk_cache_t *bulk_cache;
     arm_ram_watch_t *bulk_watch;
+    arm_cpu_t *arithmetic_cpu;
 } a64_compact_raw_context_t;
 
 _Static_assert(sizeof(void *) == 8u,
@@ -2167,7 +2168,8 @@ _Static_assert(offsetof(a64_compact_raw_context_t, flat_ram) == 0u &&
                    offsetof(a64_compact_raw_context_t, bulk_ram_window) == 552u &&
                    offsetof(a64_compact_raw_context_t, bulk_cache) == 560u &&
                    offsetof(a64_compact_raw_context_t, bulk_watch) == 568u &&
-                   sizeof(a64_compact_raw_context_t) == 576u,
+                   offsetof(a64_compact_raw_context_t, arithmetic_cpu) == 576u &&
+                   sizeof(a64_compact_raw_context_t) == 584u,
                "compact raw native context layout drifted");
 _Static_assert(ARM_RAM_MAP_ENTRIES == 4096u &&
                    sizeof(arm_ram_map_entry_t) == 16u &&
@@ -2230,8 +2232,9 @@ extern uint32_t a64_compact_raw_execute(uint32_t *regs, uint32_t *cpsr,
 unsigned a64_compact_raw_bulk_try(a64_compact_raw_context_t *context,
                                   const uint8_t *code, uint32_t code_base,
                                   uint32_t code_bytes, unsigned budget,
-                                  uint32_t pc) {
-    if (!context->bulk_cpu) return 0u;
+                                  uint32_t pc, unsigned kind) {
+    arm_cpu_t *cpu = kind == 5u ? context->arithmetic_cpu : context->bulk_cpu;
+    if (!cpu) return 0u;
     arm_bulk_memory_t memory = {
         .code = code, .code_base = code_base, .code_bytes = code_bytes,
         .data_cache = context->dread != NULL,
@@ -2240,8 +2243,9 @@ unsigned a64_compact_raw_bulk_try(a64_compact_raw_context_t *context,
         .cache = context->bulk_cache,
         .watch = context->bulk_watch,
     };
-    context->bulk_cpu->r[15] = pc;
-    unsigned n = arm_bulk_string_try(context->bulk_cpu, &memory, budget);
+    cpu->r[15] = pc;
+    unsigned n = kind == 5u ? arm_bulk_multiply_try(cpu, &memory, budget)
+                            : arm_bulk_string_try(cpu, &memory, budget);
     if (n) {
         context->bulk_stats.calls++;
         context->bulk_stats.retired += n;
@@ -2908,6 +2912,9 @@ bool a64_compact_raw_run_code_window_resident_options(
         context.fallback_opaque = fallback_opaque;
         context.bulk_cpu = options && options->bulk_enabled && fallback && !priv
             ? cpu : NULL;
+        /* Bounded arithmetic does not need an index, cold MMU walks or the
+         * optional search-cache policy. It uses only existing READ/WRITE grants. */
+        context.arithmetic_cpu = fallback && !priv ? cpu : NULL;
         context.bulk_ram_window = context.bulk_cpu ? options->bulk_ram_window : NULL;
         context.bulk_cache = context.bulk_cpu ? options->bulk_cache : NULL;
         context.bulk_watch = context.bulk_cpu ? options->bulk_watch : NULL;

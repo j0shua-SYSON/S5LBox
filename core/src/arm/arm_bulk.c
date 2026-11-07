@@ -879,8 +879,8 @@ static unsigned length_loop(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
     return count * 5u;
 }
 
-unsigned arm_bulk_string_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
-                             unsigned budget) {
+static unsigned bulk_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
+                            unsigned budget, bool arithmetic_only) {
     uint32_t offset;
     if (!cpu || !memory || !memory->code || budget < 4u ||
         cpu->arch != ARM_ARCH_V6_ARM1176 ||
@@ -904,6 +904,7 @@ unsigned arm_bulk_string_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
     if (offset > memory->code_bytes || memory->code_bytes - offset < 4u)
         return 0u;
     if (cpu->cpsr & ARM_CPSR_T) {
+        if (arithmetic_only) return 0u;
         unsigned count = thumb_ordered_chain(cpu, memory, offset, budget);
         return count ? count : thumb_filtered_chain(cpu, memory, offset, budget);
     }
@@ -912,6 +913,7 @@ unsigned arm_bulk_string_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
         if (!matches(memory, offset, multiply_words, 23u)) return 0u;
         return multiply_loop(cpu, memory, budget);
     }
+    if (arithmetic_only) return 0u;
     if (first == compare_words[5]) {
         if (offset < 20u || !matches(memory, offset - 20u, compare_words, 9u))
             return 0u;
@@ -964,4 +966,14 @@ unsigned arm_bulk_string_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
     cpu->cpsr = flags;
     if (!memory->flat_ram) cpu->dread_hits += words;
     return fixed + words * 5u;
+}
+
+unsigned arm_bulk_string_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
+                             unsigned budget) {
+    return bulk_try(cpu, memory, budget, false);
+}
+
+unsigned arm_bulk_multiply_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
+                                unsigned budget) {
+    return bulk_try(cpu, memory, budget, true);
 }

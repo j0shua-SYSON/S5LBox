@@ -52,4 +52,8 @@ typedef struct {
 unsigned arm_bulk_string_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
                              unsigned budget);
 
+/* Exact arithmetic only; does not enable the optional indexed search paths. */
+unsigned arm_bulk_multiply_try(arm_cpu_t *cpu, const arm_bulk_memory_t *memory,
+                                unsigned budget);
+
 #endif
