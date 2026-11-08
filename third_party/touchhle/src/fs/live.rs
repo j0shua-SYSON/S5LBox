@@ -231,6 +231,12 @@ impl LiveFs {
     pub fn mkdir(&self, path: &str) -> io::Result<()> {
         self.path_operation(9, path)
     }
+    pub fn chmod(&self, path: &str, mode: u32) -> io::Result<()> {
+        let mut request = Vec::new();
+        add_path(&mut request, path)?;
+        request.extend_from_slice(&mode.to_be_bytes());
+        self.0.empty(18, &request)
+    }
     pub fn unlink(&self, path: &str) -> io::Result<()> {
         self.path_operation(10, path)
     }

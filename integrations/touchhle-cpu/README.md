@@ -274,6 +274,14 @@ still invisible. IMDb advances past table-controller creation and stops at
 With `121ccd77`, Doodle Jump scored 371; closing and relaunching the app and
 finishing a zero-point round still showed the saved high score of 371.
 
+Bowmaster's later CPU fault was traced to a null import for
+`NSFilePosixPermissions`. Foundation now exports that key and applies ordinary
+permission bits through both file adapters, including newly created parent
+directories. Offline catalog tests verify persistence after commit and reopen;
+the live helper performs changes as the app owner. The live path requires the
+`service-hle-v9` helper generation. Other file attributes and special mode bits
+return errors rather than being silently ignored. Device retesting is pending.
+
 ## Boundaries
 
 Guest support currently targets the verified iPhone OS 3.1.3 SpringBoard

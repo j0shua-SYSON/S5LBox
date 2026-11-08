@@ -5,7 +5,7 @@
  */
 //! `NSFileManager` etc.
 
-use super::{ns_array, ns_string, NSUInteger};
+use super::{ns_array, ns_string, NSInteger, NSUInteger};
 use crate::dyld::{export_c_func, ConstantExports, FunctionExports, HostConstant};
 use crate::frameworks::foundation::ns_error::{NSCocoaErrorDomain, NSFileReadNoSuchFileError};
 use crate::frameworks::foundation::ns_string::get_static_str;
@@ -27,6 +27,7 @@ const NSUserDomainMask: NSSearchPathDomainMask = 1;
 
 pub const NSFileModificationDate: &str = "NSFileModificationDate";
 pub const NSFileSize: &str = "NSFileSize";
+pub const NSFilePosixPermissions: &str = "NSFilePosixPermissions";
 const NSFileSystemFreeSize: &str = "NSFileSystemFreeSize";
 pub const NSFileType: &str = "NSFileType";
 pub const NSFileTypeDirectory: &str = "NSFileTypeDirectory";
@@ -38,6 +39,10 @@ pub const CONSTANTS: ConstantExports = &[
         HostConstant::NSString(NSFileModificationDate),
     ),
     ("_NSFileSize", HostConstant::NSString(NSFileSize)),
+    (
+        "_NSFilePosixPermissions",
+        HostConstant::NSString(NSFilePosixPermissions),
+    ),
     (
         "_NSFileSystemFreeSize",
         HostConstant::NSString(NSFileSystemFreeSize),
@@ -52,6 +57,40 @@ pub const CONSTANTS: ConstantExports = &[
         HostConstant::NSString(NSFileTypeRegular),
     ),
 ];
+
+fn permission_attribute(env: &mut Environment, attributes: id) -> Result<Option<u32>, FsError> {
+    let count: NSUInteger = msg![env; attributes count];
+    if count == 0 {
+        return Ok(None);
+    }
+    let key = get_static_str(env, NSFilePosixPermissions);
+    let value: id = msg![env; attributes objectForKey:key];
+    let number = env.objc.get_known_class("NSNumber", &mut env.mem);
+    if count != 1 || value == nil || !msg![env; value isKindOfClass:number] {
+        return Err(FsError::IoError(std::io::ErrorKind::Unsupported.into()));
+    }
+    let mode: u64 = msg![env; value unsignedLongLongValue];
+    if mode & !0o777 != 0 {
+        return Err(FsError::IoError(std::io::ErrorKind::InvalidInput.into()));
+    }
+    Ok(Some(mode as u32))
+}
+
+fn file_write_error(env: &mut Environment, output: MutPtr<id>, error: FsError) -> bool {
+    if !output.is_null() {
+        let code: NSInteger = match error {
+            FsError::AlreadyExist => 516,
+            FsError::AccessDenied | FsError::ReadonlyParentDir => 513,
+            FsError::DoesNotExist | FsError::NonexistentParentDir => 4,
+            FsError::InvalidParentDir | FsError::IsDirectory => 514,
+            _ => 512,
+        };
+        let domain = get_static_str(env, NSCocoaErrorDomain);
+        let error: id = msg_class![env; NSError errorWithDomain:domain code:code userInfo:nil];
+        env.mem.write(output, error);
+    }
+    false
+}
 
 fn NSSearchPathForDirectoriesInDomains(
     env: &mut Environment,
@@ -175,15 +214,20 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (bool)createFileAtPath:(id)path // NSString*
                 contents:(id)data // NSData*
               attributes:(id)attributes { // NSDictionary*
-    assert!(attributes == nil); // TODO
-    if data == nil {
+    let Ok(mode) = permission_attribute(env, attributes) else { return false; };
+    if path == nil { return false; }
+    let path_str = ns_string::to_rust_string(env, path).into_owned();
+    let guest_path = GuestPath::new(&path_str);
+    if mode.is_some() && !env.fs.supports_permissions(guest_path) { return false; }
+    let written: bool = if data == nil {
         let empty: id = msg_class![env; NSData new];
         let res: bool = msg![env; empty writeToFile:path atomically:false];
         release(env, empty);
         res
     } else {
         msg![env; data writeToFile:path atomically:false]
-    }
+    };
+    written && mode.is_none_or(|mode| env.fs.set_permissions(guest_path, mode).is_ok())
 }
 
 - (bool)removeItemAtPath:(id)path // NSString*
@@ -240,13 +284,22 @@ pub const CLASSES: ClassExports = objc_classes! {
   withIntermediateDirectories:(bool)with_intermediates
                    attributes:(id)attributes // NSDictionary*
                         error:(MutPtr<id>)error { // NSError**
-    assert_eq!(attributes, nil); // TODO
-
-    let path_str = ns_string::to_rust_string(env, path); // TODO: avoid copy
+    let mode = match permission_attribute(env, attributes) {
+        Ok(mode) => mode,
+        Err(failure) => return file_write_error(env, error, failure),
+    };
+    if path == nil { return file_write_error(env, error, FsError::InvalidParentDir); }
+    let path_str = ns_string::to_rust_string(env, path).into_owned();
+    let guest_path = GuestPath::new(&path_str);
+    if mode.is_some() && !env.fs.supports_permissions(guest_path) {
+        return file_write_error(env, error, FsError::IoError(std::io::ErrorKind::Unsupported.into()));
+    }
     let res = if with_intermediates {
-        env.fs.create_dir_all(GuestPath::new(&path_str))
+        env.fs.create_dir_all_with_permissions(guest_path, mode)
     } else {
-        env.fs.create_dir(GuestPath::new(&path_str))
+        env.fs.create_dir(guest_path).and_then(|()| {
+            mode.map_or(Ok(()), |mode| env.fs.set_permissions(guest_path, mode))
+        })
     };
     match res {
         Ok(()) => {
@@ -254,15 +307,32 @@ pub const CLASSES: ClassExports = objc_classes! {
             true
         }
         Err(err) => {
-            assert!(error.is_null()); // TODO
             log!(
                 "Warning: createDirectoryAtPath {} failed with {:?}, returning false",
                 path_str,
                 err,
             );
-            false
+            file_write_error(env, error, err)
         }
     }
+}
+
+- (bool)setAttributes:(id)attributes ofItemAtPath:(id)path error:(MutPtr<id>)error {
+    let mode = match permission_attribute(env, attributes) {
+        Ok(mode) => mode,
+        Err(failure) => return file_write_error(env, error, failure),
+    };
+    if path == nil { return file_write_error(env, error, FsError::InvalidParentDir); }
+    let path = ns_string::to_rust_string(env, path).into_owned();
+    let path = GuestPath::new(&path);
+    if !env.fs.exists(path) { return file_write_error(env, error, FsError::DoesNotExist); }
+    match mode.map_or(Ok(()), |mode| env.fs.set_permissions(path, mode)) {
+        Ok(()) => true,
+        Err(failure) => file_write_error(env, error, failure),
+    }
+}
+- (bool)changeFileAttributes:(id)attributes atPath:(id)path {
+    msg![env; this setAttributes:attributes ofItemAtPath:path error:(MutPtr::<id>::null())]
 }
 
 - (id)enumeratorAtPath:(id)path { // NSString*
@@ -383,7 +453,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (id)fileAttributesAtPath:(id)path // NSString *
               traverseLink:(bool)traverse {
     // TODO: other attributes
-    log_once!("Warning: NSFileManager fileAttributesAtPath:traverseLink: returns only NSFileType, NSFileModificationDate and NSFileSize attributes!");
+    log_once!("Warning: NSFileManager file attributes support type, modification date, size and available POSIX permissions.");
 
     let path = ns_string::to_rust_string(env, path); // TODO: avoid copy
     // TODO: traverse link
@@ -395,17 +465,21 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (id)attributesOfItemAtPath:(id)path // NSString *
                        error:(MutPtr<id>)error { // NSError **
-    assert!(error.is_null()); // TODO
-
     // TODO: other attributes
-    log_once!("Warning: NSFileManager attributesOfItemAtPath:error: returns only NSFileType, NSFileModificationDate and NSFileSize attributes!");
+    log_once!("Warning: NSFileManager file attributes support type, modification date, size and available POSIX permissions.");
 
     let path = ns_string::to_rust_string(env, path); // TODO: avoid copy
     // TODO: traverse link
     log_dbg!("[(NSFileManager *){:?} attributesOfItemAtPath:{} error:{:?}]", this, path, error);
     let guest_path = GuestPath::new(&path);
 
-    file_attributes_common(env, guest_path)
+    let result = file_attributes_common(env, guest_path);
+    if result == nil && !error.is_null() {
+        let domain = get_static_str(env, NSCocoaErrorDomain);
+        let failure: id = msg_class![env; NSError errorWithDomain:domain code:NSFileReadNoSuchFileError userInfo:nil];
+        env.mem.write(error, failure);
+    }
+    result
 }
 
 - (id)attributesOfFileSystemForPath:(id)_path
@@ -471,6 +545,11 @@ fn file_attributes_common(env: &mut Environment, guest_path: &GuestPath) -> id {
 
     let size_key = get_static_str(env, NSFileSize);
     () = msg![env; dict setObject:size_num forKey:size_key];
+    if let Ok(mode) = env.fs.permissions(guest_path) {
+        let key = get_static_str(env, NSFilePosixPermissions);
+        let mode: id = msg_class![env; NSNumber numberWithUnsignedInt:mode];
+        () = msg![env; dict setObject:mode forKey:key];
+    }
 
     let file_type_key = get_static_str(env, NSFileType);
     // TODO: other types

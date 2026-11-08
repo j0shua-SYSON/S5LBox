@@ -47,6 +47,7 @@ Never automatically replay a mutation after losing its response.
 | 15 rmdir | path | empty |
 | 16 query lock | same as lock | u32 kind, u64 start/length, u32 pid |
 | 17 flock | handle, u32 kind | empty |
+| 18 chmod | path, u32 permissions | empty |
 
 Open flags: read=1, write=2, append=4, create=8, truncate=16, exclusive=32.
 Whence: start=0, current=1, end=2. Lock kind: shared=1, exclusive=2, unlock=3.
@@ -55,6 +56,9 @@ lifetime semantics, including release on disconnect. A zero lock length means
 through EOF. `flock` uses nonblocking whole-file BSD locks; waiting is handled
 by the interpreter's cancelable scheduler, never inside the file broker.
 Directory batches contain up to 128 names; zero means EOF.
+Permission changes accept only ordinary mode bits (`0000` through `0777`). The
+live helper runs them as the app owner; offline changes require the same owner
+and persist to the HFSX catalog without changing the inode type or file data.
 
 The chroot deliberately prevents symlinks from reaching outside the selected
 container. Absolute symlinks using the original full container path are not

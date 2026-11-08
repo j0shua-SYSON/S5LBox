@@ -900,6 +900,77 @@ impl Fs {
         self.lookup_node(path).is_some()
     }
 
+    pub fn supports_permissions(&self, path: &GuestPath) -> bool {
+        self.live_path(path).is_some() || cfg!(unix)
+    }
+
+    /// Permission changes in S5LBox always go to the selected guest volume.
+    /// Desktop Unix runs can update writable sandbox files; Windows must report
+    /// unsupported instead of claiming to have persisted POSIX permissions.
+    pub fn set_permissions(&mut self, path: &GuestPath, mode: u32) -> Result<(), FsError> {
+        if mode & !0o777 != 0 {
+            return Err(FsError::IoError(std::io::ErrorKind::InvalidInput.into()));
+        }
+        if let Some((fs, path)) = self.live_path(path) {
+            return fs.chmod(&path, mode).map_err(Self::live_error);
+        }
+        let host_path = match self.lookup_node(path).ok_or(FsError::DoesNotExist)? {
+            FsNode::File {
+                location: FileLocation::Path(path),
+                writeable: true,
+            } => path,
+            FsNode::Directory {
+                writeable: Some(path),
+                ..
+            } => path,
+            _ => return Err(FsError::AccessDenied),
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(host_path, fs::Permissions::from_mode(mode))
+                .map_err(FsError::IoError)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = host_path;
+            Err(FsError::IoError(std::io::ErrorKind::Unsupported.into()))
+        }
+    }
+
+    pub fn permissions(&self, path: &GuestPath) -> Result<u32, FsError> {
+        if let Some((fs, path)) = self.live_path(path) {
+            return fs
+                .stat(&path)
+                .map(|m| m.mode & 0o777)
+                .map_err(Self::live_error);
+        }
+        let host_path = match self.lookup_node(path).ok_or(FsError::DoesNotExist)? {
+            FsNode::File {
+                location: FileLocation::Path(path),
+                ..
+            } => path,
+            FsNode::Directory {
+                writeable: Some(path),
+                ..
+            } => path,
+            FsNode::File { .. } => return Ok(0o444),
+            FsNode::Directory { .. } => return Ok(0o555),
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::metadata(host_path)
+                .map(|m| m.permissions().mode() & 0o777)
+                .map_err(FsError::IoError)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = host_path;
+            Err(FsError::IoError(std::io::ErrorKind::Unsupported.into()))
+        }
+    }
+
     /// Returns access information about the file/directory at the path
     /// (exists, read, write, execute)
     pub fn access(&self, path: &GuestPath) -> (bool, bool, bool, bool) {
@@ -984,7 +1055,18 @@ impl Fs {
                 }
                 _ => unimplemented!(),
             },
-            _ => unimplemented!(),
+            FsNode::Directory {
+                writeable: Some(path),
+                ..
+            } => fs::metadata(path)
+                .and_then(|m| m.modified())
+                .map_err(|_| ())?
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .map_err(|_| ()),
+            FsNode::Directory {
+                writeable: None, ..
+            } => Ok(0),
         }
     }
 
@@ -1002,7 +1084,13 @@ impl Fs {
                 }
                 _ => unimplemented!(),
             },
-            _ => unimplemented!(),
+            FsNode::Directory {
+                writeable: Some(path),
+                ..
+            } => fs::metadata(path).map(|m| m.len()).map_err(|_| ()),
+            FsNode::Directory {
+                writeable: None, ..
+            } => Ok(0),
         }
     }
 
@@ -1452,16 +1540,33 @@ impl Fs {
 
     /// Like [std::fs::create_dir_all] but for the guest filesystem.
     pub fn create_dir_all<P: AsRef<GuestPath>>(&mut self, path: P) -> Result<(), FsError> {
+        self.create_dir_all_with_permissions(path, None)
+    }
+    pub fn create_dir_all_with_permissions<P: AsRef<GuestPath>>(
+        &mut self,
+        path: P,
+        mode: Option<u32>,
+    ) -> Result<(), FsError> {
         let path = path.as_ref();
-        assert!(path.as_str().starts_with('/'));
         // TODO: use GuestPathBuf push() once implemented
         let mut tmp_vec = vec![""];
-        let components = resolve_path(path, None);
+        let working_directory = self.working_directory.clone();
+        let components = resolve_path(path, Some(&working_directory));
         for component in components {
             tmp_vec.push(component);
-            let res = self.create_dir(GuestPathBuf::from(tmp_vec.join("/")));
+            let directory = GuestPathBuf::from(tmp_vec.join("/"));
+            let res = self.create_dir(&directory);
             match res {
-                Ok(_) | Err(FsError::AlreadyExist) => {}
+                Ok(_) => {
+                    if let Some(mode) = mode {
+                        self.set_permissions(&directory, mode)?;
+                    }
+                }
+                Err(FsError::AlreadyExist) => {
+                    if !self.is_dir(&directory) {
+                        return Err(FsError::InvalidParentDir);
+                    }
+                }
                 _ => return res,
             }
         }

@@ -66,6 +66,7 @@ def main():
         (root / "outside").write_text("must not be visible")
         (home / "escape").symlink_to("../../outside")
         (home / "absolute").symlink_to(str(root / "outside"))
+        (home / "root-owned").write_text("owned by the service parent")
         processes = []
 
         def connect(name=uuid, expected=0):
@@ -91,6 +92,13 @@ def main():
                 request(sock, 1, path(target), errno.ENOENT)
             request(sock, 9, path("/Documents"))
             assert (home / "Documents").stat().st_uid == 65534
+            request(sock, 18, path("/Documents") + u32(0o750))
+            assert (home / "Documents").stat().st_mode & 0o777 == 0o750
+            request(sock, 18, path("/Documents") + u32(0o4755), errno.EINVAL)
+            request(sock, 18, path("/Documents") + u32(0o700) + b"extra", errno.EINVAL)
+            assert (home / "Documents").stat().st_mode & 0o777 == 0o750
+            request(sock, 18, path("/missing") + u32(0o600), errno.ENOENT)
+            request(sock, 18, path("/root-owned") + u32(0o600), errno.EPERM)
             opened = request(sock, 2, u32(1 | 2 | 8 | 32) + path("/Documents/save"))
             handle, = struct.unpack("!I", opened)
             request(sock, 2, u32(2 | 8 | 32) + path("/Documents/save"), errno.EEXIST)
@@ -101,6 +109,11 @@ def main():
             assert (home / "Documents/save").read_bytes() == b"hello"
             metadata = request(sock, 1, path("/Documents/save"))
             assert struct.unpack("!Q", metadata[:8])[0] == 5
+            modified=(home / "Documents/save").stat().st_mtime_ns
+            request(sock, 18, path("/Documents/save") + u32(0o640))
+            metadata = request(sock, 1, path("/Documents/save"))
+            assert struct.unpack("!I", metadata[16:20])[0] & 0o777 == 0o640
+            assert (home / "Documents/save").stat().st_mtime_ns == modified
             # Native guest and interpreter writes observe the same inode.
             (home / "Documents/save").write_bytes(b"guest")
             request(sock, 6, opened + u32(0) + u64(0))

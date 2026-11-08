@@ -43,6 +43,8 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 @interface NSMutableString : NSString @end
 @interface NSDictionary : NSObject
 + (id)dictionary;
++ (id)dictionaryWithObject:(id)value forKey:(id)key;
+- (id)objectForKey:(id)key;
 @end
 @interface NSMutableDictionary : NSDictionary @end
 @interface NSNull : NSObject
@@ -105,6 +107,65 @@ extern id CFUUIDCreate(void *allocator);
 @interface NSError : NSObject
 - (int)code;
 @end
+@interface NSFileManager : NSObject
++ (id)defaultManager;
+- (BOOL)createDirectoryAtPath:(id)path withIntermediateDirectories:(BOOL)intermediates attributes:(id)attributes error:(id *)error;
+- (BOOL)createFileAtPath:(id)path contents:(id)contents attributes:(id)attributes;
+- (BOOL)setAttributes:(id)attributes ofItemAtPath:(id)path error:(id *)error;
+- (id)attributesOfItemAtPath:(id)path error:(id *)error;
+- (BOOL)removeItemAtPath:(id)path error:(id *)error;
+- (BOOL)fileExistsAtPath:(id)path;
+@end
+extern id NSTemporaryDirectory(void);
+extern id const NSFilePosixPermissions;
+static unsigned permissions_smoke(BOOL unavailable) {
+    unsigned failures=0;
+    NSFileManager *fm=[NSFileManager defaultManager];
+    id base=[NSTemporaryDirectory() stringByAppendingPathComponent:@"permissions-fixture"];
+    id child=[base stringByAppendingPathComponent:@"child"];
+    id leaf=[child stringByAppendingPathComponent:@"save"];
+    id blocked=[leaf stringByAppendingPathComponent:@"blocked"];
+    id later=[base stringByAppendingPathComponent:@"later"];
+    [fm removeItemAtPath:leaf error:0]; [fm removeItemAtPath:child error:0];
+    [fm removeItemAtPath:later error:0]; [fm removeItemAtPath:base error:0];
+    id mode750=[NSDictionary dictionaryWithObject:[NSNumber numberWithInt:0750] forKey:NSFilePosixPermissions];
+    id error=0;
+    BOOL created=[fm createDirectoryAtPath:child withIntermediateDirectories:1 attributes:mode750 error:&error];
+    if (unavailable) {
+        failures += created || [fm fileExistsAtPath:base] || error==0;
+        return failures;
+    }
+    failures += !created || error!=0;
+    id attrs=[fm attributesOfItemAtPath:base error:&error];
+    failures += [[attrs objectForKey:NSFilePosixPermissions] unsignedLongValue]!=0750 || error!=0;
+    attrs=[fm attributesOfItemAtPath:child error:&error];
+    failures += [[attrs objectForKey:NSFilePosixPermissions] unsignedLongValue]!=0750;
+    id mode700=[NSDictionary dictionaryWithObject:[NSNumber numberWithInt:0700] forKey:NSFilePosixPermissions];
+    failures += ![fm setAttributes:mode700 ofItemAtPath:child error:&error] || error!=0;
+    attrs=[fm attributesOfItemAtPath:child error:&error];
+    failures += [[attrs objectForKey:NSFilePosixPermissions] unsignedLongValue]!=0700;
+    failures += ![fm createDirectoryAtPath:later withIntermediateDirectories:1 attributes:mode700 error:&error];
+    attrs=[fm attributesOfItemAtPath:base error:&error];
+    failures += [[attrs objectForKey:NSFilePosixPermissions] unsignedLongValue]!=0750;
+    id mode640=[NSDictionary dictionaryWithObject:[NSNumber numberWithInt:0640] forKey:NSFilePosixPermissions];
+    failures += ![fm createFileAtPath:leaf contents:0 attributes:mode640];
+    attrs=[fm attributesOfItemAtPath:leaf error:&error];
+    failures += [[attrs objectForKey:NSFilePosixPermissions] unsignedLongValue]!=0640;
+    error=0;
+    failures += [fm createDirectoryAtPath:blocked withIntermediateDirectories:1 attributes:0 error:&error] || error==0;
+    error=0;
+    id invalid=[NSDictionary dictionaryWithObject:[NSNumber numberWithInt:04755] forKey:NSFilePosixPermissions];
+    failures += [fm setAttributes:invalid ofItemAtPath:leaf error:&error] || error==0;
+    attrs=[fm attributesOfItemAtPath:leaf error:0];
+    failures += [[attrs objectForKey:NSFilePosixPermissions] unsignedLongValue]!=0640;
+    error=0;
+    failures += [fm attributesOfItemAtPath:@"/missing-permissions-fixture" error:&error]!=0;
+    failures += [(NSError *)error code]!=260;
+    [fm removeItemAtPath:leaf error:0]; [fm removeItemAtPath:child error:0];
+    [fm removeItemAtPath:later error:0]; [fm removeItemAtPath:base error:0];
+    failures += [fm fileExistsAtPath:base];
+    return failures;
+}
 @interface NSUserDefaults : NSObject
 + (id)standardUserDefaults;
 - (int)integerForKey:(id)key;
@@ -518,6 +579,11 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
 @end
 int main(int argc,char **argv) {
     (void)[[NSAutoreleasePool alloc] init];
+    if (argc>1 && (!strcmp(argv[1],"--permissions-smoke") || !strcmp(argv[1],"--permissions-unavailable-smoke"))) {
+        unsigned failures=permissions_smoke(!strcmp(argv[1],"--permissions-unavailable-smoke"));
+        printf("S5LBOX-HLE-PERMISSIONS %s failures=%u\n",failures?"FAIL":"PASS",failures);
+        return failures?1:0;
+    }
     if (argc>1 && !strcmp(argv[1],"--provider-smoke")) {
         unsigned failures=provider_smoke();
         printf("S5LBOX-HLE-PROVIDER %s failures=%u\n",failures?"FAIL":"PASS",failures);

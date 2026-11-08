@@ -118,6 +118,10 @@ static int request(handle *items, uint32_t *next, unsigned op, cursor c,
         item->id=(*next)++; item->fd=fd; item->dir=dir;
         put32(out,item->id); *size=4; return 0;
     }
+    if (op==18) { /* chmod, inside the app chroot as the unprivileged owner */
+        if (!path(&c,a) || !take32(&c,&flags) || c.n || (flags&~0777u)) return EINVAL;
+        return chmod(a,(mode_t)flags)?errno:0;
+    }
     if (op==9 || op==10 || op==11 || op==15) {
         if (!path(&c,a) || (op==11 && !path(&c,b)) || c.n) return EINVAL;
         int result=op==9?mkdir(a,0700):op==10?unlink(a):op==11?rename(a,b):rmdir(a);

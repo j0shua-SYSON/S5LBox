@@ -38,6 +38,8 @@ int hfs_offline_read(hfs_offline *, uint32_t id, uint64_t offset,
 int hfs_offline_write(hfs_offline *, uint32_t id, uint64_t offset,
                       const void *bytes, size_t length);
 int hfs_offline_truncate(hfs_offline *, uint32_t id, uint64_t length);
+/* Ordinary permission bits only; preserve the inode type and data timestamps. */
+int hfs_offline_chmod(hfs_offline *, uint32_t id, uint32_t permissions);
 int hfs_offline_create(hfs_offline *, uint32_t parent, const uint16_t *name,
                        size_t length, uint32_t mode, uint32_t *id);
 int hfs_offline_remove(hfs_offline *, uint32_t id);

@@ -446,7 +446,7 @@ failed:
     NSMutableData *payload=[NSMutableData data];
     hfs_offline_info info={0}; NSString *path=nil;
     HLEOfflineHandle *handle=nil; uint32_t number=0;
-    if (op==1 || op==9 || op==10 || op==11 || op==15) {
+    if (op==1 || op==9 || op==10 || op==11 || op==15 || op==18) {
         path=[self pathAt:&p end:end]; if (!path) e=EINVAL;
     } else if (op>=3 && op<=17 && op!=9 && op!=10 && op!=11 && op!=14 && op!=15) {
         if (end-p<4) e=EINVAL;
@@ -509,6 +509,15 @@ failed:
             NSString *name=nil; e=[self parent:path info:&info name:&name];
             if (!e) { unichar units[255]; [name getCharacters:units range:NSMakeRange(0,name.length)]; uint32_t id=0;
                 e=hfs_offline_create(_volume,info.id,units,name.length,0040755,&id); } break;
+        }
+        case 18: {
+            if (end-p!=4) { e=EINVAL; break; }
+            uint32_t mode=Read32(p); p=end;
+            if (mode&~0777u) { e=EINVAL; break; }
+            e=[self resolve:path root:_root followFinal:YES result:&info];
+            if (!e && info.uid!=501) e=EPERM;
+            if (!e) e=hfs_offline_chmod(_volume,info.id,mode);
+            if (!e && ![self flush]) e=EIO; break;
         }
         case 10: case 15:
             e=[self resolve:path root:_root followFinal:NO result:&info];

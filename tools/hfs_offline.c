@@ -364,6 +364,14 @@ int hfs_offline_truncate(hfs_offline *v,uint32_t id,uint64_t length) {
     if (length>old) memset(r->data+(size_t)old,0,(size_t)(length-old));
     w64(r->value+88,length); changed(v,r); return 0;
 }
+int hfs_offline_chmod(hfs_offline *v,uint32_t id,uint32_t permissions) {
+    if (!v || v->failed || (permissions&~0777u)) return EINVAL;
+    record *r=by_id(v,id); if (!r || r->removed) return ENOENT;
+    uint32_t type=r16(r->value+42)&TYPE_MODE;
+    if (type!=FILE_MODE && type!=DIR_MODE) return ENOTSUP;
+    w16(r->value+42,(uint16_t)(type|permissions));
+    w32(r->value+20,now_mac()); v->dirty=true; return 0;
+}
 static int valid_parent(hfs_offline *v,uint32_t parent,const uint16_t *name,size_t length) {
     if (!v || v->failed || !name || !length || length>255) return EINVAL;
     if ((length==1 && name[0]=='.') || (length==2 && name[0]=='.' && name[1]=='.')) return EINVAL;

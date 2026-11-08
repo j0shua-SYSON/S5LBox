@@ -7148,9 +7148,17 @@ static void test_offline_shared_filesystem(void) {
     char data[32]={0}; size_t count=0; hfs_offline_info entry;
     CHECK(hfs_offline_read(v,FX_NOTE,0,data,sizeof data,&count)==0 && count==5 &&
           !memcmp(data,"note\n",5),"offline read existing fork");
+    CHECK(hfs_offline_stat(v,FX_NOTE,&entry)==0,"read existing metadata");
+    int64_t original_modified=entry.modified;
+    CHECK(hfs_offline_chmod(v,FX_NOTE,0600)==0 && hfs_offline_stat(v,FX_NOTE,&entry)==0 &&
+          entry.mode==0100600 && entry.modified==original_modified,"chmod preserves file type and content timestamp");
+    CHECK(hfs_offline_chmod(v,FX_BETA,0750)==0,"set directory permissions");
+    CHECK(hfs_offline_chmod(v,FX_NOTE,04777)==EINVAL && hfs_offline_chmod(v,UINT32_MAX,0600)==ENOENT,
+          "reject special bits and missing inode");
     const uint16_t filename[]={'s','a','v','e','.',0x00e9};
     uint32_t id=0;
     CHECK(hfs_offline_create(v,FX_BETA,filename,6,0100644,&id)==0,"create Unicode save");
+    CHECK(hfs_offline_chmod(v,id,0640)==0,"set save permissions");
     CHECK(hfs_offline_write(v,id,4,"saved",5)==0,"sparse write");
     memset(data,0xff,sizeof data);
     CHECK(hfs_offline_read(v,id,0,data,sizeof data,&count)==0 && count==9 &&
@@ -7174,8 +7182,9 @@ static void test_offline_shared_filesystem(void) {
     CHECK(hfs_offline_open(clone,&v)==0,"reopen committed filesystem");
     if (v) {
         const uint16_t note[]={'n','o','t','e','.','t','x','t'};
-        CHECK(hfs_offline_lookup(v,FX_BETA,note,8,&entry)==0 && entry.id==id && entry.uid==501 && entry.size==9,
+        CHECK(hfs_offline_lookup(v,FX_BETA,note,8,&entry)==0 && entry.id==id && entry.uid==501 && entry.size==9 && entry.mode==0100640,
               "rename, metadata and size persist");
+        CHECK(hfs_offline_stat(v,FX_BETA,&entry)==0 && entry.mode==0040750,"directory permissions persist");
         CHECK(hfs_offline_read(v,id,0,data,sizeof data,&count)==0 && count==9 &&
               !memcmp(data,"\0\0\0\0sa\0\0\0",9),"save bytes persist after reopen");
         CHECK(hfs_offline_write(v,id,0,"new",3)==0,"subsequent session writes");
