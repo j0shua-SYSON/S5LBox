@@ -67,6 +67,7 @@ pub(super) struct EAGLContextHostObject {
     fps_counter: Option<FpsCounter>,
     next_frame_due: Option<Instant>,
     pub mapped_buffers: HashMap<GLuint, (MutPtr<GLvoid>, *mut GLvoid)>,
+    pub(super) client_arrays: super::gles_guest::ClientArrays,
 }
 impl HostObject for EAGLContextHostObject {}
 
@@ -83,6 +84,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         fps_counter: None,
         next_frame_due: None,
         mapped_buffers: HashMap::new(),
+        client_arrays: super::gles_guest::ClientArrays::default(),
     });
     env.objc.alloc_object(this, host_object, &mut env.mem)
 }

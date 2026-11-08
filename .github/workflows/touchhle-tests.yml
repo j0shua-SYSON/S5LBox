@@ -327,6 +327,14 @@ jobs:
           ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/AudioSmoke.app --headless > ../../work/hle-audio.log 2>&1
           grep -F 'S5LBOX-HLE-AUDIO PASS failures=0' ../../work/hle-audio.log
 
+      - name: Verify deferred client arrays and rendering
+        working-directory: third_party/touchhle
+        timeout-minutes: 2
+        run: |
+          trap 'cat ../../work/hle-gles-arrays.log' EXIT
+          ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/GLESArrays.app --no-error-popup > ../../work/hle-gles-arrays.log 2>&1
+          grep -F 'S5LBOX-HLE-GLES-ARRAYS PASS failures=0' ../../work/hle-gles-arrays.log
+
       - name: Preserve smoke-test output
         if: always()
         uses: actions/upload-artifact@v4
@@ -346,6 +354,8 @@ jobs:
             work/hle-smoke/InterpreterSmoke.app
             work/hle-smoke/HLEVisual.app
             work/hle-smoke/LibrarySmoke.app
+            work/hle-smoke/GLESArrays.app
+            work/hle-gles-arrays.log
           if-no-files-found: ignore
 
       - name: Run bundled ARMv6 compression, database and XML code

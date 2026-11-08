@@ -24,6 +24,7 @@ use crate::mem::{ConstPtr, ConstVoidPtr, GuestISize, GuestUSize, Mem, MutPtr, Mu
 use crate::objc::nil;
 use crate::Environment;
 
+use std::collections::HashMap;
 use std::slice::from_raw_parts;
 
 // These types are the same size in guest code (32-bit) and host code (64-bit).
@@ -35,6 +36,150 @@ use crate::gles::gles11_raw::types::{
 use crate::gles::gles11_raw::types::{GLintptr as HostGLintptr, GLsizeiptr as HostGLsizeiptr};
 type GuestGLsizeiptr = GuestISize;
 type GuestGLintptr = GuestISize;
+
+#[derive(Clone, Copy)]
+struct ClientArray {
+    size: GLint,
+    type_: GLenum,
+    stride: GLsizei,
+    pointer: ConstVoidPtr,
+}
+
+/// Guest pointers are state, not memory reads. Translate only enabled client
+/// arrays at draw time, so unused pointers and remapped guest allocations work.
+#[derive(Default)]
+pub(super) struct ClientArrays {
+    pointers: HashMap<(GLenum, GLenum), ClientArray>,
+    error: GLenum,
+}
+impl ClientArrays {
+    fn set_error(&mut self, error: GLenum) {
+        if self.error == gles11::NO_ERROR {
+            self.error = error;
+        }
+    }
+}
+
+fn with_client_arrays<U: Default>(
+    env: &mut Environment,
+    f: impl FnOnce(&mut dyn GLES, &mut Mem, &mut ClientArrays) -> U,
+) -> U {
+    let Some(context) = *env
+        .framework_state
+        .opengles
+        .current_ctx_for_thread(env.current_thread)
+    else {
+        return U::default();
+    };
+    let host = env.objc.borrow_mut::<EAGLContextHostObject>(context);
+    let mut gles = host.gles_ctx.as_mut().unwrap().make_current(
+        env.window
+            .as_mut()
+            .expect("OpenGL ES is not supported in headless mode"),
+    );
+    f(gles.as_mut(), &mut env.mem, &mut host.client_arrays)
+}
+
+unsafe fn array_key(gles: &mut dyn GLES, kind: GLenum) -> (GLenum, GLenum) {
+    let mut texture = 0;
+    if kind == gles11::TEXTURE_COORD_ARRAY {
+        gles.GetIntegerv(gles11::CLIENT_ACTIVE_TEXTURE, &mut texture);
+    }
+    (kind, texture as GLenum)
+}
+
+impl ClientArray {
+    unsafe fn apply(&self, gles: &mut dyn GLES, kind: GLenum, pointer: *const GLvoid) {
+        match kind {
+            gles11::VERTEX_ARRAY => gles.VertexPointer(self.size, self.type_, self.stride, pointer),
+            gles11::COLOR_ARRAY => gles.ColorPointer(self.size, self.type_, self.stride, pointer),
+            gles11::NORMAL_ARRAY => gles.NormalPointer(self.type_, self.stride, pointer),
+            gles11::TEXTURE_COORD_ARRAY => {
+                gles.TexCoordPointer(self.size, self.type_, self.stride, pointer)
+            }
+            _ => unreachable!(),
+        }
+    }
+    fn error(&self, kind: GLenum) -> GLenum {
+        if self.stride < 0
+            || (if kind == gles11::COLOR_ARRAY {
+                self.size != 4
+            } else {
+                kind != gles11::NORMAL_ARRAY && !(2..=4).contains(&self.size)
+            })
+        {
+            return gles11::INVALID_VALUE;
+        }
+        let valid_type = if kind == gles11::COLOR_ARRAY {
+            matches!(
+                self.type_,
+                gles11::UNSIGNED_BYTE | gles11::FIXED | gles11::FLOAT
+            )
+        } else {
+            matches!(
+                self.type_,
+                gles11::BYTE | gles11::SHORT | gles11::FIXED | gles11::FLOAT
+            )
+        };
+        if valid_type {
+            gles11::NO_ERROR
+        } else {
+            gles11::INVALID_ENUM
+        }
+    }
+}
+
+fn set_client_array(env: &mut Environment, kind: GLenum, array: ClientArray) {
+    with_client_arrays(env, |gles, _mem, arrays| unsafe {
+        let error = array.error(kind);
+        if error != gles11::NO_ERROR {
+            arrays.set_error(error);
+            return;
+        }
+        let mut binding = 0;
+        gles.GetIntegerv(gles11::ARRAY_BUFFER_BINDING, &mut binding);
+        let key = array_key(gles, kind);
+        // VBO pointers are offsets and can go directly to the driver. Client
+        // pointers are left null until a draw actually consumes the array.
+        let pointer = if binding != 0 {
+            array.pointer.to_bits() as usize as *const GLvoid
+        } else {
+            std::ptr::null()
+        };
+        array.apply(gles, kind, pointer);
+        // Invalid setters leave the previous state intact, including its pointer.
+        if binding == 0 {
+            arrays.pointers.insert(key, array);
+        } else {
+            arrays.pointers.remove(&key);
+        }
+    });
+}
+
+unsafe fn prepare_client_arrays(gles: &mut dyn GLES, mem: &Mem, arrays: &ClientArrays) {
+    if arrays.pointers.is_empty() {
+        return;
+    }
+    let (mut binding, mut texture) = (0, 0);
+    gles.GetIntegerv(gles11::ARRAY_BUFFER_BINDING, &mut binding);
+    gles.GetIntegerv(gles11::CLIENT_ACTIVE_TEXTURE, &mut texture);
+    gles.BindBuffer(gles11::ARRAY_BUFFER, 0);
+    for (&(kind, unit), array) in &arrays.pointers {
+        if kind == gles11::TEXTURE_COORD_ARRAY {
+            gles.ClientActiveTexture(unit);
+        }
+        if gles.IsEnabled(kind) != gles11::FALSE {
+            let pointer = if array.pointer.is_null() {
+                std::ptr::null()
+            } else {
+                mem.ptr_at(array.pointer.cast::<u8>(), 0).cast()
+            };
+            array.apply(gles, kind, pointer);
+        }
+    }
+    gles.ClientActiveTexture(texture as GLenum);
+    gles.BindBuffer(gles11::ARRAY_BUFFER, binding as GLuint);
+}
 
 /// List of compressed formats supported by our emulation.
 /// Currently, it's all the PVRTC and all paletted ones.
@@ -139,8 +284,12 @@ fn panic_on_gl_errors(gles: &mut dyn GLES) {
 // Generic state manipulation
 fn glGetError(env: &mut Environment) -> GLenum {
     let ignore_gl_errors = env.options.ignore_gl_errors;
-    with_ctx_and_mem(env, |gles, _mem| {
-        let err = unsafe { gles.GetError() };
+    with_client_arrays(env, |gles, _mem, arrays| {
+        let err = if arrays.error != gles11::NO_ERROR {
+            std::mem::take(&mut arrays.error)
+        } else {
+            unsafe { gles.GetError() }
+        };
         if err != 0 {
             if ignore_gl_errors {
                 log_once!(
@@ -229,9 +378,23 @@ fn glGetIntegerv(env: &mut Environment, pname: GLenum, params: MutPtr<GLint>) {
 }
 fn glGetPointerv(env: &mut Environment, pname: GLenum, params: MutPtr<ConstVoidPtr>) {
     use crate::gles::gles1_on_gl2::{ArrayInfo, ARRAYS};
-    let &ArrayInfo { buffer_binding, .. } =
-        ARRAYS.iter().find(|info| info.pointer == pname).unwrap();
-    with_ctx_and_mem(env, |gles, mem| {
+    let Some(&ArrayInfo {
+        name,
+        buffer_binding,
+        ..
+    }) = ARRAYS.iter().find(|info| info.pointer == pname)
+    else {
+        with_client_arrays(env, |_gles, _mem, arrays| {
+            arrays.set_error(gles11::INVALID_ENUM)
+        });
+        return;
+    };
+    with_client_arrays(env, |gles, mem, arrays| {
+        let key = unsafe { array_key(gles, name) };
+        if let Some(array) = arrays.pointers.get(&key) {
+            mem.write(params, array.pointer);
+            return;
+        }
         // params always points to just one pointer for this function
         let mut host_pointer_or_offset = std::ptr::null();
         let guest_pointer_or_offset = unsafe {
@@ -675,18 +838,28 @@ fn glColorPointer(
     stride: GLsizei,
     pointer: ConstVoidPtr,
 ) {
-    with_ctx_and_mem(env, |gles, mem| unsafe {
-        let pointer =
-            translate_pointer_or_offset_to_host(gles, mem, pointer, gles11::ARRAY_BUFFER_BINDING);
-        gles.ColorPointer(size, type_, stride, pointer)
-    })
+    set_client_array(
+        env,
+        gles11::COLOR_ARRAY,
+        ClientArray {
+            size,
+            type_,
+            stride,
+            pointer,
+        },
+    );
 }
 fn glNormalPointer(env: &mut Environment, type_: GLenum, stride: GLsizei, pointer: ConstVoidPtr) {
-    with_ctx_and_mem(env, |gles, mem| unsafe {
-        let pointer =
-            translate_pointer_or_offset_to_host(gles, mem, pointer, gles11::ARRAY_BUFFER_BINDING);
-        gles.NormalPointer(type_, stride, pointer)
-    })
+    set_client_array(
+        env,
+        gles11::NORMAL_ARRAY,
+        ClientArray {
+            size: 3,
+            type_,
+            stride,
+            pointer,
+        },
+    );
 }
 fn glTexCoordPointer(
     env: &mut Environment,
@@ -695,11 +868,16 @@ fn glTexCoordPointer(
     stride: GLsizei,
     pointer: ConstVoidPtr,
 ) {
-    with_ctx_and_mem(env, |gles, mem| unsafe {
-        let pointer =
-            translate_pointer_or_offset_to_host(gles, mem, pointer, gles11::ARRAY_BUFFER_BINDING);
-        gles.TexCoordPointer(size, type_, stride, pointer)
-    })
+    set_client_array(
+        env,
+        gles11::TEXTURE_COORD_ARRAY,
+        ClientArray {
+            size,
+            type_,
+            stride,
+            pointer,
+        },
+    );
 }
 fn glVertexPointer(
     env: &mut Environment,
@@ -708,16 +886,33 @@ fn glVertexPointer(
     stride: GLsizei,
     pointer: ConstVoidPtr,
 ) {
-    with_ctx_and_mem(env, |gles, mem| unsafe {
-        let pointer =
-            translate_pointer_or_offset_to_host(gles, mem, pointer, gles11::ARRAY_BUFFER_BINDING);
-        gles.VertexPointer(size, type_, stride, pointer)
-    })
+    set_client_array(
+        env,
+        gles11::VERTEX_ARRAY,
+        ClientArray {
+            size,
+            type_,
+            stride,
+            pointer,
+        },
+    );
 }
 
 // Drawing
 fn glDrawArrays(env: &mut Environment, mode: GLenum, first: GLint, count: GLsizei) {
-    with_ctx_and_mem(env, |gles, _mem| unsafe {
+    with_client_arrays(env, |gles, mem, arrays| unsafe {
+        if mode > gles11::TRIANGLE_FAN {
+            arrays.set_error(gles11::INVALID_ENUM);
+            return;
+        }
+        if count < 0 || first < 0 {
+            arrays.set_error(gles11::INVALID_VALUE);
+            return;
+        }
+        if count == 0 {
+            return;
+        }
+        prepare_client_arrays(gles, mem, arrays);
         let fog_state_backup = clamp_fog_state_values(gles);
         gles.DrawArrays(mode, first, count);
         restore_fog_state_values(gles, fog_state_backup);
@@ -730,7 +925,21 @@ fn glDrawElements(
     type_: GLenum,
     indices: ConstVoidPtr,
 ) {
-    with_ctx_and_mem(env, |gles, mem| unsafe {
+    with_client_arrays(env, |gles, mem, arrays| unsafe {
+        if mode > gles11::TRIANGLE_FAN
+            || !matches!(type_, gles11::UNSIGNED_BYTE | gles11::UNSIGNED_SHORT)
+        {
+            arrays.set_error(gles11::INVALID_ENUM);
+            return;
+        }
+        if count < 0 {
+            arrays.set_error(gles11::INVALID_VALUE);
+            return;
+        }
+        if count == 0 {
+            return;
+        }
+        prepare_client_arrays(gles, mem, arrays);
         let fog_state_backup = clamp_fog_state_values(gles);
         let indices = translate_pointer_or_offset_to_host(
             gles,

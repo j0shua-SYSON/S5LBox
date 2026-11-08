@@ -22,7 +22,7 @@ Archives and private test logs are not distributed in this repository.
 | Units - Unit Converter for your iPhone | 1.9.1 | Convert length, mass and temperature; navigate categories | Blocked: black display after more than two minutes; input did not reveal usable UI. |
 | Flashlight RGB | 1.0.2 | Change RGB controls and restore saved color | Blocked: missing UINavigationBar. |
 | iHandy Level Free | 1.60.0 | Tilt response, calibration and saved calibration | Not tested. |
-| Clock | 2.0.2 | Clock updates, settings and timer behavior | Device build c9da925b: passes key-value getters, then fails on a numeric key-value setter. Setter fix awaits device verification. |
+| Clock | 2.0.2 | Clock updates, settings and timer behavior | Device build 3ffc8cb7: passes key-value getters and setters, then fails on missing change-observer registration. |
 | Notes | 1.0 | Create, edit, delete and reopen a saved note | Not tested. |
 | ToDo | 2.0 | Create, complete and edit tasks; relaunch persistence | Not tested. |
 | SketchBook Mobile | 1.5 | Draw, undo, save and reopen a sketch | Not tested. |
@@ -43,7 +43,7 @@ Archives and private test logs are not distributed in this repository.
 | App | Version | Required functional checks | Latest result |
 | --- | --- | --- | --- |
 | Super Monkey Ball | 1.01 | Steer through a complete stage; restart and save progress | Device build b065e116: menus respond and the first level renders; gameplay is slow. Tilt control, stage completion and persistence remain unverified. |
-| Crash Bandicoot Nitro Kart 3D | 1.0 | Complete a race, pause/resume and retain progress | Not tested. |
+| Crash Bandicoot Nitro Kart 3D | 1.0 | Complete a race, pause/resume and retain progress | Device build c9da925b: menus respond; Quick Race fails when glVertexPointer immediately translates unused guest memory. Deferred translation awaits device verification. |
 | Rolando | 1.9 | Complete a level using touch and tilt; resume saved progress | Not tested. |
 | Labyrinth | 1.9.1 | Tilt through a maze, calibrate and restart | Not tested. |
 | Cro-Mag Rally | 3.0.3 | Complete a race, pause/resume and retain settings | Not tested. |
@@ -61,7 +61,7 @@ Archives and private test logs are not distributed in this repository.
 | Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Not tested. |
 | Chopper | 1.3.1 | Complete a mission, steer/fire and pause/resume | Not tested. |
 | SPACE DEADBEEF | 1.01 | Sustained gameplay, firing, pause/resume and restart | Not tested. |
-| Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build 39dfa4bd: menus respond after the MP3 fix; selecting a level fails on asynchronous AudioQueueDispose. Disposal and landscape fixes await device verification. |
+| Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build dd948eb4: first level loads after the audio fixes. Orientation direction corrected after device inspection; completion and persistence remain unverified. |
 
 ## Runtime changes under validation
 
@@ -110,13 +110,25 @@ packet boundaries, EOF, reset, completion callbacks, PCM conversion, and invalid
 AVAudioPlayer input checks in macOS CI. Device build `39dfa4bd` reaches Trace's
 world and level menus, but selecting a level exposes unsupported asynchronous
 queue disposal. A deferred disposal path now drains active queues and suppresses
-all subsequent callbacks; its regression fixture still needs CI execution.
+all subsequent callbacks; its regression fixture passes CI, and device build
+`dd948eb4` loads the first level. Callback file reads now free guest scratch memory,
+accept partial reads, and report malformed input through error codes. These
+checks also pass CI and a Windows build with an isolated shared OpenAL library.
 The Windows desktop audio fixture separately crashes in OpenAL initialization's
 native `std::call_once`/`pthread_once` path, before playback decoding. Desktop
-access violations must not be treated as proof of the same failure on iOS.
+access violations must not be treated as proof of the same failure on iOS. The
+isolated shared-library build avoids that local toolchain failure.
 
 Basic key-value getters, setters, and nested key paths pass local ARMv6 tests,
 including inherited ivars, numeric boxing/unboxing, common Core Graphics structs,
 typed host accessors, nil and undefined-key overrides, setter precedence, and
 retain/release ownership when replacing object ivars. Collection proxies and
-arbitrary struct encodings remain unsupported. Clock still needs a device retest.
+arbitrary struct encodings remain unsupported. Clock's device retest confirms
+progress to the separate missing key-value observation API.
+
+Client vertex/color/normal/texture-coordinate pointers are now translated at draw
+time, preserving disabled pointers, VBO offsets, per-texture-unit state, and
+context isolation. Invalid array parameters and empty draws no longer panic.
+An ARMv6 rendering fixture verifies pixels, fixed-point arrays, pointer queries,
+and state restoration on the Windows OpenGL backend. CI and iPhone verification
+of this graphics change are pending.

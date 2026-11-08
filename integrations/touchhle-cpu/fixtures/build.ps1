@@ -49,6 +49,15 @@ if ($LASTEXITCODE) { throw 'Startup fixture compile failed' }
 if ($LASTEXITCODE) { throw 'Startup fixture link failed' }
 Copy-Item -LiteralPath "$PSScriptRoot/Info.plist" -Destination "$startup/Info.plist"
 $audio=Join-Path $outputRoot 'AudioSmoke.app'
+$arrays=Join-Path $outputRoot 'GLESArrays.app'
+New-Item -ItemType Directory -Force -Path $arrays | Out-Null
+& $compiler @common -marm -c "$PSScriptRoot/gles_arrays.m" -o "$outputRoot/gles_arrays.o"
+if ($LASTEXITCODE) { throw 'GLES array fixture compile failed' }
+& $linker -arch armv6 -iphoneos_version_min 3.0 -syslibroot $sdkRoot `
+    -undefined dynamic_lookup -o "$arrays/InterpreterSmoke" "$sdkRoot/usr/lib/crt1.o" `
+    "$outputRoot/gles_arrays.o" -lSystem -lobjc -framework Foundation -framework OpenGLES
+if ($LASTEXITCODE) { throw 'GLES array fixture link failed' }
+Copy-Item -LiteralPath "$PSScriptRoot/Info.plist" -Destination "$arrays/Info.plist"
 New-Item -ItemType Directory -Force -Path $audio | Out-Null
 & $compiler @common -marm -c "$PSScriptRoot/audio.m" -o "$outputRoot/audio.o"
 if ($LASTEXITCODE) { throw 'Audio fixture compile failed' }
