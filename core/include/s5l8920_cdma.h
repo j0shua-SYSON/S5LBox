@@ -1,4 +1,4 @@
-/* Partial S5L8920 CDMA AES and backed NAND receive paths.
+/* Partial S5L8920 CDMA AES and backed peripheral receive paths.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #ifndef S5LBOX_S5L8920_CDMA_H
 #define S5LBOX_S5L8920_CDMA_H
@@ -30,6 +30,18 @@ typedef struct {
     s5l8920_cdma_segment_t segments[S5L8920_CDMA_MAX_SEGMENTS];
 } s5l8920_cdma_nand_t;
 
+/* Host bound for the established data-only prefix of a kernel ring. The
+ * following 0x303 descriptor is an unsupported boundary, never completion. */
+#define S5L8920_CDMA_AMC_CHANNEL 24u
+#define S5L8920_CDMA_AMC_MAX_SEGMENTS 127u
+typedef struct {
+    s5l8920_cdma_channel_t state;
+    uint32_t configuration,peripheral,offset;
+    unsigned count,index;
+    bool configuration_programmed,peripheral_programmed;
+    s5l8920_cdma_segment_t segments[S5L8920_CDMA_AMC_MAX_SEGMENTS],boundary;
+} s5l8920_cdma_amc_t;
+
 /* A transient peripheral supplies exactly the requested bytes on READY.
  * WAIT preserves its FIFO and all DMA state; UNAVAILABLE refuses the service.
  * WAIT/refusal output bytes are discarded. A callback may consume its endpoint
@@ -47,6 +59,7 @@ typedef struct {
     aes_ctx_t cipher;
     bool initialized, setup_programmed, servicing;
     s5l8920_cdma_nand_t nand[S5L8920_CDMA_NAND_COUNT];
+    s5l8920_cdma_amc_t amc;
 } s5l8920_cdma_t;
 
 /* First use requires a zero-initialized object. No default key, IV, context
@@ -80,4 +93,21 @@ bool s5l8920_cdma_nand_service(s5l8920_cdma_t *c,unsigned channel,
                               s5l8920_cdma_memory_fn memory,void *memory_owner,
                               s5l8920_cdma_receive_fn receive,void *receive_owner);
 bool s5l8920_cdma_nand_irq(const s5l8920_cdma_t *c,unsigned channel);
+/* Standalone channel24 receive prefix: configuration300D8, endpoint8480002C,
+ * GO19. Explicit reset and all programming are required; initial current
+ * address is unavailable until GO. Preflight latches 1..127 flags3 descriptors
+ * followed by a backed 303 descriptor. That descriptor is NOT executed.
+ * Service moves at most min(budget,16,segment remainder) supplied bytes, with
+ * no crossing of a descriptor. Closed clock/zero budget/WAIT do no work.
+ * Reaching the 303 boundary makes the next non-paused service refuse without
+ * data consumption, completion status or IRQ. Remaining count must exceed the
+ * prefix length; other flags/modes, live edits/reprogramming, hold/abort and
+ * completion semantics remain unsupported. No board mapping, clock source,
+ * peripheral producer or interrupt routing is supplied by this entry point.
+ * bytes_moved is required and set to zero even on refusal. Callback rules are
+ * the same as NAND receive; RAM views must remain stable during each call. */
+bool s5l8920_cdma_amc_service(s5l8920_cdma_t *c,bool clock_open,unsigned budget,
+                             s5l8920_cdma_memory_fn memory,void *memory_owner,
+                             s5l8920_cdma_receive_fn receive,void *receive_owner,
+                             unsigned *bytes_moved);
 #endif

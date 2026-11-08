@@ -637,6 +637,49 @@ RAM aliases, clock/reset behavior, reentry and both banks' interrupt sources.
 Original firmware now consumes the FMI sector stream through these chains;
 the remaining interrupt-disable read prevents a completed raw-read return.
 
+## AMC receive data prefix
+
+The standalone CDMA component now accepts explicit channel 24 reset and the
+kernel's receive configuration `0x300d8`, peripheral `0x8480002c`, byte budget,
+descriptor address and GO `0x19`. The matching device tree assigns this channel
+to AMC. Original kernel methods `0x808a320c` and `0x808a33f2` produce the
+configuration; constructor suffix `0x808a31b8`, builder `0x808a3af8` and finalizer
+`0x808a3528` produce the 128-entry linked ring. Ordinary entries have flags 3;
+the final data entry of a command has flags `0x303`. The same combined marker
+occurs in the matching 3GS 3.1.3 driver at `0xc052540c`. This corroborates the
+software format, not the hardware effects of its individual completion bits.
+
+`s5l8920_cdma_amc_service` implements only the ordinary data prefix before that
+marker. GO preflights and latches 1..127 flags-3 entries plus the backed
+`0x303` boundary. The limit is a host bound. Missing backing, cycles including
+physical aliases, output overlap with descriptor storage, unsupported flags,
+zero lengths and a prefix exhausting the programmed byte budget refuse before
+starting. A command consisting of a single `0x303` entry therefore refuses GO.
+Software-only descriptor fields remain untouched and are not interpreted.
+
+Each explicit service copies at most 16 supplied bytes, limited by the caller's
+budget and current descriptor. A closed supplied clock, zero budget or WAIT
+preserves state and output. Missing data/backing, descriptor changes and
+callback reentry refuse. Progress registers follow actual stores; after a
+segment, the current address retains its end until another transfer occurs.
+At the `0x303` boundary, the next unpaused service refuses without consuming
+bytes or declaring completion. The channel retains its active state for this
+unimplemented transition. No DONE/CIR event or interrupt is generated.
+
+An isolated witness builds the ring with unchanged target instructions and
+passes its exact descriptor bytes and captured configuration to this component.
+Both ring start positions 0 and 127 and budgets 7 and 16 are covered: eight
+cases copy 2,048 or 4,096 bytes from explicit input streams, then refuse the
+completion descriptor; four single-entry cases refuse before copying. Waiting,
+unavailable input, whole-buffer canaries and unmodified descriptors are checked.
+The current-address read during original setup remains an explicit fixture
+input; the component does not invent an initial value before GO.
+
+Channel 24 remains absent from the board MMIO fabric. AMC's byte producer,
+completion/IRQ behavior, live ring publication, hold/abort, reset/readback
+integration and the shared audio-control write remain unresolved. These data
+copies do not establish DSP execution, sound or any advance in genuine boot.
+
 ## Backed FMI sector data
 
 The supported raw mode writes CFG with `0xa8003` and the same spare count
