@@ -154,6 +154,6 @@ const FUNCTIONS: FunctionExports = &[
     export_c_func!(object_getClass(_)),
     export_c_func!(sel_registerName(_)),
     // Apple's runtime defines these two registration functions identically.
-    export_c_func_aliased!("_sel_getUid", sel_registerName(_)),
+    export_c_func_aliased!("sel_getUid", sel_registerName(_)),
     export_c_func!(_Block_object_dispose(_, _)),
 ];
