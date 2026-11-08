@@ -69,14 +69,17 @@ jobs:
         # Pin XcodeGen to a known-good release so a previously-green build can't
         # break from Homebrew drift (a newer XcodeGen could emit a project format
         # the runner's Xcode can't read). Bump deliberately, not implicitly.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           XCODEGEN_VERSION=2.46.0
-          curl -fsSL -o /tmp/xcodegen.zip \
-            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip"
-          unzip -q /tmp/xcodegen.zip -d /tmp/xcodegen
-          sudo /tmp/xcodegen/xcodegen/install.sh
-          xcodegen --version
+          mkdir -p work/xcodegen
+          gh release download "$XCODEGEN_VERSION" --repo yonaskolb/XcodeGen \
+            --pattern xcodegen.zip --dir work/xcodegen --clobber
+          unzip -q work/xcodegen/xcodegen.zip -d work/xcodegen
+          echo "$PWD/work/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
+          work/xcodegen/xcodegen/bin/xcodegen --version
 
       - name: Test machine-list persistence and disk presets
         run: |
