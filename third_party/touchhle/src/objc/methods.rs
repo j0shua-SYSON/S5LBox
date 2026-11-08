@@ -32,7 +32,7 @@ impl Clone for IMP {
     fn clone(&self) -> Self {
         match self {
             IMP::Guest(guest_imp) => IMP::Guest(*guest_imp),
-            IMP::Host(_) => unimplemented!(),
+            IMP::Host(host) => IMP::Host(*host),
         }
     }
 }
@@ -40,7 +40,7 @@ impl std::fmt::Debug for IMP {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IMP::Guest(guest_imp) => write!(f, "guest method IMP at {:?}", guest_imp),
-            IMP::Host(_) => unimplemented!(),
+            IMP::Host(host) => write!(f, "host method IMP {:p}", *host),
         }
     }
 }
@@ -152,6 +152,144 @@ struct method_t {
     imp: GuestIMP,
 }
 unsafe impl SafeRead for method_t {}
+
+#[repr(C, packed)]
+pub(super) struct RuntimeMethod {
+    owner: Class,
+    selector: SEL,
+}
+unsafe impl SafeRead for RuntimeMethod {}
+type Method = ConstPtr<RuntimeMethod>;
+
+pub(super) fn class_getInstanceMethod(
+    env: &mut Environment,
+    mut class: Class,
+    selector: SEL,
+) -> Method {
+    if selector.is_null() {
+        return Ptr::null();
+    }
+    while class != nil {
+        let owner = env.objc.borrow::<ClassHostObject>(class);
+        if owner.methods.contains_key(&selector) {
+            let key = (class, selector);
+            if let Some(handle) = env.objc.method_handles.get(&key) {
+                return handle.cast();
+            }
+            let handle = env
+                .mem
+                .alloc_and_write(RuntimeMethod {
+                    owner: class,
+                    selector,
+                })
+                .cast_const();
+            env.objc.method_handles.insert(key, handle.cast());
+            return handle;
+        }
+        class = owner.superclass;
+    }
+    Ptr::null()
+}
+
+pub(super) fn class_getClassMethod(env: &mut Environment, class: Class, selector: SEL) -> Method {
+    if class == nil {
+        return Ptr::null();
+    }
+    let metaclass = ObjC::read_isa(class, &env.mem);
+    class_getInstanceMethod(env, metaclass, selector)
+}
+
+pub(super) fn method_getName(env: &mut Environment, method: Method) -> SEL {
+    if method.is_null() {
+        return <SEL as GuestArg>::from_regs(&[0]);
+    }
+    env.mem.read(method).selector
+}
+
+pub(super) fn method_getImplementation(env: &mut Environment, method: Method) -> IMP {
+    if method.is_null() {
+        return IMP::guest_null();
+    }
+    let RuntimeMethod { owner, selector } = env.mem.read(method);
+    super::classes::class_getMethodImplementation(env, owner, selector)
+}
+
+pub(super) fn method_getTypeEncoding(env: &mut Environment, method: Method) -> ConstPtr<u8> {
+    if method.is_null() {
+        return Ptr::null();
+    }
+    let RuntimeMethod { owner, selector } = env.mem.read(method);
+    // Preserve the original guest encoding, including its offsets and names.
+    // Host declarations currently carry Rust ABI types, not ObjC encodings.
+    env.objc
+        .borrow::<ClassHostObject>(owner)
+        .guest_method_signatures
+        .get(&selector)
+        .copied()
+        .unwrap_or(Ptr::null())
+}
+
+pub(super) fn method_setImplementation(env: &mut Environment, method: Method, imp: IMP) -> IMP {
+    if method.is_null() {
+        return IMP::guest_null();
+    }
+    let previous = method_getImplementation(env, method);
+    let RuntimeMethod { owner, selector } = env.mem.read(method);
+    env.objc
+        .borrow_mut::<ClassHostObject>(owner)
+        .methods
+        .insert(selector, imp);
+    previous
+}
+
+pub(super) fn method_exchangeImplementations(env: &mut Environment, first: Method, second: Method) {
+    if first.is_null() || second.is_null() || first == second {
+        return;
+    }
+    let RuntimeMethod {
+        owner: a_owner,
+        selector: a_selector,
+    } = env.mem.read(first);
+    let RuntimeMethod {
+        owner: b_owner,
+        selector: b_selector,
+    } = env.mem.read(second);
+    let first_imp = env.objc.borrow::<ClassHostObject>(a_owner).methods[&a_selector].clone();
+    let second_imp = env.objc.borrow::<ClassHostObject>(b_owner).methods[&b_selector].clone();
+    // Preserve host implementations as host values for typed message dispatch.
+    env.objc
+        .borrow_mut::<ClassHostObject>(a_owner)
+        .methods
+        .insert(a_selector, second_imp);
+    env.objc
+        .borrow_mut::<ClassHostObject>(b_owner)
+        .methods
+        .insert(b_selector, first_imp);
+}
+
+pub(super) fn class_addMethod(
+    env: &mut Environment,
+    class: Class,
+    selector: SEL,
+    imp: IMP,
+    types: ConstPtr<u8>,
+) -> bool {
+    if class == nil || selector.is_null() || env.objc.class_has_uninherited_method(class, selector)
+    {
+        return false;
+    }
+    let types = if types.is_null() {
+        Ptr::null()
+    } else {
+        crate::libc::string::strdup(env, types).cast_const()
+    };
+    let owner = env.objc.borrow_mut::<ClassHostObject>(class);
+    owner.methods.insert(selector, imp);
+    if !types.is_null() {
+        owner.guest_method_signatures.insert(selector, types);
+    }
+    true
+}
 
 impl ClassHostObject {
     // See classes.rs for host method parsing

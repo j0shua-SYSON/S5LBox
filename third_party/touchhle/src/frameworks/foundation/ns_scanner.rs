@@ -149,17 +149,15 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (bool)scanHexInt:(MutPtr<u32>)result {
-    assert!(!result.is_null());
-    skip_characters(env, this);
+    let parsed = scan_hex(env, this, u32::MAX as u64);
+    if let Some(value) = parsed { if !result.is_null() { env.mem.write(result, value as u32); } }
+    parsed.is_some()
+}
 
-    let NSScannerHostObject { to_be_skipped: _set, string, len, pos } = env.objc.borrow::<NSScannerHostObject>(this).clone();
-    assert!(pos < len);
-    let susbstring: id = msg![env; string substringFromIndex:pos];
-    let tmp = to_rust_string(env, susbstring);
-    assert!(!tmp.starts_with("0x") && !tmp.starts_with("0X"));
-    assert!(!tmp.chars().next().unwrap().is_ascii_hexdigit()); // TODO
-    env.mem.write(result, 0);
-    false
+- (bool)scanHexLongLong:(MutPtr<u64>)result {
+    let parsed = scan_hex(env, this, u64::MAX);
+    if let Some(value) = parsed { if !result.is_null() { env.mem.write(result, value); } }
+    parsed.is_some()
 }
 
 - (bool)scanUpToString:(id)stop_string // NSString *
@@ -260,7 +258,50 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 };
 
-// Helper functions, skips characters from `charactersToBeSkipped` set
+fn scan_hex(env: &mut Environment, scanner: id, maximum: u64) -> Option<u64> {
+    skip_characters(env, scanner);
+    let NSScannerHostObject {
+        string, pos, len, ..
+    } = env.objc.borrow::<NSScannerHostObject>(scanner).clone();
+    if pos >= len {
+        return None;
+    }
+    let suffix: id = msg![env; string substringFromIndex:pos];
+    let text = to_rust_string(env, suffix);
+    let bytes = text.as_bytes();
+    let prefix = if bytes.len() >= 3
+        && bytes[0] == b'0'
+        && matches!(bytes[1], b'x' | b'X')
+        && bytes[2].is_ascii_hexdigit()
+    {
+        2
+    } else {
+        0
+    };
+    let mut consumed = prefix;
+    let mut value = 0u64;
+    for &byte in &bytes[prefix..] {
+        let digit = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => break,
+        };
+        value = value
+            .saturating_mul(16)
+            .saturating_add(digit as u64)
+            .min(maximum);
+        consumed += 1;
+    }
+    if consumed == prefix {
+        return None;
+    }
+    // Scanned digits and the prefix are ASCII, so byte and UTF-16 lengths agree.
+    env.objc.borrow_mut::<NSScannerHostObject>(scanner).pos = pos + consumed as u32;
+    Some(value)
+}
+
+// Skip characters from the scanner's charactersToBeSkipped set.
 fn skip_characters(env: &mut Environment, scanner: id) {
     let &NSScannerHostObject {
         to_be_skipped,

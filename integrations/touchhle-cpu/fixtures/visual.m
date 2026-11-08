@@ -8,6 +8,16 @@ typedef signed char BOOL;
 typedef id (*IMP)(id,SEL,...);
 extern SEL sel_getUid(const char *name);
 extern SEL sel_registerName(const char *name);
+typedef void *Method;
+extern Method class_getInstanceMethod(Class,SEL);
+extern Method class_getClassMethod(Class,SEL);
+extern BOOL class_addMethod(Class,SEL,IMP,const char *);
+extern IMP class_replaceMethod(Class,SEL,IMP,const char *);
+extern IMP method_getImplementation(Method);
+extern SEL method_getName(Method);
+extern const char *method_getTypeEncoding(Method);
+extern IMP method_setImplementation(Method,IMP);
+extern void method_exchangeImplementations(Method,Method);
 typedef struct { float x,y; } CGPoint;
 typedef struct { float width,height; } CGSize;
 typedef struct { CGPoint origin; CGSize size; } CGRect;
@@ -21,12 +31,75 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 - (id)autorelease;
 - (void)release;
 - (void)dealloc;
+- (unsigned)retainCount;
+- (void)performSelector:(SEL)selector withObject:(id)object afterDelay:(double)delay;
++ (void)cancelPreviousPerformRequestsWithTarget:(id)target;
 - (IMP)methodForSelector:(SEL)selector;
 @end
 @interface NSAutoreleasePool : NSObject @end
+@interface RuntimeBase : NSObject
++ (int)classAnswer;
+- (int)first;
+- (int)second;
+@end
+@implementation RuntimeBase
++ (int)classAnswer { return 3; }
+- (int)first { return 11; }
+- (int)second { return 22; }
+@end
+@interface RuntimeChild : RuntimeBase @end
+@implementation RuntimeChild @end
+static int replacementMethod(id self,SEL selector) { (void)self; (void)selector; return 77; }
+
+#if __has_warning("-Wcast-function-type-mismatch")
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-function-type-mismatch"
+#endif
+static unsigned methods_smoke(void) {
+    unsigned failures=0;
+    RuntimeBase *base=[[RuntimeBase alloc] init];
+    RuntimeChild *child=[[RuntimeChild alloc] init];
+    Method first=class_getInstanceMethod([RuntimeBase class],@selector(first));
+    Method second=class_getInstanceMethod([RuntimeBase class],@selector(second));
+    failures += !first || !second || first==second;
+    failures += first!=class_getInstanceMethod([RuntimeChild class],@selector(first));
+    failures += method_getName(first)!=@selector(first);
+    failures += !method_getTypeEncoding(first) || method_getTypeEncoding(first)[0]!='i';
+    failures += class_getInstanceMethod([RuntimeBase class],@selector(missingMethod))!=NULL;
+    Method factory=class_getClassMethod([RuntimeBase class],@selector(classAnswer));
+    failures += !factory;
+    failures += ((int (*)(id,SEL))method_getImplementation(factory))([RuntimeBase class],@selector(classAnswer))!=3;
+    IMP original=method_getImplementation(first);
+    method_exchangeImplementations(first,second);
+    failures += [base first]!=22 || [child first]!=22 || [base second]!=11;
+    failures += ((int (*)(id,SEL))original)(base,@selector(first))!=11;
+    method_exchangeImplementations(first,second);
+    failures += !class_addMethod([RuntimeChild class],@selector(first),(IMP)replacementMethod,method_getTypeEncoding(first));
+    failures += class_addMethod([RuntimeChild class],@selector(first),original,"i@:");
+    failures += [base first]!=11 || [child first]!=77;
+    Method override=class_getInstanceMethod([RuntimeChild class],@selector(first));
+    failures += override==first;
+    method_setImplementation(override,original);
+    failures += [child first]!=11;
+    IMP previous=class_replaceMethod([RuntimeChild class],@selector(first),(IMP)replacementMethod,NULL);
+    failures += previous!=original || [child first]!=77;
+    // A host method's returned IMP must remain callable after replacement.
+    Method description=class_getInstanceMethod([NSObject class],@selector(class));
+    IMP host=method_getImplementation(description);
+    failures += !host;
+    method_setImplementation(description,(IMP)replacementMethod);
+    failures += ((Class (*)(id,SEL))host)(base,@selector(class))!=[RuntimeBase class];
+    method_setImplementation(description,host);
+    [base release]; [child release];
+    return failures;
+}
+#if __has_warning("-Wcast-function-type-mismatch")
+#pragma clang diagnostic pop
+#endif
 @interface NSNumber : NSObject
 + (id)numberWithBool:(BOOL)value;
 + (id)numberWithInt:(int)value;
++ (id)numberWithDouble:(double)value;
 + (id)numberWithChar:(signed char)value;
 + (id)numberWithUnsignedLong:(unsigned long)value;
 - (id)initWithUnsignedLong:(unsigned long)value;
@@ -54,6 +127,24 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 @interface NSDate : NSObject
 + (id)date;
 @end
+@interface NSScanner : NSObject
++ (id)scannerWithString:(id)string;
+- (BOOL)scanHexInt:(unsigned *)value;
+- (BOOL)scanHexLongLong:(unsigned long long *)value;
+- (unsigned)scanLocation;
+- (void)setScanLocation:(unsigned)position;
+@end
+@interface NSRunLoop : NSObject
++ (id)currentRunLoop;
+- (void)cancelPerformSelectorsWithTarget:(id)target;
+- (void)cancelPerformSelector:(SEL)selector target:(id)target argument:(id)argument;
+@end
+extern id kCFPreferencesCurrentApplication;
+extern BOOL CFPreferencesGetAppBooleanValue(id,id,unsigned char *);
+extern int CFPreferencesGetAppIntegerValue(id,id,unsigned char *);
+extern void CFPreferencesSetAppValue(id,id,id);
+extern id CFPreferencesCopyAppValue(id,id);
+extern BOOL CFPreferencesAppSynchronize(id);
 @interface NSThread : NSObject
 + (id)currentThread;
 + (void)exit;
@@ -600,8 +691,78 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     printf("S5LBOX-HLE-VISUAL TERMINATING exits=%d\n",exits); fflush(stdout);
 }
 @end
+static unsigned foundation_compat_smoke(void) {
+    unsigned failures=0;
+    id domain=kCFPreferencesCurrentApplication,key=@"CompatibilityValue";
+    unsigned char valid=9;
+    CFPreferencesSetAppValue(key,0,domain);
+    failures += CFPreferencesGetAppBooleanValue(key,domain,&valid) || valid;
+    CFPreferencesSetAppValue(key,@"yEs",domain);
+    failures += !CFPreferencesGetAppBooleanValue(key,domain,&valid) || !valid;
+    CFPreferencesSetAppValue(key,@"false",domain);
+    failures += CFPreferencesGetAppBooleanValue(key,domain,&valid) || !valid;
+    CFPreferencesSetAppValue(key,@"1",domain);
+    failures += CFPreferencesGetAppBooleanValue(key,domain,&valid) || valid;
+    failures += CFPreferencesGetAppIntegerValue(key,domain,&valid)!=1 || !valid;
+    CFPreferencesSetAppValue(key,[NSNumber numberWithDouble:1.0],domain);
+    failures += CFPreferencesGetAppBooleanValue(key,domain,&valid) || valid;
+    failures += CFPreferencesGetAppIntegerValue(key,domain,&valid)!=0 || valid;
+    CFPreferencesSetAppValue(key,[NSNumber numberWithBool:1],domain);
+    failures += !CFPreferencesGetAppBooleanValue(key,domain,NULL);
+    failures += CFPreferencesGetAppIntegerValue(key,domain,&valid)!=0 || valid;
+    CFPreferencesSetAppValue(key,@" -42",domain);
+    failures += CFPreferencesGetAppIntegerValue(key,domain,&valid)!=-42 || !valid;
+    CFPreferencesSetAppValue(key,@"42oops",domain);
+    failures += CFPreferencesGetAppIntegerValue(key,domain,&valid)!=0 || valid;
+    CFPreferencesSetAppValue(key,0,domain);
+    failures += CFPreferencesCopyAppValue(key,domain)!=0;
+    failures += !CFPreferencesAppSynchronize(domain);
+
+    unsigned value=0;
+    NSScanner *scanner=[NSScanner scannerWithString:@" 0x12Ab! FFFFFFFFFFF."];
+    failures += ![scanner scanHexInt:&value] || value!=0x12ab || [scanner scanLocation]!=7;
+    [scanner setScanLocation:8];
+    failures += ![scanner scanHexInt:&value] || value!=0xffffffffu || [scanner scanLocation]!=20;
+    scanner=[NSScanner scannerWithString:@"0Xff!"];
+    failures += ![scanner scanHexInt:NULL] || [scanner scanLocation]!=4;
+    scanner=[NSScanner scannerWithString:@"0x"];
+    failures += ![scanner scanHexInt:&value] || value || [scanner scanLocation]!=1;
+    scanner=[NSScanner scannerWithString:@""];
+    failures += [scanner scanHexInt:&value];
+    scanner=[NSScanner scannerWithString:@"  xyz"];
+    failures += [scanner scanHexInt:&value];
+    unsigned long long wide=0;
+    scanner=[NSScanner scannerWithString:@"10000000000000000!"];
+    failures += ![scanner scanHexLongLong:&wide] || wide!=~0ULL || [scanner scanLocation]!=17;
+
+    CancelTarget *target=[[CancelTarget alloc] init],*other=[[CancelTarget alloc] init];
+    NSRunLoop *loop=[NSRunLoop currentRunLoop];
+    [target performSelector:@selector(ended:) withObject:0 afterDelay:1000];
+    [target performSelector:@selector(cancelled:) withObject:0 afterDelay:1000];
+    [other performSelector:@selector(ended:) withObject:0 afterDelay:1000];
+    failures += [target retainCount]!=3 || [other retainCount]!=2;
+    [loop cancelPerformSelector:@selector(ended:) target:target argument:0];
+    failures += [target retainCount]!=2 || [other retainCount]!=2;
+    [loop cancelPerformSelectorsWithTarget:target];
+    failures += [target retainCount]!=1 || [other retainCount]!=2;
+    [NSObject cancelPreviousPerformRequestsWithTarget:other];
+    failures += [other retainCount]!=1;
+    [target release]; [other release];
+    return failures;
+}
+
 int main(int argc,char **argv) {
     (void)[[NSAutoreleasePool alloc] init];
+    if (argc>1 && !strcmp(argv[1],"--foundation-compat-smoke")) {
+        unsigned failures=foundation_compat_smoke();
+        printf("S5LBOX-HLE-FOUNDATION-COMPAT %s failures=%u\n",failures?"FAIL":"PASS",failures);
+        return failures?1:0;
+    }
+    if (argc>1 && !strcmp(argv[1],"--methods-smoke")) {
+        unsigned failures=methods_smoke();
+        printf("S5LBOX-HLE-METHODS %s failures=%u\n",failures?"FAIL":"PASS",failures);
+        return failures?1:0;
+    }
     if (argc>1 && (!strcmp(argv[1],"--permissions-smoke") || !strcmp(argv[1],"--permissions-unavailable-smoke"))) {
         unsigned failures=permissions_smoke(!strcmp(argv[1],"--permissions-unavailable-smoke"));
         printf("S5LBOX-HLE-PERMISSIONS %s failures=%u\n",failures?"FAIL":"PASS",failures);

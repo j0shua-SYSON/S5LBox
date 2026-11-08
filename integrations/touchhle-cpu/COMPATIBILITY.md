@@ -73,3 +73,11 @@ until completion, including explicit exit. ARMv6 regression fixtures pass locall
 Double floating-point classification is implemented; `nan()` uses the double
 return ABI, and `hypot()` avoids premature overflow and underflow. ARMv6 math
 checks pass locally. These checks do not yet establish PCalc functionality.
+
+Objective-C method lookup and replacement, current-app preference conversion,
+hexadecimal scanning, run-loop cancellation, and checked formatting now have
+passing ARMv6 regression fixtures. A targeted desktop startup check progresses
+past the original failures in PCalc, Convertbot, Rolando, Labyrinth, and
+Fieldrunners, but each still has a later failure. None is a functional pass.
+Host method type encodings and preference domains for other applications remain
+unsupported. The desktop graphics failures require separate device diagnosis.

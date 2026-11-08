@@ -664,17 +664,59 @@ fn vsprintf(env: &mut Environment, dest: MutPtr<u8>, format: ConstPtr<u8>, arg: 
 fn __sprintf_chk(
     env: &mut Environment,
     dest: MutPtr<u8>,
-    _flags: i32,
+    flags: i32,
     strlen: GuestUSize,
     format: ConstPtr<u8>,
     args: DotDotDot,
 ) -> i32 {
-    if strlen == 0 {
-        panic!();
-    }
-    // TODO: respect flags level
-    // TODO: full overflow check
-    sprintf(env, dest, format, args)
+    __vsprintf_chk(env, dest, flags, strlen, format, args.start())
+}
+
+fn __vsprintf_chk(
+    env: &mut Environment,
+    dest: MutPtr<u8>,
+    _flags: i32,
+    size: GuestUSize,
+    format: ConstPtr<u8>,
+    args: VaList,
+) -> i32 {
+    let output = printf_inner::<false, _>(env, |mem, idx| mem.read(format + idx), args);
+    assert!(
+        output.len() < size as usize,
+        "checked sprintf buffer overflow"
+    );
+    let destination = env
+        .mem
+        .bytes_at_mut(dest, (output.len() + 1).try_into().unwrap());
+    destination[..output.len()].copy_from_slice(&output);
+    destination[output.len()] = 0;
+    output.len().try_into().unwrap()
+}
+
+fn __snprintf_chk(
+    env: &mut Environment,
+    dest: MutPtr<u8>,
+    limit: GuestUSize,
+    flags: i32,
+    size: GuestUSize,
+    format: ConstPtr<u8>,
+    args: DotDotDot,
+) -> i32 {
+    __vsnprintf_chk(env, dest, limit, flags, size, format, args.start())
+}
+
+fn __vsnprintf_chk(
+    env: &mut Environment,
+    dest: MutPtr<u8>,
+    limit: GuestUSize,
+    _flags: i32,
+    size: GuestUSize,
+    format: ConstPtr<u8>,
+    args: VaList,
+) -> i32 {
+    // The object-size check applies even when the formatted text would fit.
+    assert!(limit <= size, "checked snprintf buffer overflow");
+    vsnprintf(env, dest, limit, format, args)
 }
 
 fn sprintf(env: &mut Environment, dest: MutPtr<u8>, format: ConstPtr<u8>, args: DotDotDot) -> i32 {
@@ -1307,6 +1349,9 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(vsnprintf(_, _, _, _)),
     export_c_func!(vsprintf(_, _, _)),
     export_c_func!(__sprintf_chk(_, _, _, _, _)),
+    export_c_func!(__vsprintf_chk(_, _, _, _, _)),
+    export_c_func!(__snprintf_chk(_, _, _, _, _, _)),
+    export_c_func!(__vsnprintf_chk(_, _, _, _, _, _)),
     export_c_func!(sprintf(_, _, _)),
     export_c_func!(swprintf(_, _, _, _)),
     export_c_func!(vswprintf(_, _, _, _)),

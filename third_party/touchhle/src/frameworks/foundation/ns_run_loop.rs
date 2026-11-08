@@ -97,6 +97,14 @@ pub const CLASSES: ClassExports = objc_classes! {
     this
 }
 
+- (())cancelPerformSelectorsWithTarget:(id)target {
+    cancel_all_perform_requests(env, this, target);
+}
+
+- (())cancelPerformSelector:(SEL)selector target:(id)target argument:(id)argument {
+    cancel_perform_requests(env, this, target, selector, argument);
+}
+
 - (())addTimer:(id)timer // NSTimer*
        forMode:(NSRunLoopMode)mode {
     let default_mode = ns_string::get_static_str(env, NSDefaultRunLoopMode);
@@ -255,43 +263,50 @@ pub(super) fn cancel_perform_requests(
     selector: SEL,
     argument: id,
 ) {
-    log_dbg!(
-        "Removing object selector request {target:?} {:?} {argument:?} on run loop {run_loop:?}",
-        selector.as_str(env.mem.as_mut())
-    );
+    cancel_requests(env, run_loop, target, Some((selector, argument)));
+}
+
+pub(super) fn cancel_all_perform_requests(env: &mut Environment, run_loop: id, target: id) {
+    cancel_requests(env, run_loop, target, None);
+}
+
+fn cancel_requests(env: &mut Environment, run_loop: id, target: id, filter: Option<(SEL, id)>) {
     let mut new_selector_objects = VecDeque::new();
+    let mut removed = Vec::new();
     let host_object = env.objc.borrow_mut::<NSRunLoopHostObject>(run_loop);
     let mut selector_objects = std::mem::take(&mut host_object.selector_objects);
     while let Some(obj) = selector_objects.pop_front() {
-        if obj.target != target || obj.selector != selector {
+        if obj.target != target || filter.is_some_and(|(selector, _)| obj.selector != selector) {
             new_selector_objects.push_back(obj);
             continue;
         }
-        let curr_arg = obj.argument;
-        let arg_equal = if curr_arg.is_null() {
-            argument.is_null()
-        } else {
-            msg![env; curr_arg isEqual:argument]
+        let current_argument = obj.argument;
+        let arg_equal = match filter {
+            None => true,
+            Some((_, argument)) if obj.argument == argument => true,
+            Some((_, argument)) => msg![env; current_argument isEqual:argument],
         };
         if arg_equal {
-            let ObjectSelectorSource {
-                target,
-                argument,
-                semaphore,
-                ..
-            } = obj;
-            release(env, target);
-            release(env, argument);
-            if !semaphore.is_null() {
-                sem_post(env, semaphore);
-            }
+            removed.push(obj);
         } else {
             new_selector_objects.push_back(obj);
         }
     }
-    env.objc
+    let queue = &mut env
+        .objc
         .borrow_mut::<NSRunLoopHostObject>(run_loop)
-        .selector_objects = new_selector_objects;
+        .selector_objects;
+    // isEqual: and dealloc may enqueue more work. Publish the survivors before
+    // releasing removed objects so those requests are not overwritten.
+    new_selector_objects.append(queue);
+    *queue = new_selector_objects;
+    for obj in removed {
+        release(env, obj.target);
+        release(env, obj.argument);
+        if !obj.semaphore.is_null() {
+            sem_post(env, obj.semaphore);
+        }
+    }
 }
 
 /// Run the run loop for just a single iteration. This is a special mode just

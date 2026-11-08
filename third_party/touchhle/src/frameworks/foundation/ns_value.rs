@@ -78,6 +78,15 @@ pub(crate) fn is_boolean(env: &Environment, object: id) -> bool {
     )
 }
 
+pub(crate) fn is_floating_point(env: &Environment, object: id) -> bool {
+    matches!(
+        env.objc
+            .get_host_object(object)
+            .and_then(|host| host.as_any().downcast_ref::<NSNumberHostObject>()),
+        Some(NSNumberHostObject::Float(_) | NSNumberHostObject::Double(_))
+    )
+}
+
 impl NSNumberHostObject {
     fn as_bool(&self) -> bool {
         match self {

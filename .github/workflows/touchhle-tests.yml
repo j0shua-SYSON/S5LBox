@@ -309,6 +309,10 @@ jobs:
           ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/InterpreterSmoke.app --headless --args --primary-exit-smoke > ../../work/hle-primary-exit.log 2>&1
           cat ../../work/hle-primary-exit.log
           grep -F 'S5LBOX-HLE-PRIMARY-EXIT PASS failures=0' ../../work/hle-primary-exit.log
+          result=0
+          ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/InterpreterSmoke.app --headless --args --format-overflow-smoke > ../../work/hle-format-overflow.log 2>&1 || result=$?
+          test "$result" -ne 0
+          grep -F 'checked sprintf buffer overflow' ../../work/hle-format-overflow.log
 
       - name: Preserve smoke-test output
         if: always()
@@ -321,6 +325,7 @@ jobs:
             work/hle-dynamic.log
             work/hle-thread-lifecycle.log
             work/hle-primary-exit.log
+            work/hle-format-overflow.log
             work/hle-smoke/InterpreterSmoke.app
             work/hle-smoke/HLEVisual.app
             work/hle-smoke/LibrarySmoke.app
@@ -355,6 +360,12 @@ jobs:
           cat ../../work/hle-permissions.log
           test "$result" -eq 0
           grep -F 'S5LBOX-HLE-PERMISSIONS PASS failures=0' ../../work/hle-permissions.log
+          ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/HLEVisual.app --headless --preferred-languages=en --args --methods-smoke > ../../work/hle-methods.log 2>&1
+          cat ../../work/hle-methods.log
+          grep -F 'S5LBOX-HLE-METHODS PASS failures=0' ../../work/hle-methods.log
+          ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/HLEVisual.app --headless --preferred-languages=en --args --foundation-compat-smoke > ../../work/hle-foundation-compat.log 2>&1
+          cat ../../work/hle-foundation-compat.log
+          grep -F 'S5LBOX-HLE-FOUNDATION-COMPAT PASS failures=0' ../../work/hle-foundation-compat.log
 
       - name: Reuse one host process after guest exits and faults
         working-directory: third_party/touchhle
@@ -404,5 +415,7 @@ jobs:
             work/hle-provider.log
             work/hle-permissions.log
             work/hle-cancel.log
+            work/hle-methods.log
+            work/hle-foundation-compat.log
             work/hle-dylibs.log
           if-no-files-found: ignore

@@ -54,7 +54,11 @@ use classes::{
 };
 pub(crate) use messages::objc_msgSend;
 use messages::{objc_msgSendSuper2, objc_msgSend_stret, MsgSendSignature, MsgSendSuperSignature};
-use methods::method_list_t;
+use methods::{
+    class_addMethod, class_getClassMethod, class_getInstanceMethod, method_exchangeImplementations,
+    method_getImplementation, method_getName, method_getTypeEncoding, method_list_t,
+    method_setImplementation,
+};
 use objects::{objc_object, object_getClass, HostObjectEntry};
 use properties::{ivar_list_t, objc_copyStruct, objc_getProperty, objc_setProperty};
 use selectors::sel_registerName;
@@ -93,6 +97,9 @@ pub struct ObjC {
     message_type_info: Option<(std::any::TypeId, &'static str)>,
     /// Callable guest addresses for host-backed Objective-C implementations.
     host_method_trampolines: HashMap<usize, crate::abi::GuestFunction>,
+    /// Stable opaque handles identify the defining class and selector, even
+    /// after the implementation is replaced or exchanged.
+    method_handles: HashMap<(Class, SEL), ConstVoidPtr>,
 }
 
 impl ObjC {
@@ -105,6 +112,7 @@ impl ObjC {
             initializer_threads: HashMap::new(),
             message_type_info: None,
             host_method_trampolines: HashMap::new(),
+            method_handles: HashMap::new(),
         }
     }
 }
@@ -146,6 +154,14 @@ const FUNCTIONS: FunctionExports = &[
     export_c_func!(class_getProperty(_, _)),
     export_c_func!(class_getMethodImplementation(_, _)),
     export_c_func!(class_replaceMethod(_, _, _, _)),
+    export_c_func!(class_addMethod(_, _, _, _)),
+    export_c_func!(class_getInstanceMethod(_, _)),
+    export_c_func!(class_getClassMethod(_, _)),
+    export_c_func!(method_getName(_)),
+    export_c_func!(method_getImplementation(_)),
+    export_c_func!(method_getTypeEncoding(_)),
+    export_c_func!(method_setImplementation(_, _)),
+    export_c_func!(method_exchangeImplementations(_, _)),
     export_c_func!(objc_msgSend(_, _)),
     export_c_func!(objc_msgSend_stret(_, _, _)),
     export_c_func!(objc_msgSendSuper2(_, _)),

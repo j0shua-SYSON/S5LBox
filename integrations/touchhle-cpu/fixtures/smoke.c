@@ -9,6 +9,17 @@
 #include <sys/time.h>
 #include <dlfcn.h>
 #include <math.h>
+#include <stdarg.h>
+extern int __snprintf_chk(char *,size_t,int,size_t,const char *,...);
+extern int __vsnprintf_chk(char *,size_t,int,size_t,const char *,va_list);
+extern int __sprintf_chk(char *,int,size_t,const char *,...);
+extern int __vsprintf_chk(char *,int,size_t,const char *,va_list);
+
+static int checked_vformat(char *buffer,size_t size,int bounded,const char *format,...) {
+    va_list args; va_start(args,format);
+    int result=bounded?__vsnprintf_chk(buffer,size,0,size,format,args):__vsprintf_chk(buffer,0,size,format,args);
+    va_end(args); return result;
+}
 
 extern int pthread_cond_timedwait_relative_np(pthread_cond_t *, pthread_mutex_t *, const struct timespec *);
 
@@ -214,6 +225,12 @@ static void dynamic_smoke(void) {
 }
 
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--format-overflow-smoke") == 0) {
+        char small[4];
+        int (*volatile checked)(char *,int,size_t,const char *,...) = __sprintf_chk;
+        checked(small,0,sizeof small,"%s","too long");
+        return 99; /* Must fail before writing beyond the destination. */
+    }
     if (argc > 1 && strcmp(argv[1], "--thread-lifecycle-smoke") == 0) {
         thread_lifecycle_smoke();
         printf("S5LBOX-HLE-THREAD-LIFECYCLE %s failures=%u\n", failures ? "FAIL" : "PASS", failures);
@@ -260,6 +277,17 @@ int main(int argc, char **argv) {
         return 97;
     }
     CHECK(thumb_sum(19, 23) == 42);
+    int (*volatile bounded_format)(char *,size_t,int,size_t,const char *,...) = __snprintf_chk;
+    int (*volatile checked_format)(char *,int,size_t,const char *,...) = __sprintf_chk;
+    char formatted[16]; memset(formatted,'!',sizeof formatted);
+    CHECK(bounded_format(formatted,5,0,sizeof formatted,"%s-%d","abcdef",42)==9);
+    CHECK(!strcmp(formatted,"abcd") && formatted[5]=='!');
+    CHECK(bounded_format(NULL,0,0,0,"%s-%d","test",7)==6);
+    CHECK(checked_format(formatted,0,sizeof formatted,"%.1f/%d",1.5,7)==5);
+    CHECK(!strcmp(formatted,"1.5/7"));
+    CHECK(checked_vformat(formatted,sizeof formatted,1,"%d %.1f",42,2.5)==6);
+    CHECK(!strcmp(formatted,"42 2.5"));
+    CHECK(checked_vformat(formatted,sizeof formatted,0,"%s","abc")==3);
     // Call through pointers to exercise the guest ABI rather than compiler
     // builtins folding the constants (notably double-valued nan()).
     int (*volatile classify_double)(double) = __fpclassify;
