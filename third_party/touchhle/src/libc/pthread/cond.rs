@@ -12,10 +12,38 @@ use crate::libc::pthread::mutex::pthread_mutex_unlock;
 use crate::mem::{ConstPtr, MutPtr, Ptr, SafeRead};
 use crate::{export_c_func, Environment};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::environment::{MutexId, ThreadBlock, ThreadId};
 use crate::libc::time::timespec;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CondDeadline {
+    Absolute(SystemTime),
+    Relative(Instant),
+}
+
+impl CondDeadline {
+    pub fn remaining(self) -> Duration {
+        match self {
+            Self::Absolute(time) => time.duration_since(SystemTime::now()).unwrap_or_default(),
+            Self::Relative(time) => time.saturating_duration_since(Instant::now()),
+        }
+    }
+}
+
+fn read_timeout(env: &Environment, time: ConstPtr<timespec>) -> Result<Duration, i32> {
+    if time.is_null() {
+        return Err(EINVAL);
+    }
+    let time = env.mem.read(time);
+    let seconds = time.tv_sec;
+    let nanos = time.tv_nsec;
+    if seconds < 0 || !(0..1_000_000_000).contains(&nanos) {
+        return Err(EINVAL);
+    }
+    Ok(Duration::new(seconds as u64, nanos as u32))
+}
 
 #[repr(C, packed)]
 pub struct pthread_condattr_t {}
@@ -105,10 +133,38 @@ fn pthread_cond_timedwait(
     mutex: MutPtr<pthread_mutex_t>,
     abs_time: ConstPtr<timespec>,
 ) -> i32 {
-    let time = env.mem.read(abs_time);
-    let deadline = Duration::from_secs(time.tv_sec.try_into().unwrap())
-        + Duration::from_nanos(time.tv_nsec.try_into().unwrap());
+    let deadline = match read_timeout(env, abs_time)
+        .ok()
+        .and_then(|time| SystemTime::UNIX_EPOCH.checked_add(time))
+    {
+        Some(time) => CondDeadline::Absolute(time),
+        None => return EINVAL,
+    };
+    wait(env, cond, mutex, Some(deadline))
+}
 
+fn pthread_cond_timedwait_relative_np(
+    env: &mut Environment,
+    cond: MutPtr<pthread_cond_t>,
+    mutex: MutPtr<pthread_mutex_t>,
+    relative_time: ConstPtr<timespec>,
+) -> i32 {
+    let deadline = match read_timeout(env, relative_time)
+        .ok()
+        .and_then(|time| Instant::now().checked_add(time))
+    {
+        Some(time) => CondDeadline::Relative(time),
+        None => return EINVAL,
+    };
+    wait(env, cond, mutex, Some(deadline))
+}
+
+fn wait(
+    env: &mut Environment,
+    cond: MutPtr<pthread_cond_t>,
+    mutex: MutPtr<pthread_mutex_t>,
+    deadline: Option<CondDeadline>,
+) -> i32 {
     match check_or_register_cond(env, cond) {
         Ok(_) => {}
         Err(e) => {
@@ -116,7 +172,9 @@ fn pthread_cond_timedwait(
         }
     };
     let res = pthread_mutex_unlock(env, mutex);
-    assert_eq!(res, 0);
+    if res != 0 {
+        return res;
+    }
     log_dbg!(
         "Thread {} is blocking on condition variable {:?} with deadline {:?}",
         env.current_thread,
@@ -139,14 +197,13 @@ fn pthread_cond_timedwait(
     host_object.curr_mutex = Some(mutex);
     host_object.waiting.push_back(current_thread);
 
-    env.yield_thread(ThreadBlock::Condition(cond, Some(deadline)));
+    env.yield_thread(ThreadBlock::Condition(cond, deadline));
 
     let host_object = State::get_mut(env)
         .condition_variables
         .get_mut(&cond)
         .unwrap();
-    if host_object.timed_out.contains(&current_thread) {
-        host_object.timed_out.remove(&current_thread);
+    if host_object.timed_out.remove(&current_thread) {
         ETIMEDOUT
     } else {
         0 // success
@@ -158,43 +215,7 @@ pub fn pthread_cond_wait(
     cond: MutPtr<pthread_cond_t>,
     mutex: MutPtr<pthread_mutex_t>,
 ) -> i32 {
-    match check_or_register_cond(env, cond) {
-        Ok(_) => {}
-        Err(e) => {
-            return e;
-        }
-    };
-    let res = pthread_mutex_unlock(env, mutex);
-    assert_eq!(res, 0);
-    log_dbg!(
-        "Thread {} is blocking on condition variable {:?}",
-        env.current_thread,
-        cond
-    );
-
-    let current_thread = env.current_thread;
-    let mutex = env.mem.read(mutex).mutex_id;
-    let host_object = State::get_mut(env)
-        .condition_variables
-        .get_mut(&cond)
-        .unwrap();
-    // The mutex used must be the same as the currently waiting mutex, or there
-    // must be no other waiters.
-    assert!(
-        host_object.curr_mutex == Some(mutex)
-            || host_object.waking.is_empty() && host_object.waiting.is_empty()
-    );
-    host_object.curr_mutex = Some(mutex);
-    host_object.waiting.push_back(current_thread);
-
-    env.yield_thread(ThreadBlock::Condition(cond, None));
-
-    let host_object = State::get_mut(env)
-        .condition_variables
-        .get_mut(&cond)
-        .unwrap();
-    assert!(!host_object.timed_out.contains(&current_thread));
-    0 // success
+    wait(env, cond, mutex, None)
 }
 
 pub fn pthread_cond_signal(env: &mut Environment, cond: MutPtr<pthread_cond_t>) -> i32 {
@@ -265,6 +286,7 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(pthread_cond_init(_, _)),
     export_c_func!(pthread_cond_wait(_, _)),
     export_c_func!(pthread_cond_timedwait(_, _, _)),
+    export_c_func!(pthread_cond_timedwait_relative_np(_, _, _)),
     export_c_func!(pthread_cond_signal(_)),
     export_c_func!(pthread_cond_broadcast(_)),
     export_c_func!(pthread_cond_destroy(_)),

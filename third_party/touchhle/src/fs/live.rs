@@ -432,6 +432,68 @@ mod tests {
     }
 
     #[test]
+    fn recursive_creation_preserves_existing_mounted_parents() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        struct Directories(Arc<Mutex<HashMap<String, u32>>>);
+        impl Exchange for Directories {
+            fn exchange(&mut self, request: &[u8], response: &mut [u8]) -> io::Result<usize> {
+                let n = u32_at(request, 5)? as usize;
+                let path = std::str::from_utf8(&request[9..9 + n]).unwrap();
+                let mut dirs = self.0.lock().unwrap();
+                let mut data = Vec::new();
+                let error = match request[4] {
+                    1 => match dirs.get(path) {
+                        Some(mode) => {
+                            data.extend_from_slice(&0u64.to_be_bytes());
+                            data.extend_from_slice(&0u64.to_be_bytes());
+                            data.extend_from_slice(&(0o40000 | mode).to_be_bytes());
+                            data.extend_from_slice(&501u32.to_be_bytes());
+                            data.extend_from_slice(&501u32.to_be_bytes());
+                            data.extend_from_slice(&2u64.to_be_bytes());
+                            0
+                        }
+                        None => 2,
+                    },
+                    9 => {
+                        assert!(
+                            !dirs.contains_key(path),
+                            "existing parent must not be created"
+                        );
+                        dirs.insert(path.to_string(), 0o755);
+                        0
+                    }
+                    18 => {
+                        *dirs.get_mut(path).unwrap() = u32_at(request, 9 + n)?;
+                        0
+                    }
+                    op => panic!("unexpected operation {op}"),
+                };
+                let bytes = reply(error, &data)?;
+                response[..bytes.len()].copy_from_slice(&bytes);
+                Ok(bytes.len())
+            }
+        }
+        let dirs = Arc::new(Mutex::new(HashMap::from([
+            ("/".to_string(), 0o755),
+            ("/Library".to_string(), 0o755),
+        ])));
+        let live = LiveFs::new(Box::new(Directories(dirs.clone())));
+        let home = "/var/mobile/Applications/01234567-89AB-CDEF-0123-456789ABCDEF";
+        let mut fs = super::super::Fs::new_live(live, home).unwrap();
+        let path = super::super::GuestPathBuf::from(format!("{home}/Library/Caches/Crash"));
+        fs.create_dir_all_with_permissions(&path, Some(0o700))
+            .unwrap();
+        fs.create_dir_all_with_permissions(&path, Some(0o750))
+            .unwrap();
+        let dirs = dirs.lock().unwrap();
+        assert_eq!(dirs["/"], 0o755);
+        assert_eq!(dirs["/Library"], 0o755);
+        assert_eq!(dirs["/Library/Caches"], 0o700);
+        assert_eq!(dirs["/Library/Caches/Crash"], 0o700);
+    }
+
+    #[test]
     fn lost_write_is_not_replayed_and_drop_does_not_reconnect() {
         let fs = scripted(vec![
             (2, reply(0, &7u32.to_be_bytes())),

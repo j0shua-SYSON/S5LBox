@@ -105,8 +105,14 @@ extern id CFUUIDCreate(void *allocator);
 - (const void *)bytes;
 @end
 @interface NSError : NSObject
++ (id)errorWithDomain:(id)domain code:(int)code userInfo:(id)info;
 - (int)code;
+- (id)description;
+- (id)localizedDescription;
+- (id)domain;
+- (id)userInfo;
 @end
+extern id const NSLocalizedDescriptionKey, NSLocalizedFailureReasonErrorKey;
 @interface NSFileManager : NSObject
 + (id)defaultManager;
 - (BOOL)createDirectoryAtPath:(id)path withIntermediateDirectories:(BOOL)intermediates attributes:(id)attributes error:(id *)error;
@@ -646,6 +652,17 @@ int main(int argc,char **argv) {
         readError=0;
         failures += [NSData dataWithContentsOfURL:[NSURL URLWithString:@"fixture:unsupported"] options:0 error:&readError]!=0;
         failures += [(NSError *)readError code]!=262;
+        failures += ![[(NSError *)readError domain] isEqualToString:@"NSCocoaErrorDomain"];
+        const char *errorDescription=[[(NSError *)readError description] UTF8String];
+        failures += !errorDescription || !strstr(errorDescription,"NSCocoaErrorDomain") || !strstr(errorDescription,"262");
+        id errorInfo=[NSDictionary dictionaryWithObject:@"Fixture failure" forKey:@"NSLocalizedDescription"];
+        failures += ![NSLocalizedDescriptionKey isEqualToString:@"NSLocalizedDescription"];
+        failures += ![NSLocalizedFailureReasonErrorKey isEqualToString:@"NSLocalizedFailureReason"];
+        NSError *customError=[NSError errorWithDomain:@"FixtureDomain" code:42 userInfo:errorInfo];
+        failures += [customError userInfo]!=errorInfo;
+        failures += ![[customError localizedDescription] isEqualToString:@"Fixture failure"];
+        errorDescription=[[customError description] UTF8String];
+        failures += !errorDescription || !strstr(errorDescription,"FixtureDomain") || !strstr(errorDescription,"42") || !strstr(errorDescription,"Fixture failure");
         // Toll-free families retain their ID across mutable subclasses.
         CFTypeID typeIDs[]={CFStringGetTypeID(),CFNumberGetTypeID(),CFBooleanGetTypeID(),
             CFArrayGetTypeID(),CFDictionaryGetTypeID(),CFDataGetTypeID(),CFDateGetTypeID(),

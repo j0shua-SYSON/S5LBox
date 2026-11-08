@@ -16,8 +16,8 @@ pub type NSErrorDomain = id;
 pub const NSCocoaErrorDomain: &str = "NSCocoaErrorDomain";
 pub const NSOSStatusErrorDomain: &str = "NSOSStatusErrorDomain";
 
-const NSLocalizedDescriptionKey: &str = "NSLocalizedDescriptionKey";
-const NSLocalizedFailureReasonErrorKey: &str = "NSLocalizedFailureReasonErrorKey";
+const NSLocalizedDescriptionKey: &str = "NSLocalizedDescription";
+const NSLocalizedFailureReasonErrorKey: &str = "NSLocalizedFailureReason";
 
 pub const NSFileReadNoSuchFileError: NSInteger = 260;
 
@@ -83,6 +83,24 @@ pub const CLASSES: ClassExports = objc_classes! {
     let user_info =  env.objc.borrow::<ErrorHostObject>(this).user_info;
     let key = ns_string::get_static_str(env, NSLocalizedFailureReasonErrorKey);
     msg![env; user_info objectForKey:key]
+}
+
+- (id)description {
+    let &ErrorHostObject { domain, code, .. } = env.objc.borrow(this);
+    let domain = ns_string::to_rust_string(env, domain).into_owned();
+    let localized: id = msg![env; this localizedDescription];
+    let localized = ns_string::to_rust_string(env, localized);
+    let text = format!("Error Domain={domain} Code={code} \"{localized}\"");
+    let result = ns_string::from_rust_string(env, text);
+    autorelease(env, result)
+}
+
+- (id)domain {
+    env.objc.borrow::<ErrorHostObject>(this).domain
+}
+
+- (id)userInfo {
+    env.objc.borrow::<ErrorHostObject>(this).user_info
 }
 
 - (())dealloc {

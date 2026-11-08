@@ -5,6 +5,10 @@
 #include <string.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <errno.h>
+#include <sys/time.h>
+
+extern int pthread_cond_timedwait_relative_np(pthread_cond_t *, pthread_mutex_t *, const struct timespec *);
 
 extern unsigned thumb_sum(unsigned, unsigned);
 static unsigned failures;
@@ -28,7 +32,72 @@ static void *thread_park(void *arg) {
     return NULL;
 }
 
+static pthread_mutex_t wait_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t wait_cond = PTHREAD_COND_INITIALIZER;
+static int worker_finished;
+
+static void *hold_wait_mutex(void *arg) {
+    CHECK(pthread_mutex_lock(&wait_mutex) == 0);
+    if (arg) CHECK(pthread_cond_signal(&wait_cond) == 0);
+    usleep(80000); /* Keep the mutex past the waiter's 20 ms deadline. */
+    worker_finished = 1;
+    CHECK(pthread_mutex_unlock(&wait_mutex) == 0);
+    return NULL;
+}
+
+static void condition_smoke(void) {
+    struct timespec zero = {0, 0}, bad = {0, 1000000000}, negative = {-1, 0};
+    CHECK(pthread_mutex_lock(&wait_mutex) == 0);
+    CHECK(pthread_cond_timedwait_relative_np(&wait_cond, &wait_mutex, &bad) == EINVAL);
+    CHECK(pthread_cond_timedwait(&wait_cond, &wait_mutex, &negative) == EINVAL);
+    CHECK(pthread_mutex_trylock(&wait_mutex) == EBUSY);
+    CHECK(pthread_cond_timedwait_relative_np(&wait_cond, &wait_mutex, &zero) == ETIMEDOUT);
+    CHECK(pthread_cond_timedwait(&wait_cond, &wait_mutex, &zero) == ETIMEDOUT);
+    /* A sole timed waiter must wake instead of being diagnosed as deadlocked. */
+    struct timespec short_wait = {0, 10000000};
+    CHECK(pthread_cond_timedwait_relative_np(&wait_cond, &wait_mutex, &short_wait) == ETIMEDOUT);
+    CHECK(pthread_mutex_trylock(&wait_mutex) == EBUSY);
+    CHECK(pthread_mutex_unlock(&wait_mutex) == 0);
+
+    for (unsigned absolute = 0; absolute < 2; absolute++) {
+        for (unsigned signalled = 0; signalled < 2; signalled++) {
+            pthread_t worker;
+            CHECK(pthread_mutex_lock(&wait_mutex) == 0);
+            worker_finished = 0;
+            int created = pthread_create(&worker, NULL, hold_wait_mutex, (void *)signalled);
+            CHECK(created == 0);
+            if (!created) {
+                struct timespec timeout = {0, 20000000};
+                if (absolute) {
+                    struct timeval now;
+                    CHECK(gettimeofday(&now, NULL) == 0);
+                    timeout.tv_sec = now.tv_sec;
+                    timeout.tv_nsec += now.tv_usec * 1000;
+                    if (timeout.tv_nsec >= 1000000000) {
+                        timeout.tv_sec++;
+                        timeout.tv_nsec -= 1000000000;
+                    }
+                }
+                int result = absolute ? pthread_cond_timedwait(&wait_cond, &wait_mutex, &timeout)
+                    : pthread_cond_timedwait_relative_np(&wait_cond, &wait_mutex, &timeout);
+                CHECK(result == (signalled ? 0 : ETIMEDOUT));
+                CHECK(worker_finished == 1);
+                CHECK(pthread_mutex_trylock(&wait_mutex) == EBUSY);
+            }
+            CHECK(pthread_mutex_unlock(&wait_mutex) == 0);
+            if (!created) CHECK(pthread_join(worker, NULL) == 0);
+        }
+    }
+    CHECK(pthread_cond_destroy(&wait_cond) == 0);
+    CHECK(pthread_mutex_destroy(&wait_mutex) == 0);
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--condition-smoke") == 0) {
+        condition_smoke();
+        printf("S5LBOX-HLE-CONDITION %s failures=%u\n", failures ? "FAIL" : "PASS", failures);
+        return failures ? 1 : 0;
+    }
     if (argc > 1 && strcmp(argv[1], "--spin") == 0) {
         for (;;) __asm__ volatile("nop");
     }

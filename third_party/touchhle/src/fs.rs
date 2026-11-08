@@ -1555,6 +1555,11 @@ impl Fs {
         for component in components {
             tmp_vec.push(component);
             let directory = GuestPathBuf::from(tmp_vec.join("/"));
+            // Existing parents need no mutation. In particular, the mounted
+            // app container maps to /, whose parent is outside this adapter.
+            if self.is_dir(&directory) {
+                continue;
+            }
             let res = self.create_dir(&directory);
             match res {
                 Ok(_) => {

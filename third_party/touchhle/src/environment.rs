@@ -25,9 +25,9 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::TcpListener;
 use std::rc::Rc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
-use crate::libc::pthread::cond::pthread_cond_t;
+use crate::libc::pthread::cond::{pthread_cond_t, CondDeadline};
 use crate::libc::stdio::FILE;
 use crate::window::DeviceFamily;
 use corosensei::{Coroutine, Yielder};
@@ -152,7 +152,7 @@ pub enum ThreadBlock {
     // Thread is waiting on a semaphore.
     Semaphore(MutPtr<sem_t>),
     // Thread is waiting on a condition variable
-    Condition(MutPtr<pthread_cond_t>, Option<Duration>),
+    Condition(MutPtr<pthread_cond_t>, Option<CondDeadline>),
     // Thread is waiting for another thread to finish (joining).
     Joining(ThreadId, MutPtr<MutVoidPtr>),
     // Thread has hit a cpu error, and is waiting to be debugged.
@@ -1812,6 +1812,28 @@ impl Environment {
                             .get_mut(&cond)
                             .unwrap();
                         let mutex = host_cond.curr_mutex.unwrap();
+                        // A timeout ends the condition wait, but must still
+                        // reacquire the mutex before returning to guest code.
+                        // A signalled waiter is already in the waking queue.
+                        if let Some(deadline) = deadline {
+                            if host_cond.waiting.contains(&thread_id) {
+                                let remaining = deadline.remaining();
+                                if remaining.is_zero() {
+                                    host_cond.waiting.retain(|&t| t != thread_id);
+                                    host_cond.timed_out.insert(thread_id);
+                                    host_cond.waking.push_back(thread_id);
+                                } else {
+                                    // Recheck wall-clock deadlines periodically;
+                                    // relative waits use the monotonic clock.
+                                    let awakening =
+                                        Instant::now() + remaining.min(Duration::from_millis(50));
+                                    next_awakening = Some(
+                                        next_awakening
+                                            .map_or(awakening, |other| other.min(awakening)),
+                                    );
+                                }
+                            }
+                        }
                         if host_cond
                             .waking
                             .front()
@@ -1823,27 +1845,6 @@ impl Environment {
                             self.threads[thread_id].blocked_by = ThreadBlock::NotBlocked;
                             self.relock_unblocked_mutex_for_thread(thread_id, mutex);
                             return thread_id;
-                        } else if let Some(deadline) = deadline {
-                            let time = SystemTime::now()
-                                .duration_since(SystemTime::UNIX_EPOCH)
-                                .unwrap();
-                            if deadline <= time {
-                                log_dbg!(
-                                    "Thread {} is timed out on cond var {:?}.",
-                                    thread_id,
-                                    cond
-                                );
-                                assert!(!host_cond.timed_out.contains(&thread_id));
-                                host_cond.timed_out.insert(thread_id);
-
-                                assert!(host_cond.waking.is_empty());
-                                host_cond.waiting.retain(|&t| t != thread_id);
-
-                                assert!(!self.mutex_state.mutex_is_locked(mutex));
-                                self.threads[thread_id].blocked_by = ThreadBlock::NotBlocked;
-                                self.relock_unblocked_mutex_for_thread(thread_id, mutex);
-                                return thread_id;
-                            }
                         }
                     }
                     ThreadBlock::Joining(joinee_thread, ptr) => {
@@ -1898,7 +1899,6 @@ impl Environment {
                 // This should hopefully not happen, but if a thread is
                 // blocked on another thread waiting for a deferred return,
                 // it could.
-                // TODO: handle a thread waiting on condition with a timeout
                 panic!("No active threads, program has deadlocked!");
             }
         }

@@ -280,7 +280,30 @@ permission bits through both file adapters, including newly created parent
 directories. Offline catalog tests verify persistence after commit and reopen;
 the live helper performs changes as the app owner. The live path requires the
 `service-hle-v9` helper generation. Other file attributes and special mode bits
-return errors rather than being silently ignored. Device retesting is pending.
+return errors rather than being silently ignored.
+
+Build `c2f808ea` passed all touchHLE and core CI jobs and was installed on the
+phone. Doodle Jump's Play, Scores and Play Again image buttons now render;
+an offline round reached Game Over with score 593. Angry Birds reaches the
+menu and level selector after a slow initial load; closing it advances beyond
+`NSThread cancel` and exposes missing `pthread_exit` support. Battleship advances
+beyond `CGDataProviderCreateDirect` and later fails during loading. Skee-Ball
+advances beyond `+load` into Mono initialization, but gameplay is not verified.
+Monopoly advances beyond `NSData` loading to `CGFontCreateWithFontName`; IMDb
+advances beyond `CFGetTypeID` to `navigationItem`.
+
+Bowmaster's retest exposed recursive creation trying to recreate the mounted
+app container. Recursive creation now skips existing directories and preserves
+their permissions; a transport regression test covers the mount root and new
+nested directories. `NSError` supports description, domain and user-info
+accessors so logging a filesystem failure does not itself stop the app.
+Device verification of these follow-up fixes is pending.
+
+Condition-variable waits now support relative deadlines and reacquire their
+mutex before returning after a timeout. An ARMv6 fixture checks an otherwise
+idle timed waiter, invalid times, and signal/timeout paths while another thread
+holds the mutex beyond the deadline. These checks do not establish Bejeweled 2
+gameplay compatibility.
 
 ## Boundaries
 
