@@ -23,6 +23,19 @@ pub unsafe fn configure_frame_texture(gles: &mut dyn GLES) {
     }
 }
 
+fn frame_tex_coords(rotation: &Matrix<2>) -> [f32; 12] {
+    let mut coords = [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+    // Rotate about the texture's center. Rotation about (0,0) produces negative
+    // coordinates in landscape, which CLAMP_TO_EDGE turns into stretched edge
+    // pixels. Relying on REPEAT to wrap them breaks NPOT ES 1.1 frame textures.
+    for uv in coords.chunks_exact_mut(2) {
+        let transformed = rotation.transform([uv[0] - 0.5, uv[1] - 0.5]);
+        uv[0] = transformed[0] + 0.5;
+        uv[1] = transformed[1] + 0.5;
+    }
+    coords
+}
+
 pub struct FpsCounter {
     time: std::time::Instant,
     frames: u32,
@@ -84,12 +97,11 @@ pub unsafe fn present_frame(
     ];
     gles.EnableClientState(gles11::VERTEX_ARRAY);
     gles.VertexPointer(2, gles11::FLOAT, 0, vertices.as_ptr() as *const GLvoid);
-    let tex_coords: [f32; 12] = [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+    let tex_coords = frame_tex_coords(&rotation_matrix);
     gles.EnableClientState(gles11::TEXTURE_COORD_ARRAY);
     gles.TexCoordPointer(2, gles11::FLOAT, 0, tex_coords.as_ptr() as *const GLvoid);
-    let matrix = Matrix::<4>::from(&rotation_matrix);
     gles.MatrixMode(gles11::TEXTURE);
-    gles.LoadMatrixf(matrix.columns().as_ptr() as *const _);
+    gles.LoadIdentity();
     gles.Enable(gles11::TEXTURE_2D);
     gles.DrawArrays(gles11::TRIANGLES, 0, 6);
     // clean this up so we don't need to worry about it in e.g. Core Animation
@@ -117,5 +129,38 @@ pub unsafe fn present_frame(
         }
         gles.VertexPointer(2, gles11::FLOAT, 0, vertices.as_ptr() as *const GLvoid);
         gles.DrawArrays(gles11::TRIANGLES, 0, 6);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotated_frame_preserves_all_four_corners_with_edge_clamping() {
+        use std::f32::consts::FRAC_PI_2;
+        for (turns, first) in [
+            (0, [0.0, 0.0]),
+            (1, [1.0, 0.0]),
+            (2, [1.0, 1.0]),
+            (3, [0.0, 1.0]),
+        ] {
+            let coords = frame_tex_coords(&Matrix::z_rotation(turns as f32 * FRAC_PI_2));
+            assert!((coords[0] - first[0]).abs() < 0.000001);
+            assert!((coords[1] - first[1]).abs() < 0.000001);
+            let corners = coords
+                .chunks_exact(2)
+                .map(|uv| {
+                    assert!(uv
+                        .iter()
+                        .all(|value| *value >= -0.000001 && *value <= 1.000001));
+                    (uv[0].round() as i32, uv[1].round() as i32)
+                })
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(
+                corners,
+                [(0, 0), (0, 1), (1, 0), (1, 1)].into_iter().collect()
+            );
+        }
     }
 }

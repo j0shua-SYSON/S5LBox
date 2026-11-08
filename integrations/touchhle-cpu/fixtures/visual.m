@@ -321,6 +321,11 @@ int main(int argc,char **argv) {
         NSNumber *zero=[[NSNumber alloc] initWithUnsignedLong:0];
         failures += [zero unsignedLongValue]!=0;
         IMP numberMethod=[wide methodForSelector:@selector(unsignedLongValue)];
+        // IMP is deliberately untyped; each call below uses the method's real ABI.
+#if __has_warning("-Wcast-function-type-mismatch")
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-function-type-mismatch"
+#endif
         failures += ((unsigned long (*)(id,SEL))numberMethod)(wide,@selector(unsignedLongValue))!=0xffffffffUL;
         failures += numberMethod!=[NSNumber instanceMethodForSelector:@selector(unsignedLongValue)];
         IMP factory=[NSNumber methodForSelector:@selector(numberWithUnsignedLong:)];
@@ -328,6 +333,9 @@ int main(int argc,char **argv) {
         failures += [direct unsignedLongValue]!=42;
         IMP action=[target methodForSelector:@selector(ended:)];
         ((void (*)(id,SEL,id))action)(target,@selector(ended:),0);
+#if __has_warning("-Wcast-function-type-mismatch")
+#pragma clang diagnostic pop
+#endif
         failures += target->ended!=1;
         target->ended=0;
         failures += sel_getUid("setText:")!=sel_registerName("setText:");
