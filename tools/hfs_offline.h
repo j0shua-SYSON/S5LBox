@@ -20,6 +20,11 @@ typedef struct {
 } hfs_offline_info;
 /* Functions return a POSIX errno value; no process-global error state. */
 int hfs_offline_open(const char *image, hfs_offline **out);
+/* Installation batches may checkpoint individual files in ONE unpublished
+ * clone to bound memory. This constructor must NEVER receive the live image.
+ * The caller publishes the clone only after the entire batch succeeds. */
+int hfs_offline_open_private(const char *unpublished_clone, hfs_offline **out);
+int hfs_offline_checkpoint_private(hfs_offline *);
 void hfs_offline_close(hfs_offline *volume);
 bool hfs_offline_dirty(const hfs_offline *volume);
 int hfs_offline_stat(hfs_offline *, uint32_t id, hfs_offline_info *);

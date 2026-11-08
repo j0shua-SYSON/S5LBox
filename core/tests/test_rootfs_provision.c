@@ -7077,6 +7077,64 @@ static void test_status_and_stage_names(void) {
                  "provision-write") == 0, "write stage is unnamed");
 }
 
+static void test_offline_allocation_and_attributes(void) {
+    fixture_t *fx=fx_create(4);
+    char source[1024],clone[1024];
+    CHECK(fx && make_path(source,sizeof source,"offline-attrs") && make_path(clone,sizeof clone,"offline-attrs-next"),"attribute fixture");
+    if (!fx) return;
+    uint8_t *vh=fx->image+VH_OFF,*header=fx->image+11*FX_BLOCK_SIZE,*leaf=header+FX_NODE_SIZE;
+    memcpy(header,fx_node(fx,0),FX_NODE_SIZE);
+    put_be32(header+20,1); put_be32(header+36,2); put_be32(header+40,0);
+    memset(header+248,0,FX_NODE_SIZE-256); header[248]=0xc0;
+    memset(leaf,0,FX_NODE_SIZE); leaf[8]=255; leaf[9]=1; put_be16(leaf+10,1);
+    uint8_t *record=leaf+14; put_be16(record,14); put_be32(record+4,FX_NOTE); put_be16(record+12,1); put_be16(record+14,'x');
+    put_be32(record+16,0x10); put_be32(record+28,1); record[32]='a';
+    put_be16(leaf+FX_NODE_SIZE-2,14); put_be16(leaf+FX_NODE_SIZE-4,48);
+    put_be64(vh+352,2*FX_BLOCK_SIZE); put_be32(vh+364,2); put_be32(vh+368,11); put_be32(vh+372,2);
+    put_be32(vh+48,2); fx_bitmap_set(fx,11,1); fx_bitmap_set(fx,12,1);
+    memcpy(fx->image+FX_SIZE-VH_OFF,vh,VH_LEN);
+    CHECK(write_file(source,fx->image,FX_SIZE) && write_file(clone,fx->image,FX_SIZE),"write attribute fixture");
+    hfs_offline *v=NULL; int e=hfs_offline_open(source,&v); CHECK(e==0,"open attributes: %d",e);
+    if (v) {
+        CHECK(hfs_offline_remove(v,FX_NOTE)==0,"unlink file with inline attributes");
+        e=hfs_offline_commit(v,clone); CHECK(e==0,"commit attribute removal: %d",e);
+        hfs_offline_close(v); v=NULL;
+        CHECK(hfs_offline_open(clone,&v)==0,"reopen after removing final attribute");
+        hfs_offline_close(v);
+        size_t length=0; uint8_t *out=read_file(clone,&length);
+        if (out && length==FX_SIZE) {
+            uint32_t block=get_be32(out+VH_OFF+368); const uint8_t *tree=out+block*FX_BLOCK_SIZE;
+            CHECK(get_be16(tree+14)==0 && get_be32(tree+16)==0 && get_be32(tree+20)==0,"empty attribute tree has no root or records");
+            CHECK(tree[248]==0x80 && get_be32(tree+40)==get_be32(tree+36)-1,"empty attribute tree owns only its header node");
+        }
+        free(out);
+    }
+    fx_bitmap_set(fx,FX_DATA_FIRST,0); CHECK(write_file(source,fx->image,FX_SIZE),"write contradictory allocation fixture");
+    v=NULL; CHECK(hfs_offline_open(source,&v)==EIO && !v,"refuse a referenced block marked free");
+    remove_if_present(source); remove_if_present(clone); free(fx);
+}
+
+static void test_offline_fragmented_allocation(void) {
+    scale_fixture_t *fx=sx_create(); char source[1024],clone[1024];
+    CHECK(fx && make_path(source,sizeof source,"offline-fragments") && make_path(clone,sizeof clone,"offline-fragments-next"),"fragmented fixture");
+    if (!fx) return;
+    /* Small free holes precede a large free run. No individual fork should
+     * exhaust its eight extents merely by taking every tiny hole first. */
+    for (uint32_t block=SX_DATA_FIRST+2;block<SX_DATA_FIRST+50;block+=2) sx_bitmap_set(fx,block);
+    CHECK(write_file(source,fx->image,SX_SIZE) && write_file(clone,fx->image,SX_SIZE),"write fragmented fixture");
+    hfs_offline *v=NULL; int e=hfs_offline_open(source,&v); CHECK(e==0,"open fragmented volume: %d",e);
+    if (v) {
+        uint32_t id=0; const uint16_t name[]={'b','i','g'};
+        uint8_t *data=calloc(32,SX_BLOCK_SIZE);
+        CHECK(data && hfs_offline_create(v,2,name,3,0100644,&id)==0,"create large file");
+        if (data) { CHECK(hfs_offline_write(v,id,0,data,32*SX_BLOCK_SIZE)==0,"buffer large fork"); free(data); }
+        e=hfs_offline_commit(v,clone); CHECK(e==0,"fragmented allocation uses large runs: %d",e);
+        hfs_offline_close(v); v=NULL;
+        CHECK(hfs_offline_open(clone,&v)==0,"reopen fragmented volume after allocation"); hfs_offline_close(v);
+    }
+    remove_if_present(source); remove_if_present(clone); sx_release(fx);
+}
+
 static void test_offline_shared_filesystem(void) {
     fixture_t *fx=fx_create(4);
     char source[1024],clone[1024];
@@ -7139,6 +7197,8 @@ int main(void) {
     printf("HFS+ catalog provisioning tests\n");
     test_status_and_stage_names();
     test_offline_shared_filesystem();
+    test_offline_allocation_and_attributes();
+    test_offline_fragmented_allocation();
     test_provision_unpublished_clone();
     test_stopped_catalog_id_hint();
     test_stopped_directory_counts();

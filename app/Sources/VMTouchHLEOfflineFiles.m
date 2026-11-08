@@ -223,7 +223,8 @@ static int32_t OfflineExchange(void *context,const uint8_t *request,uint32_t len
     if (!candidate || ![DiskIdentity(_live) isEqual:original]) {
         _error=OfflineError(ESTALE,@"The guest disk changed while saving. The replacement was not published."); return NO;
     }
-    if (!SaveWitness(_directory,@[original,candidate],&_error)) return NO;
+    NSError *witnessError=nil;
+    if (!SaveWitness(_directory,@[original,candidate],&witnessError)) { _error=witnessError; return NO; }
     if (vm_guest_recovery_publish(work,&transaction,detail,sizeof detail)!=VM_GUEST_INSTALL_OK || !transaction.committed) {
         _error=OfflineError(EIO,[NSString stringWithUTF8String:detail]); return NO;
     }

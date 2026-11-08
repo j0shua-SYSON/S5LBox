@@ -63,6 +63,7 @@ struct hfs_offline {
     uint8_t attribute_header[106];
     uint16_t attribute_node_size;
     bool dirty, failed;
+    char *private_path;
 };
 static int audit_allocations(hfs_offline *v);
 static uint16_t r16(const uint8_t *p) { return (uint16_t)((p[0]<<8)|p[1]); }
@@ -267,7 +268,17 @@ void hfs_offline_close(hfs_offline *v) {
     for (size_t i=0;i<v->count;i++) free_record(v->records[i]);
     for (size_t i=0;i<v->extent_count;i++) free_record(v->extents[i]);
     for (size_t i=0;i<v->attribute_count;i++) free_record(v->attributes[i]);
-    free(v->records); free(v->extents); free(v->attributes); free(v);
+    free(v->records); free(v->extents); free(v->attributes); free(v->private_path); free(v);
+}
+int hfs_offline_open_private(const char *path,hfs_offline **out) {
+    int e=hfs_offline_open(path,out); if (e) return e;
+    size_t n=strlen(path)+1; (*out)->private_path=(char *)malloc(n);
+    if (!(*out)->private_path) { hfs_offline_close(*out); *out=NULL; return ENOMEM; }
+    memcpy((*out)->private_path,path,n); return 0;
+}
+int hfs_offline_checkpoint_private(hfs_offline *v) {
+    if (!v || !v->private_path) return EINVAL;
+    return hfs_offline_commit(v,v->private_path);
 }
 bool hfs_offline_dirty(const hfs_offline *v) { return v && v->dirty; }
 static void info(const record *r,hfs_offline_info *out) {
@@ -491,7 +502,7 @@ static int tree_bytes(record **records,size_t record_count,const uint8_t *tree_h
     int e=0; tree_build b={0}; b.size=node_size;
     size_t current=0;
     e=tree_add(&b,1,0,NULL,&current); if (e) goto done;
-    e=tree_add(&b,255,1,n?sorted[0]:NULL,&current); if (e) goto done;
+    if (n) { e=tree_add(&b,255,1,sorted[0],&current); if (e) goto done; }
     for (size_t i=0;i<n;i++) {
         if (catalog && i && key_compare(&sorted[i-1],&sorted[i])>=0) { e=EIO; goto done; }
         if (!tree_put(&b,current,sorted[i],0)) {
@@ -609,20 +620,30 @@ static int allocate_fork(hfs_offline *v,uint8_t *map,uint64_t length,uint8_t for
     uint64_t need=(length+v->block_size-1)/v->block_size;
     if (need>UINT32_MAX) return EFBIG;
     w32(fork+12,(uint32_t)need);
-    unsigned extent=0; uint32_t start=0,count=0;
+    struct free_run { uint32_t start,count; } runs[8]={{0}};
     /* The header and alternate header allocation blocks are never data. */
     uint32_t first=(1536u+v->block_size-1)/v->block_size;
     uint32_t last=v->block_count-(1024u+v->block_size-1)/v->block_size;
-    for (uint32_t b=first;b<last && need;b++) {
-        if (used(map,b)) {
-            if (count) { w32(fork+16+extent*8,start); w32(fork+20+extent*8,count); extent++; count=0; }
-            if (extent==8) return ENOSPC;
-            continue;
+    if (!need) return 0;
+    /* Filling the first eight small holes falsely reports ENOSPC on a mostly
+     * empty real disk. Prefer the largest free runs, bounding fragmentation
+     * without inventing extent-overflow records for new allocations. */
+    for (uint32_t b=first;b<last;) {
+        if (used(map,b)) { b++; continue; }
+        uint32_t start=b;
+        while (b<last && !used(map,b)) b++;
+        struct free_run run={start,b-start};
+        for (unsigned i=0;i<8;i++) if (run.count>runs[i].count) {
+            struct free_run old=runs[i]; runs[i]=run; run=old;
         }
-        if (!count) start=b;
-        count++; need--; bit_set(map,b,true);
     }
-    if (count) { if (extent==8) return ENOSPC; w32(fork+16+extent*8,start); w32(fork+20+extent*8,count); }
+    for (unsigned i=0;i<8 && need;i++) {
+        uint32_t take=(uint32_t)(need<runs[i].count?need:runs[i].count);
+        if (!take) break;
+        w32(fork+16+i*8,runs[i].start); w32(fork+20+i*8,take);
+        for (uint32_t b=0;b<take;b++) bit_set(map,runs[i].start+b,true);
+        need-=take;
+    }
     return need?ENOSPC:0;
 }
 int hfs_offline_commit(hfs_offline *v,const char *path) {
@@ -639,11 +660,13 @@ int hfs_offline_commit(hfs_offline *v,const char *path) {
     if (!GetFileInformationByHandle((HANDLE)_get_osfhandle(file_no(v->source)),&source_stat) ||
         !GetFileInformationByHandle((HANDLE)_get_osfhandle(file_no(dest)),&dest_stat)) { e=EIO; goto done; }
     if (source_stat.dwVolumeSerialNumber==dest_stat.dwVolumeSerialNumber &&
-        source_stat.nFileIndexHigh==dest_stat.nFileIndexHigh && source_stat.nFileIndexLow==dest_stat.nFileIndexLow) { e=EINVAL; goto done; }
+        source_stat.nFileIndexHigh==dest_stat.nFileIndexHigh && source_stat.nFileIndexLow==dest_stat.nFileIndexLow &&
+        (!v->private_path || strcmp(path,v->private_path))) { e=EINVAL; goto done; }
 #else
     struct stat source_stat,dest_stat;
     if (fstat(file_no(v->source),&source_stat) || fstat(file_no(dest),&dest_stat)) { e=EIO; goto done; }
-    if (source_stat.st_dev==dest_stat.st_dev && source_stat.st_ino==dest_stat.st_ino) { e=EINVAL; goto done; }
+    if (source_stat.st_dev==dest_stat.st_dev && source_stat.st_ino==dest_stat.st_ino &&
+        (!v->private_path || strcmp(path,v->private_path))) { e=EINVAL; goto done; }
 #endif
     if (seek_file(dest,0,SEEK_END) || (uint64_t)tell_file(dest)!=v->image_size) { e=EINVAL; goto done; }
     uint8_t check[512]; e=io_at(dest,v->image_size,1024,check,512,false); if (e) goto done;
