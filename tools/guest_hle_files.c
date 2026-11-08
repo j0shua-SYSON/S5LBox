@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <sys/socket.h>
+#include <sys/resource.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -24,7 +25,7 @@
 #include <limits.h>
 
 #define LIMIT 65536u
-#define HANDLES 64u
+#define HANDLES S5LBOX_HLE_FILE_HANDLE_LIMIT
 typedef struct { uint32_t id; int fd; DIR *dir; } handle;
 typedef struct { const unsigned char *p; size_t n; } cursor;
 static uint32_t number(const unsigned char *p) {
@@ -226,6 +227,14 @@ int s5lbox_hle_files(int peer, const char *state, const char *applications,
     if (fstat(rootfd,&st) || !S_ISDIR(st.st_mode) || st.st_uid!=mobile_uid) { error=EACCES; goto rejected; }
     if (fchdir(rootfd) || chroot(".") || chdir("/")) { error=errno; goto rejected; }
     close(rootfd); rootfd=-1;
+    /* Leave room for the control socket, locks and inherited standard fds.
+     * This changes only the forked service child's soft limit, never the
+     * system limit or its parent's limit. A lower hard limit still applies. */
+    struct rlimit files;
+    if (!getrlimit(RLIMIT_NOFILE,&files) && files.rlim_cur<HANDLES+32u) {
+        files.rlim_cur=files.rlim_max<HANDLES+32u?files.rlim_max:HANDLES+32u;
+        (void)setrlimit(RLIMIT_NOFILE,&files);
+    }
     if (setgroups(0,NULL) || setgid(mobile_gid) || setuid(mobile_uid) || getuid()!=mobile_uid || geteuid()!=mobile_uid) {
         error=EACCES; goto rejected;
     }

@@ -2,6 +2,9 @@
 #ifndef S5LBOX_GUEST_HLE_FILES_H
 #define S5LBOX_GUEST_HLE_FILES_H
 #include <sys/types.h>
+/* Shared by the live service and the offline HFSX adapter. Resource-heavy apps
+ * can keep well over 64 sound/asset streams open at once. */
+#define S5LBOX_HLE_FILE_HANDLE_LIMIT 256u
 /* Run only in an authenticated, forked guest helper child. This enters the
  * selected application's chroot and permanently drops root. Never call in
  * the package-service parent or on the physical host's app filesystem. */

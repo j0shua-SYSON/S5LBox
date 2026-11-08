@@ -252,6 +252,13 @@ The Weather Channel 1.0 and IMDb 1.0.0. Their initial runtime tests encountered
 missing APIs, CPU faults or loading stalls. None is counted as fully compatible.
 No app archives or firmware are included in this repository.
 
+The later Angry Birds loading abort was preceded by `EMFILE` from the offline
+adapter's 64-handle ceiling. Both adapters now allow 256 concurrent handles;
+the live-service test covers the ceiling, reuse after close, stale IDs and
+disconnect cleanup. This change requires a device retest before attributing
+successful game loading to it. The live helper is published under a new
+versioned executable path so existing installations can upgrade safely.
+
 The UIKit work adds read-only table data sources, visible-cell reuse, row
 selection and scrolling, with `NSIndexPath` and `UITableViewController` support.
 An ARMv6 fixture exercises 2,000 rows, variable heights, bounded cell creation,

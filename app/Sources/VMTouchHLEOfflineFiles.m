@@ -13,6 +13,7 @@
 #import "VMInstancePaths.h"
 #import "VMBootOptions.h"
 #include "../../tools/hfs_offline.h"
+#include "../../tools/guest_hle_files.h"
 #include "../../tools/sha256.h"
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -460,7 +461,7 @@ failed:
             if (end-p<4) { e=EINVAL; break; }
             uint32_t flags=Read32(p); p+=4; path=[self pathAt:&p end:end];
             if (!path || (flags&~63u) || (op==14?flags!=0:!(flags&3)) || ((flags&52) && !(flags&2))) { e=EINVAL; break; }
-            if (_handles.count>=64 || _nextHandle==UINT32_MAX) { e=EMFILE; break; }
+            if (_handles.count>=S5LBOX_HLE_FILE_HANDLE_LIMIT || _nextHandle==UINT32_MAX) { e=EMFILE; break; }
             e=[self resolve:path root:_root followFinal:YES result:&info];
             if (!e && (flags&40)==40) { e=EEXIST; break; }
             if (e==ENOENT && (flags&8)) {

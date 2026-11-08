@@ -500,6 +500,16 @@ mod tests {
         fs.mkdir("/new").unwrap();
     }
     #[test]
+    fn file_limit_error_leaves_the_session_usable() {
+        let fs = scripted(vec![
+            (2, reply(24, &[])),
+            (2, reply(0, &257u32.to_be_bytes())),
+            (3, reply(0, &[])),
+        ]);
+        assert_eq!(guest_errno(&fs.open("/asset", 1).unwrap_err()), Some(24));
+        drop(fs.open("/asset", 1).unwrap());
+    }
+    #[test]
     fn byte_counts_offsets_and_close_are_checked() {
         let fs = scripted(vec![
             (2, reply(0, &3u32.to_be_bytes())),

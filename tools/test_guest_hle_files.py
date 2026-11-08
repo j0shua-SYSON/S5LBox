@@ -152,10 +152,19 @@ def main():
             request(sock, 1, u32(4) + b"/\x00xx", errno.EINVAL)
             request(sock, 2, u32(16) + path("/invalid"), errno.EINVAL)
             handles = []
-            for index in range(64):
+            for index in range(256):
                 item = request(sock, 2, u32(3 | 8) + path(f"/file{index}"))
                 assert struct.unpack("!I", item)[0] > handle
                 handles.append(item)
+            request(sock, 2, u32(3 | 8) + path("/overflow"), errno.EMFILE)
+            # Closing releases capacity; stale ids cannot alias the new stream.
+            for old in handles[128:]:
+                request(sock, 3, old)
+            recycled = []
+            for index in range(128):
+                recycled.append(request(sock, 2, u32(1) + path(f"/file{index}")))
+            assert struct.unpack("!I", recycled[0])[0] > struct.unpack("!I", handles[-1])[0]
+            request(sock, 4, handles[-1] + u32(1), errno.EBADF)
             request(sock, 2, u32(3 | 8) + path("/overflow"), errno.EMFILE)
             # EOF releases every fd and the session lease, even without closes.
             request(sock, 13, handles[0] + u32(2) + u64(0) + u64(0))

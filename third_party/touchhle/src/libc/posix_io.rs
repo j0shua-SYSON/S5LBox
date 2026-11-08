@@ -228,7 +228,7 @@ pub fn open_direct(env: &mut Environment, path: ConstPtr<u8>, flags: i32) -> Fil
                 FsError::IsDirectory => EISDIR,
                 FsError::NonexistentParentDir => ENOENT,
                 FsError::ReadonlyParentDir => EACCES,
-                FsError::IoError(_) => EIO,
+                FsError::IoError(error) => crate::fs::live::guest_errno(&error).unwrap_or(EIO),
                 _ => unimplemented!(),
             };
             set_errno(env, errno);

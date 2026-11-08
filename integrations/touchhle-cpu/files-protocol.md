@@ -25,7 +25,7 @@ The length includes the operation byte and is limited to 65,536. A response is
 `u32 length, u32 guest_errno, payload`; errors have no payload. Paths are
 `u32 byte_length, UTF-8 bytes`, absolute within the app container, under 1,024
 bytes, without NUL. Handles are opaque monotonically allocated `u32` values;
-at most 64 may be open. A broken connection invalidates all handles and locks.
+at most 256 may be open. A broken connection invalidates all handles and locks.
 Never automatically replay a mutation after losing its response.
 
 | Op | Request payload | Success payload |
