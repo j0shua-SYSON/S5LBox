@@ -269,10 +269,14 @@ static bool segment_matches(const s5l8920_cdma_segment_t *s,const uint8_t *p) {
     return p && word(p)==s->next && word(p+4u)==s->flags &&
         word(p+8u)==s->address && word(p+12u)==s->length;
 }
-static bool amc_command(s5l8920_cdma_amc_t *n,s5l8920_cdma_memory_fn memory,void *owner) {
+static bool amc_commands(s5l8920_cdma_amc_t *n,s5l8920_cdma_memory_fn memory,void *owner,bool append) {
     s5l8920_cdma_channel_t *ch=&n->state;
     if(!memory || !ch->size_programmed || !ch->descriptor_programmed ||
        !n->configuration_programmed || !n->peripheral_programmed)return false;
+    if(n->index>n->count)return false;
+    unsigned old_index=n->index,pending=append?n->count-old_index:0u;
+    uint32_t offset=append && pending?n->offset:0u;
+    s5l8920_cdma_segment_t tail=n->boundary;
     const uint8_t *headers[S5L8920_CDMA_AMC_MAX_SEGMENTS+1u];
     const uint8_t *outputs[S5L8920_CDMA_AMC_MAX_SEGMENTS];
     uint32_t at=ch->descriptor,remaining=ch->remaining;
@@ -283,20 +287,30 @@ static bool amc_command(s5l8920_cdma_amc_t *n,s5l8920_cdma_memory_fn memory,void
         for(unsigned i=0;i<n->count;i++)if(overlap(p,32u,headers[i],32u))return false;
         headers[n->count]=p;
         s5l8920_cdma_segment_t s=segment_at(at,p);
+        /* Pending entries are immutable. Only the old zero tail may become
+         * newly published data; its already-linked next pointer is retained. */
+        if(append && n->count<pending) {
+            const s5l8920_cdma_segment_t *old=&n->segments[old_index+n->count];
+            if(at!=old->descriptor || !segment_matches(old,p))return false;
+        } else if(append && n->count==pending &&
+                  (at!=tail.descriptor || s.next!=tail.next))return false;
         if(s.flags==0u) {
-            if(!n->count || n->segments[n->count-1u].flags!=0x303u)return false;
+            if(!n->count || (append && n->count<=pending) ||
+               n->segments[n->count-1u].flags!=0x303u)return false;
             n->boundary=s;ch->terminal=at;
             for(unsigned i=0;i<n->count;i++)for(unsigned j=0;j<=n->count;j++)
                 if(overlap(outputs[i],n->segments[i].length,headers[j],32u))return false;
-            n->index=0u;n->offset=0u;ch->address=n->segments[0].address;
+            n->index=0u;n->offset=offset;
+            if(!append)ch->address=n->segments[0].address;
             return true;
         }
+        uint32_t consumed=n->count?0u:offset;
         if((s.flags!=3u && s.flags!=0x303u) || n->count==S5L8920_CDMA_AMC_MAX_SEGMENTS ||
-           (n->count && n->segments[n->count-1u].flags==0x303u) ||
-           !s.length || s.length>=remaining || s.address>UINT32_MAX-s.length)return false;
+           s.length<=consumed || s.length-consumed>=remaining ||
+           s.address>UINT32_MAX-s.length)return false;
         const uint8_t *dest=memory(owner,s.address,s.length);if(!dest)return false;
         outputs[n->count]=dest;n->segments[n->count++]=s;
-        remaining-=s.length;at=s.next;
+        remaining-=s.length-consumed;at=s.next;
     }
 }
 static bool amc_write(s5l8920_cdma_amc_t *n,uint32_t reg,uint32_t value,
@@ -312,6 +326,12 @@ static bool amc_write(s5l8920_cdma_amc_t *n,uint32_t reg,uint32_t value,
         ch->control=(ch->control&(RUNNING|CIR)&~(value&CIR))|(value&0x18u);
         return true;
     }
+    if(!reg && value==0x19u) {
+        if(!amc_commands(n,memory,owner,(ch->control&RUNNING)!=0u))return false;
+        /* GO publishes descriptors; it neither consumes bytes nor acknowledges
+         * a command event. Preserve pending CIR until an explicit W1C. */
+        ch->control=(ch->control&CIR)|RUNNING|0x18u;ch->started=true;return true;
+    }
     if(ch->control&RUNNING)return false;
     if(reg==4u) {
         if(value!=0x300d8u)return false;
@@ -323,9 +343,7 @@ static bool amc_write(s5l8920_cdma_amc_t *n,uint32_t reg,uint32_t value,
     }
     if(reg==0xcu) { ch->remaining=value;ch->size_programmed=true;return true; }
     if(reg==0x14u) { ch->descriptor=value;ch->descriptor_programmed=true;return true; }
-    if(reg)return false;
-    if(value!=0x19u || !amc_command(n,memory,owner))return false;
-    ch->control=RUNNING|0x18u;ch->started=true;return true;
+    return false;
 }
 bool s5l8920_cdma_amc_service(s5l8920_cdma_t *c,bool clock_open,unsigned budget,
                              s5l8920_cdma_memory_fn memory,void *memory_owner,

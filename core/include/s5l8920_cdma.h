@@ -30,7 +30,7 @@ typedef struct {
     s5l8920_cdma_segment_t segments[S5L8920_CDMA_MAX_SEGMENTS];
 } s5l8920_cdma_nand_t;
 
-/* Host bound for one kernel command, ending in a 0x303 data descriptor.
+/* Host bound for pending kernel data descriptors, with 0x303 command ends.
  * The following flags0 descriptor remains an unsupported engine transition. */
 #define S5L8920_CDMA_AMC_CHANNEL 24u
 #define S5L8920_CDMA_AMC_MAX_SEGMENTS 127u
@@ -93,20 +93,25 @@ bool s5l8920_cdma_nand_service(s5l8920_cdma_t *c,unsigned channel,
                               s5l8920_cdma_memory_fn memory,void *memory_owner,
                               s5l8920_cdma_receive_fn receive,void *receive_owner);
 bool s5l8920_cdma_nand_irq(const s5l8920_cdma_t *c,unsigned channel);
-/* Standalone channel24 receive command: configuration300D8, endpoint8480002C,
+/* Standalone channel24 receive commands: configuration300D8, endpoint8480002C,
  * GO19. Explicit reset and all programming are required; initial current
  * address is unavailable until GO. Preflight latches 1..127 data descriptors:
- * ordinary flags3, final303, followed by a backed flags0 boundary. Only this
+ * ordinary flags3 and command ends303, followed by a backed flags0 boundary.
+ * Active GO19 appends data at the previous zero tail with its link unchanged.
+ * Pending descriptors must remain identical; retired entries can be reused.
+ * Preflight compacts only retired entries, preserves the partial offset,
+ * progress registers and pending CIR, and refuses GO without new data. Only this
  * combined303 form is interpreted; standalone100/200 modes remain refused.
  * Service moves at most min(budget,16,segment remainder) supplied bytes, with
  * no crossing of a descriptor. Closed clock/zero budget/WAIT do no work.
  * CIR100000 is latched only after every byte of the final303 descriptor is
  * stored. Control bit10 enables its IRQ; W1C acknowledges it. This is a
  * software-derived functional command boundary, not a measured DMA latency.
- * Remaining count must exceed the command length: no size-exhaustion/DONE
+ * Remaining count must exceed all pending bytes: no size-exhaustion/DONE
  * transition is inferred. At flags0 the next non-paused service refuses,
- * preserving actual progress and active state. Live publication/reprogramming,
- * hold/abort, board mapping, clock source, producer and IRQ routing are absent.
+ * preserving actual progress and active state. Descriptor changes before GO
+ * still refuse service. Active register reprogramming, hold/abort, board
+ * mapping, clock source, producer and IRQ routing remain unsupported.
  * bytes_moved is required and set to zero even on refusal. Callback rules are
  * the same as NAND receive; RAM views must remain stable during each call. */
 bool s5l8920_cdma_amc_service(s5l8920_cdma_t *c,bool clock_open,unsigned budget,

@@ -549,7 +549,7 @@ static void amc_guards(void) {
         case 1:cdma.amc.peripheral_programmed=false;break;
         case 2:cdma.amc.state.size_programmed=false;break;
         case 3:cdma.amc.state.descriptor_programmed=false;break;
-        case 4:amc_put(4,0x303);break;
+        case 4:amc_put(4,0x300);break;
         case 5:amc_put(4,0x103);break;
         case 6:amc_put(36,0);break;
         case 7:amc_put(68,0x203);break;
@@ -627,6 +627,191 @@ static void amc_single_command_setup(void) {
     }
     CHECK(!s5l8920_cdma_amc_irq(NULL));
 }
+static void amc_live_publication(void) {
+    amc_fixture(0,0);CHECK(amc_write_reg(0,0x19));
+    unsigned moved=99;CHECK(amc_step(true,7,&moved) && moved==7);
+    s5l8920_cdma_channel_t before=cdma.amc.state;
+    amc_put(32,AMC_RAM+64);amc_put(36,0x303);amc_put(40,AMC_RAM+0x3000);amc_put(44,12);
+    amc_put(64,AMC_RAM+96);amc_put(68,0);amc_put(72,0);amc_put(76,0);
+    bool accepted=amc_write_reg(0,0x19);CHECK(accepted);if(!accepted)return;
+    CHECK(cdma.amc.offset==7 && cdma.amc.state.remaining==before.remaining &&
+        cdma.amc.state.address==before.address && cdma.amc.state.descriptor==before.descriptor);
+    CHECK(amc_step(true,16,&moved) && moved==13 && s5l8920_cdma_amc_irq(&cdma));
+    CHECK(amc_write_reg(0,0x190018) && !s5l8920_cdma_amc_irq(&cdma));
+    CHECK(amc_step(true,16,&moved) && moved==12 && s5l8920_cdma_amc_irq(&cdma));
+    CHECK(amc_cursor==32 && !memcmp(amc_ram+0x2000,amc_source,20) &&
+        !memcmp(amc_ram+0x3000,amc_source+20,12));
+}
+static void amc_publish(unsigned head,unsigned count,unsigned data) {
+    for(unsigned i=0;i<=count;i++) {
+        unsigned slot=(head+i)&127u;
+        amc_put(slot*32,AMC_RAM+((slot+1)&127u)*32);
+        amc_put(slot*32+4,i==count?0u:i+1==count?0x303u:3u);
+        amc_put(slot*32+8,i==count?0u:AMC_RAM+data+i*32);
+        amc_put(slot*32+12,i==count?0u:i?21u:9u);
+    }
+}
+static void amc_publication_progress(void) {
+    const unsigned phases[]={0,7,20};
+    for(unsigned head=0;head<128;head+=127)for(unsigned phase=0;phase<3;phase++)
+     for(unsigned ack=0;ack<2;ack++)for(unsigned masked=0;masked<2;masked++) {
+        amc_fixture(head,0);CHECK(amc_write_reg(0,0x19));
+        unsigned total=0,moved=99;
+        while(total<phases[phase]) {
+            CHECK(amc_step(true,phases[phase]-total,&moved) && moved>0);
+            if(!moved)break;
+            total+=moved;
+        }
+        CHECK(total==phases[phase]);
+        if(ack)CHECK(amc_write_reg(0,0x190018));
+        if(masked)CHECK(amc_write_reg(0,0));
+        s5l8920_cdma_t before=cdma;unsigned calls=amc_calls;
+        amc_publish((head+1)&127u,2,0x3000);
+        uint8_t expected_ram[sizeof amc_ram];memcpy(expected_ram,amc_ram,sizeof amc_ram);
+        CHECK(!amc_step(true,16,&moved) && !moved && calls==amc_calls);
+        CHECK(!memcmp(&before,&cdma,sizeof cdma) && !memcmp(expected_ram,amc_ram,sizeof amc_ram));
+        bool accepted=amc_write_reg(0,0x19);CHECK(accepted);if(!accepted)continue;
+        bool pending=(before.amc.state.control&0x100000u)!=0;
+        CHECK(cdma.amc.state.remaining==before.amc.state.remaining &&
+            cdma.amc.state.address==before.amc.state.address &&
+            cdma.amc.state.descriptor==before.amc.state.descriptor && amc_calls==calls);
+        CHECK(s5l8920_cdma_amc_irq(&cdma)==pending && cdma.amc.state.control==(0x10018u|(pending?0x100000u:0u)));
+        before=cdma;amc_result=S5L8920_CDMA_WAIT;
+        CHECK(amc_step(true,16,&moved) && !moved && !memcmp(&before,&cdma,sizeof cdma));
+        amc_result=S5L8920_CDMA_UNAVAILABLE;
+        CHECK(!amc_step(true,16,&moved) && !moved && !memcmp(&before,&cdma,sizeof cdma));
+        calls=amc_calls;
+        CHECK(amc_step(false,16,&moved) && !moved && calls==amc_calls);
+        CHECK(amc_step(true,0,&moved) && !moved && calls==amc_calls);
+        amc_result=S5L8920_CDMA_READY;
+        for(unsigned work=0;work<32 && total<50;work++) {
+            CHECK(amc_step(true,ack?7u:16u,&moved) && moved>0);
+            if(!moved)break;
+            total+=moved;
+            if(total==20 || total==50)pending=true;
+            CHECK(cdma.amc.state.remaining==0x40000000u-total && s5l8920_cdma_amc_irq(&cdma)==pending);
+            if(ack && total==20){CHECK(amc_write_reg(0,0x190018));pending=false;}
+        }
+        memcpy(expected_ram+0x2000,amc_source,20);memcpy(expected_ram+0x3000,amc_source+20,9);
+        memcpy(expected_ram+0x3020,amc_source+29,21);
+        CHECK(total==50 && amc_cursor==50 && !memcmp(expected_ram,amc_ram,sizeof amc_ram));
+        CHECK(cdma.amc.state.descriptor==AMC_RAM+((head+3)&127u)*32 &&
+            cdma.amc.state.address==AMC_RAM+0x3020+21 && s5l8920_cdma_amc_irq(&cdma));
+        before=cdma;calls=amc_calls;
+        CHECK(!amc_step(true,16,&moved) && !moved && !amc_write_reg(0,0x19));
+        CHECK(!memcmp(&before,&cdma,sizeof cdma) && calls==amc_calls);
+    }
+}
+static void amc_publication_guards(void) {
+    for(unsigned fault=0;fault<18;fault++) {
+        amc_fixture(127,0);CHECK(amc_write_reg(0,0x19));
+        unsigned moved=99;CHECK(amc_step(true,7,&moved) && moved==7);
+        amc_publish(0,2,0x3000);
+        uint8_t valid[sizeof amc_ram],invalid[sizeof amc_ram];memcpy(valid,amc_ram,sizeof valid);
+        switch(fault) {
+        case 0:amc_put(127*32,AMC_RAM+32);break;
+        case 1:amc_put(127*32+4,3);break;
+        case 2:amc_put(127*32+8,AMC_RAM+0x2020);break;
+        case 3:amc_put(127*32+12,21);break;
+        case 4:amc_put(0,AMC_RAM+64);break; /* Published tail link changed. */
+        case 5:amc_put(4,0);break;
+        case 6:amc_put(36,3);break;
+        case 7:amc_put(4,0x103);break;
+        case 8:amc_put(12,0);break;
+        case 9:amc_put(32,0x70000000u+127*32);break;
+        case 10:amc_put(8,0x70000000u+127*32);break;
+        case 11:amc_put(40,AMC_RAM+64);break;
+        case 12:amc_put(8,0xfffffffcu);break;
+        case 13:amc_deny=AMC_RAM+0x3000;break;
+        case 14:amc_deny=AMC_RAM+0x2000;break;
+        case 15:amc_deny=AMC_RAM+64;break;
+        case 16:cdma.amc.state.remaining=43;break;
+        case 17:amc_put(68,0xdead);break;
+        }
+        s5l8920_cdma_t before=cdma;memcpy(invalid,amc_ram,sizeof invalid);unsigned calls=amc_calls;
+        CHECK(!amc_write_reg(0,0x19));
+        CHECK(!memcmp(&before,&cdma,sizeof cdma) && !memcmp(invalid,amc_ram,sizeof invalid) &&
+            amc_cursor==7 && amc_calls==calls);
+        memcpy(amc_ram,valid,sizeof valid);amc_deny=0;cdma.amc.state.remaining=0x40000000u-7;
+        CHECK(amc_write_reg(0,0x19) && cdma.amc.offset==7 && amc_cursor==7);
+        before=cdma;
+        CHECK(!amc_write_reg(0,2) && !amc_write_reg(0,4) && !amc_write_reg(4,0x300d8) &&
+            !amc_write_reg(8,0x8480002c) && !amc_write_reg(12,0x40000000) && !amc_write_reg(20,AMC_RAM));
+        CHECK(!memcmp(&before,&cdma,sizeof cdma) && amc_calls==calls);
+    }
+}
+static void amc_publication_retirement(void) {
+    for(unsigned head=0;head<128;head+=127) {
+        amc_fixture(head,2);CHECK(amc_write_reg(0,0x19));unsigned moved=99;
+        CHECK(amc_step(true,16,&moved) && moved==16);
+        CHECK(amc_step(true,16,&moved) && moved==4);
+        CHECK(amc_step(true,16,&moved) && moved==7);
+        CHECK(amc_step(true,3,&moved) && moved==3);
+        CHECK(cdma.amc.index==2 && cdma.amc.offset==3);
+        s5l8920_cdma_channel_t before=cdma.amc.state;
+        amc_publish((head+3)&127u,1,0x3000);
+        uint8_t want[sizeof amc_ram];memcpy(want,amc_ram,sizeof want);
+        CHECK(amc_write_reg(0,0x19) && cdma.amc.index==0 && cdma.amc.offset==3 && cdma.amc.count==2);
+        CHECK(cdma.amc.state.address==before.address && cdma.amc.state.descriptor==before.descriptor &&
+            cdma.amc.state.remaining==before.remaining);
+        CHECK(amc_step(true,16,&moved) && moved==4 && s5l8920_cdma_amc_irq(&cdma));
+        CHECK(amc_step(true,16,&moved) && moved==9 && s5l8920_cdma_amc_irq(&cdma));
+        memcpy(want+0x2040+3,amc_source+30,4);memcpy(want+0x3000,amc_source+34,9);
+        CHECK(amc_cursor==43 && !memcmp(want,amc_ram,sizeof want));
+    }
+    /* The remaining budget includes only the unconsumed part of the first
+     * descriptor. A valid append leaves exactly one unspent byte at the tail. */
+    amc_fixture(0,0);CHECK(amc_write_reg(12,51));CHECK(amc_write_reg(0,0x19));
+    unsigned moved=99;CHECK(amc_step(true,7,&moved) && moved==7);
+    amc_publish(1,2,0x3000);CHECK(amc_write_reg(0,0x19) && cdma.amc.state.remaining==44);
+    for(unsigned i=0;i<4;i++)CHECK(amc_step(true,16,&moved));
+    CHECK(amc_cursor==50 && cdma.amc.state.remaining==1 && !amc_step(true,16,&moved) && !moved);
+    /* No slot is reclaimed while its payload is only partly consumed. */
+    /* Retain the original tail link by constructing that link before the first
+     * GO below, so refusal tests capacity rather than a changed link. */
+    amc_fixture(127,126);amc_put(126*32,AMC_RAM+0x1000);CHECK(amc_write_reg(0,0x19));
+    CHECK(amc_step(true,7,&moved) && moved==7);
+    amc_put(126*32+4,0x303);amc_put(126*32+8,AMC_RAM+0x5000);amc_put(126*32+12,9);
+    amc_put(0x1000,AMC_RAM+0x1020);amc_put(0x1004,0);amc_put(0x1008,0);amc_put(0x100c,0);
+    s5l8920_cdma_t before=cdma;unsigned calls=amc_calls;
+    CHECK(!amc_write_reg(0,0x19) && !memcmp(&before,&cdma,sizeof cdma) && amc_calls==calls);
+    /* In the real ring, publishing the new zero tail can reuse the old first
+     * entry only after that entry has been consumed. */
+    amc_fixture(127,126);CHECK(amc_write_reg(0,0x19));
+    CHECK(amc_step(true,16,&moved) && moved==16);CHECK(amc_step(true,16,&moved) && moved==4);
+    s5l8920_cdma_channel_t progress=cdma.amc.state;
+    amc_publish(126,1,0x5000);CHECK(amc_write_reg(0,0x19));
+    CHECK(cdma.amc.count==127 && cdma.amc.index==0 && cdma.amc.offset==0 &&
+        cdma.amc.state.remaining==progress.remaining && cdma.amc.state.address==progress.address &&
+        cdma.amc.state.descriptor==progress.descriptor);
+}
+static void amc_repeated_publication(void) {
+    amc_fixture(127,0);CHECK(amc_write_reg(0,0x19));
+    unsigned total=0,slot=127,data=0x2000,length=20;
+    for(unsigned command=0;command<140;command++) {
+        uint8_t want[sizeof amc_ram];memcpy(want,amc_ram,sizeof want);
+        memcpy(want+data,amc_source+total,length);
+        unsigned copied=0,moved=99;
+        for(unsigned work=0;work<4 && copied<length;work++) {
+            CHECK(amc_step(true,7,&moved) && moved>0);
+            if(!moved)break;
+            copied+=moved;
+        }
+        total+=copied;
+        CHECK(copied==length && total==amc_cursor && !memcmp(want,amc_ram,sizeof want));
+        CHECK(s5l8920_cdma_amc_irq(&cdma) && cdma.amc.state.remaining==0x40000000u-total &&
+            cdma.amc.state.descriptor==AMC_RAM+((slot+1)&127u)*32);
+        CHECK(amc_write_reg(0,0x190018) && !s5l8920_cdma_amc_irq(&cdma));
+        if(command==139)break;
+        slot=(slot+1)&127u;data=0x3000+(command&3u)*32;length=9;
+        s5l8920_cdma_channel_t before=cdma.amc.state;unsigned calls=amc_calls;
+        amc_publish(slot,1,data);bool accepted=amc_write_reg(0,0x19);CHECK(accepted);if(!accepted)break;
+        CHECK(cdma.amc.count==1 && cdma.amc.index==0 && !cdma.amc.offset && calls==amc_calls &&
+            cdma.amc.state.remaining==before.remaining && cdma.amc.state.address==before.address &&
+            cdma.amc.state.descriptor==before.descriptor);
+    }
+    CHECK(total==1271 && cdma.amc.index==1 && cdma.amc.count==1);
+}
 int main(void) {
     vectors();guards();aliases_and_irqs();lifetime_and_gates();s5l8920_free(&board);
     CHECK(!s5l8920_cdma_board_service(&board));
@@ -634,5 +819,8 @@ int main(void) {
     nand_register_setup();nand_transfers();nand_guards();nand_chain_limits();s5l8920_free(&board);
     amc_register_setup();amc_transfers();amc_guards();amc_limits();
     amc_single_command_setup();
+    amc_live_publication();
+    amc_publication_progress();amc_publication_guards();
+    amc_publication_retirement();amc_repeated_publication();
     printf("CDMA AES: %u passed, %u failed\n",passed,failed);return failed?1:0;
 }

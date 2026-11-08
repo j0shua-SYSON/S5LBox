@@ -649,14 +649,28 @@ the final data entry of a command has flags `0x303`. The same combined marker
 occurs in the matching 3GS 3.1.3 driver at `0xc052540c`. This corroborates the
 software format, not the hardware effects of its individual completion bits.
 
-`s5l8920_cdma_amc_service` implements one command: 1..127 data descriptors,
-ordinary flags 3 and final flags `0x303`, followed by a backed flags-zero
-descriptor. The limit is a host bound. GO preflights and latches the command.
+`s5l8920_cdma_amc_service` implements a queue of complete commands: 1..127
+pending data descriptors, ordinary flags 3 and command ends `0x303`, followed
+by a backed flags-zero descriptor. The limit is a host bound. GO preflights
+and latches the queue.
 Missing backing, cycles including physical aliases, output overlap with
-descriptor storage, unsupported flags, zero lengths and a command exhausting
+descriptor storage, unsupported flags, zero lengths and pending data exhausting
 the programmed byte budget refuse before starting. A single `0x303` descriptor
-is valid. An early `0x303` followed by more data is refused. Software-only
-descriptor fields remain untouched and are not interpreted by the mover.
+is valid; another command may follow it. The last data descriptor before the
+zero tail must end a command. Software-only descriptor fields remain untouched
+and are not interpreted by the mover.
+
+An active GO `0x19` publishes new data at the previous zero tail. The original
+driver's finalizer prepares a new zero tail, marks the new command end,
+publishes its first descriptor through real barriers, and writes GO again.
+The model requires unchanged pending descriptor words and the previous tail's
+linked next pointer. It validates all new backing before accepting the write.
+Retired entries can be reused; a partly consumed entry still occupies a slot.
+Publication preserves the partial byte offset, current address/descriptor and
+remaining budget. Already-copied bytes are excluded from the budget check.
+GO neither copies data nor clears pending CIR. A GO without newly published
+data is refused. Descriptor edits before GO still refuse service; this does
+not model concurrent descriptor prefetch or DMA/CPU cache coherence.
 
 The combined marker uses a software-derived functional completion contract.
 The original builder marks the final buffer of each command with `0x303` and
@@ -672,28 +686,35 @@ budget and current descriptor. A closed supplied clock, zero budget or WAIT
 preserves state and output. Missing data/backing, descriptor changes and
 callback reentry refuse. Progress registers follow actual stores; after a
 segment, the current address retains its end until another transfer occurs.
-Only the last store of the final buffer latches CIR. Control bit `0x10` enables
+Only the last store of each command's final buffer latches CIR. Control bit `0x10` enables
 its interrupt signal; pending CIR survives disabling and re-enabling that bit.
 Write-one-to-clear acknowledges CIR, including the handler's read-only state
-echo. Acknowledging DONE alone does not clear CIR. No DONE event is generated.
+echo. Several completed commands coalesce in this pending bit; the original
+consumer finds them through descriptor progress. Acknowledging DONE alone
+does not clear CIR. No DONE event is generated.
 At the following flags-zero descriptor, the next unpaused service refuses
 without consuming bytes. Its engine-state transition remains unimplemented,
 so the active state and remaining budget are retained.
 
-An isolated witness builds the ring with unchanged target instructions, passes
-its exact descriptor bytes and captured configuration to this component, and
-executes the original IRQ/notification consumer against the resulting status
-and pointer. Eight cases cover starts 0 and 127, budgets 7 and 16, and one or
-three descriptors. They copy 2,048 or 6,144 supplied bytes, acknowledge the
-generated CIR and reach the real `IODMACommand::complete` entry with matching
-notification byte counts. Waiting, unavailable input, whole-buffer canaries and
-unmodified descriptors are checked. Method entry and IOKit objects are explicit
-fixtures; CPU IRQ-vector delivery and the complete method body are not executed.
+An isolated witness builds and extends the ring with unchanged target
+instructions, passes exact descriptor bytes and captured configuration/GO to
+this component, and executes the original IRQ/notification consumer against
+the resulting status and pointer. Forty-eight cases cover starts 0 and 127,
+budgets 7 and 16, one or three descriptors per command, and publication before,
+halfway through, or after the first command's transfer. They copy 4,096..12,288
+supplied bytes and preserve pending completion across publication. The original
+consumer acknowledges CIR and records separate matching notification counts
+for both command objects, then reaches the first `IODMACommand::complete`
+entry. Waiting, unavailable input, whole-buffer canaries and descriptor bytes
+are checked. Method entry and IOKit objects are explicit fixtures; CPU IRQ-vector
+delivery and the complete method body are not executed. Unit tests additionally
+cover a tight remaining budget, atomic publication rejection, pending-slot
+limits and 140 consecutive submissions across ring reuse.
 The current-address read during original setup also remains a fixture input;
 the component does not invent an initial value before GO.
 
 Channel 24 remains absent from the board MMIO fabric. AMC's byte producer,
-IRQ routing, live ring publication, hold/abort, flags-zero/size-exhaustion
+IRQ routing, hold/abort, flags-zero/size-exhaustion
 transitions, reset/readback integration and the shared audio-control write
 remain unresolved. This functional command contract is not a physical timing
 measurement and does not establish DSP execution, sound or genuine boot.
