@@ -569,6 +569,12 @@ titleForFooterInSection:(NSInteger)section {
 - (BOOL)openInstanceAtIndex:(NSUInteger)index animated:(BOOL)animated {
     return [self openInstanceAtIndex:index animated:animated afterShutdown:nil];
 }
+- (BOOL)openMachineWithIdentifier:(NSString *)identifier {
+    VMInstanceStore *store=VMInstanceStore.sharedStore;
+    for (NSUInteger i=0;i<store.count;i++) if ([[store instanceAtIndex:i][@"id"] isEqual:identifier])
+        return [self openInstanceAtIndex:i animated:YES];
+    return NO;
+}
 
 - (BOOL)openInstanceAtIndex:(NSUInteger)index animated:(BOOL)animated
              afterShutdown:(void (^)(void))afterShutdown {
@@ -618,6 +624,7 @@ titleForFooterInSection:(NSInteger)section {
     [store noteOpenedInstanceWithID:row[@"id"]];
 
     EmulatorViewController *vc = [[EmulatorViewController alloc] init];
+    vc.hidesBottomBarWhenPushed=YES;
     vc.title = row[@"name"];
     /* The identity, not just the name: it is what decides which root
      * filesystem this machine gets. Without it the engine will not boot

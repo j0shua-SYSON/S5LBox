@@ -1,5 +1,6 @@
 // Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 #import "VMIPAPackage.h"
+#import "VMStorageLease.h"
 #import "VMIPAArchive.h"
 #import "VMGuestInstall.h"
 #import "VMGuest.h"
@@ -193,6 +194,10 @@ static BOOL IPAVersionSupported(id version) {
 }
 
 - (BOOL)installInDirectory:(NSString *)directory error:(NSError **)error {
+#if S5LBOX_TOUCHHLE
+    __attribute__((objc_precise_lifetime)) VMStorageLease *lease=[VMStorageLease acquireDirectory:directory error:error];
+    if (!lease) return NO;
+#endif
     const char *work = directory.fileSystemRepresentation;
     char detail[320] = {0}, stage[VM_GUEST_INSTALL_PATH_CAPACITY], snapshots[VM_GUEST_INSTALL_PATH_CAPACITY];
     uint8_t jailbreakIdentity[32];

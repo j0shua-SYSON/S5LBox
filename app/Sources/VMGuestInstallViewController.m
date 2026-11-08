@@ -4,6 +4,7 @@
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //
 #import "VMGuestInstallViewController.h"
+#import "VMStorageLease.h"
 #import "VMPackageBridge.h"
 
 #import "VMGuestInstallBuild.h"
@@ -423,6 +424,11 @@ static void VMGuestInstallBuildProgress(
     dispatch_async(_buildQueue, ^{
         VMGuestInstallViewController *self_ = weakSelf;
         if (!self_) return;
+#if S5LBOX_TOUCHHLE
+        NSError *leaseError=nil;
+        __attribute__((objc_precise_lifetime)) VMStorageLease *lease=[VMStorageLease acquireDirectory:self_->_machineDirectory error:&leaseError];
+        if (!lease) { [self_ failWithDescription:leaseError.localizedDescription]; return; }
+#endif
         if (self_.packageManagerOnly) {
             NSError *error = nil; char recovery[320] = {0};
             const char *work = self_->_machineDirectory.fileSystemRepresentation;
@@ -506,6 +512,11 @@ static void VMGuestInstallBuildProgress(
     dispatch_async(_buildQueue, ^{
         VMGuestInstallViewController *self_ = weakSelf;
         if (!self_) return;
+#if S5LBOX_TOUCHHLE
+        NSError *leaseError=nil;
+        __attribute__((objc_precise_lifetime)) VMStorageLease *lease=[VMStorageLease acquireDirectory:self_->_machineDirectory error:&leaseError];
+        if (!lease) { [self_ failWithDescription:leaseError.localizedDescription]; return; }
+#endif
         vm_guest_install_build_result_t result;
         char detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
         vm_guest_install_build_status_t status =

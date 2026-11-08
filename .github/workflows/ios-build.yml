@@ -29,6 +29,7 @@ on:
       - 'tools/ios3_kernel_patch.h'
       - 'tools/rootfs_work.c'
       - 'tools/rootfs_work.h'
+      - 'tools/hfs_offline.*'
       - 'tools/sha256.c'
       - 'tools/sha256.h'
       - 'tools/file_block.h'

@@ -1349,7 +1349,14 @@ set_tests_properties(bounded_rootfs_work_image PROPERTIES
 # allocation bitmap, matching alternate volume header — which keeps the suite
 # firmware-free and runnable on every public CI runner.
 add_executable(test_rootfs_provision tests/test_rootfs_provision.c)
-target_link_libraries(test_rootfs_provision PRIVATE host_rootfs_work)
+add_library(host_hfs_offline STATIC ../tools/hfs_offline.c)
+target_include_directories(host_hfs_offline PUBLIC ../tools)
+if(MSVC)
+    target_compile_options(host_hfs_offline PRIVATE /W4 /WX)
+else()
+    target_compile_options(host_hfs_offline PRIVATE -Wall -Wextra -Werror)
+endif()
+target_link_libraries(test_rootfs_provision PRIVATE host_rootfs_work host_hfs_offline)
 set_target_properties(test_rootfs_provision PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED YES

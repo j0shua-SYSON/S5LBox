@@ -6,6 +6,7 @@ options:
 targets:
   S5LBox:
     sources:
+      - path: ../tools/hfs_offline.c
       - path: ../third_party/touchhle/touchHLE_dylibs
         type: folder
         buildPhase: resources

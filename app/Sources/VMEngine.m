@@ -31,6 +31,7 @@
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //
 #import "VMEngine.h"
+#import "VMStorageLease.h"
 #import "VMAudioOutput.h"
 #import "VMTouchQueue.h"
 #import "VMButtonQueue.h"
@@ -203,6 +204,7 @@ static double vm_engine_now_seconds(void) {
      * configuration this class refuses to guess about -- see -resolveFilesInto:.
      */
     NSString        *_instanceID;
+    VMStorageLease  *_storageLease;
 
     NSThread        *_thread;
     pthread_mutex_t  _lock;
@@ -825,6 +827,7 @@ static double vm_engine_now_seconds(void) {
 }
 
 - (void)finishFailedStartup {
+    [_storageLease close]; _storageLease=nil;
     pthread_mutex_lock(&_lock);
     VMEngineStopCompletion stopped = _stopCompletion;
     _stopCompletion = nil;
@@ -849,6 +852,19 @@ static double vm_engine_now_seconds(void) {
 }
 
 - (BOOL)prepareMachine {
+#if S5LBOX_TOUCHHLE
+    if (_instanceID.length) {
+        NSError *storageError=nil;
+        NSString *directory=[[VMInstanceStore sharedStore] directoryForInstanceWithID:_instanceID];
+        _storageLease=[VMStorageLease acquireDirectory:directory error:&storageError];
+        if (!_storageLease || ![_storageLease beginGuestRun:&storageError]) {
+            pthread_mutex_lock(&_lock);
+            _bringUpNote=storageError.localizedDescription ?: @"Machine storage is unavailable.";
+            pthread_mutex_unlock(&_lock);
+            return NO;
+        }
+    }
+#endif
     BOOL needSnapshot = (_snapshot == NULL);
 
     if (needSnapshot) {
@@ -2388,6 +2404,7 @@ static bool vm_native_pc_profile_row(void *opaque, uint64_t bin,
     /* Publish the terminal state only after the machine is gone. In
      * particular, clear _thread here so a later start really creates a fresh
      * machine instead of returning a false success for a dead worker. */
+    [_storageLease close]; _storageLease=nil;
     pthread_mutex_lock(&_lock);
     VMEngineCheckpointCompletion checkpointCompletion = _checkpointCompletion;
     VMEngineCheckpointCompletion shutdownCompletion = _shutdownCompletion;

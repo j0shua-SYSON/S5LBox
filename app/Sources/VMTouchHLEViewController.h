@@ -10,3 +10,9 @@
 @interface VMTouchHLEAppsViewController : UITableViewController
 - (instancetype)initWithTransport:(VMUSBTransport *)transport instanceID:(NSString *)identifier;
 @end
+#if S5LBOX_TOUCHHLE
+// Separate Apps tab. Its run controllers do not construct a VMEngine.
+@interface VMTouchHLEOfflineAppsViewController : UITableViewController
+@property(nonatomic,copy) void (^openMachine)(NSString *identifier);
+@end
+#endif

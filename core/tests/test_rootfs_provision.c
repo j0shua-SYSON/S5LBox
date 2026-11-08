@@ -26,6 +26,8 @@
 #endif
 
 #include "rootfs_work.h"
+#include "hfs_offline.h"
+#include <errno.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -7075,9 +7077,68 @@ static void test_status_and_stage_names(void) {
                  "provision-write") == 0, "write stage is unnamed");
 }
 
+static void test_offline_shared_filesystem(void) {
+    fixture_t *fx=fx_create(4);
+    char source[1024],clone[1024];
+    CHECK(fx && make_path(source,sizeof source,"offline-source") &&
+          make_path(clone,sizeof clone,"offline-clone"),"offline fixture paths");
+    if (!fx) return;
+    CHECK(write_file(source,fx->image,FX_SIZE),"write offline source");
+    hfs_offline *v=NULL; int e=hfs_offline_open(source,&v);
+    CHECK(e==0,"open offline volume: %d",e);
+    if (!v) { remove_if_present(source); free(fx); return; }
+    char data[32]={0}; size_t count=0; hfs_offline_info entry;
+    CHECK(hfs_offline_read(v,FX_NOTE,0,data,sizeof data,&count)==0 && count==5 &&
+          !memcmp(data,"note\n",5),"offline read existing fork");
+    const uint16_t filename[]={'s','a','v','e','.',0x00e9};
+    uint32_t id=0;
+    CHECK(hfs_offline_create(v,FX_BETA,filename,6,0100644,&id)==0,"create Unicode save");
+    CHECK(hfs_offline_write(v,id,4,"saved",5)==0,"sparse write");
+    memset(data,0xff,sizeof data);
+    CHECK(hfs_offline_read(v,id,0,data,sizeof data,&count)==0 && count==9 &&
+          !memcmp(data,"\0\0\0\0saved",9),"sparse hole is zero filled");
+    CHECK(hfs_offline_truncate(v,id,6)==0 && hfs_offline_truncate(v,id,9)==0,"truncate shrink and grow");
+    CHECK(hfs_offline_read(v,id,0,data,sizeof data,&count)==0 &&
+          !memcmp(data,"\0\0\0\0sa\0\0\0",9),"truncation does not expose old bytes");
+    CHECK(hfs_offline_rename(v,id,FX_BETA,(const uint16_t[]){'n','o','t','e','.','t','x','t'},8)==0,"atomic rename replacement");
+    CHECK(hfs_offline_read(v,FX_NOTE,0,data,sizeof data,&count)==0 && count==5 &&
+          !memcmp(data,"note\n",5),"open unlinked file survives replacement");
+    CHECK(hfs_offline_remove(v,FX_BETA)==ENOTEMPTY,"nonempty directory cannot be deleted");
+    CHECK(hfs_offline_rename(v,FX_ALPHA,FX_DUP,filename,6)==EINVAL,"rename cannot create parent cycle");
+    CHECK(write_file(clone,fx->image,FX_SIZE),"write unpublished clone");
+    e=hfs_offline_commit(v,clone); CHECK(e==0,"commit offline changes: %d",e);
+    CHECK(hfs_offline_read(v,FX_NOTE,0,data,sizeof data,&count)==0 && count==5 &&
+          !memcmp(data,"note\n",5),"unlinked handle survives fsync");
+    hfs_offline_close(v); v=NULL;
+    size_t size=0; uint8_t *unchanged=read_file(source,&size);
+    CHECK(unchanged && size==FX_SIZE && !memcmp(unchanged,fx->image,size),"offline commit never writes original");
+    free(unchanged);
+    CHECK(hfs_offline_open(clone,&v)==0,"reopen committed filesystem");
+    if (v) {
+        const uint16_t note[]={'n','o','t','e','.','t','x','t'};
+        CHECK(hfs_offline_lookup(v,FX_BETA,note,8,&entry)==0 && entry.id==id && entry.uid==501 && entry.size==9,
+              "rename, metadata and size persist");
+        CHECK(hfs_offline_read(v,id,0,data,sizeof data,&count)==0 && count==9 &&
+              !memcmp(data,"\0\0\0\0sa\0\0\0",9),"save bytes persist after reopen");
+        CHECK(hfs_offline_write(v,id,0,"new",3)==0,"subsequent session writes");
+        CHECK(hfs_offline_commit(v,clone)==EINVAL,"refuse live-image alias");
+        hfs_offline_close(v);
+    }
+    uint8_t *output=read_file(clone,&size);
+    if (output) {
+        tr_volume_t volume; tr_walk_t walk;
+        CHECK(tr_open(output,size,&volume),"independent reader opens offline catalog");
+        if (volume.catalog) { tr_walk(&volume,&walk,NULL,NULL); CHECK(walk.shape_ok && walk.order_ok && walk.records==volume.leaf_records,"offline B-tree ordering/links/records"); tr_close(&volume); }
+        CHECK(!memcmp(output+VH_OFF,output+FX_SIZE-VH_OFF,VH_LEN),"alternate header matches");
+        free(output);
+    }
+    remove_if_present(source); remove_if_present(clone); free(fx);
+}
+
 int main(void) {
     printf("HFS+ catalog provisioning tests\n");
     test_status_and_stage_names();
+    test_offline_shared_filesystem();
     test_provision_unpublished_clone();
     test_stopped_catalog_id_hint();
     test_stopped_directory_counts();

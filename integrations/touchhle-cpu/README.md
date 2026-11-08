@@ -22,7 +22,27 @@ The iPhone app links the optimized Rust release library. Panic unwinding is
 retained so guest faults and stop requests return through the host boundary
 instead of terminating S5LBox.
 
-Use a jailbroken iPhone OS 3.1.3 guest with Packages connected. Install apps
+The feature build now separates **Apps** and **Machines**. Apps reads installed
+user-app containers directly from the machine's HFSX disk and runs touchHLE
+without starting the full-system emulator or virtual USB. An existing saved
+machine must first shut down cleanly; its RAM checkpoint is never discarded
+as a substitute for flushing the guest filesystem.
+
+Offline changes use an exclusive machine-storage lease and an unpublished
+filesystem clone. File sync, close, rename and deletion publish a flushed disk
+through the existing recovery transaction, invalidating stale CPU/RAM restore
+state. A durable image-identity witness permits later offline sessions; starting
+iPhone OS revokes it before opening the disk. Documents and preferences remain
+in the guest's original app containers. There is no second installed-app mirror.
+
+The offline backend is bounded: binary-order, nonjournaled HFSX; at most 64 MiB
+of simultaneously modified file contents; and eight inline allocation extents
+for modified forks. Overflow extents are readable. Unsupported layouts,
+external-attribute deletion, allocation collisions and malformed metadata fail
+without publishing the private clone. Offline device testing is in progress;
+the verified live-guest results below do not establish offline compatibility.
+
+For the existing live-guest path, use a jailbroken iPhone OS 3.1.3 guest with Packages connected. Install apps
 through the existing IPA library or Legacy Store. Machine Settings → touchHLE
 discovers those installations through `installation_proxy`; there is no second
 touchHLE app library to maintain.
@@ -35,8 +55,8 @@ reconnect and applies that choice automatically.
 Home closes the interpreted app and returns to the guest; a failed launch
 offers **Try iPhone OS** without restarting the host app.
 
-App binaries, resources, documents and preferences use the running guest's
-file service, not a host-side sandbox or a disk-image editor. Installation and
+In the live-guest path, app binaries, resources, documents and preferences use
+the running guest's file service. Installation and
 updates still belong to the guest's normal installer. No per-app re-signing or
 executable-memory allocation is introduced by the interpreter.
 

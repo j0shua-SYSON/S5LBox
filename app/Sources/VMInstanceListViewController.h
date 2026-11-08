@@ -29,5 +29,6 @@
  * claiming that a guest was started.
  */
 - (BOOL)openFirstMachineForAutomation;
+- (BOOL)openMachineWithIdentifier:(NSString *)identifier;
 
 @end

@@ -3,7 +3,12 @@
 #include "../../integrations/touchhle-cpu/s5lbox_hle.h"
 @class VMUSBService;
 
-@interface VMTouchHLEFiles : NSObject
+@protocol VMTouchHLEFileChannel <NSObject>
+- (s5lbox_hle_live_config)configuration;
+- (void)close;
+@property(nonatomic,readonly) NSError *error;
+@end
+@interface VMTouchHLEFiles : NSObject <VMTouchHLEFileChannel>
 // service must already have completed the authenticated file-service handshake.
 // Own this object and its configuration strings until run_live returns.
 - (instancetype)initWithService:(VMUSBService *)service

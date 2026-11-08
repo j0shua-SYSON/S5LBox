@@ -8,6 +8,8 @@
 #import "VMFrameTelemetry.h"
 #import "VMSettings.h"
 #import "VMInstanceListViewController.h"
+#import "VMInstanceStore.h"
+#import "VMTouchHLEViewController.h"
 #import "VMIPALibrary.h"
 #import "VMFirmwareImporter.h"
 #import "VMFirmwareDownloader.h"
@@ -172,6 +174,20 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
         initWithRootViewController:machines];
     nav.navigationBar.prefersLargeTitles = YES;
     self.window.rootViewController = nav;
+#if S5LBOX_TOUCHHLE
+    if (!automationRequested) {
+        VMTouchHLEOfflineAppsViewController *apps=[VMTouchHLEOfflineAppsViewController new];
+        UINavigationController *appNavigation=[[VMNavigationController alloc] initWithRootViewController:apps];
+        appNavigation.navigationBar.prefersLargeTitles=YES;
+        appNavigation.tabBarItem=[[UITabBarItem alloc] initWithTitle:@"Apps" image:[UIImage systemImageNamed:@"square.grid.2x2"] tag:0];
+        nav.tabBarItem=[[UITabBarItem alloc] initWithTitle:@"Machines" image:[UIImage systemImageNamed:@"iphone"] tag:1];
+        UITabBarController *tabs=[UITabBarController new]; tabs.viewControllers=@[appNavigation,nav];
+        if (!VMInstanceStore.sharedStore.count) tabs.selectedIndex=1;
+        __weak UITabBarController *weakTabs=tabs; __weak VMInstanceListViewController *weakMachines=machines;
+        apps.openMachine=^(NSString *identifier) { weakTabs.selectedIndex=1; if (identifier) [weakMachines openMachineWithIdentifier:identifier]; };
+        self.window.rootViewController=tabs;
+    }
+#endif
     [self.window makeKeyAndVisible];
 
     /*

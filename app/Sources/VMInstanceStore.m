@@ -4,6 +4,7 @@
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //
 #import "VMInstanceStore.h"
+#import "VMStorageLease.h"
 
 #import "VMFirmwareBoot.h"
 #import "VMOptions.h"
@@ -645,6 +646,11 @@ static NSString *VMGraphicsRecordText(BOOL mbxEnabled,
 
 - (BOOL)deleteInstanceAtIndex:(NSUInteger)index error:(NSError **)error {
     NSDictionary *row = [self instanceAtIndex:index];
+#if S5LBOX_TOUCHHLE
+    __attribute__((objc_precise_lifetime)) VMStorageLease *lease=row[@"id"]?
+        [VMStorageLease acquireDirectory:[self directoryForInstanceWithID:row[@"id"]] error:error]:nil;
+    if (row[@"id"] && !lease) return NO;
+#endif
     vm_instance_list_t before = _list;
     vm_instance_status_t s = vm_instance_remove(&_list, (unsigned)index);
     if (![self report:s to:error]) return NO;

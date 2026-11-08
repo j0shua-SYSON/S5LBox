@@ -4,6 +4,8 @@
 #import "VMTouchHLEViewController.h"
 #import "VMTouchHLESurface.h"
 #import "VMTouchHLEFiles.h"
+#import "VMTouchHLEOfflineFiles.h"
+#import "VMInstanceStore.h"
 #import "VMGuestApplications.h"
 #import "VMPackageBridge.h"
 #import "VMUSBService.h"
@@ -130,6 +132,7 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
 @property(nonatomic,copy) NSString *instanceID;
 @property(nonatomic,copy) NSString *appIdentifier,*appName;
 @property(nonatomic,strong) VMTouchHLECoordinator *coordinator;
+@property(nonatomic) BOOL offline;
 @end
 @implementation HLERunViewController {
     HLEDisplayView *_display;
@@ -214,25 +217,28 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
 - (void)start {
     _control=s5lbox_hle_control_create();
     s5lbox_hle_control_pause(_control,_paused||_inactive);
-    _bridge=[[VMPackageBridge alloc] initWithTransport:self.transport instanceID:self.instanceID];
-    _discovery=[[VMGuestApplications alloc] initWithTransport:self.transport instanceID:self.instanceID];
+    _bridge=self.offline?nil:[[VMPackageBridge alloc] initWithTransport:self.transport instanceID:self.instanceID];
+    _discovery=self.offline?nil:[[VMGuestApplications alloc] initWithTransport:self.transport instanceID:self.instanceID];
     VMPackageBridge *bridge=_bridge; VMTouchHLESurface *surface=_surface;
     VMGuestApplications *discovery=_discovery;
     const s5lbox_hle_control *control=_control;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
         @autoreleasepool {
-            NSError *error=nil; VMTouchHLEFiles *files=nil;
+            NSError *error=nil; id<VMTouchHLEFileChannel> files=nil;
+            VMTouchHLEOfflineFiles *offline=self.offline?[[VMTouchHLEOfflineFiles alloc] initWithInstanceID:self.instanceID error:&error]:nil;
             VMGuestApplication *app=nil;
-            for (VMGuestApplication *candidate in [discovery installedApplications:&error])
+            NSArray *applications=self.offline?[offline installedApplications:&error]:[discovery installedApplications:&error];
+            for (VMGuestApplication *candidate in applications)
                 if ([candidate.identifier isEqual:self.appIdentifier]) { app=candidate; break; }
             if (!app && !error) error=HLEError(@"This app is no longer installed in the guest.");
             if (app) dispatch_async(dispatch_get_main_queue(), ^{
                 self.title=app.name; self->_display.accessibilityLabel=app.name;
             });
-            VMUSBService *service=app?[bridge openLiveFilesForContainer:app.containerID error:&error]:nil;
+            VMUSBService *service=app && !self.offline?[bridge openLiveFilesForContainer:app.containerID error:&error]:nil;
             s5lbox_hle_outcome outcome={0}; int result=S5LBOX_HLE_ERROR;
-            if (service) {
-                files=[[VMTouchHLEFiles alloc] initWithService:service homeDirectory:app.homeDirectory bundleDirectory:app.bundleDirectory];
+            if (app && offline && [offline selectApplication:app error:&error]) files=offline;
+            else if (service) files=[[VMTouchHLEFiles alloc] initWithService:service homeDirectory:app.homeDirectory bundleDirectory:app.bundleDirectory];
+            if (files) {
                 NSURL *support=[NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
                 NSURL *data=[[support URLByAppendingPathComponent:@"touchHLE"] URLByAppendingPathComponent:self.instanceID];
                 if ([NSFileManager.defaultManager createDirectoryAtURL:data withIntermediateDirectories:YES attributes:nil error:&error]) {
@@ -246,18 +252,19 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
                 }
             }
             [surface finish]; [files close]; [service close];
+            [offline close]; if (files.error) error=files.error;
             NSString *message=error.localizedDescription ?: [NSString stringWithUTF8String:outcome.message] ?: @"The app could not run.";
             dispatch_async(dispatch_get_main_queue(), ^{
                 s5lbox_hle_control_release(control); self->_control=NULL; self->_finished=YES;
                 [self->_link invalidate]; self->_link=nil; [self->_spinner stopAnimating];
                 [self updateInputState];
                 [self updateMotionState];
-                if (self->_closing || (result==S5LBOX_HLE_OK && !error)) [self dismissViewControllerAnimated:YES completion:nil];
+                if (!error && (self->_closing || result==S5LBOX_HLE_OK)) [self dismissViewControllerAnimated:YES completion:nil];
                 else {
                     self->_status.text=[@"Could not open with touchHLE.\n\n" stringByAppendingString:
                         message.length>350?[message substringToIndex:350]:message];
                     self->_status.hidden=NO; self->_status.textColor=UIColor.labelColor; self->_display.hidden=YES;
-                    self->_tryNative.hidden=NO; self->_controls.hidden=YES;
+                    self->_tryNative.hidden=self.offline; self->_controls.hidden=YES;
                     [self.view setNeedsLayout];
                 }
             });
@@ -655,5 +662,134 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
     else [self refresh];
 }
 - (void)dealloc { _discovery.canceled=YES; _setup.canceled=YES; }
+@end
+
+@interface VMTouchHLEOfflineAppsViewController () <UISearchResultsUpdating>
+@end
+@implementation VMTouchHLEOfflineAppsViewController {
+    NSString *_instanceID,*_machineName,*_message;
+    NSArray<VMGuestApplication *> *_apps,*_visibleApps;
+    NSDictionary<NSString *,UIImage *> *_icons;
+    UISearchController *_search;
+    UILabel *_emptyLabel;
+    UIButton *_machineButton;
+    UIActivityIndicatorView *_loadingIndicator;
+    BOOL _loading;
+}
+- (instancetype)init { return [super initWithStyle:UITableViewStylePlain]; }
+- (void)viewDidLoad {
+    [super viewDidLoad]; self.title=@"Apps";
+    self.tableView.rowHeight=76; self.tableView.separatorInset=UIEdgeInsetsMake(0,84,0,0);
+    self.tableView.accessibilityIdentifier=@"s5lbox.offline.apps";
+    self.navigationItem.rightBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:@"Machine" style:UIBarButtonItemStylePlain target:self action:@selector(chooseMachine)];
+    _search=[[UISearchController alloc] initWithSearchResultsController:nil];
+    _search.obscuresBackgroundDuringPresentation=NO; _search.searchResultsUpdater=self;
+    _search.searchBar.placeholder=@"Search apps"; self.navigationItem.searchController=_search;
+    self.definesPresentationContext=YES;
+    self.refreshControl=[UIRefreshControl new]; [self.refreshControl addTarget:self action:@selector(refreshApps) forControlEvents:UIControlEventValueChanged];
+    _emptyLabel=[UILabel new]; _emptyLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    _emptyLabel.adjustsFontForContentSizeCategory=YES; _emptyLabel.numberOfLines=0;
+    _emptyLabel.textAlignment=NSTextAlignmentCenter; _emptyLabel.textColor=UIColor.secondaryLabelColor;
+    _machineButton=[UIButton buttonWithType:UIButtonTypeSystem]; [_machineButton setTitle:@"Open Machine" forState:UIControlStateNormal];
+    _machineButton.titleLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
+    [_machineButton addTarget:self action:@selector(showMachine) forControlEvents:UIControlEventTouchUpInside];
+    _loadingIndicator=[[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    UIStackView *stack=[[UIStackView alloc] initWithArrangedSubviews:@[_loadingIndicator,_emptyLabel,_machineButton]];
+    stack.axis=UILayoutConstraintAxisVertical; stack.spacing=16; stack.alignment=UIStackViewAlignmentCenter;
+    UIView *background=[UIView new]; [background addSubview:stack]; stack.translatesAutoresizingMaskIntoConstraints=NO;
+    [NSLayoutConstraint activateConstraints:@[[stack.centerYAnchor constraintEqualToAnchor:background.centerYAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:background.leadingAnchor constant:28],
+        [stack.trailingAnchor constraintEqualToAnchor:background.trailingAnchor constant:-28],
+        [_machineButton.heightAnchor constraintGreaterThanOrEqualToConstant:44]]];
+    self.tableView.backgroundView=background;
+}
+- (void)viewWillAppear:(BOOL)animated { [super viewWillAppear:animated]; [self refreshApps]; }
+- (void)chooseMachine {
+    if (_loading) return;
+    UIAlertController *sheet=[UIAlertController alertControllerWithTitle:@"Apps from" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    VMInstanceStore *store=VMInstanceStore.sharedStore;
+    for (NSUInteger i=0;i<store.count;i++) {
+        NSDictionary *row=[store instanceAtIndex:i]; NSString *identifier=row[@"id"];
+        [sheet addAction:[UIAlertAction actionWithTitle:row[@"name"] style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+            self->_instanceID=identifier; [NSUserDefaults.standardUserDefaults setObject:identifier forKey:@"OfflineAppsMachine"];
+            [self refreshApps];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.barButtonItem=self.navigationItem.rightBarButtonItem;
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+- (void)showMachine { if (self.openMachine) self.openMachine(_instanceID); }
+- (void)refreshApps {
+    if (_loading) return;
+    VMInstanceStore *store=VMInstanceStore.sharedStore;
+    if (!_instanceID) _instanceID=[NSUserDefaults.standardUserDefaults stringForKey:@"OfflineAppsMachine"];
+    NSDictionary *selected=nil;
+    for (NSUInteger i=0;i<store.count;i++) { NSDictionary *row=[store instanceAtIndex:i]; if ([row[@"id"] isEqual:_instanceID]) selected=row; }
+    if (!selected) selected=[store instanceAtIndex:0];
+    _instanceID=selected[@"id"]; _machineName=selected[@"name"];
+    _apps=@[]; _visibleApps=@[]; _icons=@{}; _message=nil;
+    if (!_instanceID) {
+        _message=@"Create a machine to start your app collection."; [self filterApps]; [self.refreshControl endRefreshing]; return;
+    }
+    _loading=YES; self.navigationItem.rightBarButtonItem.enabled=NO;
+    [_loadingIndicator startAnimating]; [self filterApps];
+    NSString *identifier=_instanceID;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
+        @autoreleasepool {
+            NSError *error=nil;
+            VMTouchHLEOfflineFiles *files=[[VMTouchHLEOfflineFiles alloc] initWithInstanceID:identifier error:&error];
+            NSArray *apps=[files installedApplications:&error]; NSMutableDictionary *icons=[NSMutableDictionary dictionary];
+            for (VMGuestApplication *app in apps) {
+                NSData *data=[files iconForApplication:app]; UIImage *image=data?[UIImage imageWithData:data]:nil;
+                if (image) {
+                    UIGraphicsImageRenderer *renderer=[[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(52,52)];
+                    icons[app.identifier]=[renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *context) { [image drawInRect:CGRectMake(0,0,52,52)]; }];
+                }
+            }
+            [files close];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self->_loading=NO; self.navigationItem.rightBarButtonItem.enabled=YES;
+                self->_apps=apps?:@[]; self->_icons=icons;
+                self->_message=error.localizedDescription;
+                [self->_loadingIndicator stopAnimating]; [self.refreshControl endRefreshing]; [self filterApps];
+            });
+        }
+    });
+}
+- (void)updateSearchResultsForSearchController:(UISearchController *)searchController { (void)searchController; [self filterApps]; }
+- (void)filterApps {
+    NSString *query=_search.searchBar.text;
+    _visibleApps=query.length?[_apps filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(VMGuestApplication *app,__unused NSDictionary *bindings) {
+        return [app.name localizedCaseInsensitiveContainsString:query] || [app.identifier localizedCaseInsensitiveContainsString:query];
+    }]]:_apps;
+    BOOL empty=!_visibleApps.count; self.tableView.backgroundView.hidden=!empty;
+    _emptyLabel.text=_loading?@"Reading apps…":_message ?: (_apps.count?@"No matching apps.":@"Apps installed in this machine appear here.");
+    _machineButton.hidden=_loading || (_apps.count && !_message);
+    _loadingIndicator.hidden=!_loading;
+    [self.tableView reloadData];
+}
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { (void)tableView; (void)section; return (NSInteger)_visibleApps.count; }
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section { (void)tableView; (void)section; return _machineName; }
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    UITableViewCell *cell=[tableView dequeueReusableCellWithIdentifier:@"OfflineApp"];
+    if (!cell) cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"OfflineApp"];
+    VMGuestApplication *app=_visibleApps[(NSUInteger)indexPath.row]; cell.textLabel.text=app.name;
+    cell.textLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline]; cell.textLabel.adjustsFontForContentSizeCategory=YES;
+    cell.detailTextLabel.text=app.version; cell.detailTextLabel.textColor=UIColor.secondaryLabelColor;
+    cell.detailTextLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline]; cell.detailTextLabel.adjustsFontForContentSizeCategory=YES;
+    cell.imageView.image=_icons[app.identifier] ?: [UIImage systemImageNamed:@"app"];
+    cell.imageView.layer.cornerRadius=12; cell.imageView.clipsToBounds=YES;
+    cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;
+    return cell;
+}
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    VMGuestApplication *app=_visibleApps[(NSUInteger)indexPath.row];
+    HLERunViewController *run=[HLERunViewController new]; run.offline=YES;
+    run.instanceID=_instanceID; run.appIdentifier=app.identifier; run.appName=app.name;
+    UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:run]; nav.modalPresentationStyle=UIModalPresentationFullScreen;
+    [self presentViewController:nav animated:YES completion:nil];
+}
 @end
 #endif
