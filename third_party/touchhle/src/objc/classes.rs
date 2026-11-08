@@ -38,9 +38,9 @@ pub(super) struct ClassHostObject {
     pub(super) superclass: Class,
     pub(super) methods: HashMap<SEL, IMP>,
     pub(super) guest_method_signatures: HashMap<SEL, ConstPtr<u8>>,
-    /// Maps ivar name to a tuple of an offset (as pointer) and an alignment.
+    /// Maps ivar name to its offset pointer, alignment, and original descriptor.
     /// (Alignment is used during ivar reconciliation.)
-    pub(super) ivars: HashMap<String, (ConstPtr<GuestUSize>, u32)>,
+    pub(super) ivars: HashMap<String, (ConstPtr<GuestUSize>, u32, super::properties::Ivar)>,
     /// Offset into the allocated memory for the object where the ivars of
     /// instances of this class or metaclass (respectively: normal objects or
     /// classes) should live. This is always >= the value in the superclass.
@@ -743,7 +743,7 @@ impl ObjC {
 
                 if !ivars.is_empty() {
                     let mut max_alignment: u32 = 1;
-                    for (offset, align) in ivars.values() {
+                    for (offset, align, _) in ivars.values() {
                         if offset.is_null() {
                             // anonymous bitfield
                             continue;
@@ -754,7 +754,7 @@ impl ObjC {
                     let align_mask = max_alignment - 1;
                     diff = (diff + align_mask) & !align_mask;
 
-                    for (offset, _) in ivars.values_mut() {
+                    for (offset, _, _) in ivars.values_mut() {
                         if offset.is_null() {
                             // anonymous bitfield
                             continue;

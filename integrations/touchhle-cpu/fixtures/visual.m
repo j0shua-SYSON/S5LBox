@@ -18,6 +18,14 @@ extern SEL method_getName(Method);
 extern const char *method_getTypeEncoding(Method);
 extern IMP method_setImplementation(Method,IMP);
 extern void method_exchangeImplementations(Method,Method);
+typedef void *Ivar;
+extern Ivar class_getInstanceVariable(Class,const char *);
+extern Ivar *class_copyIvarList(Class,unsigned *);
+extern const char *ivar_getName(Ivar);
+extern const char *ivar_getTypeEncoding(Ivar);
+extern int ivar_getOffset(Ivar);
+extern id object_getIvar(id,Ivar);
+extern void object_setIvar(id,Ivar,id);
 typedef struct { float x,y; } CGPoint;
 typedef struct { float width,height; } CGSize;
 typedef struct { CGPoint origin; CGSize size; } CGRect;
@@ -49,7 +57,7 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 - (IMP)methodForSelector:(SEL)selector;
 @end
 @interface NSAutoreleasePool : NSObject @end
-@interface RuntimeBase : NSObject
+@interface RuntimeBase : NSObject { @public int count; id object; }
 + (int)classAnswer;
 - (int)first;
 - (int)second;
@@ -59,7 +67,7 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 - (int)first { return 11; }
 - (int)second { return 22; }
 @end
-@interface RuntimeChild : RuntimeBase @end
+@interface RuntimeChild : RuntimeBase { @public unsigned short flag; } @end
 @implementation RuntimeChild @end
 static int replacementMethod(id self,SEL selector) { (void)self; (void)selector; return 77; }
 
@@ -102,6 +110,28 @@ static unsigned methods_smoke(void) {
     method_setImplementation(description,(IMP)replacementMethod);
     failures += ((Class (*)(id,SEL))host)(base,@selector(class))!=[RuntimeBase class];
     method_setImplementation(description,host);
+    Ivar count=class_getInstanceVariable([RuntimeBase class],"count");
+    Ivar object=class_getInstanceVariable([RuntimeChild class],"object");
+    failures += !count || !object || count!=class_getInstanceVariable([RuntimeChild class],"count");
+    failures += class_getInstanceVariable([RuntimeBase class],"flag")!=NULL;
+    failures += class_getInstanceVariable(0,"count")!=NULL || class_getInstanceVariable([RuntimeBase class],0)!=NULL;
+    failures += strcmp(ivar_getName(count),"count") || strcmp(ivar_getTypeEncoding(count),"i");
+    failures += strcmp(ivar_getTypeEncoding(object),"@");
+    failures += ivar_getOffset(count)!=(char *)&base->count-(char *)base;
+    base->count=123;
+    failures += *(int *)((char *)base+ivar_getOffset(count))!=123;
+    object_setIvar(child,object,base);
+    failures += child->object!=base || object_getIvar(child,object)!=base || [base retainCount]!=1;
+    object_setIvar(child,object,0);
+    failures += object_getIvar(child,object)!=0 || object_getIvar(0,object)!=0;
+    unsigned fields=99;
+    Ivar *list=class_copyIvarList([RuntimeBase class],&fields);
+    failures += !list || fields!=2 || list[2]!=NULL || list[0]!=count;
+    free(list);
+    list=class_copyIvarList([RuntimeChild class],&fields);
+    failures += !list || fields!=1 || list[1]!=NULL || strcmp(ivar_getName(list[0]),"flag");
+    free(list);
+    failures += class_copyIvarList(0,&fields)!=NULL || fields!=0;
     [base release]; [child release];
     return failures;
 }

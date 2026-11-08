@@ -36,7 +36,7 @@ unsafe impl SafeRead for ivar_list_t {}
 ///
 /// The name, field names and field layout are based on what Ghidra outputs.
 #[repr(C, packed)]
-struct ivar_t {
+pub(super) struct ivar_t {
     offset: ConstPtr<GuestUSize>,
     name: ConstPtr<u8>,
     type_: ConstPtr<u8>,
@@ -44,6 +44,7 @@ struct ivar_t {
     size: u32,
 }
 unsafe impl SafeRead for ivar_t {}
+pub(super) type Ivar = ConstPtr<ivar_t>;
 
 impl ClassHostObject {
     pub(super) fn add_ivars_from_bin(&mut self, ivar_list_ptr: ConstPtr<ivar_list_t>, mem: &Mem) {
@@ -55,7 +56,6 @@ impl ClassHostObject {
         for i in 0..count {
             let ivar_ptr: ConstPtr<ivar_t> = Ptr::from_bits(ivars_base_ptr.to_bits() + i * entsize);
 
-            // TODO: support type strings
             let ivar_t {
                 offset,
                 name,
@@ -64,7 +64,8 @@ impl ClassHostObject {
             } = mem.read(ivar_ptr);
 
             let name_string = mem.cstr_at_utf8(name).unwrap().into();
-            self.ivars.insert(name_string, (offset, alignment));
+            self.ivars
+                .insert(name_string, (offset, alignment, ivar_ptr));
         }
     }
 }
@@ -86,7 +87,7 @@ impl ObjC {
                 ref ivars,
                 ..
             } = self.borrow(class);
-            if let Some((ivar_offset_ptr, _)) = ivars.get(name) {
+            if let Some((ivar_offset_ptr, _, _)) = ivars.get(name) {
                 let ivar_offset = mem.read(*ivar_offset_ptr);
                 let ivar_ptr = MutVoidPtr::from_bits(obj.to_bits() + ivar_offset);
                 return Some(ivar_ptr.cast());
@@ -117,6 +118,112 @@ impl ObjC {
         }
         ivars_strings
     }
+}
+
+pub(super) fn class_getInstanceVariable(
+    env: &mut Environment,
+    mut class: Class,
+    name: ConstPtr<u8>,
+) -> Ivar {
+    if name.is_null() {
+        return Ptr::null();
+    }
+    let name = env.mem.cstr_at_utf8(name).unwrap();
+    while class != nil {
+        if env.objc.is_fake_class(class) || env.objc.is_unimplemented_class(class) {
+            break;
+        }
+        let owner = env.objc.borrow::<ClassHostObject>(class);
+        if let Some((_, _, descriptor)) = owner.ivars.get(name) {
+            return *descriptor;
+        }
+        class = owner.superclass;
+    }
+    Ptr::null()
+}
+
+pub(super) fn class_copyIvarList(
+    env: &mut Environment,
+    class: Class,
+    out_count: MutPtr<u32>,
+) -> MutPtr<Ivar> {
+    let mut descriptors = if class == nil
+        || env.objc.is_fake_class(class)
+        || env.objc.is_unimplemented_class(class)
+    {
+        Vec::new()
+    } else {
+        env.objc
+            .borrow::<ClassHostObject>(class)
+            .ivars
+            .values()
+            .map(|(_, _, descriptor)| *descriptor)
+            .collect::<Vec<_>>()
+    };
+    if !out_count.is_null() {
+        env.mem.write(out_count, descriptors.len() as u32);
+    }
+    if descriptors.is_empty() {
+        return Ptr::null();
+    }
+    // Binary descriptor addresses preserve declaration order, unlike HashMap.
+    descriptors.sort_unstable_by_key(|descriptor| descriptor.to_bits());
+    let result: MutPtr<Ivar> = env
+        .mem
+        .alloc((descriptors.len() as u32 + 1) * guest_size_of::<Ivar>())
+        .cast();
+    for (index, descriptor) in descriptors.iter().enumerate() {
+        env.mem.write(result + index as u32, *descriptor);
+    }
+    env.mem
+        .write(result + descriptors.len() as u32, Ptr::null());
+    result
+}
+
+pub(super) fn ivar_getName(env: &mut Environment, ivar: Ivar) -> ConstPtr<u8> {
+    if ivar.is_null() {
+        Ptr::null()
+    } else {
+        env.mem.read(ivar).name
+    }
+}
+pub(super) fn ivar_getTypeEncoding(env: &mut Environment, ivar: Ivar) -> ConstPtr<u8> {
+    if ivar.is_null() {
+        Ptr::null()
+    } else {
+        env.mem.read(ivar).type_
+    }
+}
+pub(super) fn ivar_getOffset(env: &mut Environment, ivar: Ivar) -> GuestISize {
+    if ivar.is_null() {
+        return 0;
+    }
+    let offset = env.mem.read(ivar).offset;
+    if offset.is_null() {
+        0
+    } else {
+        env.mem.read(offset) as GuestISize
+    }
+}
+pub(super) fn object_getIvar(env: &mut Environment, object: id, ivar: Ivar) -> id {
+    if object == nil || ivar.is_null() {
+        return nil;
+    }
+    let offset = ivar_getOffset(env, ivar);
+    env.mem.read(ConstPtr::from_bits(
+        object.to_bits().checked_add_signed(offset).unwrap(),
+    ))
+}
+pub(super) fn object_setIvar(env: &mut Environment, object: id, ivar: Ivar, value: id) {
+    if object == nil || ivar.is_null() {
+        return;
+    }
+    // These ARMv6 apps use manual reference counting, not ARC ivar ownership.
+    let offset = ivar_getOffset(env, ivar);
+    env.mem.write(
+        Ptr::from_bits(object.to_bits().checked_add_signed(offset).unwrap()),
+        value,
+    );
 }
 
 /// Undocumented function (see link above) apparently used by auto-generated
