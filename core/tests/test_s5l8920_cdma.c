@@ -486,10 +486,10 @@ static void amc_fixture(unsigned head,unsigned count) {
     s5l8920_cdma_init(&cdma);memset(amc_ram,0xa5,sizeof amc_ram);
     for(unsigned i=0;i<sizeof amc_source;i++)amc_source[i]=(uint8_t)(i*37u+19u);
     amc_calls=amc_cursor=amc_reads=amc_reenter=0;amc_deny=0;amc_result=S5L8920_CDMA_READY;
-    for(unsigned i=0;i<=count;i++) {
+    for(unsigned i=0;i<=count+1u;i++) {
         unsigned slot=(head+i)&127u;
         amc_put(slot*32,AMC_RAM+((slot+1)&127u)*32);
-        amc_put(slot*32+4,i==count?0x303u:3u);
+        amc_put(slot*32+4,i>count?0u:i==count?0x303u:3u);
         amc_put(slot*32+8,AMC_RAM+0x2000+i*32);
         amc_put(slot*32+12,i==0?20u:7u);
     }
@@ -515,17 +515,19 @@ static void amc_transfers(void) {
             CHECK(!amc_cursor && !memcmp(&before,&cdma,sizeof cdma) && !memcmp(expected_ram,amc_ram,sizeof amc_ram));
         }
         amc_result=S5L8920_CDMA_READY;unsigned total=0;
-        for(unsigned calls=0;calls<30 && total<27;calls++) {
-            unsigned end=total<20?20:27,n=end-total;
+        for(unsigned calls=0;calls<40 && total<34;calls++) {
+            unsigned end=total<20?20:total<27?27:34,n=end-total;
             if(n>16)n=16;
             if(n>budgets[b])n=budgets[b];
             CHECK(amc_step(true,budgets[b],&moved) && moved==n);total+=moved;
-            CHECK(cdma.amc.state.remaining==0x40000000u-total && cdma.amc.state.control==0x10018u);
-            CHECK(cdma.amc.state.address==AMC_RAM+(total<=20?0x2000+total:0x2020+total-20));
+            CHECK(cdma.amc.state.remaining==0x40000000u-total && cdma.amc.state.control==(total==34?0x110018u:0x10018u));
+            CHECK(s5l8920_cdma_amc_irq(&cdma)==(total==34));
+            CHECK(cdma.amc.state.address==AMC_RAM+(total<=20?0x2000+total:total<=27?0x2020+total-20:0x2040+total-27));
         }
         memcpy(expected_ram+0x2000,amc_source,20);memcpy(expected_ram+0x2020,amc_source+20,7);
-        CHECK(total==27 && amc_cursor==27 && !memcmp(expected_ram,amc_ram,sizeof amc_ram));
-        CHECK(cdma.amc.state.descriptor==AMC_RAM+((head+2)&127u)*32);
+        memcpy(expected_ram+0x2040,amc_source+27,7);
+        CHECK(total==34 && amc_cursor==34 && !memcmp(expected_ram,amc_ram,sizeof amc_ram));
+        CHECK(cdma.amc.state.descriptor==AMC_RAM+((head+3)&127u)*32);
         before=cdma;unsigned calls=amc_calls;reads=amc_reads;
         CHECK(!amc_step(true,16,&moved) && !moved);
         CHECK(!memcmp(&before,&cdma,sizeof cdma) && calls==amc_calls && reads==amc_reads);
@@ -579,7 +581,7 @@ static void amc_guards(void) {
     }
     amc_fixture(0,2);s5l8920_cdma_t before=cdma;
     const unsigned regs[]={0,0,0,4,8,16,24};
-    const uint32_t values[]={0,4,0x1c0019,0x300da,0x84800028,0,0};
+    const uint32_t values[]={0x20,4,0x1c0019,0x300da,0x84800028,0,0};
     for(unsigned i=0;i<7;i++) { CHECK(!amc_write_reg(regs[i],values[i]));CHECK(!memcmp(&before,&cdma,sizeof cdma)); }
     unsigned moved=99;CHECK(!s5l8920_cdma_amc_service(NULL,true,16,NULL,NULL,NULL,NULL,&moved) && !moved);
     CHECK(!amc_step(true,16,NULL));CHECK(amc_write_reg(0,0x19));before=cdma;
@@ -588,16 +590,42 @@ static void amc_guards(void) {
     CHECK(!memcmp(&before,&cdma,sizeof cdma));
 }
 static void amc_limits(void) {
-    amc_fixture(127,127);CHECK(amc_write_reg(0,0x19));
+    amc_fixture(127,126);CHECK(amc_write_reg(0,0x19));
     unsigned total=0,moved=0;
     for(unsigned i=0;i<128;i++) { CHECK(amc_step(true,16,&moved));total+=moved; }
     CHECK(total==20+126*7 && cdma.amc.index==127 && !amc_step(true,16,&moved) && !moved);
-    amc_fixture(0,127);amc_put(127*32+4,3);amc_refused_go();
+    amc_fixture(0,127);amc_put(4,3);amc_put(8,AMC_RAM+0x2000);amc_put(12,20);
+    amc_put(127*32,AMC_RAM+0x1000);amc_put(0x1004,0);amc_refused_go();
     /* Software-only descriptor words are not interpreted by the data mover. */
     amc_fixture(0,2);CHECK(amc_write_reg(0,0x19));amc_put(16,0);amc_put(24,0);
     CHECK(amc_step(true,16,&moved) && moved==16);
     /* Channel24 deliberately remains absent from the board's MMIO fabric. */
     init(3);refuse(S5L8920_CDMA_BASE+0x18000u,4,2,S5L8920_BUS_UNMAPPED);s5l8920_free(&board);
+}
+static void amc_single_command_setup(void) {
+    for(unsigned enables=0;enables<=0x18;enables+=8) {
+        amc_fixture(0,0);CHECK(amc_write_reg(0,0x19));
+        CHECK(amc_write_reg(0,enables));
+        unsigned moved=99;CHECK(amc_step(true,16,&moved) && moved==16);
+        CHECK(!s5l8920_cdma_amc_irq(&cdma) && !(cdma.amc.state.control&0x180000u));
+        s5l8920_cdma_t before=cdma;amc_result=S5L8920_CDMA_WAIT;
+        CHECK(amc_step(true,16,&moved) && !moved && !memcmp(&before,&cdma,sizeof cdma));
+        amc_result=S5L8920_CDMA_READY;CHECK(amc_step(true,16,&moved) && moved==4);
+        CHECK(cdma.amc.state.control==(0x110000u|enables) && cdma.amc.state.remaining==0x40000000u-20u);
+        CHECK(s5l8920_cdma_amc_irq(&cdma)==((enables&0x10)!=0));
+        before=cdma;uint32_t control=0;
+        for(unsigned i=0;i<8;i++)CHECK(s5l8920_cdma_read(&cdma,false,0x18000,&control) && control==(0x110000u|enables));
+        CHECK(!memcmp(&before,&cdma,sizeof cdma) && amc_cursor==20);
+        CHECK(amc_write_reg(0,0x80000u|enables)); /* A different W1C bit cannot clear CIR. */
+        CHECK(cdma.amc.state.control==(0x110000u|enables));
+        CHECK(amc_write_reg(0,0x18u) && s5l8920_cdma_amc_irq(&cdma));
+        CHECK(amc_write_reg(0,0x190018u) && !s5l8920_cdma_amc_irq(&cdma)); /* Original IRQ echo. */
+        CHECK(cdma.amc.state.control==0x10018u && cdma.amc.state.descriptor==AMC_RAM+32);
+        before=cdma;unsigned calls=amc_calls;
+        CHECK(!amc_step(true,16,&moved) && !moved && !memcmp(&before,&cdma,sizeof cdma) && amc_calls==calls);
+        s5l8920_cdma_init(&cdma);CHECK(!s5l8920_cdma_amc_irq(&cdma));
+    }
+    CHECK(!s5l8920_cdma_amc_irq(NULL));
 }
 int main(void) {
     vectors();guards();aliases_and_irqs();lifetime_and_gates();s5l8920_free(&board);
@@ -605,5 +633,6 @@ int main(void) {
     CHECK(!s5l8920_cdma_attach(&board,&cdma));
     nand_register_setup();nand_transfers();nand_guards();nand_chain_limits();s5l8920_free(&board);
     amc_register_setup();amc_transfers();amc_guards();amc_limits();
+    amc_single_command_setup();
     printf("CDMA AES: %u passed, %u failed\n",passed,failed);return failed?1:0;
 }

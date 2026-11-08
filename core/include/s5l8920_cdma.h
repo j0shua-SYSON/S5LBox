@@ -30,8 +30,8 @@ typedef struct {
     s5l8920_cdma_segment_t segments[S5L8920_CDMA_MAX_SEGMENTS];
 } s5l8920_cdma_nand_t;
 
-/* Host bound for the established data-only prefix of a kernel ring. The
- * following 0x303 descriptor is an unsupported boundary, never completion. */
+/* Host bound for one kernel command, ending in a 0x303 data descriptor.
+ * The following flags0 descriptor remains an unsupported engine transition. */
 #define S5L8920_CDMA_AMC_CHANNEL 24u
 #define S5L8920_CDMA_AMC_MAX_SEGMENTS 127u
 typedef struct {
@@ -93,21 +93,25 @@ bool s5l8920_cdma_nand_service(s5l8920_cdma_t *c,unsigned channel,
                               s5l8920_cdma_memory_fn memory,void *memory_owner,
                               s5l8920_cdma_receive_fn receive,void *receive_owner);
 bool s5l8920_cdma_nand_irq(const s5l8920_cdma_t *c,unsigned channel);
-/* Standalone channel24 receive prefix: configuration300D8, endpoint8480002C,
+/* Standalone channel24 receive command: configuration300D8, endpoint8480002C,
  * GO19. Explicit reset and all programming are required; initial current
- * address is unavailable until GO. Preflight latches 1..127 flags3 descriptors
- * followed by a backed 303 descriptor. That descriptor is NOT executed.
+ * address is unavailable until GO. Preflight latches 1..127 data descriptors:
+ * ordinary flags3, final303, followed by a backed flags0 boundary. Only this
+ * combined303 form is interpreted; standalone100/200 modes remain refused.
  * Service moves at most min(budget,16,segment remainder) supplied bytes, with
  * no crossing of a descriptor. Closed clock/zero budget/WAIT do no work.
- * Reaching the 303 boundary makes the next non-paused service refuse without
- * data consumption, completion status or IRQ. Remaining count must exceed the
- * prefix length; other flags/modes, live edits/reprogramming, hold/abort and
- * completion semantics remain unsupported. No board mapping, clock source,
- * peripheral producer or interrupt routing is supplied by this entry point.
+ * CIR100000 is latched only after every byte of the final303 descriptor is
+ * stored. Control bit10 enables its IRQ; W1C acknowledges it. This is a
+ * software-derived functional command boundary, not a measured DMA latency.
+ * Remaining count must exceed the command length: no size-exhaustion/DONE
+ * transition is inferred. At flags0 the next non-paused service refuses,
+ * preserving actual progress and active state. Live publication/reprogramming,
+ * hold/abort, board mapping, clock source, producer and IRQ routing are absent.
  * bytes_moved is required and set to zero even on refusal. Callback rules are
  * the same as NAND receive; RAM views must remain stable during each call. */
 bool s5l8920_cdma_amc_service(s5l8920_cdma_t *c,bool clock_open,unsigned budget,
                              s5l8920_cdma_memory_fn memory,void *memory_owner,
                              s5l8920_cdma_receive_fn receive,void *receive_owner,
                              unsigned *bytes_moved);
+bool s5l8920_cdma_amc_irq(const s5l8920_cdma_t *c);
 #endif

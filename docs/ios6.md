@@ -637,7 +637,7 @@ RAM aliases, clock/reset behavior, reentry and both banks' interrupt sources.
 Original firmware now consumes the FMI sector stream through these chains;
 the remaining interrupt-disable read prevents a completed raw-read return.
 
-## AMC receive data prefix
+## AMC receive commands
 
 The standalone CDMA component now accepts explicit channel 24 reset and the
 kernel's receive configuration `0x300d8`, peripheral `0x8480002c`, byte budget,
@@ -649,36 +649,54 @@ the final data entry of a command has flags `0x303`. The same combined marker
 occurs in the matching 3GS 3.1.3 driver at `0xc052540c`. This corroborates the
 software format, not the hardware effects of its individual completion bits.
 
-`s5l8920_cdma_amc_service` implements only the ordinary data prefix before that
-marker. GO preflights and latches 1..127 flags-3 entries plus the backed
-`0x303` boundary. The limit is a host bound. Missing backing, cycles including
-physical aliases, output overlap with descriptor storage, unsupported flags,
-zero lengths and a prefix exhausting the programmed byte budget refuse before
-starting. A command consisting of a single `0x303` entry therefore refuses GO.
-Software-only descriptor fields remain untouched and are not interpreted.
+`s5l8920_cdma_amc_service` implements one command: 1..127 data descriptors,
+ordinary flags 3 and final flags `0x303`, followed by a backed flags-zero
+descriptor. The limit is a host bound. GO preflights and latches the command.
+Missing backing, cycles including physical aliases, output overlap with
+descriptor storage, unsupported flags, zero lengths and a command exhausting
+the programmed byte budget refuse before starting. A single `0x303` descriptor
+is valid. An early `0x303` followed by more data is refused. Software-only
+descriptor fields remain untouched and are not interpreted by the mover.
+
+The combined marker uses a software-derived functional completion contract.
+The original builder marks the final buffer of each command with `0x303` and
+a software final flag. The original version-1 hold/rewrite path at
+`0x808a38d4..0x808a3918` connects completed final buffers to the saved CIR bit
+`0x100000`; the IRQ consumer at `0x808a32b4` acknowledges `0x180000` and walks
+consumed descriptors. These support latching CIR after all bytes of the final
+buffer have actually been stored. Standalone descriptor bits `0x100`/`0x200`
+and hold-related event persistence are not inferred from the combined form.
 
 Each explicit service copies at most 16 supplied bytes, limited by the caller's
 budget and current descriptor. A closed supplied clock, zero budget or WAIT
 preserves state and output. Missing data/backing, descriptor changes and
 callback reentry refuse. Progress registers follow actual stores; after a
 segment, the current address retains its end until another transfer occurs.
-At the `0x303` boundary, the next unpaused service refuses without consuming
-bytes or declaring completion. The channel retains its active state for this
-unimplemented transition. No DONE/CIR event or interrupt is generated.
+Only the last store of the final buffer latches CIR. Control bit `0x10` enables
+its interrupt signal; pending CIR survives disabling and re-enabling that bit.
+Write-one-to-clear acknowledges CIR, including the handler's read-only state
+echo. Acknowledging DONE alone does not clear CIR. No DONE event is generated.
+At the following flags-zero descriptor, the next unpaused service refuses
+without consuming bytes. Its engine-state transition remains unimplemented,
+so the active state and remaining budget are retained.
 
-An isolated witness builds the ring with unchanged target instructions and
-passes its exact descriptor bytes and captured configuration to this component.
-Both ring start positions 0 and 127 and budgets 7 and 16 are covered: eight
-cases copy 2,048 or 4,096 bytes from explicit input streams, then refuse the
-completion descriptor; four single-entry cases refuse before copying. Waiting,
-unavailable input, whole-buffer canaries and unmodified descriptors are checked.
-The current-address read during original setup remains an explicit fixture
-input; the component does not invent an initial value before GO.
+An isolated witness builds the ring with unchanged target instructions, passes
+its exact descriptor bytes and captured configuration to this component, and
+executes the original IRQ/notification consumer against the resulting status
+and pointer. Eight cases cover starts 0 and 127, budgets 7 and 16, and one or
+three descriptors. They copy 2,048 or 6,144 supplied bytes, acknowledge the
+generated CIR and reach the real `IODMACommand::complete` entry with matching
+notification byte counts. Waiting, unavailable input, whole-buffer canaries and
+unmodified descriptors are checked. Method entry and IOKit objects are explicit
+fixtures; CPU IRQ-vector delivery and the complete method body are not executed.
+The current-address read during original setup also remains a fixture input;
+the component does not invent an initial value before GO.
 
 Channel 24 remains absent from the board MMIO fabric. AMC's byte producer,
-completion/IRQ behavior, live ring publication, hold/abort, reset/readback
-integration and the shared audio-control write remain unresolved. These data
-copies do not establish DSP execution, sound or any advance in genuine boot.
+IRQ routing, live ring publication, hold/abort, flags-zero/size-exhaustion
+transitions, reset/readback integration and the shared audio-control write
+remain unresolved. This functional command contract is not a physical timing
+measurement and does not establish DSP execution, sound or genuine boot.
 
 ## Backed FMI sector data
 
