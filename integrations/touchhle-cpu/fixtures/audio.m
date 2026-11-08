@@ -70,9 +70,11 @@ extern NSString *NSTemporaryDirectory(void);
 
 static int failures, completions;
 static int sound_completions;
+static bool dispose_on_callback;
 #define CHECK(x) do { if (!(x)) { printf("FAIL line %d: %s\n", __LINE__, #x); failures++; } } while (0)
 static void completed(void *context, AudioQueueRef queue, AudioQueueBufferRef buffer) {
     (void)context; (void)queue; (void)buffer; completions++;
+    if (dispose_on_callback) CHECK(AudioQueueDispose(queue, false) == 0);
 }
 static void sound_completed(UInt32 sound, void *context) {
     CHECK(context == &sound_completions);
@@ -151,6 +153,30 @@ int main(void) {
     CHECK(AudioQueueStop(queue, true) == 0);
     CHECK(AudioQueueDispose(queue, true) == 0);
     puts("AUDIO queue playback complete");
+
+    // Disposal can be requested during playback or from an output callback.
+    // The caller may free its context immediately: no later callback is legal.
+    for (int scenario=0; scenario<3; scenario++) {
+        CHECK(AudioQueueNewOutput(&format,completed,NULL,CFRunLoopGetCurrent(),kCFRunLoopCommonModes,0,&queue)==0);
+        for (int i=0; i<2; i++) {
+            CHECK(AudioQueueAllocateBufferWithPacketDescriptions(queue,3000,6,&buffers[i])==0);
+            count=6; length=3000;
+            CHECK(AudioFileReadPacketData(file,false,&length,buffers[i]->mPacketDescriptions,i*6,&count,buffers[i]->mAudioData)==0);
+            buffers[i]->mAudioDataByteSize=length;
+            buffers[i]->mPacketDescriptionCount=count;
+            CHECK(AudioQueueEnqueueBuffer(queue,buffers[i],0,NULL)==0);
+        }
+        int before=completions;
+        dispose_on_callback=scenario==1;
+        if (scenario!=2) CHECK(AudioQueueStart(queue,NULL)==0);
+        if (!dispose_on_callback) CHECK(AudioQueueDispose(queue,false)==0);
+        pump(0.7);
+        CHECK(completions==before+(dispose_on_callback ? 1 : 0));
+        dispose_on_callback=false;
+        pump(0.1);
+        CHECK(completions==before+(scenario==1 ? 1 : 0));
+    }
+    puts("AUDIO asynchronous disposal complete");
 
     ExtAudioFileRef ext = NULL;
     CHECK(ExtAudioFileOpenURL((CFURLRef)url, &ext) == 0);

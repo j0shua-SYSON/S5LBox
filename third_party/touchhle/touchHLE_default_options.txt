@@ -243,3 +243,6 @@ com.ea.nfshp.bv: --force-composition
 com.ea.nfshp.inc: --force-composition
 com.ea.nfshp.ipad.bv: --force-composition
 com.ea.nfshp.ipad.inc: --force-composition
+
+# Trace draws its landscape interface into the original portrait framebuffer.
+com.yourcompany.Trace: --landscape-left

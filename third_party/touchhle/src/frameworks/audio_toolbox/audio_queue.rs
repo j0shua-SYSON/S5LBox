@@ -70,6 +70,8 @@ struct AudioQueueHostObject {
     packet_ranges: HashMap<AudioQueueBufferRef, Vec<std::ops::Range<usize>>>,
     mp3_decoder: Option<Mp3Decoder>,
     is_running: AudioQueueIsRunning,
+    /// After asynchronous disposal, drain existing audio without guest callbacks.
+    is_disposing: bool,
     al_source: Option<ALuint>,
     al_unused_buffers: Vec<ALuint>,
     aq_is_running_proc: Option<AudioQueuePropertyListenerProc>,
@@ -176,6 +178,7 @@ pub fn AudioQueueNewOutput(
             None
         },
         is_running: AudioQueueIsRunning::Stopped,
+        is_disposing: false,
         al_source: None,
         al_unused_buffers: Vec::new(),
         aq_is_running_proc: None,
@@ -912,11 +915,14 @@ pub fn handle_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
     } = host_object;
 
     for buffer_ref in buffers_to_reuse.drain(..) {
-        if !State::get(&mut env.framework_state)
+        let Some(queue) = State::get(&mut env.framework_state)
             .audio_queues
-            .contains_key(&in_aq)
-        {
+            .get(&in_aq)
+        else {
             return;
+        };
+        if queue.is_disposing {
+            break;
         }
         log_dbg!(
             "Recyling buffer {:?} for queue {:?}. Calling callback {:?} with user data {:?}.",
@@ -936,6 +942,10 @@ pub fn handle_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
     else {
         return;
     };
+    if host_object.is_disposing && host_object.buffer_queue.is_empty() {
+        AudioQueueDispose(env, in_aq, true);
+        return;
+    }
     // A callback may stop the queue; use its current state before restarting AL.
     let is_running = host_object.is_running;
     _ = prime_audio_queue(env, in_aq);
@@ -1209,7 +1219,23 @@ pub fn AudioQueueDispose(
 ) -> OSStatus {
     return_if_null!(in_aq);
 
-    assert!(in_immediate); // TODO
+    if !in_immediate {
+        let Some(queue) = State::get(&mut env.framework_state)
+            .audio_queues
+            .get_mut(&in_aq)
+        else {
+            return -50;
+        };
+        // A stopped queue has no pending playback to wait for. A playing queue
+        // remains on its run loop until the already-enqueued buffers drain.
+        // The caller may release callback context immediately after this call.
+        if queue.is_running != AudioQueueIsRunning::Stopped && !queue.buffer_queue.is_empty() {
+            queue.is_disposing = true;
+            queue.aq_is_running_proc = None;
+            queue.aq_is_running_user_data = None;
+            return 0;
+        }
+    }
 
     let (state, context) =
         State::get_with_context(&mut env.framework_state, &mut env.openal_manager);

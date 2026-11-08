@@ -18,11 +18,11 @@ Archives and private test logs are not distributed in this repository.
 | App | Version | Required functional checks | Latest result |
 | --- | --- | --- | --- |
 | PCalc RPN Calculator | 2.3.3 | Arithmetic, scientific and RPN operations; settings persist | Blocked: missing double floating-point classification. |
-| Convertbot — The Amazing Unit Converter | 1.6.1 | Convert units and switch categories; saved choices persist | Blocked: missing Objective-C method lookup. |
+| Convertbot — The Amazing Unit Converter | 1.6.1 | Convert units and switch categories; saved choices persist | Device build 39dfa4bd: passes sound initialization, then fails on missing NSNumberFormatter. |
 | Units - Unit Converter for your iPhone | 1.9.1 | Convert length, mass and temperature; navigate categories | Blocked: black display after more than two minutes; input did not reveal usable UI. |
 | Flashlight RGB | 1.0.2 | Change RGB controls and restore saved color | Blocked: missing UINavigationBar. |
 | iHandy Level Free | 1.60.0 | Tilt response, calibration and saved calibration | Not tested. |
-| Clock | 2.0.2 | Clock updates, settings and timer behavior | Not tested. |
+| Clock | 2.0.2 | Clock updates, settings and timer behavior | Device build c9da925b: passes key-value getters, then fails on a numeric key-value setter. Setter fix awaits device verification. |
 | Notes | 1.0 | Create, edit, delete and reopen a saved note | Not tested. |
 | ToDo | 2.0 | Create, complete and edit tasks; relaunch persistence | Not tested. |
 | SketchBook Mobile | 1.5 | Draw, undo, save and reopen a sketch | Not tested. |
@@ -42,7 +42,7 @@ Archives and private test logs are not distributed in this repository.
 
 | App | Version | Required functional checks | Latest result |
 | --- | --- | --- | --- |
-| Super Monkey Ball | 1.01 | Steer through a complete stage; restart and save progress | Not tested. |
+| Super Monkey Ball | 1.01 | Steer through a complete stage; restart and save progress | Device build b065e116: menus respond and the first level renders; gameplay is slow. Tilt control, stage completion and persistence remain unverified. |
 | Crash Bandicoot Nitro Kart 3D | 1.0 | Complete a race, pause/resume and retain progress | Not tested. |
 | Rolando | 1.9 | Complete a level using touch and tilt; resume saved progress | Not tested. |
 | Labyrinth | 1.9.1 | Tilt through a maze, calibrate and restart | Not tested. |
@@ -51,7 +51,7 @@ Archives and private test logs are not distributed in this repository.
 | Enigmo | 4.1 | Solve a level, manipulate tools and reopen saved progress | Not tested. |
 | Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Not tested. |
 | Edge | 1.62 | Complete a level, precise controls and saved progress | Device build 60bd8788: offline install passes; blank display persists beyond three minutes. |
-| Canabalt | 1.7 | Sustained run, jumping, restart and saved high score | Not tested. |
+| Canabalt | 1.7 | Sustained run, jumping, restart and saved high score | Device build b065e116: offline install passes; missing NSOperationQueue prevents launch. |
 | Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Not tested. |
 | Minigore | 7.0 | Movement and firing through sustained combat; restart | Not tested. |
 | iCopter | 1.4 | Sustained flight, restart and saved high score | Not tested. |
@@ -61,7 +61,7 @@ Archives and private test logs are not distributed in this repository.
 | Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Not tested. |
 | Chopper | 1.3.1 | Complete a mission, steer/fire and pause/resume | Not tested. |
 | SPACE DEADBEEF | 1.01 | Sustained gameplay, firing, pause/resume and restart | Not tested. |
-| Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build 60bd8788: offline install passes; audio callback recursion exhausts the guest stack before gameplay. |
+| Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build 39dfa4bd: menus respond after the MP3 fix; selecting a level fails on asynchronous AudioQueueDispose. Disposal and landscape fixes await device verification. |
 
 ## Runtime changes under validation
 
@@ -107,7 +107,10 @@ PCM: its streaming callback computed a zero packet count and recursively retried
 the read. MP3 packet handling and audio completion callbacks were added in
 `6fb1e3b7`. The ARMv6 audio fixture on `39dfa4bd` passes playback, pause/resume,
 packet boundaries, EOF, reset, completion callbacks, PCM conversion, and invalid
-AVAudioPlayer input checks in macOS CI. Physical-device validation is pending.
+AVAudioPlayer input checks in macOS CI. Device build `39dfa4bd` reaches Trace's
+world and level menus, but selecting a level exposes unsupported asynchronous
+queue disposal. A deferred disposal path now drains active queues and suppresses
+all subsequent callbacks; its regression fixture still needs CI execution.
 The Windows desktop audio fixture separately crashes in OpenAL initialization's
 native `std::call_once`/`pthread_once` path, before playback decoding. Desktop
 access violations must not be treated as proof of the same failure on iOS.
