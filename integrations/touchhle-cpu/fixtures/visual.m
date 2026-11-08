@@ -100,6 +100,7 @@ extern id CFUUIDCreate(void *allocator);
 + (id)dataWithContentsOfURL:(id)url options:(unsigned)options error:(id *)error;
 + (id)dataWithContentsOfFile:(id)path options:(unsigned)options error:(id *)error;
 - (unsigned)length;
+- (const void *)bytes;
 @end
 @interface NSError : NSObject
 - (int)code;
@@ -207,6 +208,79 @@ extern void *CGBitmapContextCreate(void *data,unsigned width,unsigned height,uns
 extern void *CGBitmapContextCreateImage(void *context);
 extern void CGContextRelease(void *context);
 extern void CGImageRelease(void *image);
+typedef struct {
+    unsigned version;
+    const void *(*getBytePointer)(void *);
+    void (*releaseBytePointer)(void *,const void *);
+    unsigned (*getBytesAtPosition)(void *,void *,long long,unsigned);
+    void (*releaseInfo)(void *);
+} DirectCallbacks;
+extern void *CGDataProviderCreateDirect(void *,long long,const DirectCallbacks *);
+extern void *CGDataProviderRetain(void *);
+extern void CGDataProviderRelease(void *);
+extern NSData *CGDataProviderCopyData(void *);
+typedef struct {
+    unsigned pointers,reads,pointerReleases,infoReleases,available,position,failed;
+    BOOL fallback;
+} ProviderState;
+static const char providerBytes[]="0123456789abcdef";
+static const void *provider_pointer(void *opaque) {
+    ProviderState *state=opaque; state->pointers++;
+    return state->fallback?0:providerBytes;
+}
+static void provider_release_pointer(void *opaque,const void *pointer) {
+    ProviderState *state=opaque; state->pointerReleases++;
+    state->failed += pointer!=providerBytes || state->infoReleases!=0;
+}
+static unsigned provider_read(void *opaque,void *buffer,long long position,unsigned count) {
+    ProviderState *state=opaque; state->reads++;
+    state->failed += position!=state->position || position<0;
+    if(position<0 || (unsigned long long)position>=state->available) return 0;
+    unsigned n=state->available-(unsigned)position;
+    if(n>count)n=count;
+    if(n>3)n=3; // Deliberately return short reads across the 64-bit offset ABI.
+    memcpy(buffer,providerBytes+position,n); state->position+=(unsigned)n;
+    return n;
+}
+static void provider_release_info(void *opaque) { ((ProviderState *)opaque)->infoReleases++; }
+static unsigned provider_smoke(void) {
+    unsigned failures=0;
+    DirectCallbacks callbacks={0,provider_pointer,provider_release_pointer,provider_read,provider_release_info};
+    ProviderState direct={0}; direct.available=16;
+    void *provider=CGDataProviderCreateDirect(&direct,16,&callbacks);
+    failures += provider==0 || direct.pointers || direct.reads || direct.infoReleases;
+    NSData *copy=CGDataProviderCopyData(provider);
+    failures += [copy length]!=16 || memcmp([copy bytes],providerBytes,16)!=0;
+    failures += direct.pointers!=1 || direct.reads!=0;
+    CGDataProviderRetain(provider); CGDataProviderRelease(provider);
+    failures += direct.pointerReleases || direct.infoReleases;
+    CGDataProviderRelease(provider);
+    failures += direct.pointerReleases!=1 || direct.infoReleases!=1 || direct.failed;
+    failures += memcmp([copy bytes],providerBytes,16)!=0; [copy release];
+    ProviderState fallback={0}; fallback.fallback=1; fallback.available=7;
+    provider=CGDataProviderCreateDirect(&fallback,16,&callbacks);
+    copy=CGDataProviderCopyData(provider);
+    failures += [copy length]!=7 || memcmp([copy bytes],providerBytes,7)!=0;
+    [copy release]; CGDataProviderRelease(provider);
+    failures += fallback.pointers!=1 || fallback.reads!=4 || fallback.pointerReleases || fallback.infoReleases!=1 || fallback.failed;
+    ProviderState positional={0}; positional.available=16;
+    callbacks.getBytePointer=0;
+    provider=CGDataProviderCreateDirect(&positional,16,&callbacks);
+    copy=CGDataProviderCopyData(provider);
+    failures += [copy length]!=16 || memcmp([copy bytes],providerBytes,16)!=0;
+    [copy release]; CGDataProviderRelease(provider);
+    failures += positional.reads!=6 || positional.pointerReleases || positional.infoReleases!=1 || positional.failed;
+    ProviderState unread={0}; unread.available=16;
+    provider=CGDataProviderCreateDirect(&unread,16,&callbacks); CGDataProviderRelease(provider);
+    failures += unread.reads || unread.pointers || unread.pointerReleases || unread.infoReleases!=1;
+    failures += CGDataProviderCreateDirect(&unread,-1,&callbacks)!=0;
+    callbacks.version=1;
+    failures += CGDataProviderCreateDirect(&unread,16,&callbacks)!=0;
+    callbacks.version=0; callbacks.getBytesAtPosition=0;
+    failures += CGDataProviderCreateDirect(&unread,16,&callbacks)!=0;
+    failures += unread.infoReleases!=1;
+    return failures;
+}
 typedef struct { unsigned location,length; } NSRange;
 @interface UITextField : UIControl
 - (void)setDelegate:(id)delegate;
@@ -444,6 +518,11 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
 @end
 int main(int argc,char **argv) {
     (void)[[NSAutoreleasePool alloc] init];
+    if (argc>1 && !strcmp(argv[1],"--provider-smoke")) {
+        unsigned failures=provider_smoke();
+        printf("S5LBOX-HLE-PROVIDER %s failures=%u\n",failures?"FAIL":"PASS",failures);
+        return failures?1:0;
+    }
     // Headless framework regression; normal visual/native runs skip this.
     if (argc>1 && !strcmp(argv[1],"--cancel-smoke")) {
         UIControl *control=[[UIControl alloc] init];

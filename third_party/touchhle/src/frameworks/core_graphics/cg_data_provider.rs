@@ -17,6 +17,7 @@ use crate::frameworks::core_foundation::cf_url::CFURLRef;
 use crate::frameworks::core_foundation::{CFRelease, CFRetain, CFTypeRef};
 use crate::frameworks::foundation::ns_string::to_rust_string;
 use crate::frameworks::foundation::NSUInteger;
+use crate::libc::posix_io::off_t;
 use crate::mem::{ConstPtr, ConstVoidPtr, GuestUSize, MutPtr, MutVoidPtr, SafeRead};
 use crate::objc::{id, msg, msg_class, objc_classes, ClassExports, HostObject};
 use crate::Environment;
@@ -45,6 +46,22 @@ struct CGDataProviderSequentialCallbacks {
 }
 unsafe impl SafeRead for CGDataProviderSequentialCallbacks {}
 
+#[derive(Clone, Copy)]
+#[repr(C, packed)]
+struct CGDataProviderDirectCallbacks {
+    version: u32,
+    get_byte_pointer: GuestFunction,
+    release_byte_pointer: GuestFunction,
+    get_bytes_at_position: GuestFunction,
+    release_info: GuestFunction,
+}
+unsafe impl SafeRead for CGDataProviderDirectCallbacks {}
+
+enum DirectBytes {
+    Borrowed(ConstVoidPtr),
+    Copied(Vec<u8>),
+}
+
 // A CGDataProvider is supposed to be a collection of callbacks used for
 // accessing data, but at least for now, we instead only support some specific
 // use-cases.
@@ -61,6 +78,13 @@ enum CGDataProviderHostObject {
     // need a special variant for this.
     CGImage(CGImageRef),
     CFData(CFDataRef),
+    Direct {
+        info: MutVoidPtr,
+        size: GuestUSize,
+        callbacks: CGDataProviderDirectCallbacks,
+        bytes: Option<DirectBytes>,
+        loading: bool,
+    },
 }
 impl HostObject for CGDataProviderHostObject {}
 
@@ -94,6 +118,22 @@ pub const CLASSES: ClassExports = objc_classes! {
         },
         CGDataProviderHostObject::CGImage(cg_image) => CGImageRelease(env, cg_image),
         CGDataProviderHostObject::CFData(cf_data) => CFRelease(env, cf_data),
+        CGDataProviderHostObject::Direct { info, callbacks, ref bytes, .. } => {
+            let pointer = match bytes {
+                Some(DirectBytes::Borrowed(pointer)) => Some(*pointer),
+                _ => None,
+            };
+            if let Some(pointer) = pointer {
+                if !callbacks.release_byte_pointer.to_ptr().is_null() {
+                    let release_pointer = callbacks.release_byte_pointer;
+                    () = release_pointer.call_from_host(env, (info, pointer));
+                }
+            }
+            if !callbacks.release_info.to_ptr().is_null() {
+                let release_info = callbacks.release_info;
+                () = release_info.call_from_host(env, (info,));
+            }
+        },
     }
     env.objc.dealloc_object(this, &mut env.mem)
 }
@@ -113,6 +153,102 @@ pub fn CGDataProviderRetain(env: &mut Environment, c: CGDataProviderRef) -> CGDa
     } else {
         c
     }
+}
+
+fn CGDataProviderCreateDirect(
+    env: &mut Environment,
+    info: MutVoidPtr,
+    size: off_t,
+    callbacks: ConstPtr<CGDataProviderDirectCallbacks>,
+) -> CGDataProviderRef {
+    let Ok(size) = GuestUSize::try_from(size) else {
+        return id::null();
+    };
+    if callbacks.is_null() {
+        return id::null();
+    }
+    let callbacks = env.mem.read(callbacks);
+    if callbacks.version != 0
+        || (callbacks.get_byte_pointer.to_ptr().is_null()
+            && callbacks.get_bytes_at_position.to_ptr().is_null())
+    {
+        return id::null();
+    }
+    let class = env
+        .objc
+        .get_known_class("_touchHLE_CGDataProvider", &mut env.mem);
+    env.objc.alloc_object(
+        class,
+        Box::new(CGDataProviderHostObject::Direct {
+            info,
+            size,
+            callbacks,
+            bytes: None,
+            loading: false,
+        }),
+        &mut env.mem,
+    )
+}
+
+// The raster decoders consume contiguous bytes. Obtain those lazily, and keep
+// the client's pointer/info alive until the provider's final release. Positional
+// providers may return short reads; retain the actual prefix on EOF.
+fn load_direct_bytes(env: &mut Environment, provider: CGDataProviderRef) {
+    let (info, size, callbacks) = match env.objc.borrow_mut::<CGDataProviderHostObject>(provider) {
+        CGDataProviderHostObject::Direct {
+            info,
+            size,
+            callbacks,
+            bytes,
+            loading,
+        } => {
+            if bytes.is_some() {
+                return;
+            }
+            assert!(!*loading, "recursive CGDataProvider read");
+            *loading = true;
+            (*info, *size, *callbacks)
+        }
+        _ => return,
+    };
+    let pointer: ConstVoidPtr = if callbacks.get_byte_pointer.to_ptr().is_null() {
+        ConstVoidPtr::null()
+    } else {
+        let get_pointer = callbacks.get_byte_pointer;
+        get_pointer.call_from_host(env, (info,))
+    };
+    let data = if !pointer.is_null() {
+        DirectBytes::Borrowed(pointer)
+    } else {
+        let mut bytes = Vec::new();
+        if !callbacks.get_bytes_at_position.to_ptr().is_null() && size != 0 {
+            let chunk_size = size.min(64 * 1024);
+            let chunk = env.mem.alloc(chunk_size);
+            while bytes.len() < size as usize {
+                let count = chunk_size.min(size - bytes.len() as GuestUSize);
+                let position = bytes.len() as off_t;
+                let get_bytes = callbacks.get_bytes_at_position;
+                let read: GuestUSize =
+                    get_bytes.call_from_host(env, (info, chunk, position, count));
+                assert!(
+                    read <= count,
+                    "CGDataProvider callback exceeded requested byte count"
+                );
+                if read == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(env.mem.bytes_at(chunk.cast(), read));
+            }
+            env.mem.free(chunk);
+        }
+        DirectBytes::Copied(bytes)
+    };
+    let CGDataProviderHostObject::Direct { bytes, loading, .. } = env.objc.borrow_mut(provider)
+    else {
+        unreachable!()
+    };
+    *bytes = Some(data);
+    *loading = false;
 }
 
 fn CGDataProviderCreateSequential(
@@ -203,6 +339,18 @@ pub(super) fn from_cg_image(env: &mut Environment, cg_image: CGImageRef) -> CGDa
 
 /// Generic interface for host code.
 pub(super) fn borrow_bytes(env: &mut Environment, provider: CGDataProviderRef) -> &[u8] {
+    load_direct_bytes(env, provider);
+    // Resolve CFData's guest pointer before borrowing any cached host bytes for
+    // the returned slice. Its Objective-C accessors require mutable Environment.
+    let cf_data = match *env.objc.borrow(provider) {
+        CGDataProviderHostObject::CFData(data) => Some(data),
+        _ => None,
+    };
+    if let Some(data) = cf_data {
+        let pointer = CFDataGetBytePtr(env, data);
+        let size = CFDataGetLength(env, data);
+        return env.mem.bytes_at(pointer, size.try_into().unwrap());
+    }
     match *env.objc.borrow(provider) {
         CGDataProviderHostObject::DataWithSize { data, size, .. } => {
             env.mem.bytes_at(data.cast(), size)
@@ -210,15 +358,18 @@ pub(super) fn borrow_bytes(env: &mut Environment, provider: CGDataProviderRef) -
         CGDataProviderHostObject::CGImage(cg_image) => {
             cg_image::borrow_image(&env.objc, cg_image).pixels()
         }
-        CGDataProviderHostObject::CFData(cf_data) => {
-            let data = CFDataGetBytePtr(env, cf_data);
-            let size = CFDataGetLength(env, cf_data);
-            env.mem.bytes_at(data, size.try_into().unwrap())
-        }
+        CGDataProviderHostObject::CFData(_) => unreachable!(),
+        CGDataProviderHostObject::Direct {
+            size, ref bytes, ..
+        } => match bytes.as_ref().unwrap() {
+            DirectBytes::Borrowed(pointer) => env.mem.bytes_at(pointer.cast(), size),
+            DirectBytes::Copied(bytes) => bytes,
+        },
     }
 }
 
 fn CGDataProviderCopyData(env: &mut Environment, provider: CGDataProviderRef) -> CFDataRef {
+    load_direct_bytes(env, provider);
     match *env.objc.borrow(provider) {
         CGDataProviderHostObject::DataWithSize { data, size, .. } => CFDataCreate(
             env,
@@ -244,6 +395,16 @@ fn CGDataProviderCopyData(env: &mut Environment, provider: CGDataProviderRef) ->
             let data = CFDataGetBytePtr(env, cf_data);
             let size = CFDataGetLength(env, cf_data);
             CFDataCreate(env, kCFAllocatorDefault, data.cast(), size)
+        }
+        CGDataProviderHostObject::Direct { .. } => {
+            let bytes = borrow_bytes(env, provider).to_vec();
+            let size = bytes.len().try_into().unwrap();
+            let data = env.mem.alloc(size);
+            env.mem
+                .bytes_at_mut(data.cast(), size)
+                .copy_from_slice(&bytes);
+            let result: id = msg_class![env; NSData alloc];
+            msg![env; result initWithBytesNoCopy:data length:size]
         }
     }
 }
@@ -288,6 +449,7 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CGDataProviderRetain(_)),
     export_c_func!(CGDataProviderRelease(_)),
     export_c_func!(CGDataProviderCreateSequential(_, _)),
+    export_c_func!(CGDataProviderCreateDirect(_, _, _)),
     export_c_func!(CGDataProviderCreateWithData(_, _, _, _)),
     export_c_func!(CGDataProviderCopyData(_)),
     export_c_func!(CGDataProviderCreateWithFilename(_)),

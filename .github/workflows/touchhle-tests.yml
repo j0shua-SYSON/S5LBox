@@ -324,6 +324,11 @@ jobs:
           cat ../../work/hle-cancel.log
           test "$result" -eq 0
           grep -F 'S5LBOX-HLE-CANCEL PASS failures=0' ../../work/hle-cancel.log
+          result=0
+          ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/HLEVisual.app --headless --preferred-languages=en --args --provider-smoke > ../../work/hle-provider.log 2>&1 || result=$?
+          cat ../../work/hle-provider.log
+          test "$result" -eq 0
+          grep -F 'S5LBOX-HLE-PROVIDER PASS failures=0' ../../work/hle-provider.log
 
       - name: Reuse one host process after guest exits and faults
         working-directory: third_party/touchhle
@@ -370,6 +375,7 @@ jobs:
           path: |
             work/hle-lifecycle.log
             work/hle-host.log
+            work/hle-provider.log
             work/hle-cancel.log
             work/hle-dylibs.log
           if-no-files-found: ignore
