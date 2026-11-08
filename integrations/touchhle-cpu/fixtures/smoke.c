@@ -7,6 +7,8 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/time.h>
+#include <sys/mount.h>
+#include <stdint.h>
 #include <dlfcn.h>
 #include <math.h>
 #include <stdarg.h>
@@ -18,6 +20,11 @@ extern double drand48(void), erand48(unsigned short *);
 extern long lrand48(void), mrand48(void), nrand48(unsigned short *), jrand48(unsigned short *);
 extern void srand48(long), lcong48(unsigned short *);
 extern unsigned short *seed48(unsigned short *);
+/* statvfs.h was not supplied by the early iPhone SDK. Darwin's ARM ABI
+ * contains eleven unsigned longs (32 bits each). */
+struct smoke_statvfs { uint32_t bsize,frsize,blocks,bfree,bavail,files,ffree,favail,fsid,flag,namemax; };
+extern int statvfs(const char *,struct smoke_statvfs *);
+extern int fstatvfs(int,struct smoke_statvfs *);
 
 static int checked_vformat(char *buffer,size_t size,int bounded,const char *format,...) {
     va_list args; va_start(args,format);
@@ -351,6 +358,25 @@ int main(int argc, char **argv) {
     const char *home = getenv("HOME");
     CHECK(home != NULL);
     if (home) {
+        struct statfs volume;
+        struct smoke_statvfs portable;
+        CHECK(sizeof(volume)==2168 && sizeof(portable)==44);
+        CHECK(statfs(home,&volume)==0 && volume.f_bsize>0);
+        CHECK(statfs("/",&volume)==0);
+        CHECK(statfs(".",&volume)==0);
+        CHECK(statvfs(home,&portable)==0);
+        CHECK(portable.frsize==volume.f_bsize && portable.namemax==255);
+        CHECK(portable.flag==((volume.f_flags&1)|((volume.f_flags&8)?2:0)));
+        errno=0; CHECK(statfs("/missing-statfs-file",&volume)==-1 && errno==ENOENT);
+        errno=0; CHECK(statfs("",&volume)==-1 && errno==ENOENT);
+        errno=0; CHECK(statfs(NULL,&volume)==-1 && errno==EFAULT);
+        errno=0; CHECK(statfs((const char *)0x60000000,&volume)==-1 && errno==EFAULT);
+        errno=0; CHECK(statfs(home,NULL)==-1 && errno==EFAULT);
+        errno=0; CHECK(statvfs(home,NULL)==-1 && errno==EFAULT);
+        errno=0; CHECK(fstatfs(-1,&volume)==-1 && errno==EBADF);
+        errno=0; CHECK(fstatvfs(-1,&portable)==-1 && errno==EBADF);
+        char longpath[1025]; memset(longpath,'x',1024); longpath[1024]=0;
+        errno=0; CHECK(statfs(longpath,&volume)==-1 && errno==ENAMETOOLONG);
         char path[1024], contents[32] = {0};
         int length = snprintf(path, sizeof path, "%s/Documents/interpreter-smoke.txt", home);
         CHECK(length > 0 && (unsigned)length < sizeof path);
@@ -358,6 +384,11 @@ int main(int argc, char **argv) {
             FILE *file = fopen(path, "w+");
             CHECK(file != NULL);
             if (file) {
+                CHECK(statfs(path,&volume)==0);
+                CHECK(fstatfs(fileno(file),&volume)==0);
+                CHECK(fstatvfs(fileno(file),&portable)==0);
+                char child[1100]; snprintf(child,sizeof child,"%s/child",path);
+                errno=0; CHECK(statfs(child,&volume)==-1 && errno==ENOTDIR);
                 CHECK(fputs("interpreter smoke", file) >= 0);
                 CHECK(fflush(file) == 0);
                 CHECK(fseek(file, 0, SEEK_SET) == 0);

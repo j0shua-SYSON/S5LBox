@@ -900,6 +900,25 @@ impl Fs {
         self.lookup_node(path).is_some()
     }
 
+    /// Check existence while retaining the reason a lookup failed. Unlike a
+    /// permissions query, this also works on hosts without Unix mode bits.
+    pub fn check_path(&self, path: &GuestPath) -> Result<(), FsError> {
+        if let Some((fs, path)) = self.live_path(path) {
+            return fs.stat(&path).map(|_| ()).map_err(Self::live_error);
+        }
+        let mut node = &self.root;
+        for component in resolve_path(path, Some(&self.working_directory)) {
+            let FsNode::Directory { children, .. } = node else {
+                return Err(FsError::InvalidParentDir);
+            };
+            node = children.get(component).ok_or(FsError::DoesNotExist)?;
+        }
+        if path.as_str().ends_with('/') && matches!(node, FsNode::File { .. }) {
+            return Err(FsError::InvalidParentDir);
+        }
+        Ok(())
+    }
+
     pub fn supports_permissions(&self, path: &GuestPath) -> bool {
         self.live_path(path).is_some() || cfg!(unix)
     }

@@ -34,6 +34,7 @@ pub const EPROTONOSUPPORT: i32 = 43;
 pub const ENOTSUP: i32 = 45;
 pub const ECONNRESET: i32 = 54;
 pub const ETIMEDOUT: i32 = 60;
+pub const ENAMETOOLONG: i32 = 63;
 pub const EOVERFLOW: i32 = 84;
 
 #[derive(Default)]
@@ -121,6 +122,7 @@ fn strerror(env: &mut Environment, err_num: i32) -> ConstPtr<u8> {
             ENOTDIR => "Not a directory",
             EISDIR => "Is a directory",
             EINVAL => "Invalid argument",
+            ENAMETOOLONG => "File name too long",
             ESPIPE => "Illegal seek",
             EROFS => "Read-only file system",
             EAGAIN => "Resource temporarily unavailable",

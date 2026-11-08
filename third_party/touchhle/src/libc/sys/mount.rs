@@ -6,12 +6,14 @@
 //! `sys/mount.h`, file system statistics
 
 use crate::dyld::{export_c_func, FunctionExports};
-use crate::fs::GuestPath;
+use crate::fs::{FsError, GuestPath};
 use crate::libc::dirent::MAXPATHLEN;
-use crate::libc::errno::{set_errno, EBADF, ENOENT};
+use crate::libc::errno::{
+    set_errno, EACCES, EBADF, EFAULT, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOTDIR,
+};
 use crate::libc::posix_io::stat::uid_t;
 use crate::libc::posix_io::{FileDescriptor, STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO};
-use crate::mem::{ConstPtr, MutPtr, SafeRead};
+use crate::mem::{guest_size_of, ConstPtr, MutPtr, SafeRead};
 use crate::Environment;
 
 const MFSTYPENAMELEN: usize = 16;
@@ -76,26 +78,62 @@ fn fake_statfs() -> statfs {
 
 /// Internal helper for `statfs`, not a part of the API.
 pub fn statfs_inner(env: &mut Environment, path: ConstPtr<u8>) -> Result<statfs, i32> {
-    // FIXME does directory matter?
-    assert!(env
-        .mem
-        .cstr_at_utf8(path)
-        .is_ok_and(|path| path.starts_with(env.fs.home_directory().join("Documents").as_str())));
-
-    // TODO: Handle additional errors
-    let path = env.mem.cstr_at_utf8(path).unwrap();
-    if !env.fs.exists(GuestPath::new(path)) {
+    // statfs accepts any existing path on the volume, including the bundle,
+    // home directory, root and relative paths, not only Documents.
+    let mut bytes = Vec::new();
+    for offset in 0..MAXPATHLEN as u32 {
+        let address = path.to_bits().checked_add(offset).ok_or(EFAULT)?;
+        let byte = env
+            .mem
+            .get_bytes_fallible(ConstPtr::<u8>::from_bits(address).cast(), 1)
+            .ok_or(EFAULT)?[0];
+        if byte == 0 {
+            break;
+        }
+        bytes.push(byte);
+    }
+    if bytes.len() == MAXPATHLEN {
+        return Err(ENAMETOOLONG);
+    }
+    let path = std::str::from_utf8(&bytes).map_err(|_| EINVAL)?;
+    if path.is_empty() {
         return Err(ENOENT);
     }
-
+    // Preserve live filesystem errors instead of treating a disconnected
+    // service or denied access as a missing file.
+    env.fs
+        .check_path(GuestPath::new(path))
+        .map_err(|error| match error {
+            FsError::AccessDenied | FsError::ReadonlyParentDir => EACCES,
+            FsError::DoesNotExist | FsError::NonexistentParentDir => ENOENT,
+            FsError::InvalidParentDir => ENOTDIR,
+            FsError::IoError(error) => crate::fs::live::guest_errno(&error).unwrap_or(EIO),
+            _ => EIO,
+        })?;
+    // Capacity remains a virtual compatibility value until the mount service
+    // exposes volume statistics. Never leak the host computer's disk identity.
     Ok(fake_statfs())
 }
 
-fn statfs(env: &mut Environment, path: ConstPtr<u8>, buf: MutPtr<statfs>) -> i32 {
-    // TODO: handle errno properly
-    set_errno(env, 0);
+pub fn fstatfs_inner(env: &mut Environment, fd: FileDescriptor) -> Result<statfs, i32> {
+    if !matches!(fd, STDIN_FILENO | STDOUT_FILENO | STDERR_FILENO)
+        && !env.libc_state.posix_io.is_fd_open(fd)
+    {
+        return Err(EBADF);
+    }
+    Ok(fake_statfs())
+}
 
-    let result = match statfs_inner(env, path) {
+fn write_statfs(env: &mut Environment, buf: MutPtr<statfs>, result: Result<statfs, i32>) -> i32 {
+    if env
+        .mem
+        .get_bytes_fallible_mut(buf.cast_const().cast(), guest_size_of::<statfs>())
+        .is_none()
+    {
+        set_errno(env, EFAULT);
+        return -1;
+    }
+    match result {
         Ok(statfs) => {
             env.mem.write(buf, statfs);
             0
@@ -104,31 +142,17 @@ fn statfs(env: &mut Environment, path: ConstPtr<u8>, buf: MutPtr<statfs>) -> i32
             set_errno(env, error);
             -1
         }
-    };
+    }
+}
 
-    log!(
-        "TODO: statfs({:?}, {buf:?}) -> {result}",
-        env.mem.cstr_at_utf8(path)
-    );
-    result
+fn statfs(env: &mut Environment, path: ConstPtr<u8>, buf: MutPtr<statfs>) -> i32 {
+    let result = statfs_inner(env, path);
+    write_statfs(env, buf, result)
 }
 
 fn fstatfs(env: &mut Environment, fd: FileDescriptor, buf: MutPtr<statfs>) -> i32 {
-    // TODO: handle errno properly
-    set_errno(env, 0);
-
-    let result = if !matches!(fd, STDIN_FILENO | STDOUT_FILENO | STDERR_FILENO)
-        && !env.libc_state.posix_io.is_fd_open(fd)
-    {
-        set_errno(env, EBADF);
-        -1
-    } else {
-        env.mem.write(buf, fake_statfs());
-        0
-    };
-
-    log!("TODO: fstatfs({fd}, {buf:?}) -> {result}");
-    result
+    let result = fstatfs_inner(env, fd);
+    write_statfs(env, buf, result)
 }
 
 pub const FUNCTIONS: FunctionExports =

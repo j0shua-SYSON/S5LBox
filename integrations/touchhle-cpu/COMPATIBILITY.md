@@ -27,7 +27,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Clock | 2.0.2 | Clock updates, settings and timer behavior | Device build 3ffc8cb7: passes key-value getters and setters, then fails on missing change-observer registration. |
 | Notes | 1.0 | Create, edit, delete and reopen a saved note | Desktop startup: missing WebPreferences. |
 | ToDo | 2.0 | Create, complete and edit tasks; relaunch persistence | Desktop startup: missing NSPersistentStoreCoordinator. |
-| SketchBook Mobile | 1.5 | Draw, undo, save and reopen a sketch | Desktop startup: statfs rejects the application's Documents path. |
+| SketchBook Mobile | 1.5 | Draw, undo, save and reopen a sketch | Filesystem-stat path restriction fixed; desktop startup runs for 25 seconds. Drawing and persistence need device testing. |
 | Good Reader (large PDF viewer) - read big PDF files with reflow | 3.8.1 | Open a local document, navigate pages and remember position | Desktop startup: guest CPU memory fault; cause unconfirmed. |
 | Stanza | 3.2 | Open an offline book, turn pages and save position | Desktop startup: missing UITabBarController. |
 | Brushes - iPhone Edition | 2.2.2 | Draw, undo and reopen saved artwork | Desktop startup: missing CGImageMaskCreate. |
@@ -45,10 +45,10 @@ they establish the next failure or a 25-second observation, not functionality.
 | App | Version | Required functional checks | Latest result |
 | --- | --- | --- | --- |
 | Super Monkey Ball | 1.01 | Steer through a complete stage; restart and save progress | Device build b065e116: menus respond and the first level renders; gameplay is slow. Tilt control, stage completion and persistence remain unverified. |
-| Crash Bandicoot Nitro Kart 3D | 1.0 | Complete a race, pause/resume and retain progress | Device build c9da925b: menus respond; Quick Race fails when glVertexPointer immediately translates unused guest memory. Deferred translation awaits device verification. |
+| Crash Bandicoot Nitro Kart 3D | 1.0 | Complete a race, pause/resume and retain progress | Device build 23a5d292: Quick Race renders and continues running; pause and options respond. Tilt steering, race completion and persistence remain unverified. |
 | Rolando | 1.9 | Complete a level using touch and tilt; resume saved progress | Desktop startup: guest CPU memory fault; cause unconfirmed. |
 | Labyrinth | 1.9.1 | Tilt through a maze, calibrate and restart | Desktop startup: missing UINavigationController setNavigationBarHidden:animated:. |
-| Cro-Mag Rally | 3.0.3 | Complete a race, pause/resume and retain settings | Desktop startup: missing srand48; generator implementation under validation. |
+| Cro-Mag Rally | 3.0.3 | Complete a race, pause/resume and retain settings | Device build 4efcbc30: offline install, track/vehicle/character selection and race rendering work. Driving, completion and persistence remain unverified. |
 | R.Thunder | 1.0 | Complete a race; responsive steering and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Enigmo | 4.1 | Solve a level, manipulate tools and reopen saved progress | Desktop startup: missing UIToolbar. |
 | Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Desktop startup: no crash during 25 seconds; functionality unverified. |
@@ -63,7 +63,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Desktop startup: missing UIToolbar. |
 | Chopper | 1.3.1 | Complete a mission, steer/fire and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | SPACE DEADBEEF | 1.01 | Sustained gameplay, firing, pause/resume and restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
-| Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build dd948eb4: first level completed, platform drawing works, and progress survives Home and relaunch. Orientation correction awaits device verification. |
+| Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build 23a5d292: orientation corrected, first two levels completed, platform drawing and jumping work. First-level completion time survives relaunch and app reinstall; longer play remains untested. |
 
 ## Runtime changes under validation
 
@@ -132,10 +132,19 @@ Client vertex/color/normal/texture-coordinate pointers are now translated at dra
 time, preserving disabled pointers, VBO offsets, per-texture-unit state, and
 context isolation. Invalid array parameters and empty draws no longer panic.
 An ARMv6 rendering fixture verifies pixels, fixed-point arrays, pointer queries,
-and state restoration on the Windows OpenGL backend. CI and iPhone verification
-of this graphics change are pending.
+and state restoration on the Windows OpenGL backend and in macOS CI. Both CI
+workflows pass. On the iPhone, Crash Nitro Kart's Quick Race now renders and runs
+past its previous crash, including working pause and options menus.
 
 The `rand48` family now implements Darwin's 48-bit generator, independent global
 and caller-owned seeds, configurable coefficients, and the static `seed48`
 return buffer. ARMv6 checks pass for known sequences, signed and floating-point
 returns, seed aliasing, coefficient reset, and independence from `rand()`.
+Both CI workflows pass, and Cro-Mag Rally reaches race rendering on the iPhone.
+
+Filesystem-stat queries now accept existing paths outside Documents and report
+invalid paths, pointers and descriptors through errno. `fstatvfs` shares the
+descriptor path, maps Darwin mount flags to POSIX flags, and reports count
+overflow. ARMv6 regression checks pass locally. Volume capacity remains a
+virtual compatibility value; the filesystem service does not yet supply actual
+volume statistics.
