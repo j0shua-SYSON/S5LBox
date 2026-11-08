@@ -492,6 +492,10 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.objc.borrow::<NSNumberHostObject>(this).as_char()
 }
 
+- (u8)unsignedCharValue {
+    env.objc.borrow::<NSNumberHostObject>(this).as_unsigned_int() as u8
+}
+
 - (id)description {
     msg![env; this stringValue]
 }

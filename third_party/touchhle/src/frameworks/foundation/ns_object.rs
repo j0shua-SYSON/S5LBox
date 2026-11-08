@@ -25,7 +25,7 @@ use crate::libc::semaphore::{host_destroy_semaphore, sem_wait};
 use crate::mem::MutVoidPtr;
 use crate::objc::{
     autorelease, id, msg, msg_class, msg_send, msg_send_no_type_checking, nil, objc_classes,
-    retain, Class, ClassExports, NSZonePtr, ObjC, TrivialHostObject, IMP, SEL,
+    release, retain, Class, ClassExports, NSZonePtr, ObjC, TrivialHostObject, IMP, SEL,
 };
 use crate::Environment;
 use std::any::TypeId;
@@ -238,64 +238,53 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (())setValue:(id)value
        forKey:(id)key { // NSString*
-    let key_string = to_rust_string(env, key); // TODO: avoid copy?
-    assert!(key_string.is_ascii()); // TODO: do we have to handle non-ASCII keys?
-    let camel_case_key_string = format!("{}{}", key_string.as_bytes()[0].to_ascii_uppercase() as char, &key_string[1..]);
-
-    let class = msg![env; this class];
-
-    // TODO: If value is nil, the target ivar/method argument type must be
-    // checked. If it's non-object type, invoke setNilValueForKey:
-    assert!(value != nil);
-
-    // TODO: If value is a NSNumber or NSValue, it must be unwrapped
-    let value_class = msg![env; value class];
-    let ns_value_class = env.objc.get_known_class("NSValue", &mut env.mem);
-    assert!(!env.objc.class_is_subclass_of(value_class, ns_value_class));
-
-    // Look for the first accessor named set<Key>: or _set<Key>, in that order.
-    // If found, invoke it with the input value (or unwrapped value, as needed)
-    // and finish.
-    if let Some(sel) = env.objc.lookup_selector(&format!("set{camel_case_key_string}:")) {
-        if env.objc.class_has_method(class, sel) {
-            () = msg_send(env, (this, sel, value));
-            return;
+    let name = to_rust_string(env, key).into_owned();
+    let mut chars = name.chars();
+    let capitalized = chars.next().map(|first| first.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default();
+    let class = ObjC::read_isa(this, &env.mem);
+    for setter in [format!("set{capitalized}:"), format!("_set{capitalized}:")] {
+        if let Some(selector) = env.objc.lookup_selector(&setter) {
+            if env.objc.class_has_method(class, selector) {
+                let encoding = env.objc.class_get_method_signature(class, selector)
+                    .map(|ptr| env.mem.cstr_at_utf8(*ptr).unwrap().to_owned());
+                let signature = env.objc.class_get_host_method_signature(class, selector);
+                let argument = encoding.as_deref().map(setter_argument_encoding);
+                set_key_value(env, this, key, value, Some(selector), MutVoidPtr::null(), argument, signature);
+                return;
+            }
         }
     }
-
-    if let Some(sel) = env.objc.lookup_selector(&format!("_set{camel_case_key_string}:")) {
-        if env.objc.class_has_method(class, sel) {
-            () = msg_send(env, (this, sel, value));
-            return;
+    let direct: bool = msg![env; class accessInstanceVariablesDirectly];
+    if direct {
+        for name in [format!("_{name}"), format!("_is{capitalized}"), name.clone(), format!("is{capitalized}")] {
+            if let Some((address, encoding)) = env.objc.object_lookup_typed_ivar(&env.mem, this, &name) {
+                let encoding = env.mem.cstr_at_utf8(encoding).unwrap().to_owned();
+                set_key_value(env, this, key, value, None, address, Some(&encoding), None);
+                return;
+            }
         }
     }
+    () = msg![env; this setValue:value forUndefinedKey:key];
+}
 
-    // If no simple accessor is found, and if the class method
-    // accessInstanceVariablesDirectly returns YES, look for an instance
-    // variable with a name like _<key>, _is<Key>, <key>, or is<Key>,
-    // in that order.
-    // If found, set the variable directly with the input value
-    // (or unwrapped value) and finish.
-    let sel = env.objc.lookup_selector("accessInstanceVariablesDirectly").unwrap();
-    let accessInstanceVariablesDirectly = msg_send(env, (class, sel));
-    if accessInstanceVariablesDirectly {
-        if let Some(ivar_ptr) = env.objc.object_lookup_ivar(&env.mem, this, &format!("_{key_string}"))
-            .or_else(|| env.objc.object_lookup_ivar(&env.mem, this, &format!("_is{camel_case_key_string}")))
-            .or_else(|| env.objc.object_lookup_ivar(&env.mem, this, &format!("{key_string}")))
-            .or_else(|| env.objc.object_lookup_ivar(&env.mem, this, &format!("is{camel_case_key_string}"))
-        ) {
-            retain(env, value);
-            env.mem.write(ivar_ptr.cast(), value);
-            return;
-        }
+- (())setValue:(id)value forKeyPath:(id)key_path {
+    let path = to_rust_string(env, key_path).into_owned();
+    if let Some((parent, name)) = path.rsplit_once('.') {
+        let parent = from_rust_string(env, parent.to_owned());
+        let target: id = msg![env; this valueForKeyPath:parent];
+        autorelease(env, parent);
+        let key = from_rust_string(env, name.to_owned());
+        () = msg![env; target setValue:value forKey:key];
+        autorelease(env, key);
+    } else {
+        () = msg![env; this setValue:value forKey:key_path];
     }
+}
 
-    // Upon finding no accessor or instance variable,
-    // invoke setValue:forUndefinedKey:.
-    // This raises an exception by default, but a subclass of NSObject
-    // may provide key-specific behavior.
-    let sel = env.objc.lookup_selector("setValue:forUndefinedKey:").unwrap();
-    () = msg_send(env, (this, sel, value, key));
+- (())setNilValueForKey:(id)key {
+    // TODO: Raise NSInvalidArgumentException.
+    let name = to_rust_string(env, key);
+    panic!("Cannot set nil for non-object key {name} on object {this:?}");
 }
 
 - (())setValue:(id)_value
@@ -496,4 +485,88 @@ fn box_key_value(
         return msg_class![env; NSValue valueWithCGRect:value];
     }
     unimplemented!("Key-value coding for type {encoding}");
+}
+
+/// KVC setters return void and take self, _cmd, then the property value.
+/// Leave the complete last type intact, including struct names and qualifiers.
+fn setter_argument_encoding(mut signature: &str) -> &str {
+    for expected in ['v', '@', ':'] {
+        signature = signature.trim_start_matches(['r', 'n', 'N', 'o', 'O', 'R', 'V']);
+        signature = signature
+            .strip_prefix(expected)
+            .expect("Invalid KVC setter signature");
+        signature = signature.trim_start_matches(|c: char| c.is_ascii_digit());
+    }
+    signature
+}
+
+#[allow(clippy::too_many_arguments)]
+fn set_key_value(
+    env: &mut Environment,
+    object: id,
+    key: id,
+    value: id,
+    selector: Option<SEL>,
+    address: MutVoidPtr,
+    encoding: Option<&str>,
+    host_signature: Option<TypeId>,
+) {
+    let encoding = encoding
+        .map(|s| s.trim_start_matches(['r', 'n', 'N', 'o', 'O', 'R', 'V']))
+        .unwrap_or("");
+    macro_rules! matches_type {
+        ($type:ty, $code:expr) => {
+            if let Some(signature) = host_signature {
+                signature == TypeId::of::<((), (id, SEL, $type))>()
+            } else {
+                encoding.starts_with($code)
+            }
+        };
+    }
+    if matches_type!(id, "@") || matches_type!(Class, "#") {
+        if let Some(selector) = selector {
+            // The accessor owns its retain/copy policy.
+            () = msg_send(env, (object, selector, value));
+        } else {
+            let previous: id = env.mem.read(address.cast());
+            retain(env, value);
+            env.mem.write(address.cast(), value);
+            release(env, previous);
+        }
+        return;
+    }
+    if value == nil {
+        () = msg![env; object setNilValueForKey:key];
+        return;
+    }
+    macro_rules! unbox {
+        ($type:ty, $code:expr, $getter:ident) => {
+            if matches_type!($type, $code) {
+                let unboxed: $type = msg![env; value $getter];
+                if let Some(selector) = selector {
+                    () = msg_send(env, (object, selector, unboxed));
+                } else {
+                    env.mem.write(address.cast(), unboxed);
+                }
+                return;
+            }
+        };
+    }
+    unbox!(bool, "B", boolValue);
+    unbox!(i8, "c", charValue);
+    unbox!(u8, "C", unsignedCharValue);
+    unbox!(i16, "s", shortValue);
+    unbox!(u16, "S", unsignedShortValue);
+    unbox!(i32, "i", intValue);
+    unbox!(i32, "l", longValue);
+    unbox!(u32, "I", unsignedIntValue);
+    unbox!(u32, "L", unsignedLongValue);
+    unbox!(i64, "q", longLongValue);
+    unbox!(u64, "Q", unsignedLongLongValue);
+    unbox!(f32, "f", floatValue);
+    unbox!(f64, "d", doubleValue);
+    unbox!(CGPoint, "{CGPoint=", CGPointValue);
+    unbox!(CGSize, "{CGSize=", CGSizeValue);
+    unbox!(CGRect, "{CGRect=", CGRectValue);
+    unimplemented!("Key-value setter for type {encoding}");
 }

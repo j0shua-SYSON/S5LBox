@@ -55,6 +55,10 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 - (id)valueForKey:(id)key;
 - (id)valueForKeyPath:(id)path;
 - (id)valueForUndefinedKey:(id)key;
+- (void)setValue:(id)value forKey:(id)key;
+- (void)setValue:(id)value forKeyPath:(id)path;
+- (void)setValue:(id)value forUndefinedKey:(id)key;
+- (void)setNilValueForKey:(id)key;
 + (BOOL)accessInstanceVariablesDirectly;
 - (void)performSelector:(SEL)selector withObject:(id)object afterDelay:(double)delay;
 + (void)cancelPreviousPerformRequestsWithTarget:(id)target;
@@ -148,6 +152,8 @@ static unsigned methods_smoke(void) {
 + (id)numberWithDouble:(double)value;
 + (id)numberWithChar:(signed char)value;
 + (id)numberWithUnsignedLong:(unsigned long)value;
++ (id)numberWithLongLong:(long long)value;
++ (id)numberWithUnsignedLongLong:(unsigned long long)value;
 - (id)initWithUnsignedLong:(unsigned long)value;
 - (unsigned long)unsignedLongValue;
 - (unsigned long long)unsignedLongLongValue;
@@ -156,6 +162,7 @@ static unsigned methods_smoke(void) {
 - (long long)longLongValue;
 @end
 @interface NSValue : NSObject
++ (id)valueWithCGPoint:(CGPoint)point;
 - (CGPoint)CGPointValue;
 @end
 @interface NSString : NSObject
@@ -745,6 +752,8 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
 @interface KVCFixture : NSObject {
 @public int _count; signed char _tiny; long long _wide; unsigned long _unsigned;
     double _real; CGPoint _point; id _object;
+    unsigned char _byte; short _short; unsigned short _ushort;
+    unsigned long long _uwide; float _fraction; unsigned _nilCalls, _undefinedCalls;
 }
 - (int)getPriority;
 - (int)priority;
@@ -753,8 +762,15 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
 @implementation KVCFixture
 - (int)getPriority { return 3; }
 - (int)priority { return 99; }
-- (float)fraction { return 1.5f; }
+- (float)fraction { return _fraction; }
+- (void)setPriority:(int)value { _count=value+1; }
+- (void)_setPriority:(int)value { _count=value+100; }
+- (void)setFraction:(float)value { _fraction=value; }
+- (void)setReal:(double)value { _real=value; }
+- (void)_setPoint:(CGPoint)value { _point=value; }
 - (id)valueForUndefinedKey:(id)key { (void)key; return @"missing"; }
+- (void)setValue:(id)value forUndefinedKey:(id)key { (void)value; (void)key; _undefinedCalls++; }
+- (void)setNilValueForKey:(id)key { (void)key; _nilCalls++; }
 @end
 @interface KVCChild : KVCFixture @end
 @implementation KVCChild @end
@@ -766,6 +782,7 @@ static unsigned kvc_smoke(void) {
     KVCFixture *object=[[KVCChild alloc] init];
     object->_count=-42; object->_tiny=-7; object->_wide=-9000000000LL;
     object->_unsigned=0xfedcba98UL; object->_real=3.125; object->_point=(CGPoint){1,2};
+    object->_fraction=1.5f;
     object->_object=@"key";
     unsigned failures=[[object valueForKey:@"priority"] longValue]!=3;
     failures += [[object valueForKey:@"count"] longValue]!=-42;
@@ -783,10 +800,54 @@ static unsigned kvc_smoke(void) {
     failures += [[[NSNumber numberWithDouble:4.5] valueForKey:@"doubleValue"] doubleValue]!=4.5;
     object->_object=0;
     failures += [object valueForKeyPath:@"object.length"]!=0;
+    [object setValue:[NSNumber numberWithInt:41] forKey:@"priority"];
+    failures += object->_count!=42;
+    [object setValue:[NSNumber numberWithInt:-56] forKey:@"count"];
+    [object setValue:[NSNumber numberWithInt:-12] forKey:@"tiny"];
+    [object setValue:[NSNumber numberWithInt:255] forKey:@"byte"];
+    [object setValue:[NSNumber numberWithInt:-1234] forKey:@"short"];
+    [object setValue:[NSNumber numberWithInt:65535] forKey:@"ushort"];
+    [object setValue:[NSNumber numberWithLongLong:-123456789012LL] forKey:@"wide"];
+    [object setValue:[NSNumber numberWithUnsignedLongLong:0xfedcba9876543210ULL] forKey:@"uwide"];
+    [object setValue:[NSNumber numberWithUnsignedLong:0xffffffffUL] forKey:@"unsigned"];
+    [object setValue:[NSNumber numberWithDouble:2.25] forKey:@"fraction"];
+    [object setValue:[NSNumber numberWithDouble:-6.125] forKey:@"real"];
+    [object setValue:[NSValue valueWithCGPoint:(CGPoint){7,8}] forKey:@"point"];
+    failures += object->_count!=-56 || object->_tiny!=-12 || object->_byte!=255;
+    failures += object->_short!=-1234 || object->_ushort!=65535;
+    failures += object->_wide!=-123456789012LL || object->_uwide!=0xfedcba9876543210ULL;
+    failures += object->_unsigned!=0xffffffffUL || object->_fraction!=2.25 || object->_real!=-6.125;
+    failures += object->_point.x!=7 || object->_point.y!=8;
+    [object setValue:0 forKey:@"count"];
+    [object setValue:0 forKey:@"real"];
+    failures += object->_nilCalls!=2 || object->_count!=-56 || object->_real!=-6.125;
+    [object setValue:0 forKey:@""];
+    [object setValue:0 forKey:@"absent"];
+    failures += object->_undefinedCalls!=2;
+    KVCFixture *child=[[KVCFixture alloc] init];
+    [object setValue:child forKey:@"object"];
+    failures += [child retainCount]!=2;
+    [object setValue:child forKey:@"object"];
+    failures += [child retainCount]!=2;
+    [object setValue:[NSNumber numberWithInt:123] forKeyPath:@"object.count"];
+    failures += child->_count!=123;
+    [object setValue:[NSNumber numberWithInt:124] forKeyPath:@"count"];
+    failures += object->_count!=124;
+    [object setValue:0 forKey:@"object"];
+    failures += [child retainCount]!=1 || object->_object!=0;
+    [object setValue:0 forKeyPath:@"object.count"];
+    [child release];
     [object release];
     KVCNoDirect *disabled=[[KVCNoDirect alloc] init];
     failures += [[disabled valueForKey:@"count"] isEqualToString:@"missing"]==0;
+    [disabled setValue:[NSNumber numberWithInt:12] forKey:@"count"];
+    failures += disabled->_count!=0 || disabled->_undefinedCalls!=1;
     [disabled release];
+    NSScanner *scanner=[NSScanner scannerWithString:@"01234"];
+    [scanner setValue:[NSNumber numberWithInt:3] forKey:@"scanLocation"];
+    failures += [scanner scanLocation]!=3;
+    [scanner setValue:0 forKey:@"charactersToBeSkipped"];
+    failures += [scanner valueForKey:@"charactersToBeSkipped"]!=0;
     return failures;
 }
 static unsigned foundation_compat_smoke(void) {

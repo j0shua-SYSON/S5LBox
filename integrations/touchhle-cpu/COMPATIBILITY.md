@@ -112,7 +112,8 @@ The Windows desktop audio fixture separately crashes in OpenAL initialization's
 native `std::call_once`/`pthread_once` path, before playback decoding. Desktop
 access violations must not be treated as proof of the same failure on iOS.
 
-Basic key-value getters and nested key paths now pass local ARMv6 tests, including
-inherited ivars, numeric boxing, common Core Graphics structs, host getters, and
-overridden undefined-key handling. Collection proxies and arbitrary struct
-encodings remain unsupported. Clock still needs a device retest of these changes.
+Basic key-value getters, setters, and nested key paths pass local ARMv6 tests,
+including inherited ivars, numeric boxing/unboxing, common Core Graphics structs,
+typed host accessors, nil and undefined-key overrides, setter precedence, and
+retain/release ownership when replacing object ivars. Collection proxies and
+arbitrary struct encodings remain unsupported. Clock still needs a device retest.
