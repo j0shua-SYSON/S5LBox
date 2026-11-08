@@ -378,8 +378,12 @@ pub(super) fn UIApplicationMain(
     // Call layoutSubviews on all views in the view hierarchy.
     // See https://medium.com/geekculture/uiview-lifecycle-part-5-faa2d44511c9
     let views = env.framework_state.uikit.ui_view.views.clone();
+    // Layout can recycle/remove other views, including table cells. Keep this
+    // snapshot alive until every callback has finished.
+    for view in &views { retain(env, *view); }
     for view in views {
         () = msg![env; view layoutSubviews];
+        release(env, view);
     }
 
     // Send applicationDidBecomeActive now that the application is ready to

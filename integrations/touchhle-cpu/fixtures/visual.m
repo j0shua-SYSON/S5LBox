@@ -17,6 +17,8 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 + (IMP)methodForSelector:(SEL)selector;
 + (IMP)instanceMethodForSelector:(SEL)selector;
 - (id)init;
+- (id)autorelease;
+- (void)release;
 - (IMP)methodForSelector:(SEL)selector;
 @end
 @interface NSAutoreleasePool : NSObject @end
@@ -43,6 +45,17 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 - (id)pathForResource:(id)name ofType:(id)type;
 - (id)localizedStringForKey:(id)key value:(id)value table:(id)table;
 @end
+@interface NSIndexPath : NSObject
++ (id)indexPathForRow:(int)row inSection:(int)section;
+- (unsigned)length;
+- (unsigned)indexAtPosition:(unsigned)position;
+- (int)row;
+- (int)section;
+- (id)indexPathByAddingIndex:(unsigned)index;
+- (id)indexPathByRemovingLastIndex;
+- (BOOL)isEqual:(id)other;
+- (int)compare:(id)other;
+@end
 @interface NSUserDefaults : NSObject
 + (id)standardUserDefaults;
 - (int)integerForKey:(id)key;
@@ -62,9 +75,61 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 - (void)makeKeyAndVisible;
 @end
 @interface UILabel : UIView
+- (id)text;
 - (void)setText:(id)text;
 - (void)setTextColor:(id)color;
 - (void)setTextAlignment:(int)alignment;
+@end
+@interface NSArray : NSObject
+- (unsigned)count;
+@end
+@interface UITableViewCell : UIView
+- (id)initWithStyle:(int)style reuseIdentifier:(id)identifier;
+- (id)textLabel;
+- (BOOL)isSelected;
+@end
+@interface UITableView : UIView
+- (id)initWithFrame:(CGRect)frame style:(int)style;
+- (void)setDataSource:(id)source;
+- (void)setDelegate:(id)delegate;
+- (void)reloadData;
+- (int)numberOfSections;
+- (int)numberOfRowsInSection:(int)section;
+- (id)dequeueReusableCellWithIdentifier:(id)identifier;
+- (id)cellForRowAtIndexPath:(id)path;
+- (id)indexPathForSelectedRow;
+- (id)visibleCells;
+- (CGSize)contentSize;
+- (void)setContentOffset:(CGPoint)offset;
+- (void)selectRowAtIndexPath:(id)path animated:(BOOL)animated scrollPosition:(int)position;
+- (void)deselectRowAtIndexPath:(id)path animated:(BOOL)animated;
+- (void)touchesBegan:(id)touches withEvent:(id)event;
+- (void)touchesMoved:(id)touches withEvent:(id)event;
+- (void)touchesEnded:(id)touches withEvent:(id)event;
+- (void)touchesCancelled:(id)touches withEvent:(id)event;
+@end
+@interface TableSource : NSObject { @public unsigned created,selected; }
+@end
+@implementation TableSource
+- (int)numberOfSectionsInTableView:(id)table { (void)table; return 2; }
+- (int)tableView:(id)table numberOfRowsInSection:(int)section { (void)table; (void)section; return 1000; }
+- (float)tableView:(id)table heightForRowAtIndexPath:(NSIndexPath *)path {
+    (void)table; return [path section] ? 44.0f : 22.0f;
+}
+- (id)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
+    UITableViewCell *cell=[table dequeueReusableCellWithIdentifier:@"fixture"];
+    if (!cell) { cell=[[[UITableViewCell alloc] initWithStyle:0 reuseIdentifier:@"fixture"] autorelease]; created++; }
+    char label[48]; snprintf(label,sizeof(label),"row %d/%d",[path section],[path row]);
+    [[cell textLabel] setText:[NSString stringWithUTF8String:label]];
+    return cell;
+}
+- (void)tableView:(id)table didSelectRowAtIndexPath:(id)path { (void)table; (void)path; selected++; }
+@end
+@interface TableTouch : NSObject { @public CGPoint point,previous; }
+@end
+@implementation TableTouch
+- (CGPoint)locationInView:(id)view { (void)view; return point; }
+- (CGPoint)previousLocationInView:(id)view { (void)view; return previous; }
 @end
 @interface UIControl : UIView
 - (void)addTarget:(id)target action:(SEL)action forControlEvents:(unsigned)events;
@@ -353,6 +418,46 @@ int main(int argc,char **argv) {
         failures += [resource executablePath]!=0;
         failures += [resource pathForResource:@"Info" ofType:@"plist"]==0;
         failures += ![[main localizedStringForKey:@"fixture-key" value:0 table:0] isEqualToString:@"fixture-key"];
+        NSIndexPath *path=[NSIndexPath indexPathForRow:4 inSection:2];
+        failures += [path row]!=4 || [path section]!=2 || [path length]!=2;
+        failures += [path indexAtPosition:2]!=0x7fffffffU;
+        NSIndexPath *child=[path indexPathByAddingIndex:7];
+        failures += [path length]!=2 || [child length]!=3;
+        failures += ![[child indexPathByRemovingLastIndex] isEqual:path];
+        failures += [path compare:child]!=-1;
+        TableSource *source=[[TableSource alloc] init];
+        UITableView *table=[[UITableView alloc] initWithFrame:(CGRect){{0,0},{320,44}} style:0];
+        [table setDataSource:source]; [table setDelegate:source]; [table reloadData];
+        failures += [table numberOfSections]!=2 || [table numberOfRowsInSection:1]!=1000;
+        failures += [table contentSize].height!=66000.0f;
+        failures += [[table visibleCells] count]!=2 || source->created!=2;
+        NSIndexPath *first=[NSIndexPath indexPathForRow:0 inSection:0];
+        UITableViewCell *firstCell=[table cellForRowAtIndexPath:first];
+        failures += ![[[firstCell textLabel] text] isEqualToString:@"row 0/0"];
+        failures += [table cellForRowAtIndexPath:[NSIndexPath indexPathForRow:99 inSection:1]]!=0;
+        // Scrolling thousands of rows must reuse cells, not instantiate every row.
+        for (unsigned step=1;step<30;step++) [table setContentOffset:(CGPoint){0,step*44.0f}];
+        failures += source->created>3 || [[table visibleCells] count]!=2;
+        NSIndexPath *far=[NSIndexPath indexPathForRow:900 inSection:1];
+        [table selectRowAtIndexPath:far animated:0 scrollPosition:1];
+        failures += ![[table indexPathForSelectedRow] isEqual:far];
+        failures += ![[table cellForRowAtIndexPath:far] isSelected];
+        failures += source->selected!=0; // Programmatic selection has no delegate callback.
+        [table deselectRowAtIndexPath:far animated:0];
+        failures += [table indexPathForSelectedRow]!=0;
+        [table setContentOffset:(CGPoint){0,0}];
+        TableTouch *tableTouch=[[TableTouch alloc] init]; tableTouch->point=(CGPoint){10,10};
+        id tableTouches=[NSSet setWithObject:tableTouch];
+        [table touchesBegan:tableTouches withEvent:0]; [table touchesEnded:tableTouches withEvent:0];
+        failures += source->selected!=1 || ![[table indexPathForSelectedRow] isEqual:first];
+        [table touchesBegan:tableTouches withEvent:0]; [table touchesCancelled:tableTouches withEvent:0];
+        [table touchesEnded:tableTouches withEvent:0]; failures += source->selected!=1;
+        [table touchesBegan:tableTouches withEvent:0];
+        tableTouch->previous=tableTouch->point; tableTouch->point=(CGPoint){10,-12};
+        [table touchesMoved:tableTouches withEvent:0]; [table touchesEnded:tableTouches withEvent:0];
+        failures += source->selected!=1;
+        [table reloadData]; failures += [table indexPathForSelectedRow]!=0;
+        [table release]; [source release];
         failures += ![[resource localizedStringForKey:@"fixture-key" value:0 table:0] isEqualToString:@"Resource value"];
         failures += ![[main localizedStringForKey:@"fixture-key" value:0 table:0] isEqualToString:@"fixture-key"];
         [control touchesCancelled:touches withEvent:0];

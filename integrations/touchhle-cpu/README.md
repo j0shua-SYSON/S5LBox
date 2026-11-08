@@ -55,9 +55,11 @@ Physical-device checks on the feature build verified a fresh profile, offline
 IPA installation, an offline app update preserving its container, and a saved
 counter passed from touchHLE to iPhone OS and back. A second profile started
 with separate app data. These checks establish storage and installation paths,
-not general app compatibility. A 20-app Legacy Store runtime pass is ongoing;
-missing framework APIs and rendering failures still prevent several titles
-from running. This integration remains experimental.
+not general app compatibility. Twenty Legacy Store archives also installed
+successfully into a profile that had never booted iPhone OS. An app installed
+offline into the original jailbroken profile appeared in SpringBoard after
+a cold boot and reached its native loading screen. This integration remains
+experimental; installation success does not establish runtime compatibility.
 
 For the existing live-guest path, use a jailbroken iPhone OS 3.1.3 guest with Packages connected. Install apps
 through the existing IPA library or Legacy Store. Machine Settings → touchHLE
@@ -222,6 +224,40 @@ context before returning; startup and cleanup also wait until the gate reopens.
 Raw GL calls must not escape the GLES borrow. The device checks above exercise
 the integrated lifecycle but are not a long-duration interruption stress test.
 
+## Legacy Store compatibility checks
+
+All 20 selected ARMv6 app versions passed offline installation on the iOS 15.8.5
+test phone. Runtime checks found shared failures in large-file transfers,
+landscape frame presentation, resource bundles and Objective-C method lookup.
+The file service now completes reads/writes across its 64 KiB transport frames;
+the presenter rotates texture coordinates about their center so edge clamping
+does not stretch a single row across the screen.
+
+Build `b1182130` passed the touchHLE CI workflow and was installed on the phone.
+Its retests establish the following, without claiming complete compatibility:
+
+| App/version | Observed result |
+| --- | --- |
+| Fruit Ninja 1.0 | Correct landscape menu; New Game starts a round and reaches Game Over. Swipe scoring remains unverified. |
+| Pocket God 1.0 | Correct landscape scene; adding characters and dragging one into the air work. |
+| Skee-Ball 1.0 | Resource-bundle failure resolved; now stops at a superclass `+load` call. |
+| Monopoly 1.1.13 | Bundle lookup failure resolved; now stops at `NSData` URL/options/error loading. |
+| Paper Toss 1.0 | Method lookup failure resolved; now stops at `CGContextGetTextPosition`. |
+| Ragdoll Blaster 2 1.0 | Selector lookup failure resolved; now stops at `class_getInstanceMethod`. |
+
+The other tested versions were Angry Birds 1.0, Doodle Jump 1.0, Bowmaster 1.0,
+Tetris 1.0.55, Battleship 1.0.6, Bejeweled 2 1.0, Plants vs. Zombies 1.0,
+Tweetie 2.0, Facebook 1.0, Pandora 1.0, Skype 1.0.0, Google Mobile 0.1.337,
+The Weather Channel 1.0 and IMDb 1.0.0. Their initial runtime tests encountered
+missing APIs, CPU faults or loading stalls. None is counted as fully compatible.
+No app archives or firmware are included in this repository.
+
+The UIKit work adds read-only table data sources, visible-cell reuse, row
+selection and scrolling, with `NSIndexPath` and `UITableViewController` support.
+An ARMv6 fixture exercises 2,000 rows, variable heights, bounded cell creation,
+reuse, programmatic selection, touch selection and cancellation. Table editing,
+insertion animations, grouped styling and indexed navigation remain incomplete.
+
 ## Boundaries
 
 Guest support currently targets the verified iPhone OS 3.1.3 SpringBoard
@@ -230,8 +266,8 @@ exclusion and authenticated, bounded file access are required for interpreted
 execution; the host does not silently fall back to editing a mounted disk.
 
 This remains a feature-branch build, not a claim of universal compatibility.
-The device evidence uses open-source fixtures, the upstream framework demo,
-and a negative real-app compatibility check, not a representative game suite.
+The device evidence includes open-source fixtures, the upstream framework demo,
+and the limited real-app checks above; it does not establish broad compatibility.
 Upstream framework gaps, ARMv7-only apps, audible quality across audio-route
 changes, and host iOS versions other than the tested device must not be
 presented as verified. The keyboard bridge covers insertion, deletion and

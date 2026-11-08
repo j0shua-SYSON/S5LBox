@@ -64,11 +64,13 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ui_view::ui_page_control::CLASSES,
         ui_view::ui_picker_view::CLASSES,
         ui_view::ui_scroll_view::CLASSES,
+        ui_view::ui_scroll_view::ui_table_view::CLASSES,
         ui_view::ui_scroll_view::ui_text_view::CLASSES,
         ui_view::ui_web_view::CLASSES,
         ui_view::ui_window::CLASSES,
         ui_view_controller::CLASSES,
         ui_view_controller::ui_navigation_controller::CLASSES,
+        ui_view_controller::ui_table_view_controller::CLASSES,
     ],
     constant_exports: &[
         ui_application::CONSTANTS,
