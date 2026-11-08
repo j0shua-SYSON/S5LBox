@@ -22,6 +22,7 @@ pub mod qsort;
 #[derive(Default)]
 pub struct State {
     rand: u32,
+    rand48: Rand48,
     random: u32,
     arc4random: u32,
     fcvt_buf: Option<MutPtr<u8>>,
@@ -193,6 +194,108 @@ fn prng(state: u32) -> u32 {
 }
 
 const RAND_MAX: i32 = i32::MAX;
+
+// Darwin's 48-bit generator has its own seed and configurable coefficients;
+// it must not share the unrelated rand()/random() state above.
+// https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/drand48.3.html
+struct Rand48 {
+    seed: u64,
+    multiplier: u64,
+    addend: u16,
+    previous: Option<MutPtr<u16>>,
+}
+impl Default for Rand48 {
+    fn default() -> Self {
+        Self {
+            seed: 0x1234_abcd_330e,
+            multiplier: 0x5_deec_e66d,
+            addend: 11,
+            previous: None,
+        }
+    }
+}
+impl Rand48 {
+    fn advance(&self, seed: u64) -> u64 {
+        seed.wrapping_mul(self.multiplier)
+            .wrapping_add(u64::from(self.addend))
+            & 0xffff_ffff_ffff
+    }
+    fn next(&mut self) -> u64 {
+        self.seed = self.advance(self.seed);
+        self.seed
+    }
+    fn reset(&mut self, seed: u64) {
+        self.seed = seed;
+        self.multiplier = 0x5_deec_e66d;
+        self.addend = 11;
+    }
+}
+fn read_seed48(env: &Environment, seed: ConstPtr<u16>) -> u64 {
+    u64::from(env.mem.read(seed))
+        | (u64::from(env.mem.read(seed + 1)) << 16)
+        | (u64::from(env.mem.read(seed + 2)) << 32)
+}
+fn write_seed48(env: &mut Environment, pointer: MutPtr<u16>, seed: u64) {
+    env.mem.write(pointer, seed as u16);
+    env.mem.write(pointer + 1, (seed >> 16) as u16);
+    env.mem.write(pointer + 2, (seed >> 32) as u16);
+}
+fn next_seed48(env: &mut Environment, pointer: MutPtr<u16>) -> u64 {
+    let seed = env
+        .libc_state
+        .stdlib
+        .rand48
+        .advance(read_seed48(env, pointer.cast_const()));
+    write_seed48(env, pointer, seed);
+    seed
+}
+fn srand48(env: &mut Environment, seed: i32) {
+    env.libc_state
+        .stdlib
+        .rand48
+        .reset(((seed as u32 as u64) << 16) | 0x330e);
+}
+fn drand48(env: &mut Environment) -> f64 {
+    env.libc_state.stdlib.rand48.next() as f64 / 281474976710656.0
+}
+fn lrand48(env: &mut Environment) -> i32 {
+    (env.libc_state.stdlib.rand48.next() >> 17) as i32
+}
+fn mrand48(env: &mut Environment) -> i32 {
+    (env.libc_state.stdlib.rand48.next() >> 16) as i32
+}
+fn erand48(env: &mut Environment, seed: MutPtr<u16>) -> f64 {
+    next_seed48(env, seed) as f64 / 281474976710656.0
+}
+fn nrand48(env: &mut Environment, seed: MutPtr<u16>) -> i32 {
+    (next_seed48(env, seed) >> 17) as i32
+}
+fn jrand48(env: &mut Environment, seed: MutPtr<u16>) -> i32 {
+    (next_seed48(env, seed) >> 16) as i32
+}
+fn seed48(env: &mut Environment, pointer: ConstPtr<u16>) -> MutPtr<u16> {
+    // The input may alias the static buffer returned by the previous call.
+    let seed = read_seed48(env, pointer);
+    let previous = env.libc_state.stdlib.rand48.seed;
+    let slot = *env
+        .libc_state
+        .stdlib
+        .rand48
+        .previous
+        .get_or_insert_with(|| env.mem.alloc(6).cast());
+    write_seed48(env, slot, previous);
+    env.libc_state.stdlib.rand48.reset(seed);
+    slot
+}
+fn lcong48(env: &mut Environment, params: ConstPtr<u16>) {
+    let seed = read_seed48(env, params);
+    let multiplier = read_seed48(env, params + 3);
+    let addend = env.mem.read(params + 6);
+    let state = &mut env.libc_state.stdlib.rand48;
+    state.seed = seed;
+    state.multiplier = multiplier;
+    state.addend = addend;
+}
 
 fn srand(env: &mut Environment, seed: u32) {
     env.libc_state.stdlib.rand = seed;
@@ -671,6 +774,15 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(sranddev()),
     export_c_func!(rand()),
     export_c_func!(rand_r(_)),
+    export_c_func!(srand48(_)),
+    export_c_func!(drand48()),
+    export_c_func!(lrand48()),
+    export_c_func!(mrand48()),
+    export_c_func!(erand48(_)),
+    export_c_func!(nrand48(_)),
+    export_c_func!(jrand48(_)),
+    export_c_func!(seed48(_)),
+    export_c_func!(lcong48(_)),
     export_c_func!(srandom(_)),
     export_c_func!(random()),
     export_c_func!(arc4random()),

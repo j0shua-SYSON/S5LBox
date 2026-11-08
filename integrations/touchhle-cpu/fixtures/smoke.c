@@ -14,6 +14,10 @@ extern int __snprintf_chk(char *,size_t,int,size_t,const char *,...);
 extern int __vsnprintf_chk(char *,size_t,int,size_t,const char *,va_list);
 extern int __sprintf_chk(char *,int,size_t,const char *,...);
 extern int __vsprintf_chk(char *,int,size_t,const char *,va_list);
+extern double drand48(void), erand48(unsigned short *);
+extern long lrand48(void), mrand48(void), nrand48(unsigned short *), jrand48(unsigned short *);
+extern void srand48(long), lcong48(unsigned short *);
+extern unsigned short *seed48(unsigned short *);
 
 static int checked_vformat(char *buffer,size_t size,int bounded,const char *format,...) {
     va_list args; va_start(args,format);
@@ -30,6 +34,32 @@ static unsigned failures;
 
 static int compare(const void *a, const void *b) {
     return *(const int *)a - *(const int *)b;
+}
+
+static void rand48_smoke(void) {
+    unsigned short zero[3]={0}, user[3]={1,2,3};
+    unsigned short *old=seed48(zero);
+    CHECK(old && old[0]==0x330e && old[1]==0xabcd && old[2]==0x1234);
+    CHECK(seed48(old)==old); /* The input may alias the static result buffer. */
+    srand48(0); CHECK(drand48()==0.17082803610628972);
+    srand48(0); CHECK(lrand48()==366850414L);
+    srand48(0); CHECK(mrand48()==733700828L);
+    srand48(-1); CHECK(seed48(user)==old);
+    CHECK(old[0]==0x330e && old[1]==0xffff && old[2]==0xffff);
+    CHECK(nrand48(zero)==0 && zero[0]==11 && zero[1]==0 && zero[2]==0);
+    unsigned short negative[3]={0xffff,0xffff,0xffff};
+    CHECK(jrand48(negative)==-384749L);
+    CHECK(negative[0]==0x199e && negative[1]==0x2113 && negative[2]==0xfffa);
+    unsigned short custom[7]={1,0,0,2,0,0,3};
+    lcong48(custom); CHECK(drand48()==5.0/281474976710656.0);
+    unsigned short other[3]={4,0,0};
+    CHECK(erand48(other)==11.0/281474976710656.0 && other[0]==11);
+    CHECK(seed48(user)==old && old[0]==5 && old[1]==0 && old[2]==0);
+    other[0]=1; other[1]=0; other[2]=0;
+    (void)erand48(other); /* seed48 also resets the custom coefficients. */
+    CHECK(other[0]==0xe678 && other[1]==0xdeec && other[2]==5);
+    lcong48(custom); srand48(0); CHECK(lrand48()==366850414L);
+    srand(19); int first=rand(); srand(19); srand48(91); CHECK(rand()==first);
 }
 static void *thread_main(void *arg) {
     return (void *)(unsigned long)thumb_sum((unsigned long)arg, 1);
@@ -277,6 +307,7 @@ int main(int argc, char **argv) {
         return 97;
     }
     CHECK(thumb_sum(19, 23) == 42);
+    rand48_smoke();
     int (*volatile bounded_format)(char *,size_t,int,size_t,const char *,...) = __snprintf_chk;
     int (*volatile checked_format)(char *,int,size_t,const char *,...) = __sprintf_chk;
     char formatted[16]; memset(formatted,'!',sizeof formatted);

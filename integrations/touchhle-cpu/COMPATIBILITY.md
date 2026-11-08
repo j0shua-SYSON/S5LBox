@@ -12,31 +12,33 @@ alone is never a pass. Results apply only to the exact version and tested build.
 The initial device baseline uses build `d9052b50`, an iPhone 6s Plus running iOS
 15.8.5, and an offline iPhone OS 3.1.3 profile. The guest OS is not booted.
 Archives and private test logs are not distributed in this repository.
+The desktop startup rows use `23a5d292` with a shared OpenAL library on Windows;
+they establish the next failure or a 25-second observation, not functionality.
 
 ## Utilities
 
 | App | Version | Required functional checks | Latest result |
 | --- | --- | --- | --- |
-| PCalc RPN Calculator | 2.3.3 | Arithmetic, scientific and RPN operations; settings persist | Blocked: missing double floating-point classification. |
+| PCalc RPN Calculator | 2.3.3 | Arithmetic, scientific and RPN operations; settings persist | Desktop startup: missing CFNumberFormatterCreate. |
 | Convertbot — The Amazing Unit Converter | 1.6.1 | Convert units and switch categories; saved choices persist | Device build 39dfa4bd: passes sound initialization, then fails on missing NSNumberFormatter. |
 | Units - Unit Converter for your iPhone | 1.9.1 | Convert length, mass and temperature; navigate categories | Blocked: black display after more than two minutes; input did not reveal usable UI. |
 | Flashlight RGB | 1.0.2 | Change RGB controls and restore saved color | Blocked: missing UINavigationBar. |
-| iHandy Level Free | 1.60.0 | Tilt response, calibration and saved calibration | Not tested. |
+| iHandy Level Free | 1.60.0 | Tilt response, calibration and saved calibration | Desktop startup: missing NSCalendar. |
 | Clock | 2.0.2 | Clock updates, settings and timer behavior | Device build 3ffc8cb7: passes key-value getters and setters, then fails on missing change-observer registration. |
-| Notes | 1.0 | Create, edit, delete and reopen a saved note | Not tested. |
-| ToDo | 2.0 | Create, complete and edit tasks; relaunch persistence | Not tested. |
-| SketchBook Mobile | 1.5 | Draw, undo, save and reopen a sketch | Not tested. |
-| Good Reader (large PDF viewer) - read big PDF files with reflow | 3.8.1 | Open a local document, navigate pages and remember position | Not tested. |
-| Stanza | 3.2 | Open an offline book, turn pages and save position | Not tested. |
-| Brushes - iPhone Edition | 2.2.2 | Draw, undo and reopen saved artwork | Not tested. |
-| Color Splash | 1.6.2 | Import a test image, edit and save the result | Not tested. |
-| Recorder | 1.1.1 | Record, play back, rename and reopen a recording | Not tested. |
+| Notes | 1.0 | Create, edit, delete and reopen a saved note | Desktop startup: missing WebPreferences. |
+| ToDo | 2.0 | Create, complete and edit tasks; relaunch persistence | Desktop startup: missing NSPersistentStoreCoordinator. |
+| SketchBook Mobile | 1.5 | Draw, undo, save and reopen a sketch | Desktop startup: statfs rejects the application's Documents path. |
+| Good Reader (large PDF viewer) - read big PDF files with reflow | 3.8.1 | Open a local document, navigate pages and remember position | Desktop startup: guest CPU memory fault; cause unconfirmed. |
+| Stanza | 3.2 | Open an offline book, turn pages and save position | Desktop startup: missing UITabBarController. |
+| Brushes - iPhone Edition | 2.2.2 | Draw, undo and reopen saved artwork | Desktop startup: missing CGImageMaskCreate. |
+| Color Splash | 1.6.2 | Import a test image, edit and save the result | Desktop startup: missing UITabBar. |
+| Recorder | 1.1.1 | Record, play back, rename and reopen a recording | Desktop startup: missing UINavigationBar. |
 | iTalk Recorder Premium | 1.0.4 | Record, play back and reopen saved audio | Desktop startup blocked: missing navigationItem. Replaces the non-Premium archive, which failed duplicate-path validation. |
-| Merriam-Webster Dictionary | 1.2.1 | Offline word lookup, definitions and navigation | Not tested. |
-| Batterie Gratuite HD | 2.24 | Battery state updates and settings navigation | Not tested. |
-| Ruler | 1.1 | Switch units and measure using the ruler | Not tested. |
-| Convert ~ the unit calculator | 1.0.1 | Arithmetic and unit conversion; history or choices persist | Not tested. |
-| WiFi HD FREE (Wireless Hard Disk Drive) | 1.2 | Transfer a local file and reopen it | Not tested. |
+| Merriam-Webster Dictionary | 1.2.1 | Offline word lookup, definitions and navigation | Desktop startup: missing NSBundle allBundles. |
+| Batterie Gratuite HD | 2.24 | Battery state updates and settings navigation | Desktop startup: missing CALayer setContentsScale:. |
+| Ruler | 1.1 | Switch units and measure using the ruler | Desktop startup: missing CGContextSetShouldAntialias. |
+| Convert ~ the unit calculator | 1.0.1 | Arithmetic and unit conversion; history or choices persist | Desktop startup: missing NSNumberFormatter. |
+| WiFi HD FREE (Wireless Hard Disk Drive) | 1.2 | Transfer a local file and reopen it | Desktop startup: missing UINavigationBar. |
 
 ## Games
 
@@ -44,24 +46,24 @@ Archives and private test logs are not distributed in this repository.
 | --- | --- | --- | --- |
 | Super Monkey Ball | 1.01 | Steer through a complete stage; restart and save progress | Device build b065e116: menus respond and the first level renders; gameplay is slow. Tilt control, stage completion and persistence remain unverified. |
 | Crash Bandicoot Nitro Kart 3D | 1.0 | Complete a race, pause/resume and retain progress | Device build c9da925b: menus respond; Quick Race fails when glVertexPointer immediately translates unused guest memory. Deferred translation awaits device verification. |
-| Rolando | 1.9 | Complete a level using touch and tilt; resume saved progress | Not tested. |
-| Labyrinth | 1.9.1 | Tilt through a maze, calibrate and restart | Not tested. |
-| Cro-Mag Rally | 3.0.3 | Complete a race, pause/resume and retain settings | Not tested. |
-| R.Thunder | 1.0 | Complete a race; responsive steering and pause/resume | Not tested. |
-| Enigmo | 4.1 | Solve a level, manipulate tools and reopen saved progress | Not tested. |
-| Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Not tested. |
+| Rolando | 1.9 | Complete a level using touch and tilt; resume saved progress | Desktop startup: guest CPU memory fault; cause unconfirmed. |
+| Labyrinth | 1.9.1 | Tilt through a maze, calibrate and restart | Desktop startup: missing UINavigationController setNavigationBarHidden:animated:. |
+| Cro-Mag Rally | 3.0.3 | Complete a race, pause/resume and retain settings | Desktop startup: missing srand48; generator implementation under validation. |
+| R.Thunder | 1.0 | Complete a race; responsive steering and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
+| Enigmo | 4.1 | Solve a level, manipulate tools and reopen saved progress | Desktop startup: missing UIToolbar. |
+| Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Edge | 1.62 | Complete a level, precise controls and saved progress | Device build 60bd8788: offline install passes; blank display persists beyond three minutes. |
 | Canabalt | 1.7 | Sustained run, jumping, restart and saved high score | Device build b065e116: offline install passes; missing NSOperationQueue prevents launch. |
-| Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Not tested. |
-| Minigore | 7.0 | Movement and firing through sustained combat; restart | Not tested. |
-| iCopter | 1.4 | Sustained flight, restart and saved high score | Not tested. |
-| Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Not tested. |
-| Tap Tap Revenge | 1.7 | Play a bundled song, timing/scoring and restart | Not tested. |
-| Trism | 1.4 | Complete a puzzle session and retain progress | Not tested. |
-| Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Not tested. |
-| Chopper | 1.3.1 | Complete a mission, steer/fire and pause/resume | Not tested. |
-| SPACE DEADBEEF | 1.01 | Sustained gameplay, firing, pause/resume and restart | Not tested. |
-| Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build dd948eb4: first level loads after the audio fixes. Orientation direction corrected after device inspection; completion and persistence remain unverified. |
+| Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
+| Minigore | 7.0 | Movement and firing through sustained combat; restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
+| iCopter | 1.4 | Sustained flight, restart and saved high score | Desktop startup: missing NSSortDescriptor. |
+| Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
+| Tap Tap Revenge | 1.7 | Play a bundled song, timing/scoring and restart | Desktop startup: missing NSNetServiceBrowser. |
+| Trism | 1.4 | Complete a puzzle session and retain progress | Desktop startup: missing UIButton setTitleShadowColor:forState:. |
+| Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Desktop startup: missing UIToolbar. |
+| Chopper | 1.3.1 | Complete a mission, steer/fire and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
+| SPACE DEADBEEF | 1.01 | Sustained gameplay, firing, pause/resume and restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
+| Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build dd948eb4: first level completed, platform drawing works, and progress survives Home and relaunch. Orientation correction awaits device verification. |
 
 ## Runtime changes under validation
 
@@ -132,3 +134,8 @@ context isolation. Invalid array parameters and empty draws no longer panic.
 An ARMv6 rendering fixture verifies pixels, fixed-point arrays, pointer queries,
 and state restoration on the Windows OpenGL backend. CI and iPhone verification
 of this graphics change are pending.
+
+The `rand48` family now implements Darwin's 48-bit generator, independent global
+and caller-owned seeds, configurable coefficients, and the static `seed48`
+return buffer. ARMv6 checks pass for known sequences, signed and floating-point
+returns, seed aliasing, coefficient reset, and independence from `rand()`.
