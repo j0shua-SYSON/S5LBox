@@ -82,6 +82,8 @@ pub fn AudioFileOpenURL(
     in_file_type_hint: AudioFileTypeID,
     out_audio_file: MutPtr<AudioFileID>,
 ) -> OSStatus {
+    return_if_null!(out_audio_file);
+    env.mem.write(out_audio_file, AudioFileID::null());
     return_if_null!(in_file_ref);
 
     assert!(in_permissions == kAudioFileReadPermission); // writing TODO
@@ -158,7 +160,12 @@ pub fn AudioFileOpenWithCallbacks(
     in_file_type_hint: AudioFileTypeID,
     out_audio_file: MutPtr<AudioFileID>,
 ) -> OSStatus {
-    if _write_callback.to_ptr().is_null() || _setsize_callback.to_ptr().is_null() {
+    return_if_null!(out_audio_file);
+    env.mem.write(out_audio_file, AudioFileID::null());
+    if read_callback.to_ptr().is_null() || getsize_callback.to_ptr().is_null() {
+        return -50;
+    }
+    if !_write_callback.to_ptr().is_null() || !_setsize_callback.to_ptr().is_null() {
         log_dbg!("AudioFileOpenWithCallbacks() called with (unsupported) write({:?})/set_size({:?}) callbacks!",
             _write_callback,
             _setsize_callback);
@@ -172,41 +179,55 @@ pub fn AudioFileOpenWithCallbacks(
     // TODO: We're just reading in the whole file at once and parsing it here,
     // this should change when streaming parsing is implemented.
     let size: i64 = getsize_callback.call_from_host(env, (client_data,));
-    let size: u32 = size.try_into().unwrap();
-
-    assert!(
-        size != 0,
-        "0 byte size of file for AudioFileOpenWithCallbacks(), likely bad!"
-    );
-
-    let data_ptr: MutPtr<u8> = env.mem.alloc(size).cast();
-    let bytes_read_ptr: MutPtr<u32> = env.mem.alloc(guest_size_of::<u32>()).cast();
-
-    env.mem.write(bytes_read_ptr, 0);
-    log_dbg!(
-        "AudioFileOpenWithCallbacks() calling read: {:?}",
-        (client_data, 0_i64, size, data_ptr, bytes_read_ptr)
-    );
-    let status: OSStatus =
-        read_callback.call_from_host(env, (client_data, 0_i64, size, data_ptr, bytes_read_ptr));
-    if status != 0 {
-        log!(
-            "AudioFileOpenWithCallbacks() failed read, returning {}",
-            fourcc(&status.to_le_bytes())
+    let Ok(size) = u32::try_from(size) else {
+        return -50;
+    };
+    if size == 0 {
+        return kAudioFileUnsupportedFileTypeError;
+    }
+    // Use bounded guest scratch space and accept short reads. Both scratch
+    // allocations must be freed on read failures as well as successful opens.
+    let capacity = size.min(64 * 1024);
+    let data_ptr: MutPtr<u8> = env.mem.alloc(capacity).cast();
+    let bytes_read_ptr = env.mem.alloc_and_write(0u32);
+    let mut data_vec = Vec::new();
+    let status = loop {
+        let position = data_vec.len() as u32;
+        if position == size {
+            break 0;
+        }
+        let request = capacity.min(size - position);
+        env.mem.write(bytes_read_ptr, 0);
+        let status: OSStatus = read_callback.call_from_host(
+            env,
+            (
+                client_data,
+                i64::from(position),
+                request,
+                data_ptr,
+                bytes_read_ptr,
+            ),
         );
-
+        let actual = env.mem.read(bytes_read_ptr);
+        if actual > request {
+            break -50;
+        }
+        if status != 0 && status != -39 {
+            break status;
+        }
+        if actual == 0 {
+            break -39;
+        }
+        data_vec.extend_from_slice(env.mem.bytes_at(data_ptr, actual));
+        if status == -39 && data_vec.len() != size as usize {
+            break -39;
+        }
+    };
+    env.mem.free(data_ptr.cast());
+    env.mem.free(bytes_read_ptr.cast());
+    if status != 0 {
         return status;
     }
-
-    assert!(
-        env.mem.read(bytes_read_ptr) == size,
-        "Bytes read != size for AudioFileOpenWithCallbacks(), likely bad!"
-    );
-
-    let data_vec = env
-        .mem
-        .bytes_at(data_ptr, env.mem.read(bytes_read_ptr))
-        .to_vec();
 
     let Ok(guest_audio_file) = guest_audio_file_read_from_vec(env, data_vec) else {
         log!("Warning: AudioFileOpenWithCallbacks() failed parse");

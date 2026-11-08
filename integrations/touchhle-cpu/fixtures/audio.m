@@ -27,6 +27,7 @@ enum { kAudioFileReadPermission=1, kAudioFormatMPEGLayer3=0x2e6d7033, kAudioForm
 extern void *CFRunLoopGetCurrent(void);
 extern id kCFRunLoopCommonModes, NSDefaultRunLoopMode;
 extern OSStatus AudioFileOpenURL(CFURLRef,signed char,UInt32,AudioFileID *);
+extern OSStatus AudioFileOpenWithCallbacks(void *,OSStatus (*)(void *,int64_t,UInt32,void *,UInt32 *),void *,int64_t (*)(void *),void *,UInt32,AudioFileID *);
 extern OSStatus AudioFileGetProperty(AudioFileID,UInt32,UInt32 *,void *);
 extern OSStatus AudioFileReadPackets(AudioFileID,bool,UInt32 *,AudioStreamPacketDescription *,int64_t,UInt32 *,void *);
 extern OSStatus AudioFileReadPacketData(AudioFileID,bool,UInt32 *,AudioStreamPacketDescription *,int64_t,UInt32 *,void *);
@@ -56,6 +57,7 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 extern NSString *NSTemporaryDirectory(void);
 @interface NSMutableData : NSObject
 + (id)data; - (void)appendBytes:(const void *)bytes length:(unsigned)length;
+- (const void *)bytes; - (unsigned)length;
 - (BOOL)writeToFile:(id)path atomically:(BOOL)atomic;
 @end
 @interface NSURL : NSObject + (id)fileURLWithPath:(id)path; @end
@@ -85,6 +87,18 @@ static void pump(double seconds) {
     NSDate *end = [NSDate dateWithTimeIntervalSinceNow:seconds];
     [[NSRunLoop currentRunLoop] runUntilDate:end];
 }
+typedef struct { const unsigned char *data; int64_t size; int mode, reads; } ReadContext;
+static int64_t callback_size(void *ctx) { return ((ReadContext *)ctx)->size; }
+static OSStatus callback_read(void *ctx,int64_t pos,UInt32 request,void *buffer,UInt32 *actual) {
+    ReadContext *c=ctx; c->reads++;
+    CHECK(request<=65536 && pos>=0 && pos<c->size);
+    if (c->mode==1) return -1234;
+    if (c->mode==2) { *actual=0; return 0; }
+    if (c->mode==3) { *actual=request+1; return 0; }
+    *actual=request>257 ? 257 : request;
+    memcpy(buffer,c->data+pos,*actual);
+    return c->mode==4 && pos+*actual==c->size ? eofErr : 0;
+}
 int main(void) {
     setbuf(stdout, NULL);
     puts("AUDIO fixture entered");
@@ -100,6 +114,27 @@ int main(void) {
     NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"packet-fixture.mp3"];
     CHECK([data writeToFile:path atomically:NO]);
     NSURL *url = [NSURL fileURLWithPath:path];
+    ReadContext input={[data bytes],[data length],0,0};
+    AudioFileID callback_file=NULL;
+    for (int mode=0; mode<5; mode++) {
+        input.mode=mode; input.reads=0; callback_file=(void *)1;
+        OSStatus status=AudioFileOpenWithCallbacks(&input,callback_read,NULL,callback_size,NULL,0,&callback_file);
+        if (mode==0 || mode==4) {
+            CHECK(status==0 && callback_file!=NULL && input.reads>1);
+            CHECK(AudioFileClose(callback_file)==0);
+        } else {
+            CHECK(status==(mode==1 ? -1234 : mode==2 ? eofErr : -50) && callback_file==NULL);
+        }
+    }
+    for (int bad=0; bad<3; bad++) {
+        input.size=bad==0 ? 0 : bad==1 ? -1 : (1LL<<40);
+        input.reads=0; callback_file=(void *)1;
+        CHECK(AudioFileOpenWithCallbacks(&input,callback_read,NULL,callback_size,NULL,0,&callback_file)!=0);
+        CHECK(callback_file==NULL && input.reads==0);
+    }
+    CHECK(AudioFileOpenWithCallbacks(&input,NULL,NULL,callback_size,NULL,0,&callback_file)==-50);
+    CHECK(AudioFileOpenURL((CFURLRef)url,kAudioFileReadPermission,0,NULL)==-50);
+    puts("AUDIO callback reads complete");
     AudioFileID file = NULL;
     CHECK(AudioFileOpenURL((CFURLRef)url, kAudioFileReadPermission, 0, &file) == 0);
     puts("AUDIO file opened");
