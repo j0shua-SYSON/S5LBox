@@ -48,7 +48,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Crash Bandicoot Nitro Kart 3D | 1.0 | Complete a race, pause/resume and retain progress | Device build 23a5d292: Quick Race renders and continues running; pause and options respond. Tilt steering, race completion and persistence remain unverified. |
 | Rolando | 1.9 | Complete a level using touch and tilt; resume saved progress | Desktop startup: guest CPU memory fault; cause unconfirmed. |
 | Labyrinth | 1.9.1 | Tilt through a maze, calibrate and restart | Desktop startup: missing UINavigationController setNavigationBarHidden:animated:. |
-| Cro-Mag Rally | 3.0.3 | Complete a race, pause/resume and retain settings | Device build 4efcbc30: offline install, track/vehicle/character selection and race rendering work. Driving, completion and persistence remain unverified. |
+| Cro-Mag Rally | 3.0.3 | Complete a race, pause/resume and retain settings | Device build 4efcbc30: offline install, track/vehicle/character selection and race rendering work. Pause requests an unimplemented UIAlertView. Driving, completion and persistence remain unverified. |
 | R.Thunder | 1.0 | Complete a race; responsive steering and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Enigmo | 4.1 | Solve a level, manipulate tools and reopen saved progress | Desktop startup: missing UIToolbar. |
 | Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Desktop startup: no crash during 25 seconds; functionality unverified. |
@@ -148,3 +148,9 @@ descriptor path, maps Darwin mount flags to POSIX flags, and reports count
 overflow. ARMv6 regression checks pass locally. Volume capacity remains a
 virtual compatibility value; the filesystem service does not yet supply actual
 volume statistics.
+
+System queries distinguish legacy numeric OIDs from named 64-bit properties,
+support Darwin's four-byte numeric output conversion, and return errno for
+unknown queries, invalid buffers, read-only writes and insufficient space.
+Page size, memory size, CPU frequency and kernel-revision ABI checks pass in
+the ARMv6 fixture. The hardware values describe the emulated environment.

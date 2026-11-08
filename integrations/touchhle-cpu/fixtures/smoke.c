@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <sys/time.h>
 #include <sys/mount.h>
+#include <sys/sysctl.h>
 #include <stdint.h>
 #include <dlfcn.h>
 #include <math.h>
@@ -354,6 +355,40 @@ int main(int argc, char **argv) {
         CHECK(pthread_join(thread, &result) == 0);
         CHECK((unsigned long)result == 42);
     }
+
+    size_t querySize=0;
+    CHECK(sysctlbyname("hw.pagesize",NULL,&querySize,NULL,0)==0 && querySize==8);
+    int pageSize=0; querySize=sizeof pageSize;
+    CHECK(sysctlbyname("hw.pagesize",&pageSize,&querySize,NULL,0)==0);
+    CHECK(pageSize==4096 && querySize==4);
+    uint64_t wideValue=0; querySize=sizeof wideValue;
+    CHECK(sysctlbyname("hw.memsize",&wideValue,&querySize,NULL,0)==0);
+    CHECK(wideValue==121634816 && querySize==8);
+    int mib[]={CTL_HW,HW_PAGESIZE}; pageSize=0; querySize=sizeof pageSize;
+    CHECK(sysctl(mib,2,&pageSize,&querySize,NULL,0)==0 && pageSize==4096 && querySize==4);
+    mib[1]=HW_CPU_FREQ; querySize=sizeof pageSize;
+    CHECK(sysctl(mib,2,&pageSize,&querySize,NULL,0)==0 && pageSize==412000000 && querySize==4);
+    querySize=sizeof wideValue;
+    CHECK(sysctlbyname("hw.cpufrequency",&wideValue,&querySize,NULL,0)==0 && querySize==8);
+    CHECK(wideValue==412000000);
+    querySize=sizeof pageSize;
+    CHECK(sysctlbyname("kern.osrevision",&pageSize,&querySize,NULL,0)==0 && querySize==4);
+    CHECK(pageSize==199506);
+    char queryBuffer[16]; memset(queryBuffer,0x7a,sizeof queryBuffer); querySize=2;
+    errno=0; CHECK(sysctlbyname("kern.ostype",queryBuffer,&querySize,NULL,0)==-1 && errno==ENOMEM);
+    CHECK(querySize==0 && queryBuffer[0]==0x7a && queryBuffer[2]==0x7a);
+    querySize=sizeof queryBuffer;
+    CHECK(sysctlbyname("kern.ostype",queryBuffer,&querySize,NULL,0)==0);
+    CHECK(!strcmp(queryBuffer,"Darwin") && querySize==7);
+    errno=0; CHECK(sysctlbyname("unavailable.fixture",NULL,&querySize,NULL,0)==-1 && errno==ENOENT);
+    mib[1]=99999; errno=0;
+    CHECK(sysctl(mib,2,NULL,&querySize,NULL,0)==-1 && errno==ENOENT);
+    errno=0; CHECK(sysctl(mib,0,NULL,&querySize,NULL,0)==-1 && errno==EINVAL);
+    errno=0; CHECK(sysctl(NULL,2,NULL,&querySize,NULL,0)==-1 && errno==EFAULT);
+    errno=0; CHECK(sysctlbyname(NULL,NULL,&querySize,NULL,0)==-1 && errno==EFAULT);
+    errno=0; CHECK(sysctlbyname("hw.pagesize",&pageSize,NULL,NULL,0)==-1 && errno==EFAULT);
+    errno=0; CHECK(sysctlbyname("hw.pagesize",NULL,NULL,&pageSize,sizeof pageSize)==-1 && errno==EPERM);
+    CHECK(sysctlbyname("hw.pagesize",NULL,NULL,NULL,0)==0);
 
     const char *home = getenv("HOME");
     CHECK(home != NULL);

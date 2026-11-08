@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use crate::dyld::{export_c_func, FunctionExports};
-use crate::libc::errno::{set_errno, ENOENT};
-use crate::mem::{guest_size_of, ConstPtr, GuestUSize, MutPtr, MutVoidPtr, PAGE_SIZE};
+use crate::libc::errno::{set_errno, EFAULT, EINVAL, ENAMETOOLONG, ENOENT, ENOMEM, EPERM, ERANGE};
+use crate::mem::{ConstPtr, GuestUSize, MutPtr, MutVoidPtr, PAGE_SIZE};
 use crate::Environment;
 
 // Top level constants
@@ -63,12 +63,12 @@ static SYSCTL_VALUES: [(SysCtlNamePath, &str, SysInfoType); 18] = [
     (SysCtlNamePath::Length2(CTL_HW, HW_BUS_FREQ), "hw.busfrequency", SysInfoType::Int64(103000000)),
     (SysCtlNamePath::Length2(CTL_HW, HW_PHYSMEM), "hw.physmem", SysInfoType::Int32(121634816)),
     (SysCtlNamePath::Length2(CTL_HW, HW_USERMEM), "hw.usermem", SysInfoType::Int32(93564928)),
-    (SysCtlNamePath::Length2(CTL_HW, HW_MEMSIZE), "hw.memsize", SysInfoType::Int32(121634816)),
+    (SysCtlNamePath::Length2(CTL_HW, HW_MEMSIZE), "hw.memsize", SysInfoType::Int64(121634816)),
     (SysCtlNamePath::Length2(CTL_HW, HW_PAGESIZE), "hw.pagesize", SysInfoType::Int64(PAGE_SIZE as i64)),
     // High kernel limits
     (SysCtlNamePath::Length2(CTL_KERN, KERN_OSTYPE), "kern.ostype", SysInfoType::String(b"Darwin")),
     (SysCtlNamePath::Length2(CTL_KERN, KERN_OSRELEASE), "kern.osrelease", SysInfoType::String(b"10.0.0d3")),
-    (SysCtlNamePath::Length2(CTL_KERN, KERN_OSREV), "kern.osrevision", SysInfoType::String(b"199506")),
+    (SysCtlNamePath::Length2(CTL_KERN, KERN_OSREV), "kern.osrevision", SysInfoType::Int32(199506)),
     (SysCtlNamePath::Length2(CTL_KERN, KERN_HOSTNAME), "kern.hostname", SysInfoType::String(b"touchHLE")), // this is arbitrary
     (SysCtlNamePath::Length2(CTL_KERN, KERN_VERSION), "kern.version", SysInfoType::String(b"Darwin Kernel Version 10.0.0d3: Wed May 13 22:11:58 PDT 2009; root:xnu-1357.2.89~4/RELEASE_ARM_S5L8900X")),
     (SysCtlNamePath::Length2(CTL_KERN, KERN_OSVERSION), "kern.osversion", SysInfoType::String(b"7A341")),
@@ -94,7 +94,18 @@ static INT_MAP: LazyLock<HashMap<SysCtlNamePath, (&str, SysInfoType)>> = LazyLoc
             // skip entries which do not have integer name paths
             continue;
         }
-        hashmap.insert(*ints, (*str, value.clone()));
+        // Darwin's legacy numeric OIDs use int-sized values for these
+        // properties; their named counterparts are 64-bit nodes.
+        let value = match ints {
+            SysCtlNamePath::Length2(CTL_HW, HW_PAGESIZE | HW_CPU_FREQ | HW_BUS_FREQ) => {
+                let SysInfoType::Int64(value) = value else {
+                    unreachable!()
+                };
+                SysInfoType::Int32((*value).try_into().unwrap())
+            }
+            _ => value.clone(),
+        };
+        hashmap.insert(*ints, (*str, value));
     }
     hashmap
 });
@@ -107,6 +118,11 @@ enum SysInfoType {
     Struct,
 }
 
+fn error(env: &mut Environment, errno: i32) -> i32 {
+    set_errno(env, errno);
+    -1
+}
+
 fn sysctl(
     env: &mut Environment,
     name: MutPtr<i32>,
@@ -116,81 +132,25 @@ fn sysctl(
     newp: MutVoidPtr,
     newlen: GuestUSize,
 ) -> i32 {
-    set_errno(env, 0);
-
-    log_dbg!(
-        "sysctl({:?}, {:#x}, {:?}, {:?}, {:?}, {:x})",
-        name,
-        name_len,
-        oldp,
-        oldlenp,
-        newp,
-        newlen
-    );
-    match name_len {
-        2 => {
-            let (name0, name1) = (env.mem.read(name), env.mem.read(name + 1));
-            sysctl_generic(
-                env,
-                |_| {
-                    let Some(val) = INT_MAP.get(&SysCtlNamePath::Length2(name0, name1)).cloned()
-                    else {
-                        unimplemented!("Unknown sysctl parameter ({name0}, {name1})!")
-                    };
-                    val
-                },
-                oldp,
-                oldlenp,
-                newp,
-                newlen,
-            )
-        }
-        4 => {
-            let (name0, name1, name2, name3) = (
-                env.mem.read(name),
-                env.mem.read(name + 1),
-                env.mem.read(name + 2),
-                env.mem.read(name + 3),
-            );
-            if SysCtlNamePath::Length4(name0, name1, name2, name3)
-                == SysCtlNamePath::Length4(CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0)
-            {
-                // In some Unity games, mono initialization set-ups perf
-                // counters, which set-ups a shared memory area, which gets
-                // a list of all processes via sysctl() if shm_open() fails.
-                // (See mono's [mono-perfcounters.c](https://github.com/mono/mono/blob/62121afbb28f0b62f100ec9a942d10c5e0f4814f/mono/metadata/mono-perfcounters.c#L392)
-                // and [mono-mmap.c](https://github.com/mono/mono/blob/0f53e9e151d92944cacab3e24ac359410c606df6/mono/utils/mono-mmap.c#L555))
-                // Stubbing that sysctl() call doesn't seem to have any impact
-                // on the games' functionality.
-                //
-                // ...but wait, why would perf counters need a shared memory
-                // area in the first place? This is left as an exercise for
-                // the reader.
-                set_errno(env, ENOENT);
-                log!("TODO: sysctl() for 'kern.proc.all', returning -1");
-                return -1;
-            }
-            sysctl_generic(
-                env,
-                |_| {
-                    let Some(val) = INT_MAP
-                        .get(&SysCtlNamePath::Length4(name0, name1, name2, name3))
-                        .cloned()
-                    else {
-                        unimplemented!(
-                            "Unknown sysctl parameter ({name0}, {name1}, {name2}, {name3})!"
-                        )
-                    };
-                    val
-                },
-                oldp,
-                oldlenp,
-                newp,
-                newlen,
-            )
-        }
-        _ => unimplemented!("sysctl() for name length {name_len} is unimplemented!"),
+    if name_len == 0 || name_len > 12 {
+        return error(env, EINVAL);
     }
+    let Some(bytes) = env
+        .mem
+        .get_bytes_fallible(name.cast_const().cast(), name_len * 4)
+    else {
+        return error(env, EFAULT);
+    };
+    let names: Vec<i32> = bytes
+        .chunks_exact(4)
+        .map(|bytes| i32::from_le_bytes(bytes.try_into().unwrap()))
+        .collect();
+    let key = match names.as_slice() {
+        &[a, b] => SysCtlNamePath::Length2(a, b),
+        &[a, b, c, d] => SysCtlNamePath::Length4(a, b, c, d),
+        _ => SysCtlNamePath::Undefined,
+    };
+    sysctl_generic(env, INT_MAP.get(&key).cloned(), oldp, oldlenp, newp, newlen)
 }
 
 fn sysctlbyname(
@@ -201,84 +161,107 @@ fn sysctlbyname(
     newp: MutVoidPtr,
     newlen: GuestUSize,
 ) -> i32 {
-    // TODO: handle errno properly
-    set_errno(env, 0);
-
-    let name_str = env.mem.cstr_at_utf8(name).unwrap();
-    log_dbg!(
-        "sysctlbyname({:?}, {:?}, {:?}, {:?}, {:x})",
-        name_str,
-        oldp,
-        oldlenp,
-        newp,
-        newlen
-    );
-    sysctl_generic(
-        env,
-        |env| {
-            let name_str = env.mem.cstr_at_utf8(name).unwrap();
-            let Some((name_str, val)) = STRING_MAP.get_key_value(name_str) else {
-                unimplemented!("Unknown sysctlbyname parameter {name_str}!")
-            };
-            (name_str, val.clone())
-        },
-        oldp,
-        oldlenp,
-        newp,
-        newlen,
-    )
+    let mut bytes = Vec::new();
+    for offset in 0..1024 {
+        let Some(address) = name.to_bits().checked_add(offset) else {
+            return error(env, EFAULT);
+        };
+        let Some(byte) = env
+            .mem
+            .get_bytes_fallible(ConstPtr::<u8>::from_bits(address).cast(), 1)
+        else {
+            return error(env, EFAULT);
+        };
+        if byte[0] == 0 {
+            break;
+        }
+        bytes.push(byte[0]);
+    }
+    if bytes.len() == 1024 {
+        return error(env, ENAMETOOLONG);
+    }
+    let Ok(name) = std::str::from_utf8(&bytes) else {
+        return error(env, ENOENT);
+    };
+    let value = STRING_MAP
+        .get_key_value(name)
+        .map(|(&name, value)| (name, value.clone()));
+    sysctl_generic(env, value, oldp, oldlenp, newp, newlen)
 }
 
-fn sysctl_generic<F>(
+fn sysctl_generic(
     env: &mut Environment,
-    // Returns the name and value of the property (or exits)
-    name_lookup: F,
+    value: Option<(&'static str, SysInfoType)>,
     oldp: MutVoidPtr,
     oldlenp: MutPtr<GuestUSize>,
     newp: MutVoidPtr,
     newlen: GuestUSize,
-) -> i32
-where
-    F: FnOnce(&mut Environment) -> (&'static str, SysInfoType),
-{
-    assert!(newp.is_null());
-    assert_eq!(newlen, 0);
-
-    let (name_str, val) = name_lookup(env);
-    let len: GuestUSize = match val {
-        SysInfoType::String(str) => str.len() as GuestUSize + 1,
-        SysInfoType::Int32(_) => guest_size_of::<i32>(),
-        SysInfoType::Int64(_) => guest_size_of::<i64>(),
-        _ => unimplemented!(),
+) -> i32 {
+    let Some((_name, value)) = value else {
+        return error(env, ENOENT);
     };
+    // Process enumeration is not supplied by this runtime. Never enumerate
+    // the host's processes or turn an unavailable query into a host panic.
+    if matches!(value, SysInfoType::Struct) {
+        return error(env, ENOENT);
+    }
+    if !newp.is_null() {
+        return error(env, EPERM);
+    }
+    if newlen != 0 {
+        return error(env, EINVAL);
+    }
+    if oldlenp.is_null() {
+        return if oldp.is_null() {
+            0
+        } else {
+            error(env, EFAULT)
+        };
+    }
+    if env
+        .mem
+        .get_bytes_fallible(oldlenp.cast_const().cast(), 4)
+        .is_none()
+    {
+        return error(env, EFAULT);
+    }
+    let oldlen = env.mem.read(oldlenp);
+    let bytes = match value {
+        SysInfoType::String(string) => {
+            let mut bytes = string.to_vec();
+            bytes.push(0);
+            bytes
+        }
+        SysInfoType::Int32(number) => number.to_le_bytes().to_vec(),
+        // Darwin's sysctl_io_number accepts a four-byte destination for a
+        // quad-sized property when the value fits in a signed int. A size
+        // probe still reports the node's full eight-byte representation.
+        SysInfoType::Int64(number) if !oldp.is_null() && oldlen == 4 => {
+            let Ok(number) = i32::try_from(number) else {
+                return error(env, ERANGE);
+            };
+            number.to_le_bytes().to_vec()
+        }
+        SysInfoType::Int64(number) => number.to_le_bytes().to_vec(),
+        SysInfoType::Struct => unreachable!(),
+    };
+    let size = bytes.len() as GuestUSize;
     if oldp.is_null() {
-        env.mem.write(oldlenp, len);
+        env.mem.write(oldlenp, size);
         return 0;
     }
-    assert!(!oldp.is_null() && !oldlenp.is_null());
-    let oldlen = env.mem.read(oldlenp);
-    if oldlen < len {
-        // TODO: set errno
-        // TODO: write partial data
-        log!("sysctl(byname) for '{name_str}': the buffer of size {oldlen} is too low to fit the value of size {len}, returning -1");
-        return -1;
+    if oldlen < size {
+        // iPhone OS 3's sysctl_old_user rejects an undersized scalar/string
+        // transfer before copying it; oldlen records zero bytes transferred.
+        env.mem.write(oldlenp, 0);
+        return error(env, ENOMEM);
     }
-    match val {
-        SysInfoType::String(str) => {
-            let sysctl_str = env.mem.alloc_and_write_cstr(str);
-            env.mem.memmove(oldp, sysctl_str.cast().cast_const(), len);
-            env.mem.free(sysctl_str.cast());
-        }
-        SysInfoType::Int32(num) => {
-            env.mem.write(oldp.cast(), num);
-        }
-        SysInfoType::Int64(num) => {
-            env.mem.write(oldp.cast(), num);
-        }
-        _ => unimplemented!(),
-    }
-    env.mem.write(oldlenp, len);
-    0 // success
+    let Some(destination) = env.mem.get_bytes_fallible_mut(oldp.cast_const(), size) else {
+        return error(env, EFAULT);
+    };
+    destination.copy_from_slice(&bytes);
+    env.mem.write(oldlenp, size);
+    0
 }
 
 pub const FUNCTIONS: FunctionExports = &[
