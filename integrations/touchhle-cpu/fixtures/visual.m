@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 typedef signed char BOOL;
+typedef id (*IMP)(id,SEL,...);
 extern SEL sel_getUid(const char *name);
 extern SEL sel_registerName(const char *name);
 typedef struct { float x,y; } CGPoint;
@@ -13,7 +14,10 @@ typedef struct { CGPoint origin; CGSize size; } CGRect;
 __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 + (id)alloc;
 + (Class)class;
++ (IMP)methodForSelector:(SEL)selector;
++ (IMP)instanceMethodForSelector:(SEL)selector;
 - (id)init;
+- (IMP)methodForSelector:(SEL)selector;
 @end
 @interface NSAutoreleasePool : NSObject @end
 @interface NSNumber : NSObject
@@ -316,6 +320,16 @@ int main(int argc,char **argv) {
         failures += [wide longValue]!=-1;
         NSNumber *zero=[[NSNumber alloc] initWithUnsignedLong:0];
         failures += [zero unsignedLongValue]!=0;
+        IMP numberMethod=[wide methodForSelector:@selector(unsignedLongValue)];
+        failures += ((unsigned long (*)(id,SEL))numberMethod)(wide,@selector(unsignedLongValue))!=0xffffffffUL;
+        failures += numberMethod!=[NSNumber instanceMethodForSelector:@selector(unsignedLongValue)];
+        IMP factory=[NSNumber methodForSelector:@selector(numberWithUnsignedLong:)];
+        NSNumber *direct=((id (*)(id,SEL,unsigned long))factory)([NSNumber class],@selector(numberWithUnsignedLong:),42);
+        failures += [direct unsignedLongValue]!=42;
+        IMP action=[target methodForSelector:@selector(ended:)];
+        ((void (*)(id,SEL,id))action)(target,@selector(ended:),0);
+        failures += target->ended!=1;
+        target->ended=0;
         failures += sel_getUid("setText:")!=sel_registerName("setText:");
         failures += sel_getUid("fixtureNewSelector:")!=sel_registerName("fixtureNewSelector:");
         NSBundle *main=[NSBundle mainBundle];

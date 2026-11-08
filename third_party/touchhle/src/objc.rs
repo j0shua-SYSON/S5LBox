@@ -47,9 +47,10 @@ pub use selectors::{selector, SEL};
 
 use crate::mem::ConstVoidPtr;
 use crate::Environment;
+pub(crate) use classes::class_getMethodImplementation;
 use classes::{
-    class_getInstanceSize, class_getMethodImplementation, class_getProperty, class_getSuperclass,
-    class_replaceMethod, objc_getClass, ClassHostObject, FakeClass, UnimplementedClass,
+    class_getInstanceSize, class_getProperty, class_getSuperclass, class_replaceMethod,
+    objc_getClass, ClassHostObject, FakeClass, UnimplementedClass,
 };
 pub(crate) use messages::objc_msgSend;
 use messages::{objc_msgSendSuper2, objc_msgSend_stret, MsgSendSignature, MsgSendSuperSignature};
@@ -90,6 +91,8 @@ pub struct ObjC {
     /// Type information isn't part of the `objc_msgSend` ABI, so an alternative
     /// channel is needed.
     message_type_info: Option<(std::any::TypeId, &'static str)>,
+    /// Callable guest addresses for host-backed Objective-C implementations.
+    host_method_trampolines: HashMap<usize, crate::abi::GuestFunction>,
 }
 
 impl ObjC {
@@ -101,6 +104,7 @@ impl ObjC {
             sync_mutexes: HashMap::new(),
             initializer_threads: HashMap::new(),
             message_type_info: None,
+            host_method_trampolines: HashMap::new(),
         }
     }
 }

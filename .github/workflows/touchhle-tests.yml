@@ -320,7 +320,7 @@ jobs:
         run: |
           set -euo pipefail
           result=0
-          ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/HLEVisual.app --headless --args --cancel-smoke > ../../work/hle-cancel.log 2>&1 || result=$?
+          ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/HLEVisual.app --headless --preferred-languages=en --args --cancel-smoke > ../../work/hle-cancel.log 2>&1 || result=$?
           cat ../../work/hle-cancel.log
           test "$result" -eq 0
           grep -F 'S5LBOX-HLE-CANCEL PASS failures=0' ../../work/hle-cancel.log

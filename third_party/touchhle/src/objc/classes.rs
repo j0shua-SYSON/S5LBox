@@ -1094,7 +1094,7 @@ pub(super) fn class_replaceMethod(
     existing
 }
 
-pub(super) fn class_getMethodImplementation(env: &mut Environment, cls: Class, name: SEL) -> IMP {
+pub(crate) fn class_getMethodImplementation(env: &mut Environment, cls: Class, name: SEL) -> IMP {
     if cls == nil {
         return IMP::guest_null();
     }
@@ -1105,12 +1105,26 @@ pub(super) fn class_getMethodImplementation(env: &mut Environment, cls: Class, n
             ref methods,
             ..
         } = env.objc.borrow(class);
-        if methods.contains_key(&name) {
-            let method = methods.get(&name).unwrap().clone();
-            assert!(matches!(method, IMP::Guest(_))); // TODO
-            return method;
+        if let Some(method) = methods.get(&name) {
+            let host = match method {
+                IMP::Guest(function) => return IMP::Guest(*function),
+                IMP::Host(host) => *host,
+            };
+            let key = host as *const dyn HostIMP as *const () as usize;
+            let function = if let Some(&cached) = env.objc.host_method_trampolines.get(&key) {
+                cached
+            } else {
+                let function =
+                    env.dyld
+                        .create_guest_function(&mut env.mem, "Objective-C method", host);
+                env.cpu
+                    .invalidate_cache_range(function.addr_without_thumb_bit(), 8);
+                env.objc.host_method_trampolines.insert(key, function);
+                function
+            };
+            return IMP::Guest(function);
         } else if next == nil {
-            // TODO: currently this returns NULL for unimplemented host methods
+            // TODO: return a forwarding implementation for unknown selectors.
             return IMP::guest_null();
         }
         class = next;
