@@ -181,6 +181,27 @@ int main(void) {
     [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
     CHECK([[AVAudioPlayer alloc] initWithContentsOfURL:url error:NULL] == nil);
     CHECK([[AVAudioPlayer alloc] initWithData:[NSMutableData data] error:NULL] == nil);
+    // MPEG-2 uses 576-frame packets, and this stream also exercises ID3 removal
+    // and mono decoding at the lower sample rate used by older game music.
+    data = [NSMutableData data];
+    unsigned char tag[10] = {'I','D','3',4,0,0,0,0,0,0};
+    [data appendBytes:tag length:sizeof(tag)];
+    unsigned char low[208] = {0xff,0xf3,0x80,0xc0};
+    for (int i=0; i<12; i++) [data appendBytes:low length:sizeof(low)];
+    CHECK([data writeToFile:path atomically:NO]);
+    CHECK(AudioFileOpenURL((CFURLRef)url,kAudioFileReadPermission,0,&file)==0);
+    size=sizeof(format);
+    CHECK(AudioFileGetProperty(file,kAudioFilePropertyDataFormat,&size,&format)==0);
+    CHECK(format.mFormatID==kAudioFormatMPEGLayer3 && format.mFramesPerPacket==576 && format.mSampleRate==22050 && format.mChannelsPerFrame==1);
+    CHECK(AudioFileClose(file)==0);
+    CHECK(ExtAudioFileOpenURL((CFURLRef)url,&ext)==0);
+    pcm.mSampleRate=22050; pcm.mChannelsPerFrame=1; pcm.mBytesPerPacket=2; pcm.mBytesPerFrame=2;
+    CHECK(ExtAudioFileSetProperty(ext,kExtAudioFileProperty_ClientDataFormat,sizeof(pcm),&pcm)==0);
+    frames=15000; output.mBuffers[0].mDataByteSize=sizeof(samples);
+    CHECK(ExtAudioFileRead(ext,&frames,&output)==0 && frames==12*576);
+    CHECK(output.mBuffers[0].mDataByteSize==frames*2);
+    CHECK(ExtAudioFileDispose(ext)==0);
+    [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
     printf("S5LBOX-HLE-AUDIO %s failures=%d\n", failures ? "FAIL" : "PASS", failures);
     [pool drain]; return failures ? 1 : 0;
 }
