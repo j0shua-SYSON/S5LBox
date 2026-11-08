@@ -26,6 +26,37 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
+## Optional AMC software control component
+
+A standalone AMC r2 component supports the start-address register and its
+software status latch, plus two interrupt-mask banks. Its owner supplies four
+initial read words and a powered, idle context; there are no silicon reset
+defaults. Readback bits outside the supported fields remain the supplied,
+stable observations. Host reset restores those explicit inputs. Repeating an
+identical configuration preserves current state; conflicting inputs refuse.
+
+Aligned word accesses support start address `0x988` (low 16 bits), commands
+`0x990` and `0x994` (value 1 only) to set and clear status `0x998` bit 0, and
+interrupt-mask set/clear/read at `0xa8c/0xa90/0xa94` (low 30 bits) and
+`0xb0c/0xb10/0xb14` (all 32 bits). Mask writes affect only written one bits.
+Unsupported widths, directions, fields and addresses preserve state and
+refuse. Initial readback and reserved-bit values are explicit inputs, not
+values inferred from the software's masks.
+
+The matching 6.1.6 AMC driver provides start-address read/write helpers and
+built-in tests that compare two programmed addresses, exercise the status
+clear/set/clear sequence, and verify both interrupt-mask banks. The r2 setup
+passes flag 1 to its runtime record; the corresponding helper masks the first
+bank to 30 bits. The earlier revision's 27-bit mask is not used as the r2
+field width. Original program-memory queries independently require hardware
+offset and size words spaced `0x14` bytes apart; their values remain unknown.
+
+This component has no board attachment, clock-gate coupling, pending interrupt
+causes or IRQ output. Engine-start `0x984`, doorbell `0x98c`, reset `0x99c`,
+completion status, FIFO, program memory, DMA and shared audio control remain
+unsupported. Software control-register tests do not establish engine
+execution, audio output, or further progress through the full kernel boot.
+
 ## Optional SDHC reset and clock component
 
 An explicitly initialized SDHC component models a bounded SDHCI-compatible
