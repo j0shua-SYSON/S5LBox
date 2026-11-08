@@ -28,6 +28,16 @@ without starting the full-system emulator or virtual USB. An existing saved
 machine must first shut down cleanly; its RAM checkpoint is never discarded
 as a substitute for flushing the guest filesystem.
 
+Apps provides a searchable icon grid, a machine-profile picker, Legacy Store,
+and IPA import. Each profile retains its own installations and saved data.
+A new profile can prepare its disk from configured firmware without executing
+the guest. Offline installation validates the IPA, stages its bundle and the
+iPhone OS installation registry together, and publishes only the completed
+transaction. Updates preserve the existing app container and its Documents,
+Library and temporary directories. Large installations checkpoint internally
+inside the unpublished clone to bound memory; individual files currently have
+a 64 MiB limit. Booting iPhone OS subsequently uses that same disk and registry.
+
 Offline changes use an exclusive machine-storage lease and an unpublished
 filesystem clone. File sync, close, rename and deletion publish a flushed disk
 through the existing recovery transaction, invalidating stale CPU/RAM restore

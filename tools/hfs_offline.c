@@ -45,7 +45,7 @@ typedef struct record {
     uint8_t *key, *value, *data;
     uint16_t key_length, value_length;
     size_t capacity;
-    bool removed, dirty;
+    bool removed, dirty, forgotten;
 } record;
 struct hfs_offline {
     FILE *source;
@@ -88,7 +88,7 @@ static uint32_t object_id(const record *r) {
     return type==1 || type==2?r32(r->value+8):0;
 }
 static record *by_id(hfs_offline *v,uint32_t id) {
-    for (size_t i=0;i<v->count;i++) if (object_id(v->records[i])==id) return v->records[i];
+    for (size_t i=0;i<v->count;i++) if (!v->records[i]->forgotten && object_id(v->records[i])==id) return v->records[i];
     return NULL;
 }
 static uint32_t mode_of(const record *r) {
@@ -392,7 +392,7 @@ static void parent_changed(hfs_offline *v,uint32_t parent,int delta,bool folder)
 }
 int hfs_offline_create(hfs_offline *v,uint32_t parent,const uint16_t *name,size_t length,uint32_t mode,uint32_t *id) {
     int e=valid_parent(v,parent,name,length); if (e) return e;
-    if (!id || ((mode&TYPE_MODE)!=DIR_MODE && (mode&TYPE_MODE)!=FILE_MODE)) return EINVAL;
+    if (!id || ((mode&TYPE_MODE)!=DIR_MODE && (mode&TYPE_MODE)!=FILE_MODE && (mode&TYPE_MODE)!=LINK_MODE)) return EINVAL;
     hfs_offline_info found; if (!hfs_offline_lookup(v,parent,name,length,&found)) return EEXIST;
     if (v->next_id==UINT32_MAX || v->count>MAX_RECORDS-2) return ENOSPC;
     record *r=(record *)calloc(1,sizeof *r),*t=(record *)calloc(1,sizeof *t);
@@ -412,7 +412,7 @@ int hfs_offline_create(hfs_offline *v,uint32_t parent,const uint16_t *name,size_
     e=add_record(v,t); if (e) { v->count--; free_record(r); free_record(t); return e; }
     *id=v->next_id++; parent_changed(v,parent,1,folder); v->dirty=true; return 0;
 }
-int hfs_offline_remove(hfs_offline *v,uint32_t id) {
+static int remove_inode(hfs_offline *v,uint32_t id,bool retain) {
     if (!v || v->failed || id<16) return EINVAL;
     record *r=by_id(v,id); if (!r || r->removed) return ENOENT;
     for (size_t i=0;i<v->attribute_count;i++) {
@@ -425,11 +425,19 @@ int hfs_offline_remove(hfs_offline *v,uint32_t id) {
         if (!hfs_offline_next(v,id,&cursor,&child)) return ENOTEMPTY;
     } else {
         int e=fork_inline(v,r->value+168); if (e) return e;
-        e=buffer_file(v,r,r64(r->value+88)); if (e) return e;
+        if (retain) { e=buffer_file(v,r,r64(r->value+88)); if (e) return e; }
+        else { e=fork_inline(v,r->value+88); if (e) return e; }
     }
     record *t=thread_for(v,id); if (!t) return EIO;
     for (size_t i=0;i<v->attribute_count;i++) if (r32(v->attributes[i]->key+4)==id) v->attributes[i]->removed=true;
     r->removed=t->removed=true; parent_changed(v,r32(r->key+2),-1,folder); v->dirty=true; return 0;
+}
+int hfs_offline_remove(hfs_offline *v,uint32_t id) { return remove_inode(v,id,true); }
+int hfs_offline_remove_closed(hfs_offline *v,uint32_t id) {
+    record *r=v?by_id(v,id):NULL;
+    int e=remove_inode(v,id,false);
+    if (!e && r) { v->dirty_bytes-=r->capacity; free(r->data); r->data=NULL; r->capacity=0; r->forgotten=true; }
+    return e;
 }
 int hfs_offline_rename(hfs_offline *v,uint32_t id,uint32_t parent,const uint16_t *name,size_t length) {
     int e=valid_parent(v,parent,name,length); if (e) return e;

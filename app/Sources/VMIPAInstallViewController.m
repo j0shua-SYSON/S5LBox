@@ -3,6 +3,7 @@
 #import "VMIPAPackage.h"
 #import "VMInstanceStore.h"
 #import "VMUSBInstaller.h"
+#import "VMTouchHLEOfflineFiles.h"
 
 @interface VMIPAInstallViewController ()
 - (void)setBusy:(BOOL)busy message:(NSString *)message;
@@ -84,6 +85,7 @@
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section != 0) return nil;
     if (_liveTransport) return @"An existing version of this app may be replaced.";
+    if (_offlineTouchHLE) return @"Updates keep this profile's app data.";
     return @"Requires an unencrypted ARMv6 app for iPhone OS 3.1.3 or earlier. Updates require a running machine.";
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {
@@ -101,7 +103,7 @@
         cell.accessibilityIdentifier = @"s5lbox.ipa.package";
     } else if (path.section == 1) {
         BOOL enabled = !_busy && (_installed || _package != nil);
-        cell.textLabel.text = _installed ? (_liveTransport ? @"Return to machine" : @"Start machine") : @"Install";
+        cell.textLabel.text = _installed ? (_offlineTouchHLE ? @"Return to Apps" : _liveTransport ? @"Return to machine" : @"Start machine") : @"Install";
         cell.accessibilityIdentifier = @"s5lbox.ipa.install";
         cell.textLabel.textColor = enabled ? UIColor.systemBlueColor : UIColor.tertiaryLabelColor;
         cell.userInteractionEnabled = enabled;
@@ -148,12 +150,13 @@
 - (void)confirmInstall {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:
         [NSString stringWithFormat:@"Install %@?", _package.displayName]
-        message:_liveTransport ? [NSString stringWithFormat:@"Install in %@?", _machineName]
+        message:(_liveTransport || _offlineTouchHLE) ? [NSString stringWithFormat:@"Install in %@?", _machineName]
             : [NSString stringWithFormat:@"%@ will shut down first. Existing apps will not be replaced.", _machineName]
         preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Install" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         if (self->_liveTransport) { [self installLive]; return; }
+        if (self->_offlineTouchHLE) { [self installPackage]; return; }
         if (!self.prepareHandler) return;
         self->_installOnReturn = YES;
         self.prepareHandler();
@@ -218,12 +221,19 @@
     VMIPAPackage *package = _package;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *error = nil;
-        BOOL installed = [package installInDirectory:directory error:&error];
+        BOOL installed=NO;
+#if S5LBOX_TOUCHHLE
+        if (self->_offlineTouchHLE) {
+            VMTouchHLEOfflineFiles *files=[[VMTouchHLEOfflineFiles alloc] initWithInstanceID:self->_identifier error:&error];
+            installed=[files installPackage:package error:&error]; [files close];
+        } else
+#endif
+        installed=[package installInDirectory:directory error:&error];
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_installed = installed;
             if (installed) self->_package = nil;
             [self setBusy:NO message:installed
-                ? @"App added to the guest disk. Start the machine to refresh its Home screen icon. Compatibility checks do not guarantee the app will run."
+                ? (self->_offlineTouchHLE ? @"Installed. Open it from Apps." : @"App added to the guest disk. Start the machine to refresh its Home screen icon. Compatibility checks do not guarantee the app will run.")
                 : error.localizedDescription ?: @"Installation did not finish."];
             if (self->_backgroundTask != UIBackgroundTaskInvalid) {
                 [app endBackgroundTask:self->_backgroundTask];

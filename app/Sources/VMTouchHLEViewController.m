@@ -6,6 +6,9 @@
 #import "VMTouchHLEFiles.h"
 #import "VMTouchHLEOfflineFiles.h"
 #import "VMInstanceStore.h"
+#import "VMIPALibraryViewController.h"
+#import "VMIPAInstallViewController.h"
+#import "VMLegacyStoreViewController.h"
 #import "VMGuestApplications.h"
 #import "VMPackageBridge.h"
 #import "VMUSBService.h"
@@ -664,7 +667,28 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
 - (void)dealloc { _discovery.canceled=YES; _setup.canceled=YES; }
 @end
 
-@interface VMTouchHLEOfflineAppsViewController () <UISearchResultsUpdating>
+@interface HLELauncherCell : UICollectionViewCell
+@property(nonatomic,strong) UIImageView *artwork;
+@property(nonatomic,strong) UILabel *name;
+@end
+@implementation HLELauncherCell
+- (instancetype)initWithFrame:(CGRect)frame {
+    self=[super initWithFrame:frame]; if (!self) return nil;
+    _artwork=[UIImageView new]; _artwork.contentMode=UIViewContentModeScaleAspectFit;
+    _artwork.layer.cornerRadius=15; _artwork.clipsToBounds=YES;
+    _name=[UILabel new]; _name.font=[UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
+    _name.adjustsFontForContentSizeCategory=YES; _name.numberOfLines=2; _name.textAlignment=NSTextAlignmentCenter;
+    [self.contentView addSubview:_artwork]; [self.contentView addSubview:_name];
+    self.isAccessibilityElement=YES; self.accessibilityTraits=UIAccessibilityTraitButton; return self;
+}
+- (void)layoutSubviews {
+    [super layoutSubviews]; CGFloat width=self.contentView.bounds.size.width;
+    _artwork.frame=CGRectMake((width-64)/2,0,64,64);
+    _name.frame=CGRectMake(0,72,width,self.contentView.bounds.size.height-72);
+}
+- (void)setHighlighted:(BOOL)highlighted { [super setHighlighted:highlighted]; self.contentView.alpha=highlighted?0.55:1; }
+@end
+@interface VMTouchHLEOfflineAppsViewController () <UISearchResultsUpdating,UICollectionViewDataSource,UICollectionViewDelegateFlowLayout>
 @end
 @implementation VMTouchHLEOfflineAppsViewController {
     NSString *_instanceID,*_machineName,*_message;
@@ -674,19 +698,29 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
     UILabel *_emptyLabel;
     UIButton *_machineButton;
     UIActivityIndicatorView *_loadingIndicator;
+    UICollectionView *_collection;
+    CGFloat _layoutWidth;
     BOOL _loading;
 }
-- (instancetype)init { return [super initWithStyle:UITableViewStylePlain]; }
 - (void)viewDidLoad {
     [super viewDidLoad]; self.title=@"Apps";
-    self.tableView.rowHeight=76; self.tableView.separatorInset=UIEdgeInsetsMake(0,84,0,0);
-    self.tableView.accessibilityIdentifier=@"s5lbox.offline.apps";
-    self.navigationItem.rightBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:@"Machine" style:UIBarButtonItemStylePlain target:self action:@selector(chooseMachine)];
+    UICollectionViewFlowLayout *layout=[UICollectionViewFlowLayout new];
+    layout.minimumInteritemSpacing=12; layout.minimumLineSpacing=20; layout.sectionInset=UIEdgeInsetsMake(24,20,24,20);
+    _collection=[[UICollectionView alloc] initWithFrame:self.view.bounds collectionViewLayout:layout];
+    _collection.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
+    _collection.backgroundColor=UIColor.systemBackgroundColor; _collection.alwaysBounceVertical=YES;
+    _collection.dataSource=self; _collection.delegate=self; _collection.accessibilityIdentifier=@"s5lbox.offline.apps";
+    [_collection registerClass:HLELauncherCell.class forCellWithReuseIdentifier:@"App"];
+    [self.view addSubview:_collection];
+    self.navigationItem.leftBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:@"Profiles" style:UIBarButtonItemStylePlain target:self action:@selector(chooseMachine)];
+    UIBarButtonItem *add=[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd target:self action:@selector(openLibrary)];
+    add.accessibilityLabel=@"Import apps";
+    self.navigationItem.rightBarButtonItems=@[add,[[UIBarButtonItem alloc] initWithTitle:@"Store" style:UIBarButtonItemStylePlain target:self action:@selector(openStore)]];
     _search=[[UISearchController alloc] initWithSearchResultsController:nil];
     _search.obscuresBackgroundDuringPresentation=NO; _search.searchResultsUpdater=self;
     _search.searchBar.placeholder=@"Search apps"; self.navigationItem.searchController=_search;
     self.definesPresentationContext=YES;
-    self.refreshControl=[UIRefreshControl new]; [self.refreshControl addTarget:self action:@selector(refreshApps) forControlEvents:UIControlEventValueChanged];
+    _collection.refreshControl=[UIRefreshControl new]; [_collection.refreshControl addTarget:self action:@selector(refreshApps) forControlEvents:UIControlEventValueChanged];
     _emptyLabel=[UILabel new]; _emptyLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     _emptyLabel.adjustsFontForContentSizeCategory=YES; _emptyLabel.numberOfLines=0;
     _emptyLabel.textAlignment=NSTextAlignmentCenter; _emptyLabel.textColor=UIColor.secondaryLabelColor;
@@ -701,12 +735,20 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
         [stack.leadingAnchor constraintEqualToAnchor:background.leadingAnchor constant:28],
         [stack.trailingAnchor constraintEqualToAnchor:background.trailingAnchor constant:-28],
         [_machineButton.heightAnchor constraintGreaterThanOrEqualToConstant:44]]];
-    self.tableView.backgroundView=background;
+    _collection.backgroundView=background;
 }
 - (void)viewWillAppear:(BOOL)animated { [super viewWillAppear:animated]; [self refreshApps]; }
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    if (_layoutWidth!=_collection.bounds.size.width) { _layoutWidth=_collection.bounds.size.width; [_collection.collectionViewLayout invalidateLayout]; }
+}
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    if (![previous.preferredContentSizeCategory isEqual:self.traitCollection.preferredContentSizeCategory]) [_collection.collectionViewLayout invalidateLayout];
+}
 - (void)chooseMachine {
     if (_loading) return;
-    UIAlertController *sheet=[UIAlertController alertControllerWithTitle:@"Apps from" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    UIAlertController *sheet=[UIAlertController alertControllerWithTitle:@"Machine profile" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
     VMInstanceStore *store=VMInstanceStore.sharedStore;
     for (NSUInteger i=0;i<store.count;i++) {
         NSDictionary *row=[store instanceAtIndex:i]; NSString *identifier=row[@"id"];
@@ -715,11 +757,51 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
             [self refreshApps];
         }]];
     }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"New Profile…" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) { [self createProfile]; }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    sheet.popoverPresentationController.barButtonItem=self.navigationItem.rightBarButtonItem;
+    sheet.popoverPresentationController.barButtonItem=self.navigationItem.leftBarButtonItem;
     [self presentViewController:sheet animated:YES completion:nil];
 }
-- (void)showMachine { if (self.openMachine) self.openMachine(_instanceID); }
+- (void)showMachine {
+    if (!_instanceID) { [self createProfile]; return; }
+    if (self.openMachine) self.openMachine(_instanceID);
+}
+- (void)createProfile {
+    UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"New Profile" message:nil preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) { field.placeholder=@"Profile name"; field.autocapitalizationType=UITextAutocapitalizationTypeWords; }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Create" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        NSError *error=nil; NSString *name=[alert.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        NSString *identifier=[VMInstanceStore.sharedStore createInstanceNamed:name.length?name:@"iPhone OS 3.1.3" error:&error];
+        if (identifier) { self->_instanceID=identifier; [NSUserDefaults.standardUserDefaults setObject:identifier forKey:@"OfflineAppsMachine"]; [self refreshApps]; }
+        else { self->_message=error.localizedDescription; [self filterApps]; }
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+- (void)installURL:(NSURL *)url {
+    if (!_instanceID) { [self showMachine]; return; }
+    VMIPAInstallViewController *install=[[VMIPAInstallViewController alloc] initWithInstanceID:_instanceID machineName:_machineName];
+    install.offlineTouchHLE=YES;
+    __weak VMTouchHLEOfflineAppsViewController *weakSelf=self;
+    install.readyHandler=^{ VMTouchHLEOfflineAppsViewController *owner=weakSelf; if (owner) [owner.navigationController popToViewController:owner animated:YES]; };
+    [self.navigationController pushViewController:install animated:YES]; [install inspectURL:url];
+}
+- (void)openLibrary {
+    if (_loading) return;
+    if (!_instanceID) { [self showMachine]; return; }
+    VMIPALibraryViewController *library=[VMIPALibraryViewController new]; library.storeTarget=VMLegacyStoreTarget.supportedGuest;
+    __weak VMTouchHLEOfflineAppsViewController *weakSelf=self;
+    library.selectionHandler=^(NSURL *url) { [weakSelf installURL:url]; };
+    [self.navigationController pushViewController:library animated:YES];
+}
+- (void)openStore {
+    if (_loading) return;
+    if (!_instanceID) { [self showMachine]; return; }
+    VMLegacyStoreViewController *store=[[VMLegacyStoreViewController alloc] initWithTarget:VMLegacyStoreTarget.supportedGuest];
+    __weak VMTouchHLEOfflineAppsViewController *weakSelf=self;
+    store.selectionHandler=^(NSURL *url) { [weakSelf installURL:url]; };
+    [self.navigationController pushViewController:store animated:YES];
+}
 - (void)refreshApps {
     if (_loading) return;
     VMInstanceStore *store=VMInstanceStore.sharedStore;
@@ -728,11 +810,13 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
     for (NSUInteger i=0;i<store.count;i++) { NSDictionary *row=[store instanceAtIndex:i]; if ([row[@"id"] isEqual:_instanceID]) selected=row; }
     if (!selected) selected=[store instanceAtIndex:0];
     _instanceID=selected[@"id"]; _machineName=selected[@"name"];
+    self.navigationItem.leftBarButtonItem.title=_machineName ?: @"Profiles";
+    self.navigationItem.leftBarButtonItem.accessibilityLabel=[@"Machine profile, " stringByAppendingString:_machineName ?: @"None"];
     _apps=@[]; _visibleApps=@[]; _icons=@{}; _message=nil;
     if (!_instanceID) {
-        _message=@"Create a machine to start your app collection."; [self filterApps]; [self.refreshControl endRefreshing]; return;
+        _message=@"Create a machine to start your app collection."; [self filterApps]; [_collection.refreshControl endRefreshing]; return;
     }
-    _loading=YES; self.navigationItem.rightBarButtonItem.enabled=NO;
+    _loading=YES; self.navigationItem.leftBarButtonItem.enabled=NO;
     [_loadingIndicator startAnimating]; [self filterApps];
     NSString *identifier=_instanceID;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
@@ -743,16 +827,16 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
             for (VMGuestApplication *app in apps) {
                 NSData *data=[files iconForApplication:app]; UIImage *image=data?[UIImage imageWithData:data]:nil;
                 if (image) {
-                    UIGraphicsImageRenderer *renderer=[[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(52,52)];
-                    icons[app.identifier]=[renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *context) { [image drawInRect:CGRectMake(0,0,52,52)]; }];
+                    UIGraphicsImageRenderer *renderer=[[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(64,64)];
+                    icons[app.identifier]=[renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *context) { [image drawInRect:CGRectMake(0,0,64,64)]; }];
                 }
             }
             [files close];
             dispatch_async(dispatch_get_main_queue(), ^{
-                self->_loading=NO; self.navigationItem.rightBarButtonItem.enabled=YES;
+                self->_loading=NO; self.navigationItem.leftBarButtonItem.enabled=YES;
                 self->_apps=apps?:@[]; self->_icons=icons;
                 self->_message=error.localizedDescription;
-                [self->_loadingIndicator stopAnimating]; [self.refreshControl endRefreshing]; [self filterApps];
+                [self->_loadingIndicator stopAnimating]; [self->_collection.refreshControl endRefreshing]; [self filterApps];
             });
         }
     });
@@ -763,33 +847,51 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
     _visibleApps=query.length?[_apps filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(VMGuestApplication *app,__unused NSDictionary *bindings) {
         return [app.name localizedCaseInsensitiveContainsString:query] || [app.identifier localizedCaseInsensitiveContainsString:query];
     }]]:_apps;
-    BOOL empty=!_visibleApps.count; self.tableView.backgroundView.hidden=!empty;
-    _emptyLabel.text=_loading?@"Reading apps…":_message ?: (_apps.count?@"No matching apps.":@"Apps installed in this machine appear here.");
-    _machineButton.hidden=_loading || (_apps.count && !_message);
+    BOOL empty=!_visibleApps.count; _collection.backgroundView.hidden=!empty;
+    _emptyLabel.text=_loading?@"Reading apps…":_message ?: (_apps.count?@"No matching apps.":@"Your apps appear here. Browse the Store or import an IPA to get started.");
+    _machineButton.hidden=_loading || !_message.length;
+    [_machineButton setTitle:_instanceID?@"Open Machine":@"New Profile" forState:UIControlStateNormal];
     _loadingIndicator.hidden=!_loading;
-    [self.tableView reloadData];
+    [_collection reloadData];
 }
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { (void)tableView; (void)section; return (NSInteger)_visibleApps.count; }
-- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section { (void)tableView; (void)section; return _machineName; }
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    UITableViewCell *cell=[tableView dequeueReusableCellWithIdentifier:@"OfflineApp"];
-    if (!cell) cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"OfflineApp"];
-    VMGuestApplication *app=_visibleApps[(NSUInteger)indexPath.row]; cell.textLabel.text=app.name;
-    cell.textLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline]; cell.textLabel.adjustsFontForContentSizeCategory=YES;
-    cell.detailTextLabel.text=app.version; cell.detailTextLabel.textColor=UIColor.secondaryLabelColor;
-    cell.detailTextLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline]; cell.detailTextLabel.adjustsFontForContentSizeCategory=YES;
-    cell.imageView.image=_icons[app.identifier] ?: [UIImage systemImageNamed:@"app"];
-    cell.imageView.layer.cornerRadius=12; cell.imageView.clipsToBounds=YES;
-    cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;
+- (NSInteger)collectionView:(UICollectionView *)collectionView numberOfItemsInSection:(NSInteger)section { (void)collectionView; (void)section; return (NSInteger)_visibleApps.count; }
+- (CGSize)collectionView:(UICollectionView *)collectionView layout:(UICollectionViewLayout *)layout sizeForItemAtIndexPath:(NSIndexPath *)indexPath {
+    (void)layout; (void)indexPath; CGFloat width=collectionView.bounds.size.width-40;
+    BOOL large=UIContentSizeCategoryIsAccessibilityCategory(self.traitCollection.preferredContentSizeCategory);
+    NSUInteger columns=large?2:MAX(3,(NSUInteger)(width/100));
+    return CGSizeMake(floor((width-12*(columns-1))/columns),76+2*[UIFont preferredFontForTextStyle:UIFontTextStyleCaption1].lineHeight);
+}
+- (UICollectionViewCell *)collectionView:(UICollectionView *)collectionView cellForItemAtIndexPath:(NSIndexPath *)indexPath {
+    HLELauncherCell *cell=[collectionView dequeueReusableCellWithReuseIdentifier:@"App" forIndexPath:indexPath];
+    VMGuestApplication *app=_visibleApps[(NSUInteger)indexPath.row]; cell.name.text=app.name;
+    cell.artwork.image=_icons[app.identifier] ?: [UIImage systemImageNamed:@"app.fill"];
+    cell.accessibilityLabel=app.name; cell.accessibilityHint=@"Opens with touchHLE";
     return cell;
 }
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+- (void)collectionView:(UICollectionView *)collectionView didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
+    [collectionView deselectItemAtIndexPath:indexPath animated:YES];
     VMGuestApplication *app=_visibleApps[(NSUInteger)indexPath.row];
+    [self openApplication:app];
+}
+- (void)openApplication:(VMGuestApplication *)app {
     HLERunViewController *run=[HLERunViewController new]; run.offline=YES;
     run.instanceID=_instanceID; run.appIdentifier=app.identifier; run.appName=app.name;
     UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:run]; nav.modalPresentationStyle=UIModalPresentationFullScreen;
     [self presentViewController:nav animated:YES completion:nil];
+}
+- (UIContextMenuConfiguration *)collectionView:(UICollectionView *)collectionView contextMenuConfigurationForItemAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point {
+    (void)collectionView; (void)point; VMGuestApplication *app=_visibleApps[(NSUInteger)indexPath.row];
+    return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:^UIMenu *(__unused NSArray<UIMenuElement *> *suggested) {
+        UIAction *open=[UIAction actionWithTitle:@"Open" image:[UIImage systemImageNamed:@"play"] identifier:nil handler:^(__unused UIAction *action) {
+            [self openApplication:app];
+        }];
+        UIAction *details=[UIAction actionWithTitle:@"App Info" image:[UIImage systemImageNamed:@"info.circle"] identifier:nil handler:^(__unused UIAction *action) {
+            UIAlertController *alert=[UIAlertController alertControllerWithTitle:app.name
+                message:[NSString stringWithFormat:@"Version %@\n%@\n%@",app.version,self->_machineName,app.identifier] preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Done" style:UIAlertActionStyleCancel handler:nil]]; [self presentViewController:alert animated:YES completion:nil];
+        }];
+        return [UIMenu menuWithTitle:@"" children:@[open,details]];
+    }];
 }
 @end
 #endif

@@ -7,6 +7,7 @@
 - (void)inspectURL:(NSURL *)url;
 /* Set before inspection to use the running guest's installer, never HFS edits. */
 @property (nonatomic, strong) VMUSBTransport *liveTransport;
+@property (nonatomic) BOOL offlineTouchHLE;
 /* Machines owns shutdown/navigation. The package is inspected before this is
  * called. Re-present this controller only after a verified guest shutdown. */
 @property (nonatomic, copy) void (^prepareHandler)(void);

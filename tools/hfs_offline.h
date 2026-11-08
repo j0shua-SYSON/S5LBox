@@ -41,6 +41,8 @@ int hfs_offline_truncate(hfs_offline *, uint32_t id, uint64_t length);
 int hfs_offline_create(hfs_offline *, uint32_t parent, const uint16_t *name,
                        size_t length, uint32_t mode, uint32_t *id);
 int hfs_offline_remove(hfs_offline *, uint32_t id);
+/* Installer-only unlink when the caller has no open handles to this inode. */
+int hfs_offline_remove_closed(hfs_offline *, uint32_t id);
 /* Replacement has POSIX rename semantics. Open, unlinked files retain data
  * until the volume is closed; CNIDs are never reused during a session. */
 int hfs_offline_rename(hfs_offline *, uint32_t id, uint32_t parent,

@@ -7,6 +7,11 @@
 #import "VMResumeCheckpoint.h"
 #import "VMGuest.h"
 #import "VMIPAArchive.h"
+#import "VMIPAPackage.h"
+#import "VMSettings.h"
+#import "VMOptions.h"
+#import "VMInstancePaths.h"
+#import "VMBootOptions.h"
 #include "../../tools/hfs_offline.h"
 #include "../../tools/sha256.h"
 #include <fcntl.h>
@@ -77,6 +82,7 @@ static int32_t OfflineExchange(void *context,const uint8_t *request,uint32_t len
     NSMutableDictionary<NSNumber *,HLEOfflineHandle *> *_handles;
     NSMutableDictionary<NSString *,NSArray<NSString *> *> *_icons;
     NSError *_error;
+    BOOL _batchActive;
 }
 - (instancetype)initWithInstanceID:(NSString *)identifier error:(NSError **)error {
     self=[super init]; if (!self) return nil;
@@ -88,12 +94,34 @@ static int32_t OfflineExchange(void *context,const uint8_t *request,uint32_t len
         if (error) *error=OfflineError(EIO,[NSString stringWithUTF8String:detail]); return nil;
     }
     NSDictionary *identity=DiskIdentity(_live);
+    BOOL created=NO;
+    if (!identity && ![NSFileManager.defaultManager fileExistsAtPath:_live]) {
+        VMInstanceStore *store=VMInstanceStore.sharedStore; VMSettings *settings=VMSettings.sharedSettings;
+        vm_instance_paths_t paths; vm_firmware_boot_paths_t bootPaths;
+        BOOL mbx=NO,software=NO;
+        BOOL graphics=[store graphicsForOpeningInstanceWithID:identifier mbxEnabled:&mbx softwareRendererEnabled:&software error:error];
+        if (error && *error) return nil;
+        if (vm_instance_paths_derive(settings.firmwareDirectory.fileSystemRepresentation,store.machinesDirectory.fileSystemRepresentation,
+            identifier.UTF8String,&paths)!=VM_INSTANCE_PATHS_OK || vm_instance_work_plan(&paths)!=VM_INSTANCE_WORK_PROVISION) {
+            if (error) *error=OfflineError(EINVAL,@"This machine's existing storage must be opened and shut down before using Apps."); return nil;
+        }
+        vm_instance_paths_to_boot(&paths,&bootPaths);
+        bool values[VM_BOOT_OPTION_MAX]={0}; unsigned count=vm_option_count();
+        if (count>VM_BOOT_OPTION_MAX) { if (error) *error=OfflineError(EINVAL,@"The machine settings could not be loaded."); return nil; }
+        for (unsigned i=0;i<count;i++) values[i]=[settings valueForNewMachineOptionIndex:i];
+        int mbxIndex=vm_option_index("mbx"),softwareIndex=vm_option_index("ca-software-render");
+        if (graphics && mbxIndex>=0 && softwareIndex>=0) { values[mbxIndex]=mbx; values[softwareIndex]=software; }
+        if (!vm_firmware_boot_provision(&bootPaths,values,count,NULL,NULL,detail,sizeof detail)) {
+            if (error) *error=OfflineError(EIO,[NSString stringWithUTF8String:detail]); return nil;
+        }
+        identity=DiskIdentity(_live); created=identity!=nil;
+    }
     if (!identity) { if (error) *error=OfflineError(ENOENT,@"Set up this machine before opening its apps."); return nil; }
     _identity=identity;
     NSDictionary *witness=[NSDictionary dictionaryWithContentsOfFile:[_directory stringByAppendingPathComponent:@"offline-storage.plist"]];
     NSArray *images=[witness[@"images"] isKindOfClass:NSArray.class]?witness[@"images"]:@[];
     BOOL handedOff=[witness[@"version"] isEqual:@1] && [images containsObject:identity];
-    if (!handedOff) {
+    if (!handedOff && !created) {
         vm_resume_checkpoint_state_t state=vm_resume_checkpoint_probe_state(_directory.fileSystemRepresentation,
             [identity[@"size"] unsignedLongLongValue],VM_GUEST_RAM_BASE,VM_GUEST_RAM_SIZE,detail,sizeof detail);
         if (state!=VM_RESUME_CHECKPOINT_POWERED_OFF) {
@@ -232,11 +260,170 @@ static int32_t OfflineExchange(void *context,const uint8_t *request,uint32_t len
     return YES;
 }
 - (void)close {
-    if (!_volume) { [_lease close]; _lease=nil; return; }
-    [self flush]; hfs_offline_close(_volume); _volume=NULL; [_handles removeAllObjects];
+    if (!_batchActive) [self flush];
+    hfs_offline_close(_volume); _volume=NULL; [_handles removeAllObjects];
+    if (_batchActive) { char detail[320]; vm_guest_recovery_discard_stage(_directory.fileSystemRepresentation,detail,sizeof detail); _batchActive=NO; }
     [_lease close]; _lease=nil;
 }
 - (void)dealloc { [self close]; }
+
+- (int)ensureDirectory:(NSString *)path result:(hfs_offline_info *)result {
+    uint32_t parent=2;
+    for (NSString *component in [path componentsSeparatedByString:@"/"]) {
+        if (!component.length) continue;
+        if ([component isEqual:@"."] || [component isEqual:@".."] || component.length>255) return EINVAL;
+        int e=[self lookup:component parent:parent result:result];
+        if (e==ENOENT) {
+            NSString *name=component.decomposedStringWithCanonicalMapping;
+            if (name.length>255) return ENAMETOOLONG;
+            unichar units[255]; [name getCharacters:units range:NSMakeRange(0,name.length)]; uint32_t id=0;
+            e=hfs_offline_create(_volume,parent,units,name.length,0040755,&id);
+            if (!e) e=hfs_offline_stat(_volume,id,result);
+        }
+        if (e) return e;
+        if ((result->mode&0170000)!=0040000) return ENOTDIR;
+        parent=result->id;
+    }
+    return hfs_offline_stat(_volume,parent,result);
+}
+- (int)writeFile:(NSString *)path data:(NSData *)data mode:(uint32_t)mode {
+    hfs_offline_info parent,entry;
+    int e=[self ensureDirectory:path.stringByDeletingLastPathComponent result:&parent]; if (e) return e;
+    NSString *name=path.lastPathComponent.decomposedStringWithCanonicalMapping;
+    if (!name.length || name.length>255) return ENAMETOOLONG;
+    e=[self lookup:name parent:parent.id result:&entry];
+    if (e==ENOENT) {
+        unichar units[255]; [name getCharacters:units range:NSMakeRange(0,name.length)]; uint32_t id=0;
+        e=hfs_offline_create(_volume,parent.id,units,name.length,mode,&id);
+        if (!e) e=hfs_offline_stat(_volume,id,&entry);
+    }
+    if (e) return e;
+    if ((entry.mode&0170000)!=(mode&0170000)) return EINVAL;
+    e=hfs_offline_truncate(_volume,entry.id,0); if (e) return e;
+    return hfs_offline_write(_volume,entry.id,0,data.bytes,data.length);
+}
+- (NSData *)readFile:(NSString *)path error:(int *)error {
+    hfs_offline_info info;
+    *error=[self resolve:path root:2 followFinal:YES result:&info]; if (*error) return nil;
+    if ((info.mode&0170000)!=0100000 || info.size>8*1024*1024) { *error=EFBIG; return nil; }
+    NSMutableData *data=[NSMutableData dataWithLength:(NSUInteger)info.size]; size_t count=0;
+    *error=hfs_offline_read(_volume,info.id,0,data.mutableBytes,data.length,&count);
+    if (!*error && count!=data.length) *error=EIO;
+    return *error?nil:data;
+}
+- (int)removeTree:(uint32_t)inode depth:(NSUInteger)depth {
+    if (depth>64) return ELOOP;
+    hfs_offline_info info; int e=hfs_offline_stat(_volume,inode,&info); if (e) return e;
+    if ((info.mode&0170000)==0040000) {
+        size_t cursor=0;
+        while (!hfs_offline_next(_volume,inode,&cursor,&info)) {
+            e=[self removeTree:info.id depth:depth+1]; if (e) return e;
+        }
+    }
+    return hfs_offline_remove_closed(_volume,inode);
+}
+- (NSMutableDictionary *)initialInstallationRegistry:(int *)error {
+    hfs_offline_info applications;
+    *error=[self resolve:@"/Applications" root:2 followFinal:YES result:&applications]; if (*error) return nil;
+    NSMutableDictionary *system=[NSMutableDictionary dictionary]; size_t cursor=0; hfs_offline_info entry;
+    while (!hfs_offline_next(_volume,applications.id,&cursor,&entry)) {
+        NSString *name=Name(&entry);
+        if ((entry.mode&0170000)!=0040000 || ![name hasSuffix:@".app"]) continue;
+        NSString *path=[@"/Applications" stringByAppendingPathComponent:name];
+        int readError=0; NSData *data=[self readFile:[path stringByAppendingPathComponent:@"Info.plist"] error:&readError];
+        if (!data) { *error=readError; return nil; }
+        id decoded=[NSPropertyListSerialization propertyListWithData:data options:NSPropertyListMutableContainers format:NULL error:NULL];
+        if (![decoded isKindOfClass:NSMutableDictionary.class] || ![decoded[@"CFBundleIdentifier"] isKindOfClass:NSString.class]) { *error=EINVAL; return nil; }
+        decoded[@"Path"]=path; decoded[@"ApplicationType"]=@"System"; system[decoded[@"CFBundleIdentifier"]]=decoded;
+    }
+    int versionError=0; NSData *version=[self readFile:@"/System/Library/CoreServices/SystemVersion.plist" error:&versionError];
+    id metadata=version?[NSPropertyListSerialization propertyListWithData:version options:0 format:NULL error:NULL]:nil;
+    if (![metadata isKindOfClass:NSDictionary.class]) { *error=versionError?:EINVAL; return nil; }
+    return [@{@"System":system,@"User":[NSMutableDictionary dictionary],@"Metadata":metadata} mutableCopy];
+}
+- (BOOL)installPackage:(VMIPAPackage *)package error:(NSError **)error {
+    if (!_volume || _home || _batchActive || _error || !package) {
+        if (error) *error=OfflineError(EBUSY,@"Close the running app before installing."); return NO;
+    }
+    VMGuestApplication *existing=nil;
+    for (VMGuestApplication *app in [self installedApplications:error]) if ([app.identifier isEqual:package.bundleIdentifier]) existing=app;
+    if (error && *error) return NO;
+    NSString *home=existing?[@"/private" stringByAppendingString:existing.homeDirectory]:
+        [@"/private/var/mobile/Applications" stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+    NSString *bundle=[home stringByAppendingPathComponent:package.bundleDirectoryName];
+    const char *work=_directory.fileSystemRepresentation; char detail[320]={0},stage[VM_GUEST_INSTALL_PATH_CAPACITY];
+    vm_guest_install_result_t transaction={0}; int failure=0;
+    if (![DiskIdentity(_live) isEqual:_identity] ||
+        vm_guest_recovery_prepare_stage(work,&transaction,detail,sizeof detail)!=VM_GUEST_INSTALL_OK ||
+        !vm_guest_recovery_stage_image_path(stage,sizeof stage,work) ||
+        vm_guest_recovery_clone_live_to_stage(work,detail,sizeof detail)!=VM_GUEST_INSTALL_OK) {
+        if (error) *error=OfflineError(EIO,@"The disk could not be prepared for installation."); return NO;
+    }
+    _batchActive=YES;
+    hfs_offline_close(_volume); _volume=NULL;
+    failure=hfs_offline_open_private(stage,&_volume);
+    if (failure) goto failed;
+    if (existing) {
+        hfs_offline_info old;
+        failure=[self resolve:[home stringByAppendingPathComponent:existing.bundleDirectory] root:2 followFinal:NO result:&old];
+        if (!failure) failure=[self removeTree:old.id depth:0];
+        if (!failure) failure=hfs_offline_checkpoint_private(_volume);
+        if (failure) goto failed;
+    }
+    {
+        hfs_offline_info directory;
+        for (NSString *path in @[bundle,[home stringByAppendingPathComponent:@"Documents"],
+            [home stringByAppendingPathComponent:@"Library/Preferences"],[home stringByAppendingPathComponent:@"tmp"]]) {
+            failure=[self ensureDirectory:path result:&directory]; if (failure) goto failed;
+        }
+        __block int writeError=0; __block NSUInteger pending=0;
+        BOOL copied=[package visitBundleFiles:^BOOL(NSString *relative,NSData *data,uint32_t mode) {
+            NSString *path=[bundle stringByAppendingPathComponent:relative];
+            if (data.length>64u*1024u*1024u) { writeError=EFBIG; return NO; }
+            if (pending+data.length>32u*1024u*1024u) {
+                writeError=hfs_offline_checkpoint_private(self->_volume); pending=0; if (writeError) return NO;
+            }
+            if ((mode&0170000)==0040000) { hfs_offline_info directoryInfo; writeError=[self ensureDirectory:path result:&directoryInfo]; }
+            else { writeError=[self writeFile:path data:data mode:mode]; pending+=data.length; }
+            return !writeError;
+        }];
+        if (!copied) { failure=writeError?:EIO; goto failed; }
+        failure=hfs_offline_checkpoint_private(_volume); if (failure) goto failed;
+    }
+    {
+        NSString *registryPath=@"/private/var/mobile/Library/Caches/com.apple.mobile.installation.plist";
+        NSData *data=[self readFile:registryPath error:&failure];
+        id decoded=nil;
+        if (failure==ENOENT) { failure=0; decoded=[self initialInstallationRegistry:&failure]; }
+        else if (!failure) decoded=[NSPropertyListSerialization propertyListWithData:data options:NSPropertyListMutableContainers format:NULL error:NULL];
+        if (failure) goto failed;
+        if (![decoded isKindOfClass:NSMutableDictionary.class] || ![decoded[@"User"] isKindOfClass:NSMutableDictionary.class]) { failure=EINVAL; goto failed; }
+        NSMutableDictionary *record=[package.infoDictionary mutableCopy];
+        record[@"Path"]=bundle; record[@"Container"]=home; record[@"ApplicationType"]=@"User";
+        record[@"EnvironmentVariables"]=@{@"HOME":home,@"CFFIXED_USER_HOME":home,@"TMPDIR":[home stringByAppendingPathComponent:@"tmp"]};
+        decoded[@"User"][package.bundleIdentifier]=record;
+        data=[NSPropertyListSerialization dataWithPropertyList:decoded format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
+        if (!data) { failure=EINVAL; goto failed; }
+        failure=[self writeFile:registryPath data:data mode:0100644];
+        if (!failure) failure=hfs_offline_checkpoint_private(_volume);
+        if (failure) goto failed;
+    }
+    {
+        NSDictionary *candidate=DiskIdentity([NSString stringWithUTF8String:stage]); NSError *saveError=nil;
+        if (!candidate || ![DiskIdentity(_live) isEqual:_identity] || !SaveWitness(_directory,@[_identity,candidate],&saveError)) {
+            failure=EIO; goto failed;
+        }
+        if (vm_guest_recovery_publish(work,&transaction,detail,sizeof detail)!=VM_GUEST_INSTALL_OK || !transaction.committed) {
+            failure=EIO; goto failed;
+        }
+        _identity=candidate; _batchActive=NO; return YES;
+    }
+failed:
+    _error=OfflineError(failure,failure==EFBIG?@"An app file exceeds the offline installer's current 64 MB limit.":
+        failure==ENOSPC?@"There is not enough free space to install this app safely.":@"Installation could not finish. The previous installation and saved data have been kept.");
+    if (error) *error=_error;
+    [self close]; return NO;
+}
 
 - (NSString *)pathAt:(const uint8_t **)p end:(const uint8_t *)end {
     if (end-*p<4) return nil;

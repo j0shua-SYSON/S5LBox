@@ -7193,12 +7193,36 @@ static void test_offline_shared_filesystem(void) {
     remove_if_present(source); remove_if_present(clone); free(fx);
 }
 
+static void test_offline_private_install_batch(void) {
+    fixture_t *fx=fx_create(4); char source[1024],clone[1024];
+    CHECK(fx && make_path(source,sizeof source,"offline-batch-source") && make_path(clone,sizeof clone,"offline-batch-stage"),"batch fixture");
+    if (!fx) return;
+    CHECK(write_file(source,fx->image,FX_SIZE) && write_file(clone,fx->image,FX_SIZE),"write batch source and stage");
+    hfs_offline *v=NULL; CHECK(hfs_offline_open_private(clone,&v)==0,"open unpublished installation batch");
+    if (v) {
+        const uint16_t a[]={'a'},b[]={'b'}; uint32_t first=0,second=0; size_t count=0; char data[8]={0};
+        CHECK(hfs_offline_create(v,FX_BETA,a,1,0100755,&first)==0 && hfs_offline_write(v,first,0,"first",5)==0,"first staged executable");
+        CHECK(hfs_offline_checkpoint_private(v)==0,"first bounded-memory checkpoint");
+        CHECK(hfs_offline_create(v,FX_BETA,b,1,0100644,&second)==0 && hfs_offline_write(v,second,0,"second",6)==0,"second staged resource");
+        CHECK(hfs_offline_remove_closed(v,first)==0,"drop closed staged executable without buffering contents");
+        CHECK(hfs_offline_checkpoint_private(v)==0,"second checkpoint on same private inode");
+        CHECK(hfs_offline_read(v,second,0,data,sizeof data,&count)==0 && count==6 && !memcmp(data,"second",6),"reads follow checkpointed private data");
+        CHECK(hfs_offline_read(v,first,0,data,sizeof data,&count)==ENOENT,"closed deleted inode cannot be read");
+        hfs_offline_close(v); v=NULL;
+        CHECK(hfs_offline_open(clone,&v)==0,"completed staged install passes allocation audit"); hfs_offline_close(v);
+    }
+    size_t length=0; uint8_t *original=read_file(source,&length);
+    CHECK(original && length==FX_SIZE && !memcmp(original,fx->image,length),"intermediate install checkpoints never alter live disk");
+    free(original); remove_if_present(source); remove_if_present(clone); free(fx);
+}
+
 int main(void) {
     printf("HFS+ catalog provisioning tests\n");
     test_status_and_stage_names();
     test_offline_shared_filesystem();
     test_offline_allocation_and_attributes();
     test_offline_fragmented_allocation();
+    test_offline_private_install_batch();
     test_provision_unpublished_clone();
     test_stopped_catalog_id_hint();
     test_stopped_directory_counts();

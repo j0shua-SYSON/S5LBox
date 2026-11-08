@@ -12,7 +12,7 @@
 @end
 #if S5LBOX_TOUCHHLE
 // Separate Apps tab. Its run controllers do not construct a VMEngine.
-@interface VMTouchHLEOfflineAppsViewController : UITableViewController
+@interface VMTouchHLEOfflineAppsViewController : UIViewController
 @property(nonatomic,copy) void (^openMachine)(NSString *identifier);
 @end
 #endif

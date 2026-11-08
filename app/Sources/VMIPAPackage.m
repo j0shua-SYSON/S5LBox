@@ -127,6 +127,8 @@ static BOOL IPAVersionSupported(id version) {
         if (![parsed isKindOfClass:[NSDictionary class]])
             return IPAError(error, @"The app does not contain a valid Info.plist dictionary.");
         NSDictionary *info = parsed;
+        _infoDictionary=[info copy];
+        _bundleDirectoryName=[[NSString stringWithUTF8String:_plan.app_root] lastPathComponent];
         if (!IPAString(info[@"CFBundleIdentifier"]) || !IPAString(info[@"CFBundleExecutable"]) ||
             ![info[@"CFBundlePackageType"] isEqual:@"APPL"])
             return IPAError(error, @"The app is missing its identifier, executable, or APPL bundle type.");
@@ -191,6 +193,24 @@ static BOOL IPAVersionSupported(id version) {
 - (void)dealloc {
     vm_ipa_archive_close(&_plan);
     if (_stagingDirectory) [[NSFileManager defaultManager] removeItemAtURL:_stagingDirectory error:NULL];
+}
+- (BOOL)visitBundleFiles:(BOOL (^)(NSString *,NSData *,uint32_t))visitor {
+    if (!visitor) return NO;
+    NSString *prefix=[[NSString stringWithUTF8String:_plan.app_root] stringByAppendingString:@"/"];
+    for (unsigned i=0;i<_plan.count;i++) {
+        NSString *path=[NSString stringWithUTF8String:_plan.files[i].name];
+        if (![path hasPrefix:prefix]) continue;
+        NSString *relative=[path substringFromIndex:prefix.length];
+        if (!relative.length) continue;
+        uint32_t mode=_plan.files[i].is_directory?0040755:vm_ipa_entry_is_symlink(&_plan.files[i])?0120777:
+            ((_plan.files[i].unix_mode&0111u) || i==_executableIndex)?0100755:0100644;
+        NSData *data=nil;
+        if (!_plan.files[i].is_directory) data=[NSData dataWithBytesNoCopy:
+            (void *)((const uint8_t *)_packed.bytes+_offsets[i].unsignedLongLongValue)
+            length:(NSUInteger)_plan.files[i].uncompressed_size freeWhenDone:NO];
+        if (!visitor(relative,data,mode)) return NO;
+    }
+    return YES;
 }
 
 - (BOOL)installInDirectory:(NSString *)directory error:(NSError **)error {
