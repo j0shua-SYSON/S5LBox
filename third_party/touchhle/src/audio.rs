@@ -17,6 +17,7 @@ pub mod openal;
 mod symphonia_formats;
 
 pub use ima4::decode_ima4;
+pub use symphonia_formats::{read_mp3, Mp3Decoder};
 
 use crate::fs::{Fs, GuestPath};
 use std::io::Cursor;
@@ -29,6 +30,7 @@ pub enum AudioFileOpenError {
 
 #[derive(Debug)]
 pub enum AudioFormat {
+    Mp3,
     LinearPcm {
         is_float: bool,
         is_little_endian: bool,
@@ -51,6 +53,7 @@ pub struct AudioDescription {
 pub struct AudioFile(AudioFileInner);
 enum AudioFileInner {
     Wave(hound::WavReader<Cursor<Vec<u8>>>),
+    Mp3(symphonia_formats::Mp3File),
     Symphonia(symphonia_formats::SymphoniaDecodedToPcm),
 }
 
@@ -85,10 +88,8 @@ impl AudioFile {
         if hound::WavReader::new(Cursor::new(&bytes)).is_ok() {
             let reader = hound::WavReader::new(Cursor::new(bytes)).unwrap();
             Ok(AudioFile(AudioFileInner::Wave(reader)))
-        // TODO: Real MP3/MP4/Non-linear PCM container handling. Currently we
-        // are immediately decoding the entire file to PCM and acting as if
-        // it's a PCM file, simply because because this is easier. Full MP3
-        // support would require a lot of changes in Audio Toolbox.
+        } else if let Ok(mp3) = read_mp3(&bytes) {
+            Ok(AudioFile(AudioFileInner::Mp3(mp3)))
         } else if let Ok(pcm) = symphonia_formats::decode_symphonia_to_pcm(Cursor::new(bytes)) {
             Ok(AudioFile(AudioFileInner::Symphonia(pcm)))
         } else {
@@ -98,6 +99,14 @@ impl AudioFile {
 
     pub fn audio_description(&self) -> AudioDescription {
         match self.0 {
+            AudioFileInner::Mp3(ref file) => AudioDescription {
+                sample_rate: file.sample_rate.into(),
+                format: AudioFormat::Mp3,
+                bytes_per_packet: 0,
+                frames_per_packet: file.frames_per_packet,
+                channels_per_frame: file.channels,
+                bits_per_channel: 0,
+            },
             AudioFileInner::Wave(ref wave_reader) => {
                 let hound::WavSpec {
                     channels,
@@ -158,6 +167,7 @@ impl AudioFile {
 
     pub fn byte_count(&self) -> u64 {
         match self.0 {
+            AudioFileInner::Mp3(ref file) => file.bytes.len() as u64,
             AudioFileInner::Wave(ref wave_reader) => {
                 let sample_count = wave_reader.len(); // position-independent
                 u64::from(sample_count) * self.bytes_per_sample()
@@ -171,6 +181,7 @@ impl AudioFile {
 
     pub fn packet_count(&self) -> u64 {
         match self.0 {
+            AudioFileInner::Mp3(ref file) => file.packets.len() as u64,
             AudioFileInner::Wave(_)
             | AudioFileInner::Symphonia(symphonia_formats::SymphoniaDecodedToPcm { .. }) => {
                 // never variable-size
@@ -190,13 +201,84 @@ impl AudioFile {
     }
 
     pub fn packet_size_upper_bound(&self) -> u32 {
-        self.packet_size_fixed() // variable size not implemented
+        match &self.0 {
+            AudioFileInner::Mp3(file) => file
+                .packets
+                .iter()
+                .map(|p| p.len() as u32)
+                .max()
+                .unwrap_or(0),
+            _ => self.packet_size_fixed(),
+        }
+    }
+
+    /// Return only complete packets that fit in the caller's byte capacity.
+    /// Ranges are relative to the returned buffer, not to the source file.
+    pub fn read_packets(
+        &mut self,
+        start: u64,
+        count: u32,
+        capacity: u32,
+    ) -> Result<(Vec<u8>, Vec<std::ops::Range<usize>>), ()> {
+        if start >= self.packet_count() || count == 0 {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        if let AudioFileInner::Mp3(file) = &self.0 {
+            let mut bytes = Vec::new();
+            let mut ranges = Vec::new();
+            for packet in file
+                .packets
+                .iter()
+                .skip(start as usize)
+                .take(count as usize)
+            {
+                if packet.len() > capacity as usize - bytes.len() {
+                    break;
+                }
+                let offset = bytes.len();
+                bytes.extend_from_slice(&file.bytes[packet.clone()]);
+                ranges.push(offset..bytes.len());
+            }
+            return Ok((bytes, ranges));
+        }
+        let size = self.packet_size_fixed();
+        let count = (count as u64)
+            .min(self.packet_count() - start)
+            .min((capacity / size) as u64) as usize;
+        let mut bytes = vec![0; count * size as usize];
+        let read = self.read_bytes(start * size as u64, &mut bytes)?;
+        bytes.truncate(read);
+        let ranges = (0..read / size as usize)
+            .map(|i| i * size as usize..(i + 1) * size as usize)
+            .collect();
+        Ok((bytes, ranges))
+    }
+
+    /// PCM conversion for APIs that explicitly consume decoded sample frames.
+    /// Audio File Services itself continues to expose encoded MP3 packets.
+    pub fn decoded_mp3(&self) -> Result<Option<Self>, ()> {
+        if let AudioFileInner::Mp3(file) = &self.0 {
+            let mut decoder = Mp3Decoder::new()?;
+            let pcm = decoder.decode(file.packets.iter().map(|p| &file.bytes[p.clone()]))?;
+            Ok(Some(Self(AudioFileInner::Symphonia(pcm))))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Read `buffer.len()` bytes of audio data from byte offset `offset`.
     /// Returns the number of bytes read.
     pub fn read_bytes(&mut self, offset: u64, buffer: &mut [u8]) -> Result<usize, ()> {
+        if offset >= self.byte_count() {
+            return Ok(0);
+        }
         match self.0 {
+            AudioFileInner::Mp3(ref file) => {
+                let bytes = &file.bytes[offset as usize..];
+                let count = buffer.len().min(bytes.len());
+                buffer[..count].copy_from_slice(&bytes[..count]);
+                Ok(count)
+            }
             AudioFileInner::Wave(_) => {
                 let bytes_per_sample = self.bytes_per_sample();
                 assert!(offset.is_multiple_of(bytes_per_sample));
@@ -251,12 +333,9 @@ impl AudioFile {
     pub fn estimated_duration(&self) -> f64 {
         let AudioDescription {
             sample_rate,
-            bytes_per_packet,
             frames_per_packet,
             ..
         } = self.audio_description();
-        assert!(bytes_per_packet != 0); // TODO
-        self.byte_count() as f64 * frames_per_packet as f64
-            / (bytes_per_packet as f64 * sample_rate)
+        self.packet_count() as f64 * frames_per_packet as f64 / sample_rate
     }
 }

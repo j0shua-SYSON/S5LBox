@@ -317,6 +317,16 @@ jobs:
           cat ../../work/hle-startup.log
           grep -F 'S5LBOX-HLE-STARTUP PASS failures=0' ../../work/hle-startup.log
 
+      - name: Verify compressed audio packets, playback and reset
+        working-directory: third_party/touchhle
+        timeout-minutes: 2
+        env:
+          ALSOFT_DRIVERS: 'null'
+        run: |
+          ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/AudioSmoke.app --headless > ../../work/hle-audio.log 2>&1
+          cat ../../work/hle-audio.log
+          grep -F 'S5LBOX-HLE-AUDIO PASS failures=0' ../../work/hle-audio.log
+
       - name: Preserve smoke-test output
         if: always()
         uses: actions/upload-artifact@v4
@@ -330,6 +340,8 @@ jobs:
             work/hle-primary-exit.log
             work/hle-format-overflow.log
             work/hle-startup.log
+            work/hle-audio.log
+            work/hle-smoke/AudioSmoke.app
             work/hle-smoke/StartupSmoke.app
             work/hle-smoke/InterpreterSmoke.app
             work/hle-smoke/HLEVisual.app

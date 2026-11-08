@@ -39,6 +39,7 @@ impl State {
 
 pub struct ExtAudioFileHostObject {
     guest_audio_file: AudioFileID,
+    decoded_audio_file: Option<crate::audio::AudioFile>,
     client_data_format: Option<AudioStreamBasicDescription>,
     current_bytes_read: i64,
 }
@@ -88,6 +89,7 @@ fn ExtAudioFileOpenURL(
 
     let host_object = ExtAudioFileHostObject {
         guest_audio_file,
+        decoded_audio_file: None,
         client_data_format: None,
         current_bytes_read: 0,
     };
@@ -171,28 +173,33 @@ fn ExtAudioFileSetProperty(
         .extended_audio_files
         .get_mut(&in_ext_audio_file)
         .unwrap();
-    assert!(host_object.client_data_format.is_none());
-    host_object.client_data_format = Some(client_audio_desc);
-
-    let host_object = env
-        .framework_state
-        .audio_toolbox
-        .extended_audio_file
-        .extended_audio_files
-        .get(&in_ext_audio_file)
-        .unwrap();
+    let guest_audio_file = host_object.guest_audio_file;
     let other_host_object = env
         .framework_state
         .audio_toolbox
         .audio_file
         .audio_files
-        .get(&host_object.guest_audio_file)
+        .get(&guest_audio_file)
         .unwrap();
+    let Ok(decoded) = other_host_object.audio_file.decoded_mp3() else {
+        return -50;
+    };
     let audio_desc = AudioStreamBasicDescription::from_audio_description(
-        other_host_object.audio_file.audio_description(),
+        decoded
+            .as_ref()
+            .unwrap_or(&other_host_object.audio_file)
+            .audio_description(),
     );
-    // TODO: support audio format conversions
-    assert_eq!(audio_desc, client_audio_desc);
+    // Sample-rate, channel-layout and sample-width conversion remain unsupported.
+    if audio_desc != client_audio_desc {
+        return -50;
+    }
+    let host_object = State::get(&mut env.framework_state)
+        .extended_audio_files
+        .get_mut(&in_ext_audio_file)
+        .unwrap();
+    host_object.client_data_format = Some(client_audio_desc);
+    host_object.decoded_audio_file = decoded;
 
     0 // success
 }
@@ -214,7 +221,7 @@ fn ExtAudioFileRead(
         .audio_toolbox
         .extended_audio_file
         .extended_audio_files
-        .get(&in_ext_audio_file)
+        .get_mut(&in_ext_audio_file)
         .unwrap();
 
     audio_buffer_list.buffers[0].number_channels =
@@ -222,23 +229,37 @@ fn ExtAudioFileRead(
 
     let number_frames = env.mem.read(io_number_frames);
     let bytes_per_frame = host_object.client_data_format.unwrap().bytes_per_frame;
-    let number_of_bytes = number_frames.checked_mul(bytes_per_frame).unwrap();
+    let number_of_bytes = number_frames
+        .saturating_mul(bytes_per_frame)
+        .min(audio_buffer_list.buffers[0].data_byte_size);
+    let number_of_bytes = number_of_bytes / bytes_per_frame * bytes_per_frame;
     let number_of_bytes_ptr = env.mem.alloc_and_write(number_of_bytes);
-    let res = AudioFileReadBytes(
-        env,
-        host_object.guest_audio_file,
-        false,
-        host_object.current_bytes_read,
-        number_of_bytes_ptr,
-        audio_buffer_list.buffers[0].data,
-    );
+    let guest_audio_file = host_object.guest_audio_file;
+    let current_bytes_read = host_object.current_bytes_read;
+    let res = if let Some(file) = &mut host_object.decoded_audio_file {
+        let buffer = env
+            .mem
+            .bytes_at_mut(audio_buffer_list.buffers[0].data.cast(), number_of_bytes);
+        match file.read_bytes(host_object.current_bytes_read as u64, buffer) {
+            Ok(count) => {
+                env.mem.write(number_of_bytes_ptr, count as u32);
+                0
+            }
+            Err(()) => -50,
+        }
+    } else {
+        AudioFileReadBytes(
+            env,
+            guest_audio_file,
+            false,
+            current_bytes_read,
+            number_of_bytes_ptr,
+            audio_buffer_list.buffers[0].data,
+        )
+    };
     let number_of_bytes_read = env.mem.read(number_of_bytes_ptr);
     env.mem.free(number_of_bytes_ptr.cast());
-    if res != 0 {
-        if res == eofErr {
-            env.mem.write(io_number_frames, 0);
-            return 0;
-        }
+    if res != 0 && res != eofErr {
         log!(
             "ExtAudioFileRead({:?}, {:?}, {:?}) failed, error: {:?}",
             in_ext_audio_file,

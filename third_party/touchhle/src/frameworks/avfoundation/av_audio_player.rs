@@ -92,8 +92,10 @@ pub const CLASSES: ClassExports = objc_classes! {
     // Check for errors. Return nil and write them to error if there are
     let tmp_afi_ptr: MutPtr<AudioFileID> = env.mem.alloc(guest_size_of::<AudioFileID>()).cast();
     let status = AudioFileOpenURL(env, url, kAudioFileReadPermission, 0, tmp_afi_ptr) as NSInteger;
-    let audio_file_id = env.mem.read(tmp_afi_ptr);
-    env.objc.borrow_mut::<AVAudioPlayerHostObject>(this).audio_file_id = Some(audio_file_id);
+    if status == 0 {
+        let audio_file_id = env.mem.read(tmp_afi_ptr);
+        env.objc.borrow_mut::<AVAudioPlayerHostObject>(this).audio_file_id = Some(audio_file_id);
+    }
     env.mem.free(tmp_afi_ptr.cast());
     if status != 0 {
         if !out_error.is_null() {
@@ -128,12 +130,14 @@ pub const CLASSES: ClassExports = objc_classes! {
             this
         }
         Err(_) => {
-            let domain = ns_string::get_static_str(env, NSOSStatusErrorDomain);
-            let error = msg_class![env; NSError alloc];
-            let code = -1; // TODO: set a proper code
-            let error = msg![env; error initWithDomain:domain code:code userInfo:nil];
-            autorelease(env, error);
-            env.mem.write(out_error, error);
+            if !out_error.is_null() {
+                let domain = ns_string::get_static_str(env, NSOSStatusErrorDomain);
+                let error = msg_class![env; NSError alloc];
+                let code = -1; // TODO: set a proper code
+                let error = msg![env; error initWithDomain:domain code:code userInfo:nil];
+                autorelease(env, error);
+                env.mem.write(out_error, error);
+            }
 
             release(env, this);
             nil

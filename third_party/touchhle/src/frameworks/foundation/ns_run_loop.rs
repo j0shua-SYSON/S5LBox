@@ -397,6 +397,7 @@ pub fn run_run_loop(
         for audio_queue in audio_queues_tmp.drain(..) {
             handle_audio_queue(env, audio_queue);
         }
+        crate::frameworks::audio_toolbox::audio_services::handle_sound_completions(env, run_loop);
 
         // TODO: not clear if audio units should be processed in the run loop
         assert!(audio_units_tmp.is_empty());

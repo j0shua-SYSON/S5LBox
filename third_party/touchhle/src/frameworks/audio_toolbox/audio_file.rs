@@ -9,7 +9,9 @@ use crate::abi::{CallFromHost, GuestFunction};
 use crate::audio; // Keep this module namespaced to avoid confusion
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::frameworks::carbon_core::{eofErr, OSStatus};
-use crate::frameworks::core_audio_types::{debug_fourcc, fourcc, AudioStreamBasicDescription};
+use crate::frameworks::core_audio_types::{
+    debug_fourcc, fourcc, AudioStreamBasicDescription, AudioStreamPacketDescription,
+};
 use crate::frameworks::core_foundation::cf_url::CFURLRef;
 use crate::frameworks::foundation::ns_url::to_rust_path;
 use crate::mem::{guest_size_of, GuestUSize, MutPtr, MutVoidPtr, SafeRead};
@@ -95,7 +97,7 @@ pub fn AudioFileOpenURL(
         kAUdioFileAIFFType => {
             log!("Ignoring 'AIFF' file type hint for AudioFileOpenURL()");
         }
-        _ => unimplemented!(),
+        _ => log_dbg!("Ignoring file type hint for AudioFileOpenURL()"),
     }
 
     let path = to_rust_path(env, in_file_ref);
@@ -345,6 +347,10 @@ pub fn AudioFileReadBytes(
     out_buffer: MutVoidPtr,
 ) -> OSStatus {
     return_if_null!(in_audio_file);
+    if in_starting_byte < 0 {
+        env.mem.write(io_num_bytes, 0);
+        return -50;
+    }
 
     let host_object = State::get(&mut env.framework_state)
         .audio_files
@@ -354,10 +360,13 @@ pub fn AudioFileReadBytes(
     let bytes_to_read = env.mem.read(io_num_bytes);
     let buffer_slice = env.mem.bytes_at_mut(out_buffer.cast(), bytes_to_read);
 
-    let bytes_read = host_object
+    let Ok(bytes_read) = host_object
         .audio_file
-        .read_bytes(in_starting_byte.try_into().unwrap(), buffer_slice)
-        .unwrap(); // TODO: handle seek error?
+        .read_bytes(in_starting_byte as u64, buffer_slice)
+    else {
+        env.mem.write(io_num_bytes, 0);
+        return kAudioFileUnspecifiedError;
+    };
     env.mem.write(io_num_bytes, bytes_read.try_into().unwrap());
 
     if bytes_read < bytes_to_read as usize {
@@ -377,8 +386,8 @@ fn AudioFileReadPacketData(
     io_num_packets: MutPtr<u32>,
     out_buffer: MutVoidPtr,
 ) -> OSStatus {
-    // TODO: real VBR support
-    AudioFileReadPackets(
+    let capacity = env.mem.read(out_num_bytes);
+    read_packets(
         env,
         in_audio_file,
         in_use_cache,
@@ -387,6 +396,7 @@ fn AudioFileReadPacketData(
         in_starting_packet,
         io_num_packets,
         out_buffer,
+        Some(capacity),
     )
 }
 
@@ -400,42 +410,79 @@ pub fn AudioFileReadPackets(
     io_num_packets: MutPtr<u32>,
     out_buffer: MutVoidPtr,
 ) -> OSStatus {
-    return_if_null!(in_audio_file);
-
-    // Variable-size packets are not implemented currently. When they are,
-    // this parameter should be a `MutPtr<AudioStreamPacketDescription>`.
-    if !out_packet_descriptions.is_null() {
-        log!("Warning: ignoring non-null out_packet_descriptions in AudioFileReadPackets()");
-    }
-
-    let host_object = State::get(&mut env.framework_state)
-        .audio_files
-        .get_mut(&in_audio_file)
-        .unwrap();
-    let packet_size = host_object.audio_file.packet_size_fixed();
-
-    let packets_to_read = env.mem.read(io_num_packets);
-
-    let starting_byte = i64::from(packet_size)
-        .checked_mul(in_starting_packet)
-        .unwrap();
-    let bytes_to_read = packets_to_read.checked_mul(packet_size).unwrap();
-
-    env.mem.write(out_num_bytes, bytes_to_read);
-    let res = AudioFileReadBytes(
+    read_packets(
         env,
         in_audio_file,
         in_use_cache,
-        starting_byte,
         out_num_bytes,
+        out_packet_descriptions,
+        in_starting_packet,
+        io_num_packets,
         out_buffer,
-    );
+        None,
+    )
+}
 
-    let bytes_read = env.mem.read(out_num_bytes);
-    let packets_read = bytes_read / packet_size;
-    env.mem.write(io_num_packets, packets_read);
-
-    res
+fn read_packets(
+    env: &mut Environment,
+    in_audio_file: AudioFileID,
+    _in_use_cache: bool,
+    out_num_bytes: MutPtr<u32>,
+    out_packet_descriptions: MutVoidPtr,
+    in_starting_packet: i64,
+    io_num_packets: MutPtr<u32>,
+    out_buffer: MutVoidPtr,
+    capacity: Option<u32>,
+) -> OSStatus {
+    return_if_null!(in_audio_file);
+    let requested = env.mem.read(io_num_packets);
+    env.mem.write(io_num_packets, 0);
+    env.mem.write(out_num_bytes, 0);
+    if in_starting_packet < 0 {
+        return -50;
+    }
+    let Some(host) = State::get(&mut env.framework_state)
+        .audio_files
+        .get_mut(&in_audio_file)
+    else {
+        return -50;
+    };
+    let total = host.audio_file.packet_count();
+    let Ok((bytes, packets)) = host.audio_file.read_packets(
+        in_starting_packet as u64,
+        requested,
+        capacity.unwrap_or(u32::MAX),
+    ) else {
+        return kAudioFileUnspecifiedError;
+    };
+    if !bytes.is_empty() {
+        env.mem
+            .bytes_at_mut(out_buffer.cast(), bytes.len() as u32)
+            .copy_from_slice(&bytes);
+    }
+    if !out_packet_descriptions.is_null() {
+        let descriptions: MutPtr<AudioStreamPacketDescription> = out_packet_descriptions.cast();
+        for (i, packet) in packets.iter().enumerate() {
+            env.mem.write(
+                descriptions + i as u32,
+                AudioStreamPacketDescription {
+                    start_offset: packet.start as i64,
+                    variable_frames_in_packet: 0,
+                    data_byte_size: packet.len() as u32,
+                },
+            );
+        }
+    }
+    let count = packets.len() as u32;
+    env.mem.write(io_num_packets, count);
+    env.mem.write(out_num_bytes, bytes.len() as u32);
+    if count < requested && in_starting_packet as u64 + count as u64 >= total {
+        eofErr
+    } else if count == 0 && requested != 0 {
+        -50 // The supplied byte capacity cannot hold even one packet.
+    } else {
+        0
+    }
 }
 
 pub fn AudioFileClose(env: &mut Environment, in_audio_file: AudioFileID) -> OSStatus {

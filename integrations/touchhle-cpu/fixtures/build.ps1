@@ -48,6 +48,15 @@ if ($LASTEXITCODE) { throw 'Startup fixture compile failed' }
     "$outputRoot/startup.o" -lSystem -lobjc -framework Foundation -framework CoreFoundation
 if ($LASTEXITCODE) { throw 'Startup fixture link failed' }
 Copy-Item -LiteralPath "$PSScriptRoot/Info.plist" -Destination "$startup/Info.plist"
+$audio=Join-Path $outputRoot 'AudioSmoke.app'
+New-Item -ItemType Directory -Force -Path $audio | Out-Null
+& $compiler @common -marm -c "$PSScriptRoot/audio.m" -o "$outputRoot/audio.o"
+if ($LASTEXITCODE) { throw 'Audio fixture compile failed' }
+& $linker -arch armv6 -iphoneos_version_min 3.0 -syslibroot $sdkRoot `
+    -undefined dynamic_lookup -o "$audio/InterpreterSmoke" "$sdkRoot/usr/lib/crt1.o" `
+    "$outputRoot/audio.o" -lSystem -lobjc -framework Foundation -framework CoreFoundation -framework AudioToolbox -framework AVFoundation
+if ($LASTEXITCODE) { throw 'Audio fixture link failed' }
+Copy-Item -LiteralPath "$PSScriptRoot/Info.plist" -Destination "$audio/Info.plist"
 $dylibs=Join-Path $outputRoot 'LibrarySmoke.app'
 New-Item -ItemType Directory -Force -Path $dylibs | Out-Null
 & $compiler @common -marm -c "$PSScriptRoot/dylibs.c" -o "$outputRoot/dylibs.o"

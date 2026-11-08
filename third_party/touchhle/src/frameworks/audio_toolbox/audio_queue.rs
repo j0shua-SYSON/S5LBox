@@ -9,16 +9,17 @@
 //! Apple's implementation probably uses Core Audio instead.
 
 use crate::abi::{CallFromHost, GuestFunction};
-use crate::audio::decode_ima4;
 use crate::audio::openal as al;
 use crate::audio::openal::al_types::*;
 use crate::audio::openal::{OpenAL, OpenALManager};
+use crate::audio::{decode_ima4, read_mp3, Mp3Decoder};
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::frameworks::carbon_core::OSStatus;
 use crate::frameworks::core_audio_types::{
     debug_fourcc, fourcc, kAudioFormatAppleIMA4, kAudioFormatFlagIsBigEndian,
     kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatFlagIsSignedInteger,
-    kAudioFormatLinearPCM, AudioStreamBasicDescription, AudioTimeStamp,
+    kAudioFormatLinearPCM, kAudioFormatMPEGLayer3, AudioStreamBasicDescription,
+    AudioStreamPacketDescription, AudioTimeStamp,
 };
 use crate::frameworks::core_foundation::cf_run_loop::{
     kCFRunLoopCommonModes, CFRunLoopGetMain, CFRunLoopMode, CFRunLoopRef,
@@ -66,6 +67,8 @@ struct AudioQueueHostObject {
     /// the nth item in this queue must also be the nth item in the OpenAL
     /// queue, though the OpenAL queue may be shorter.
     buffer_queue: VecDeque<AudioQueueBufferRef>,
+    packet_ranges: HashMap<AudioQueueBufferRef, Vec<std::ops::Range<usize>>>,
+    mp3_decoder: Option<Mp3Decoder>,
     is_running: AudioQueueIsRunning,
     al_source: Option<ALuint>,
     al_unused_buffers: Vec<ALuint>,
@@ -100,10 +103,8 @@ pub struct AudioQueueBuffer {
     pub audio_data_byte_size: u32,
     user_data: MutVoidPtr,
     packet_description_capacity: u32,
-    /// Should be a `MutPtr<AudioStreamPacketDescription>`, but that's not
-    /// implemented yet.
-    _packet_descriptions: MutVoidPtr,
-    _packet_description_count: u32,
+    packet_descriptions: MutPtr<AudioStreamPacketDescription>,
+    packet_description_count: u32,
 }
 unsafe impl SafeRead for AudioQueueBuffer {}
 
@@ -158,23 +159,7 @@ pub fn AudioQueueNewOutput(
         in_callback_run_loop
     };
 
-    let mut format = env.mem.read(in_format);
-    if env.bundle.bundle_identifier().starts_with("com.ea.candcra")
-        && format.format_id == fourcc(b".mp3")
-    {
-        log!("Applying game-specific hack for C&C Red Alert: Fixing hardcoded audio format from .mp3 to PCM.");
-        format = AudioStreamBasicDescription {
-            sample_rate: 44100.0,
-            format_id: kAudioFormatLinearPCM,
-            format_flags: 12,
-            bytes_per_packet: 4,
-            frames_per_packet: 1,
-            bytes_per_frame: 4,
-            channels_per_frame: 2,
-            bits_per_channel: 16,
-            _reserved: 0,
-        }
-    }
+    let format = env.mem.read(in_format);
 
     let host_object = AudioQueueHostObject {
         format,
@@ -184,6 +169,12 @@ pub fn AudioQueueNewOutput(
         volume: 1.0,
         buffers: Vec::new(),
         buffer_queue: VecDeque::new(),
+        packet_ranges: HashMap::new(),
+        mp3_decoder: if format.format_id == kAudioFormatMPEGLayer3 {
+            Some(Mp3Decoder::new().unwrap())
+        } else {
+            None
+        },
         is_running: AudioQueueIsRunning::Stopped,
         al_source: None,
         al_unused_buffers: Vec::new(),
@@ -276,11 +267,28 @@ fn AudioQueueAllocateBufferWithPacketDescriptions(
     env: &mut Environment,
     in_aq: AudioQueueRef,
     in_buffer_byte_size: GuestUSize,
-    _in_number_packet_desc: GuestUSize,
+    in_number_packet_desc: GuestUSize,
     out_buffer: MutPtr<AudioQueueBufferRef>,
 ) -> OSStatus {
-    // TODO: support packet descriptions
-    AudioQueueAllocateBuffer(env, in_aq, in_buffer_byte_size, out_buffer)
+    let Some(size) =
+        in_number_packet_desc.checked_mul(guest_size_of::<AudioStreamPacketDescription>())
+    else {
+        return -50;
+    };
+    let status = AudioQueueAllocateBuffer(env, in_aq, in_buffer_byte_size, out_buffer);
+    if status != 0 {
+        return status;
+    }
+    let ptr = env.mem.read(out_buffer);
+    let mut buffer = env.mem.read(ptr);
+    buffer.packet_description_capacity = in_number_packet_desc;
+    buffer.packet_descriptions = if size == 0 {
+        Ptr::null()
+    } else {
+        env.mem.alloc(size).cast()
+    };
+    env.mem.write(ptr, buffer);
+    0
 }
 
 pub fn AudioQueueAllocateBuffer(
@@ -296,26 +304,15 @@ pub fn AudioQueueAllocateBuffer(
         .get_mut(&in_aq)
         .unwrap();
 
-    let packet_description_capacity = if env
-        .bundle
-        .bundle_identifier()
-        .starts_with("com.ea.candcra")
-    {
-        log!("Applying game-specific hack for C&C Red Alert: Setting packet description capacity to 1024.");
-        1024
-    } else {
-        0
-    };
-
     let audio_data = env.mem.alloc(in_buffer_byte_size);
     let buffer_ptr = env.mem.alloc_and_write(AudioQueueBuffer {
         audio_data_bytes_capacity: in_buffer_byte_size,
         audio_data,
         audio_data_byte_size: 0,
         user_data: Ptr::null(),
-        packet_description_capacity,
-        _packet_descriptions: Ptr::null(),
-        _packet_description_count: 0,
+        packet_description_capacity: 0,
+        packet_descriptions: Ptr::null(),
+        packet_description_count: 0,
     });
     host_object.buffers.push(buffer_ptr);
     env.mem.write(out_buffer, buffer_ptr);
@@ -350,14 +347,10 @@ pub fn AudioQueueEnqueueBuffer(
     env: &mut Environment,
     in_aq: AudioQueueRef,
     in_buffer: AudioQueueBufferRef,
-    _in_num_packet_descs: u32,
-    _in_packet_descs: MutVoidPtr,
+    in_num_packet_descs: u32,
+    in_packet_descs: MutVoidPtr,
 ) -> OSStatus {
     return_if_null!(in_aq);
-
-    // Variable packet size unimplemented (no formats supported that need it).
-    // We don't assert the count is 0 because we might get a useless one even
-    // for formats that don't need it.
 
     let host_object = State::get(&mut env.framework_state)
         .audio_queues
@@ -366,6 +359,48 @@ pub fn AudioQueueEnqueueBuffer(
 
     if !host_object.buffers.contains(&in_buffer) {
         return kAudioQueueErr_InvalidBuffer;
+    }
+    if host_object.buffer_queue.contains(&in_buffer) {
+        return kAudioQueueErr_BufferInQueue;
+    }
+    let buffer = env.mem.read(in_buffer);
+    if buffer.audio_data_byte_size > buffer.audio_data_bytes_capacity {
+        return kAudioQueueErr_InvalidBuffer;
+    }
+    if host_object.format.format_id == kAudioFormatMPEGLayer3 {
+        let (count, descriptions) = if !in_packet_descs.is_null() {
+            (
+                in_num_packet_descs,
+                in_packet_descs.cast::<AudioStreamPacketDescription>(),
+            )
+        } else {
+            if buffer.packet_description_count > buffer.packet_description_capacity {
+                return kAudioQueueErr_InvalidBuffer;
+            }
+            (buffer.packet_description_count, buffer.packet_descriptions)
+        };
+        let mut ranges = Vec::new();
+        if count != 0 {
+            if descriptions.is_null() || count > buffer.audio_data_byte_size {
+                return kAudioQueueErr_InvalidBuffer;
+            }
+            for i in 0..count {
+                let desc = env.mem.read(descriptions + i);
+                let Ok(start) = usize::try_from(desc.start_offset) else {
+                    return kAudioQueueErr_InvalidBuffer;
+                };
+                let Some(end) = start.checked_add(desc.data_byte_size as usize) else {
+                    return kAudioQueueErr_InvalidBuffer;
+                };
+                if end > buffer.audio_data_byte_size as usize || start == end {
+                    return kAudioQueueErr_InvalidBuffer;
+                }
+                ranges.push(start..end);
+            }
+        }
+        // An empty range list denotes a self-contained MP3 frame stream, used
+        // by clients that do not supply descriptions for constant bit-rate data.
+        host_object.packet_ranges.insert(in_buffer, ranges);
     }
 
     host_object.buffer_queue.push_back(in_buffer);
@@ -531,6 +566,7 @@ pub fn is_supported_audio_format(format: &AudioStreamBasicDescription) -> bool {
         ..
     } = format;
     match format_id {
+        kAudioFormatMPEGLayer3 => channels_per_frame == 1 || channels_per_frame == 2,
         kAudioFormatAppleIMA4 => (channels_per_frame == 1) || (channels_per_frame == 2),
         kAudioFormatLinearPCM => {
             // TODO: support more PCM formats
@@ -558,6 +594,22 @@ pub fn decode_buffer(
     assert!(is_supported_audio_format(format));
 
     match format.format_id {
+        kAudioFormatMPEGLayer3 => {
+            let file = read_mp3(data_slice).expect("Invalid MP3 audio buffer");
+            let pcm = Mp3Decoder::new()
+                .unwrap()
+                .decode(file.packets.iter().map(|p| &file.bytes[p.clone()]))
+                .expect("MP3 decode failed");
+            (
+                if pcm.channels == 1 {
+                    al::AL_FORMAT_MONO16
+                } else {
+                    al::AL_FORMAT_STEREO16
+                },
+                pcm.sample_rate as _,
+                pcm.bytes,
+            )
+        }
         kAudioFormatAppleIMA4 => {
             assert!(data_slice.len().is_multiple_of(34));
             let mut out_pcm = Vec::<u8>::with_capacity((data_slice.len() / 34) * 64 * 2);
@@ -736,19 +788,46 @@ fn prime_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) -> Result<(), 
             in_aq
         );
 
+        let (al_format, al_frequency, data) = if let Some(decoder) = &mut host_object.mp3_decoder {
+            let bytes = env.mem.bytes_at(
+                next_buffer.audio_data.cast(),
+                next_buffer.audio_data_byte_size,
+            );
+            let ranges = &host_object.packet_ranges[&next_buffer_ref];
+            let pcm = if ranges.is_empty() {
+                let file = read_mp3(bytes)?;
+                decoder.decode(file.packets.iter().map(|p| &file.bytes[p.clone()]))?
+            } else {
+                decoder.decode(ranges.iter().map(|p| &bytes[p.clone()]))?
+            };
+            if pcm.channels != host_object.format.channels_per_frame
+                || pcm.sample_rate as f64 != host_object.format.sample_rate
+            {
+                return Err(());
+            }
+            (
+                if pcm.channels == 1 {
+                    al::AL_FORMAT_MONO16
+                } else {
+                    al::AL_FORMAT_STEREO16
+                },
+                pcm.sample_rate as _,
+                pcm.bytes,
+            )
+        } else {
+            decode_buffer(
+                &env.mem,
+                &host_object.format,
+                next_buffer.audio_data.cast(),
+                next_buffer.audio_data_byte_size,
+            )
+        };
         let next_al_buffer = host_object.al_unused_buffers.pop().unwrap_or_else(|| {
             let mut al_buffer = 0;
             unsafe { context.GenBuffers(1, &mut al_buffer) };
             assert!(unsafe { context.GetError() } == 0);
             al_buffer
         });
-
-        let (al_format, al_frequency, data) = decode_buffer(
-            &env.mem,
-            &host_object.format,
-            next_buffer.audio_data.cast(),
-            next_buffer.audio_data_byte_size,
-        );
         unsafe {
             context.BufferData(
                 next_al_buffer,
@@ -792,6 +871,12 @@ fn unqueue_buffers<F: FnMut(ALuint)>(al_source: ALuint, context: &OpenAL<'_>, mu
 /// For use by `NSRunLoop`: check the status of an audio queue, recycle buffers,
 /// call callbacks, push new buffers etc.
 pub fn handle_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
+    if !State::get(&mut env.framework_state)
+        .audio_queues
+        .contains_key(&in_aq)
+    {
+        return;
+    }
     // Collect used buffers and call the user callback so the app can provide
     // new buffers.
 
@@ -823,11 +908,16 @@ pub fn handle_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
     let &mut AudioQueueHostObject {
         callback_proc,
         callback_user_data,
-        is_running,
         ..
     } = host_object;
 
     for buffer_ref in buffers_to_reuse.drain(..) {
+        if !State::get(&mut env.framework_state)
+            .audio_queues
+            .contains_key(&in_aq)
+        {
+            return;
+        }
         log_dbg!(
             "Recyling buffer {:?} for queue {:?}. Calling callback {:?} with user data {:?}.",
             buffer_ref,
@@ -840,7 +930,14 @@ pub fn handle_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
     }
 
     // Push new buffers etc.
-
+    let Some(host_object) = State::get(&mut env.framework_state)
+        .audio_queues
+        .get(&in_aq)
+    else {
+        return;
+    };
+    // A callback may stop the queue; use its current state before restarting AL.
+    let is_running = host_object.is_running;
     _ = prime_audio_queue(env, in_aq);
 
     let context = env
@@ -1056,6 +1153,10 @@ fn AudioQueueReset(env: &mut Environment, in_aq: AudioQueueRef) -> OSStatus {
     }
 
     host_object.buffer_queue.clear();
+    host_object.packet_ranges.clear();
+    if let Some(decoder) = &mut host_object.mp3_decoder {
+        decoder.reset();
+    }
 
     0 // success
 }
@@ -1089,6 +1190,10 @@ fn AudioQueueFreeBuffer(
 
         let buffer = env.mem.read(in_buffer);
         env.mem.free(buffer.audio_data);
+        if !buffer.packet_descriptions.is_null() {
+            env.mem.free(buffer.packet_descriptions.cast());
+        }
+        host_object.packet_ranges.remove(&in_buffer);
         env.mem.free(in_buffer.cast());
 
         0 // success
@@ -1117,6 +1222,9 @@ pub fn AudioQueueDispose(
     for buffer_ptr in host_object.buffers {
         let buffer = env.mem.read(buffer_ptr);
         env.mem.free(buffer.audio_data);
+        if !buffer.packet_descriptions.is_null() {
+            env.mem.free(buffer.packet_descriptions.cast());
+        }
         env.mem.free(buffer_ptr.cast());
     }
 
@@ -1131,6 +1239,7 @@ pub fn AudioQueueDispose(
         });
 
         unsafe {
+            context.DeleteSources(1, &al_source);
             context.DeleteBuffers(
                 host_object.al_unused_buffers.len().try_into().unwrap(),
                 host_object.al_unused_buffers.as_ptr(),

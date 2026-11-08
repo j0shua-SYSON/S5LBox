@@ -107,6 +107,17 @@ impl AudioStreamBasicDescription {
         } = desc;
 
         match format {
+            AudioFormat::Mp3 => AudioStreamBasicDescription {
+                sample_rate,
+                format_id: kAudioFormatMPEGLayer3,
+                format_flags: 0,
+                bytes_per_packet: 0,
+                frames_per_packet,
+                bytes_per_frame: 0,
+                channels_per_frame,
+                bits_per_channel: 0,
+                _reserved: 0,
+            },
             AudioFormat::LinearPcm {
                 is_float,
                 is_little_endian,
@@ -133,6 +144,17 @@ impl AudioStreamBasicDescription {
         }
     }
 }
+
+pub const kAudioFormatMPEGLayer3: AudioFormatID = fourcc(b".mp3");
+
+#[derive(Clone, Copy)]
+#[repr(C, packed)]
+pub struct AudioStreamPacketDescription {
+    pub start_offset: i64,
+    pub variable_frames_in_packet: u32,
+    pub data_byte_size: u32,
+}
+unsafe impl SafeRead for AudioStreamPacketDescription {}
 
 #[repr(C, packed)]
 pub struct SMPTETime {

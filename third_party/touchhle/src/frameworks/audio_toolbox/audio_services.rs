@@ -5,6 +5,7 @@
  */
 //! `AudioServices.h` (Audio Services)
 
+use crate::abi::{CallFromHost, GuestFunction};
 use std::collections::HashMap;
 
 use crate::audio::openal as al;
@@ -15,6 +16,9 @@ use super::audio_queue::decode_buffer;
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::frameworks::carbon_core::OSStatus;
 use crate::frameworks::core_audio_types::{fourcc, AudioStreamBasicDescription};
+use crate::frameworks::core_foundation::cf_run_loop::{
+    CFRunLoopGetMain, CFRunLoopMode, CFRunLoopRef,
+};
 use crate::frameworks::core_foundation::cf_url::CFURLRef;
 use crate::frameworks::foundation::ns_url::to_rust_path;
 use crate::mem::{GuestUSize, MutPtr, MutVoidPtr};
@@ -33,6 +37,15 @@ const INITIAL_SYSTEM_SOUND_ID: SystemSoundID = 0x1001;
 struct SystemSoundData {
     al_source: ALuint,
     al_buffer: ALuint,
+    completion: Option<SoundCompletion>,
+    playing: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SoundCompletion {
+    run_loop: CFRunLoopRef,
+    callback: GuestFunction,
+    user_data: MutVoidPtr,
 }
 
 pub struct State {
@@ -115,6 +128,8 @@ fn AudioServicesCreateSystemSoundID(
     let sys_data = SystemSoundData {
         al_source,
         al_buffer,
+        completion: None,
+        playing: false,
     };
     state.sounds.insert(state.data_top, sys_data);
     env.mem.write(out_system_sound_id, state.data_top);
@@ -147,10 +162,10 @@ fn AudioServicesPlaySystemSound(env: &mut Environment, sys_sound_id: SystemSound
             State::get_with_context(&mut env.framework_state, &mut env.openal_manager);
 
         if let Some(SystemSoundData {
-            al_source,
-            al_buffer: _,
-        }) = state.sounds.get(&sys_sound_id)
+            al_source, playing, ..
+        }) = state.sounds.get_mut(&sys_sound_id)
         {
+            *playing = true;
             unsafe {
                 let al_source = *al_source;
                 context.SourcePlay(al_source);
@@ -184,6 +199,7 @@ fn AudioServicesDisposeSystemSoundID(
     if let Some(SystemSoundData {
         al_source,
         al_buffer,
+        ..
     }) = state.sounds.remove(&sys_sound_id)
     {
         unsafe {
@@ -200,7 +216,98 @@ fn AudioServicesDisposeSystemSoundID(
     }
 }
 
+fn AudioServicesAddSystemSoundCompletion(
+    env: &mut Environment,
+    sound: SystemSoundID,
+    run_loop: CFRunLoopRef,
+    _mode: CFRunLoopMode,
+    callback: GuestFunction,
+    user_data: MutVoidPtr,
+) -> OSStatus {
+    if callback.to_ptr().is_null() {
+        return -50;
+    }
+    let run_loop = if run_loop.is_null() {
+        CFRunLoopGetMain(env)
+    } else {
+        run_loop
+    };
+    let Some(sound) = env
+        .framework_state
+        .audio_toolbox
+        .audio_services
+        .sounds
+        .get_mut(&sound)
+    else {
+        return kAudioServicesSystemSoundUnspecifiedError;
+    };
+    // Run-loop modes follow the current NSRunLoop implementation, which
+    // processes default and common-mode sources together.
+    sound.completion = Some(SoundCompletion {
+        run_loop,
+        callback,
+        user_data,
+    });
+    0
+}
+
+fn AudioServicesRemoveSystemSoundCompletion(env: &mut Environment, sound: SystemSoundID) {
+    if let Some(sound) = env
+        .framework_state
+        .audio_toolbox
+        .audio_services
+        .sounds
+        .get_mut(&sound)
+    {
+        sound.completion = None;
+    }
+}
+
+pub fn handle_sound_completions(env: &mut Environment, run_loop: CFRunLoopRef) {
+    let ids: Vec<_> = env
+        .framework_state
+        .audio_toolbox
+        .audio_services
+        .sounds
+        .iter()
+        .filter(|(_, sound)| {
+            sound.playing && sound.completion.is_some_and(|c| c.run_loop == run_loop)
+        })
+        .map(|(&id, _)| id)
+        .collect();
+    for id in ids {
+        // A previous callback may have removed or restarted another sound.
+        let completion = {
+            let (state, context) =
+                State::get_with_context(&mut env.framework_state, &mut env.openal_manager);
+            let Some(sound) = state.sounds.get_mut(&id) else {
+                continue;
+            };
+            let Some(completion) = sound.completion else {
+                continue;
+            };
+            if !sound.playing || completion.run_loop != run_loop {
+                continue;
+            }
+            let mut status = 0;
+            unsafe {
+                context.GetSourcei(sound.al_source, al::AL_SOURCE_STATE, &mut status);
+            }
+            if status != al::AL_STOPPED {
+                continue;
+            }
+            sound.playing = false;
+            completion
+        };
+        let () = completion
+            .callback
+            .call_from_host(env, (id, completion.user_data));
+    }
+}
+
 pub const FUNCTIONS: FunctionExports = &[
+    export_c_func!(AudioServicesAddSystemSoundCompletion(_, _, _, _, _)),
+    export_c_func!(AudioServicesRemoveSystemSoundCompletion(_)),
     export_c_func!(AudioServicesCreateSystemSoundID(_, _)),
     export_c_func!(AudioServicesGetProperty(_, _, _, _, _)),
     export_c_func!(AudioServicesPlaySystemSound(_)),
