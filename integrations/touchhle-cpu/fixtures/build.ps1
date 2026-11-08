@@ -38,6 +38,7 @@ if ($LASTEXITCODE) { throw 'Visual fixture compile failed' }
     "$outputRoot/visual.o" -lSystem -lobjc -framework Foundation -framework UIKit -framework OpenAL
 if ($LASTEXITCODE) { throw 'Visual fixture link failed' }
 Copy-Item -LiteralPath "$PSScriptRoot/visual.plist" -Destination "$visual/Info.plist"
+Copy-Item -LiteralPath "$PSScriptRoot/Fixture.bundle" -Destination $visual -Recurse -Force
 $dylibs=Join-Path $outputRoot 'LibrarySmoke.app'
 New-Item -ItemType Directory -Force -Path $dylibs | Out-Null
 & $compiler @common -marm -c "$PSScriptRoot/dylibs.c" -o "$outputRoot/dylibs.o"

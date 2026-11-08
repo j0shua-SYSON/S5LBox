@@ -13,6 +13,7 @@ use crate::frameworks::core_foundation::cf_bundle::{
 use crate::frameworks::foundation::ns_string::{
     from_rust_string, to_rust_string, NSUTF8StringEncoding,
 };
+use crate::fs::{resolve_path, GuestPath};
 use crate::mem::{ConstVoidPtr, MutPtr, Ptr};
 use crate::objc::{
     autorelease, id, msg, msg_class, nil, objc_classes, release, retain, Class, ClassExports,
@@ -41,7 +42,8 @@ const LANG_ID_TO_LANG_PROJ: &[(&str, &[&str])] = &[
 #[derive(Default)]
 pub struct State {
     main_bundle: Option<id>,
-    localization_tables: HashMap<id, id>, // NSString* to NSDictionary*
+    bundles: HashMap<String, id>, // Retained for the lifetime of the environment.
+    localization_tables: HashMap<(id, String), id>, // Bundle + table to NSDictionary*.
 }
 
 pub struct NSBundleHostObject {
@@ -65,6 +67,33 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 @implementation NSBundle: NSObject
 
++ (id)allocWithZone:(NSZonePtr)_zone {
+    let object = NSBundleHostObject {
+        bundle: Some(Bundle::new_fake_bundle()), bundle_path: nil,
+        bundle_identifier: nil, bundle_url: None, info_dictionary: None,
+    };
+    env.objc.alloc_object(this, Box::new(object), &mut env.mem)
+}
+
++ (id)bundleWithPath:(id)path {
+    let bundle: id = msg![env; this alloc];
+    let bundle: id = msg![env; bundle initWithPath:path];
+    autorelease(env, bundle)
+}
+
+
++ (id)bundleForClass:(Class)class {
+    // Classes compiled into the application's Mach-O belong to its main
+    // bundle. Do not misidentify host-implemented framework classes as app
+    // classes: their framework resource bundles are not currently mounted.
+    let address = class.to_bits();
+    if env.bins.first().is_some_and(|binary| binary.sections.iter().any(|section|
+        address >= section.addr && address < section.next_section_addr())) {
+        return msg![env; this mainBundle];
+    }
+    nil
+}
+
 + (id)mainBundle {
     if let Some(bundle) = env.framework_state.foundation.ns_bundle.main_bundle {
         bundle
@@ -80,14 +109,54 @@ pub const CLASSES: ClassExports = objc_classes! {
     autorelease(env, preferredLocalizations)
 }
 
+- (id)initWithPath:(id)path {
+    if path == nil {
+        release(env, this);
+        return nil;
+    }
+    let path = to_rust_string(env, path).to_string();
+    if !path.starts_with('/') {
+        release(env, this);
+        return nil;
+    }
+    let path = format!("/{}", resolve_path(GuestPath::new(&path), None).join("/"));
+    if path == env.bundle.bundle_path().as_str() {
+        let main: id = msg_class![env; NSBundle mainBundle];
+        retain(env, main);
+        release(env, this);
+        return main;
+    }
+    if let Some(&cached) = env.framework_state.foundation.ns_bundle.bundles.get(&path) {
+        retain(env, cached);
+        release(env, this);
+        return cached;
+    }
+    let Some(bundle) = Bundle::from_guest_path(&env.fs, GuestPath::new(&path)) else {
+        release(env, this);
+        return nil;
+    };
+    let identifier = bundle.optional_identifier().map(str::to_owned);
+    let bundle_path = from_rust_string(env, path.clone());
+    let bundle_identifier = identifier.map(|value| from_rust_string(env, value)).unwrap_or(nil);
+    *env.objc.borrow_mut::<NSBundleHostObject>(this) = NSBundleHostObject {
+        bundle: Some(bundle), bundle_path, bundle_identifier,
+        bundle_url: None, info_dictionary: None,
+    };
+    retain(env, this);
+    env.framework_state.foundation.ns_bundle.bundles.insert(path, this);
+    this
+}
+
 - (())dealloc {
     let &NSBundleHostObject {
         bundle: _,
-        bundle_path: _, // FIXME?
-        bundle_identifier: _, // FIXME?
+        bundle_path,
+        bundle_identifier,
         bundle_url,
         info_dictionary,
     } = env.objc.borrow(this);
+    release(env, bundle_path);
+    release(env, bundle_identifier);
     if let Some(bundle_url) = bundle_url {
         release(env, bundle_url);
     }
@@ -155,13 +224,16 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (id)executablePath {
-    let exec_path_str = env.bundle.executable_path().as_str().to_string();
+    let bundle = env.objc.borrow::<NSBundleHostObject>(this).bundle.as_ref().unwrap_or(&env.bundle);
+    let Some(exec_path) = bundle.optional_executable_path() else { return nil; };
+    let exec_path_str = exec_path.as_str().to_string();
     let exec_path = from_rust_string(env, exec_path_str);
     autorelease(env, exec_path)
 }
 - (id)executableURL {
     // TODO: cache result
     let exec_path: id = msg![env; this executablePath];
+    if exec_path == nil { return nil; }
     msg_class![env; NSURL fileURLWithPath:exec_path]
 }
 
@@ -259,17 +331,15 @@ pub const CLASSES: ClassExports = objc_classes! {
     } else {
         table_name
     };
-    // TODO: support arbitrary bundles, not only main one
-    assert_eq!(this, env.framework_state.foundation.ns_bundle.main_bundle.unwrap());
-    let dict = if let Some(&table_dict) = env.framework_state.foundation.ns_bundle.localization_tables.get(&name) {
+    let cache_key = (this, to_rust_string(env, name).to_string());
+    let dict = if let Some(&table_dict) = env.framework_state.foundation.ns_bundle.localization_tables.get(&cache_key) {
         table_dict
     } else {
         let extension = ns_string::get_static_str(env, "strings");
         let dict_url: id = msg![env; this URLForResource:name withExtension:extension];
         if dict_url == nil {
             log!("Warning: Unable to locate localization table named '{}', caching as nil", to_rust_string(env, name));
-            retain(env, name);
-            env.framework_state.foundation.ns_bundle.localization_tables.insert(name, nil);
+            env.framework_state.foundation.ns_bundle.localization_tables.insert(cache_key, nil);
             nil
         } else {
             let dict = {
@@ -282,9 +352,8 @@ pub const CLASSES: ClassExports = objc_classes! {
                     load_strings_as_standard_format(env, dict_url)
                 }
             };
-            retain(env, name);
             retain(env, dict);
-            env.framework_state.foundation.ns_bundle.localization_tables.insert(name, dict);
+            env.framework_state.foundation.ns_bundle.localization_tables.insert(cache_key, dict);
             dict
         }
     };
@@ -335,7 +404,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     autorelease(env, preferred_localizations)
 }
 
-// TODO: constructors, more accessors
+// TODO: more accessors and executable loading for non-main bundles.
 
 @end
 

@@ -12,6 +12,7 @@ typedef struct { float width,height; } CGSize;
 typedef struct { CGPoint origin; CGSize size; } CGRect;
 __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 + (id)alloc;
++ (Class)class;
 - (id)init;
 @end
 @interface NSAutoreleasePool : NSObject @end
@@ -26,6 +27,17 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 + (id)stringWithUTF8String:(const char *)text;
 - (const char *)UTF8String;
 - (BOOL)isEqualToString:(id)other;
+- (id)stringByAppendingPathComponent:(id)component;
+@end
+@interface NSBundle : NSObject
++ (id)mainBundle;
++ (id)bundleWithPath:(id)path;
++ (id)bundleForClass:(Class)class;
+- (id)bundlePath;
+- (id)bundleIdentifier;
+- (id)executablePath;
+- (id)pathForResource:(id)name ofType:(id)type;
+- (id)localizedStringForKey:(id)key value:(id)value table:(id)table;
 @end
 @interface NSUserDefaults : NSObject
 + (id)standardUserDefaults;
@@ -306,6 +318,21 @@ int main(int argc,char **argv) {
         failures += [zero unsignedLongValue]!=0;
         failures += sel_getUid("setText:")!=sel_registerName("setText:");
         failures += sel_getUid("fixtureNewSelector:")!=sel_registerName("fixtureNewSelector:");
+        NSBundle *main=[NSBundle mainBundle];
+        id resourcePath=[[main bundlePath] stringByAppendingPathComponent:@"Fixture.bundle"];
+        NSBundle *resource=[NSBundle bundleWithPath:resourcePath];
+        failures += resource==0;
+        failures += [NSBundle bundleWithPath:[main bundlePath]]!=main;
+        failures += [NSBundle bundleForClass:[CancelTarget class]]!=main;
+        failures += [NSBundle bundleWithPath:[resourcePath stringByAppendingPathComponent:@"."]]!=resource;
+        failures += [NSBundle bundleWithPath:@"relative.bundle"]!=0;
+        failures += [NSBundle bundleWithPath:@"/missing.bundle"]!=0;
+        failures += ![[resource bundleIdentifier] isEqualToString:@"org.s5lbox.fixture.resources"];
+        failures += [resource executablePath]!=0;
+        failures += [resource pathForResource:@"Info" ofType:@"plist"]==0;
+        failures += ![[main localizedStringForKey:@"fixture-key" value:0 table:0] isEqualToString:@"fixture-key"];
+        failures += ![[resource localizedStringForKey:@"fixture-key" value:0 table:0] isEqualToString:@"Resource value"];
+        failures += ![[main localizedStringForKey:@"fixture-key" value:0 table:0] isEqualToString:@"fixture-key"];
         [control touchesCancelled:touches withEvent:0];
         failures += [control isTracking] || [control isHighlighted] || target->ended || target->cancelled!=1;
         [control touchesCancelled:touches withEvent:0]; // No duplicate action.

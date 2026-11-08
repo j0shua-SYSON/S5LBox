@@ -25,6 +25,50 @@ pub struct Bundle {
 }
 
 impl Bundle {
+    /// Open a resource bundle already visible in the guest filesystem. Unlike
+    /// an application, a resource bundle need not have an executable or ID.
+    pub fn from_guest_path(fs: &Fs, path: &GuestPath) -> Option<Self> {
+        if !fs.is_dir(path) {
+            return None;
+        }
+        let info = path.join("Info.plist");
+        let plist = if fs.exists(&info) {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            fs.open(&info)
+                .ok()?
+                .take(1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .ok()?;
+            if bytes.len() > 1024 * 1024 {
+                return None;
+            }
+            Value::from_reader(Cursor::new(bytes))
+                .ok()?
+                .into_dictionary()?
+        } else {
+            Dictionary::new()
+        };
+        Some(Bundle {
+            path: path.to_owned(),
+            plist,
+        })
+    }
+
+    pub fn optional_identifier(&self) -> Option<&str> {
+        self.plist
+            .get("CFBundleIdentifier")
+            .and_then(Value::as_string)
+    }
+
+    pub fn optional_executable_path(&self) -> Option<GuestPathBuf> {
+        self.plist
+            .get("CFBundleExecutable")
+            .and_then(Value::as_string)
+            .filter(|name| !name.is_empty())
+            .map(|name| self.path.join(name))
+    }
+
     /// Use the installed bundle in the live guest, without copying its resources
     /// or redirecting its documents into a host-only sandbox.
     pub fn new_bundle_and_fs_from_live(

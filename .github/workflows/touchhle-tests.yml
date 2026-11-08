@@ -314,13 +314,15 @@ jobs:
           cat ../../work/hle-dylibs.log
           grep -F 'S5LBOX-HLE-DYLIBS PASS failures=0' ../../work/hle-dylibs.log
 
-      - name: Verify cancelled UIKit touches do not activate controls
+      - name: Verify UIKit touch cancellation and Foundation compatibility
         working-directory: third_party/touchhle
         timeout-minutes: 2
         run: |
           set -euo pipefail
-          ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/HLEVisual.app --headless --args --cancel-smoke > ../../work/hle-cancel.log 2>&1
+          result=0
+          ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/HLEVisual.app --headless --args --cancel-smoke > ../../work/hle-cancel.log 2>&1 || result=$?
           cat ../../work/hle-cancel.log
+          test "$result" -eq 0
           grep -F 'S5LBOX-HLE-CANCEL PASS failures=0' ../../work/hle-cancel.log
 
       - name: Reuse one host process after guest exits and faults
