@@ -59,8 +59,8 @@ execution, audio output, or further progress through the full kernel boot.
 
 ## Optional AMC internal-memory DMA component
 
-A separate channel-0 component copies backed memory from a validated terminal
-descriptor. The owner supplies the powered context, writable memory, up to
+A separate channel-0 component copies backed memory from validated descriptors
+in link order. The owner supplies the powered context, writable memory, up to
 three disjoint internal-memory regions, and full idle, active and stopped
 status words. The low three status bits are constrained to 0, 1 through 6,
 and 7 respectively. The exact active encoding and other readback bits remain
@@ -70,22 +70,32 @@ are inferred from this interface.
 The matching driver's DMA test uses channel offsets `0x00` for submission,
 `0x10` for commands, and `0x14` for status. Command 4 stops an idle channel;
 command `0x10` resets a stopped channel. Submission accepts an internal
-descriptor offset tagged with low bits 2. Its four words contain a zero next
+descriptor offset tagged with low bits 2. Its four words contain a tagged next
 pointer, control, source offset and destination offset. Supported control
-forms use internal source/destination modes 1/1, flags `0x20`, burst field
-zero or `0xf80`, and a word count in bits 31:18. These are the two forms the
-original descriptor builder produces for this test. Lengths are 1 through
-16,383 words; all descriptor and data spans must fit the supplied regions.
+forms use internal source/destination modes 1/1 and a word count in bits
+31:18. For internal-memory links, the normal driver uses zero flags and burst
+field.
+A terminal descriptor may also use flags `0x20` with burst zero or `0xf80`,
+the two forms used by the DMA test. The role of `0x20` on an intermediate link
+is unknown and remains unsupported. A zero next pointer ends the chain.
+Lengths are 1 through 16,383 words per descriptor; all descriptor and data
+spans must fit the supplied regions. Admission is bounded to 64 descriptors
+as a host resource limit, not an inferred silicon capacity.
 
-Submission validates and latches the descriptor without copying bytes. Each
+Submission validates and latches the entire chain without copying bytes. Each
 explicit service call with an available clock copies whole words, bounded
-by the caller's budget and 16 bytes. Reads never advance a transfer. The
-channel returns to supplied idle status only after every byte has moved;
+by the caller's budget, 16 bytes and the current descriptor's remaining data.
+Reads never advance a transfer. The channel stays active between descriptors
+and returns to supplied idle status only after the last descriptor finishes;
 `completed` records that host-side event. This scheduling is functional and
 does not establish hardware timing. Host reset cancels work while preserving
-already copied bytes and the configured backing. Chained descriptors,
-overlapping spans, external memory, other flags/modes/channels and active
-stop/reset commands refuse without mutation.
+already copied bytes and the configured backing. Later copies can consume
+data produced by earlier descriptors. Cycles, overlapping descriptor headers,
+data overlapping any header, source/destination overlap within one descriptor,
+external memory, other flags/modes/channels and active stop/reset commands
+refuse without mutation. An invalid later link rejects the whole submission
+before any payload write. Latched metadata prevents subsequent descriptor
+edits from redirecting pending work.
 
 The original DMA test block constructs its own descriptor, submits it, polls,
 compares 512 destination words and checks a trailing guard. It passes with
@@ -96,6 +106,15 @@ returns, window registers, software-list BSS and status observations and
 enters after the logging call. This is not the complete self-test dispatcher
 or driver initialization. The component has no board attachment, IRQ cause
 mapping, DSP execution or sound output, and does not advance the full boot.
+
+An additional witness uses the original normal-driver allocation and
+descriptor/list helpers to build two linked transfers, then enters the
+original submit, poll, comparison and guard block. Both zero-flags and
+supported terminal-flag forms copy the complete 2 KB. Withheld clocks leave
+the channel polling; missing later data or metadata, a cycle, or unsupported
+intermediate flags refuse submission before copying the valid first entry.
+The boundary inputs are explicit fixtures; this does not establish complete
+normal-driver initialization or execution of its control-register DMA forms.
 
 ## Optional SDHC reset and clock component
 

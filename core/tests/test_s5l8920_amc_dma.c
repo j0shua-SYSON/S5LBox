@@ -115,7 +115,7 @@ static void rejections(void) {
     refuse(&d,0x10u,4u,0x10u); refuse(&d,0x10u,4u,0x20u); refuse(&d,0x10u,4u,0x60u);
     const uint32_t pointers[]={0u,1u,3u,desc,desc|1u,desc|3u,0x20002u,0x48ff6u,0xfffffffeu};
     for (unsigned i=0;i<sizeof pointers/sizeof pointers[0];++i) refuse(&d,0u,4u,pointers[i]);
-    const uint32_t controls[]={0x25u,0x40024u,0x40021u,0x40035u,0x40005u,0x41fa5u,0x44025u};
+    const uint32_t controls[]={0x25u,0x40024u,0x40021u,0x40035u,0x40045u,0x41fa5u,0x44025u};
     for (unsigned i=0;i<sizeof controls/sizeof controls[0];++i) {
         word_at(desc+4u,controls[i]); refuse(&d,0u,4u,desc|2u);
     }
@@ -136,11 +136,99 @@ static void rejections(void) {
     CHECK(s5l8920_amc_dma_write(&d,0u,4u,desc|2u)); word_at(desc+12u,0xfffffffcu);
     CHECK(s5l8920_amc_dma_service(&d,true,16u)==16u && d.destination==dest);
 }
+static unsigned prepare_chain(unsigned count) {
+    prepare(0x1400u,0x25u);
+    unsigned length=0;
+    for (unsigned i=0;i<count;++i) {
+        unsigned words=i%5u+1u;
+        uint32_t at=desc+i*32u;
+        word_at(at,i+1u<count?(at+32u)|2u:0u);
+        word_at(at+4u,(words<<18)|5u);
+        word_at(at+8u,source+i*0x100u);word_at(at+12u,dest+i*0x100u);
+        length+=words*4u;
+    }
+    memcpy(expected,memory,sizeof memory);return length;
+}
+static void chain_transfer(unsigned count,unsigned terminal) {
+    unsigned length=prepare_chain(count);
+    word_at(desc+(count-1u)*32u+4u,(((count-1u)%5u+1u)<<18)|5u|terminal);
+    memcpy(expected,memory,sizeof memory);
+    s5l8920_amc_dma_t d={0};s5l8920_amc_dma_input_t in=input();
+    CHECK(s5l8920_amc_dma_configure(&d,&in));
+    bool accepted=s5l8920_amc_dma_write(&d,0u,4u,desc|2u);
+    CHECK(accepted);if (!accepted) return;
+    CHECK(d.length==length && !d.copied && d.active && !d.completed);
+    CHECK(!memcmp(memory,expected,sizeof memory));
+    unsigned copied=0,calls=0;
+    while (d.active && calls<1000u) {
+        s5l8920_amc_dma_t before=d;
+        CHECK(status(&d)==in.active_status && !memcmp(&before,&d,sizeof d));
+        CHECK(s5l8920_amc_dma_service(&d,false,16u)==0u && !memcmp(&before,&d,sizeof d));
+        CHECK(s5l8920_amc_dma_configure(&d,&in) && !memcmp(&before,&d,sizeof d));
+        unsigned moved=s5l8920_amc_dma_service(&d,true,calls%2u?7u:16u);
+        CHECK(moved && moved<=16u && !(moved&3u));copied+=moved;
+        unsigned prefix=0;
+        for (unsigned i=0;i<count;++i) {
+            unsigned bytes=(i%5u+1u)*4u,n=copied>prefix?copied-prefix:0u;
+            if (n>bytes) n=bytes;
+            memcpy(expected+dest+i*0x100u,expected+source+i*0x100u,n);prefix+=bytes;
+        }
+        CHECK(copied<=length && d.copied==copied && !memcmp(memory,expected,sizeof memory));
+        CHECK(d.active==(copied<length) && d.completed==(copied==length));++calls;
+    }
+    CHECK(copied==length && d.completed && !d.active && status(&d)==in.idle_status);
+    CHECK(s5l8920_amc_dma_service(&d,true,16u)==0u);
+}
+static void chain_refusals(void) {
+    s5l8920_amc_dma_t d={0};s5l8920_amc_dma_input_t in=input();
+    CHECK(s5l8920_amc_dma_configure(&d,&in));
+    for (unsigned i=0;i<11u;++i) {
+        prepare_chain(2u);
+        switch (i) {
+        case 0:word_at(desc+32u+8u,0x20000u);break; /* missing second source */
+        case 1:word_at(desc+32u,desc|2u);break; /* cycle */
+        case 2:word_at(desc,(desc+32u)|1u);break; /* external link */
+        case 3:word_at(desc+4u,0x40025u);break; /* unknown flags on intermediate link */
+        case 4:word_at(desc+32u+4u,0x80015u);break; /* unsupported second control */
+        case 5:word_at(desc+12u,desc+32u);break; /* first copy would alter later metadata */
+        case 6:word_at(desc+8u,desc+32u);break; /* descriptor as data */
+        case 7:word_at(desc,0x20002u);break; /* missing descriptor */
+        case 8:prepare_chain(65u);break; /* host admission bound */
+        case 9:word_at(desc,(desc+4u)|2u);break; /* overlapping descriptor headers */
+        case 10:word_at(desc+32u+8u,desc);break; /* later data aliases earlier metadata */
+        }
+        refuse(&d,0u,4u,desc|2u);
+    }
+    prepare_chain(2u);word_at(desc+4u,0x80005u);
+    word_at(desc+32u+8u,dest);word_at(desc+32u+12u,dest+0x100u);
+    memcpy(expected,memory,sizeof memory);
+    bool accepted=s5l8920_amc_dma_write(&d,0u,4u,desc|2u);
+    CHECK(accepted);if (!accepted) return;
+    CHECK(s5l8920_amc_dma_service(&d,true,16u)==8u && d.active && !d.completed);
+    memcpy(expected+dest,expected+source,8u);
+    CHECK(!memcmp(memory,expected,sizeof memory));
+    CHECK(s5l8920_amc_dma_service(&d,true,16u)==8u && !d.active && d.completed);
+    memcpy(expected+dest+0x100u,expected+source,8u);
+    CHECK(!memcmp(memory,expected,sizeof memory));
+    prepare_chain(2u);CHECK(s5l8920_amc_dma_write(&d,0u,4u,desc|2u));
+    CHECK(s5l8920_amc_dma_service(&d,true,16u)==4u && d.active);
+    memcpy(expected+dest,expected+source,4u);s5l8920_amc_dma_reset(&d);
+    CHECK(!d.active && !d.completed && !d.copied && !d.length && !d.descriptor_count);
+    CHECK(!s5l8920_amc_dma_service(&d,true,16u) && !memcmp(memory,expected,sizeof memory));
+    prepare_chain(2u);CHECK(s5l8920_amc_dma_write(&d,0u,4u,desc|2u));
+    word_at(desc+32u+12u,0xfffffffcu);memcpy(expected,memory,sizeof memory);
+    CHECK(s5l8920_amc_dma_service(&d,true,16u)==4u && d.active);
+    CHECK(s5l8920_amc_dma_service(&d,true,16u)==8u && !d.active && d.completed);
+    memcpy(expected+dest,expected+source,4u);memcpy(expected+dest+0x100u,expected+source+0x100u,8u);
+    CHECK(d.descriptor[1].destination==dest+0x100u && !memcmp(memory,expected,sizeof memory));
+}
 int main(void) {
     rejections();
     const unsigned counts[]={1u,2u,7u,512u,16383u};
     for (unsigned i=0;i<sizeof counts/sizeof counts[0];++i) {
         transfer(counts[i],0x25u); transfer(counts[i],0xfa5u);
     }
+    chain_transfer(1u,0u);chain_transfer(2u,0u);chain_transfer(2u,0x20u);
+    chain_transfer(2u,0xfa0u);chain_transfer(23u,0u);chain_transfer(64u,0u);chain_refusals();
     printf("AMC DMA: %u passed, %u failed\n",passed,failed); return failed?1:0;
 }

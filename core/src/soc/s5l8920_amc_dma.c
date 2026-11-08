@@ -35,6 +35,8 @@ void s5l8920_amc_dma_reset(s5l8920_amc_dma_t *d) {
     if (!d) return;
     if (!d->configured) { memset(d,0,sizeof *d); return; }
     d->source=d->destination=d->length=d->copied=0;
+    memset(d->descriptor,0,sizeof d->descriptor);
+    d->descriptor_count=d->descriptor_index=0; d->descriptor_copied=0;
     d->active=d->stopped=d->completed=false;
 }
 static bool backed(const s5l8920_amc_dma_input_t *in,uint32_t a,uint32_t n) {
@@ -60,25 +62,52 @@ bool s5l8920_amc_dma_write(s5l8920_amc_dma_t *d,uint32_t offset,unsigned size,ui
         s5l8920_amc_dma_reset(d); return true;
     }
     if (offset || d->stopped || (value&3u)!=2u) return false;
-    const uint32_t descriptor=value&~3u;
-    if (!backed(&d->input,descriptor,16u)) return false;
-    const uint8_t *p=d->input.memory+descriptor;
-    const uint32_t control=word(p+4),source=word(p+8),destination=word(p+12);
-    const uint32_t count=control>>18,form=control&0x3ffffu,length=count*4u;
-    if (word(p) || !count || (form!=0x25u && form!=0xfa5u) || ((source|destination)&3u) ||
-        !backed(&d->input,source,length) || !backed(&d->input,destination,length) ||
-        overlap(source,length,destination,length) || overlap(source,length,descriptor,16u) ||
-        overlap(destination,length,descriptor,16u)) return false;
-    d->source=source; d->destination=destination; d->length=length; d->copied=0;
-    d->completed=false; d->active=true; return true;
+    s5l8920_amc_dma_t next=*d;
+    s5l8920_amc_dma_reset(&next);
+    do {
+        if ((value&3u)!=2u || next.descriptor_count==S5L8920_AMC_DMA_MAX_DESCRIPTORS) return false;
+        const uint32_t at=value&~3u;
+        if (!backed(&d->input,at,16u)) return false;
+        for (unsigned i=0;i<next.descriptor_count;++i)
+            if (overlap(at,16u,next.descriptor[i].offset,16u)) return false;
+        const uint8_t *p=d->input.memory+at;
+        const uint32_t control=word(p+4),source=word(p+8),destination=word(p+12);
+        const uint32_t count=control>>18,form=control&0x3ffffu,length=count*4u;
+        value=word(p);
+        if (!count || (form!=5u && (value || (form!=0x25u && form!=0xfa5u))) ||
+            ((source|destination)&3u) || !backed(&d->input,source,length) ||
+            !backed(&d->input,destination,length) || overlap(source,length,destination,length)) return false;
+        s5l8920_amc_dma_descriptor_t entry={at,source,destination,length};
+        next.descriptor[next.descriptor_count++]=entry; next.length+=length;
+    } while (value);
+    /* Protect every admitted header, including later metadata that an earlier
+     * copy could otherwise alter. This also keeps descriptor reads separate
+     * from the supported payload-memory operation. */
+    for (unsigned i=0;i<next.descriptor_count;++i) {
+        const s5l8920_amc_dma_descriptor_t *e=&next.descriptor[i];
+        for (unsigned j=0;j<next.descriptor_count;++j)
+            if (overlap(e->source,e->length,next.descriptor[j].offset,16u) ||
+                overlap(e->destination,e->length,next.descriptor[j].offset,16u)) return false;
+    }
+    next.source=next.descriptor[0].source; next.destination=next.descriptor[0].destination;
+    next.active=true; *d=next; return true;
 }
 unsigned s5l8920_amc_dma_service(s5l8920_amc_dma_t *d,bool clock_available,unsigned budget) {
     if (!d || !d->configured || !d->active || !clock_available) return 0;
+    const s5l8920_amc_dma_descriptor_t *e=&d->descriptor[d->descriptor_index];
     unsigned n=budget>16u?16u:budget&~3u;
-    if (n>d->length-d->copied) n=d->length-d->copied;
+    if (n>e->length-d->descriptor_copied) n=e->length-d->descriptor_copied;
     if (!n) return 0;
-    memcpy(d->input.memory+d->destination+d->copied,d->input.memory+d->source+d->copied,n);
-    d->copied+=n;
-    if (d->copied==d->length) { d->active=false; d->completed=true; }
+    memcpy(d->input.memory+e->destination+d->descriptor_copied,
+           d->input.memory+e->source+d->descriptor_copied,n);
+    d->copied+=n; d->descriptor_copied+=n;
+    if (d->descriptor_copied==e->length) {
+        if (d->descriptor_index+1u==d->descriptor_count) { d->active=false; d->completed=true; }
+        else {
+            ++d->descriptor_index; d->descriptor_copied=0;
+            d->source=d->descriptor[d->descriptor_index].source;
+            d->destination=d->descriptor[d->descriptor_index].destination;
+        }
+    }
     return n;
 }
