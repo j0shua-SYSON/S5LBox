@@ -26,9 +26,9 @@ extern const char *ivar_getTypeEncoding(Ivar);
 extern int ivar_getOffset(Ivar);
 extern id object_getIvar(id,Ivar);
 extern void object_setIvar(id,Ivar,id);
-typedef struct { float x,y; } CGPoint;
-typedef struct { float width,height; } CGSize;
-typedef struct { CGPoint origin; CGSize size; } CGRect;
+typedef struct CGPoint { float x,y; } CGPoint;
+typedef struct CGSize { float width,height; } CGSize;
+typedef struct CGRect { CGPoint origin; CGSize size; } CGRect;
 @interface UIScreenMode
 - (CGSize)size;
 - (float)pixelAspectRatio;
@@ -52,6 +52,10 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 - (void)release;
 - (void)dealloc;
 - (unsigned)retainCount;
+- (id)valueForKey:(id)key;
+- (id)valueForKeyPath:(id)path;
+- (id)valueForUndefinedKey:(id)key;
++ (BOOL)accessInstanceVariablesDirectly;
 - (void)performSelector:(SEL)selector withObject:(id)object afterDelay:(double)delay;
 + (void)cancelPreviousPerformRequestsWithTarget:(id)target;
 - (IMP)methodForSelector:(SEL)selector;
@@ -148,6 +152,11 @@ static unsigned methods_smoke(void) {
 - (unsigned long)unsignedLongValue;
 - (unsigned long long)unsignedLongLongValue;
 - (long)longValue;
+- (double)doubleValue;
+- (long long)longLongValue;
+@end
+@interface NSValue : NSObject
+- (CGPoint)CGPointValue;
 @end
 @interface NSString : NSObject
 + (id)stringWithString:(id)text;
@@ -733,6 +742,53 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     printf("S5LBOX-HLE-VISUAL TERMINATING exits=%d\n",exits); fflush(stdout);
 }
 @end
+@interface KVCFixture : NSObject {
+@public int _count; signed char _tiny; long long _wide; unsigned long _unsigned;
+    double _real; CGPoint _point; id _object;
+}
+- (int)getPriority;
+- (int)priority;
+- (float)fraction;
+@end
+@implementation KVCFixture
+- (int)getPriority { return 3; }
+- (int)priority { return 99; }
+- (float)fraction { return 1.5f; }
+- (id)valueForUndefinedKey:(id)key { (void)key; return @"missing"; }
+@end
+@interface KVCChild : KVCFixture @end
+@implementation KVCChild @end
+@interface KVCNoDirect : KVCFixture @end
+@implementation KVCNoDirect
++ (BOOL)accessInstanceVariablesDirectly { return 0; }
+@end
+static unsigned kvc_smoke(void) {
+    KVCFixture *object=[[KVCChild alloc] init];
+    object->_count=-42; object->_tiny=-7; object->_wide=-9000000000LL;
+    object->_unsigned=0xfedcba98UL; object->_real=3.125; object->_point=(CGPoint){1,2};
+    object->_object=@"key";
+    unsigned failures=[[object valueForKey:@"priority"] longValue]!=3;
+    failures += [[object valueForKey:@"count"] longValue]!=-42;
+    failures += [[object valueForKey:@"tiny"] longValue]!=-7;
+    failures += [[object valueForKey:@"wide"] longLongValue]!=-9000000000LL;
+    failures += [[object valueForKey:@"unsigned"] unsignedLongValue]!=0xfedcba98UL;
+    failures += [[object valueForKey:@"real"] doubleValue]!=3.125;
+    failures += [[object valueForKey:@"fraction"] doubleValue]!=1.5;
+    CGPoint point=[[object valueForKey:@"point"] CGPointValue];
+    failures += point.x!=1 || point.y!=2;
+    failures += [object valueForKey:@"object"]!=object->_object;
+    failures += [[object valueForKeyPath:@"object.length"] longValue]!=3;
+    failures += [[object valueForKey:@"absent"] isEqualToString:@"missing"]==0;
+    failures += [[object valueForKey:@""] isEqualToString:@"missing"]==0;
+    failures += [[[NSNumber numberWithDouble:4.5] valueForKey:@"doubleValue"] doubleValue]!=4.5;
+    object->_object=0;
+    failures += [object valueForKeyPath:@"object.length"]!=0;
+    [object release];
+    KVCNoDirect *disabled=[[KVCNoDirect alloc] init];
+    failures += [[disabled valueForKey:@"count"] isEqualToString:@"missing"]==0;
+    [disabled release];
+    return failures;
+}
 static unsigned foundation_compat_smoke(void) {
     UIScreen *screen=[UIScreen mainScreen];
     UIScreenMode *mode=[screen currentMode];
@@ -797,7 +853,7 @@ static unsigned foundation_compat_smoke(void) {
     [NSObject cancelPreviousPerformRequestsWithTarget:other];
     failures += [other retainCount]!=1;
     [target release]; [other release];
-    return failures+screenFailures;
+    return failures+screenFailures+kvc_smoke();
 }
 
 int main(int argc,char **argv) {

@@ -16,6 +16,7 @@
 
 use super::ns_string::{from_rust_string, to_rust_string};
 use super::{NSTimeInterval, NSUInteger};
+use crate::frameworks::core_graphics::{CGPoint, CGRect, CGSize};
 use crate::frameworks::foundation::ns_run_loop::{
     add_perform_request, cancel_all_perform_requests, cancel_perform_requests,
 };
@@ -26,6 +27,8 @@ use crate::objc::{
     autorelease, id, msg, msg_class, msg_send, msg_send_no_type_checking, nil, objc_classes,
     retain, Class, ClassExports, NSZonePtr, ObjC, TrivialHostObject, IMP, SEL,
 };
+use crate::Environment;
+use std::any::TypeId;
 
 pub const CLASSES: ClassExports = objc_classes! {
 
@@ -186,6 +189,53 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 // NSKeyValueCoding
 // https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/KeyValueCoding/SearchImplementation.html
+- (id)valueForKey:(id)key {
+    let name = to_rust_string(env, key).into_owned();
+    let mut chars = name.chars();
+    let capitalized = chars.next().map(|first| first.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default();
+    let class = ObjC::read_isa(this, &env.mem);
+    for getter in [format!("get{capitalized}"), name.clone(), format!("is{capitalized}"), format!("_{name}")] {
+        if let Some(selector) = env.objc.lookup_selector(&getter) {
+            if env.objc.class_has_method(class, selector) {
+                let encoding = env.objc.class_get_method_signature(class, selector)
+                    .map(|ptr| env.mem.cstr_at_utf8(*ptr).unwrap().to_owned());
+                let signature = env.objc.class_get_host_method_signature(class, selector);
+                return box_key_value(env, this, Some(selector), MutVoidPtr::null(), encoding.as_deref(), signature);
+            }
+        }
+    }
+    // Collection accessor proxies are not implemented yet.
+    if env.objc.class_has_method_named(class, &format!("countOf{capitalized}")) {
+        unimplemented!("Collection key-value accessor for {name}");
+    }
+    let direct: bool = msg![env; class accessInstanceVariablesDirectly];
+    if direct {
+        for name in [format!("_{name}"), format!("_is{capitalized}"), name.clone(), format!("is{capitalized}")] {
+            if let Some((address, encoding)) = env.objc.object_lookup_typed_ivar(&env.mem, this, &name) {
+                let encoding = env.mem.cstr_at_utf8(encoding).unwrap().to_owned();
+                return box_key_value(env, this, None, address, Some(&encoding), None);
+            }
+        }
+    }
+    msg![env; this valueForUndefinedKey:key]
+}
+
+- (id)valueForKeyPath:(id)key_path {
+    let path = to_rust_string(env, key_path).into_owned();
+    let mut result = this;
+    for component in path.split('.') {
+        let key = from_rust_string(env, component.to_owned());
+        result = msg![env; result valueForKey:key];
+        autorelease(env, key);
+    }
+    result
+}
+
+- (id)valueForUndefinedKey:(id)key {
+    let name = to_rust_string(env, key);
+    panic!("No key-value getter for {name} on object {this:?}");
+}
+
 - (())setValue:(id)value
        forKey:(id)key { // NSString*
     let key_string = to_rust_string(env, key); // TODO: avoid copy?
@@ -376,3 +426,74 @@ forUndefinedKey:(id)key { // NSString*
 @end
 
 };
+
+/// Box a getter or ivar with its actual ABI type. In particular, float/double
+/// accessors must not be dispatched as object-returning methods.
+fn box_key_value(
+    env: &mut Environment,
+    object: id,
+    selector: Option<SEL>,
+    address: MutVoidPtr,
+    encoding: Option<&str>,
+    host_signature: Option<TypeId>,
+) -> id {
+    let encoding = encoding
+        .map(|s| s.trim_start_matches(['r', 'n', 'N', 'o', 'O', 'R', 'V']))
+        .unwrap_or("");
+    macro_rules! read {
+        ($type:ty) => {{
+            let value: $type = if let Some(selector) = selector {
+                msg_send(env, (object, selector))
+            } else {
+                env.mem.read(address.cast())
+            };
+            value
+        }};
+    }
+    macro_rules! matches_type {
+        ($type:ty, $code:expr) => {
+            if let Some(signature) = host_signature {
+                signature == TypeId::of::<($type, (id, SEL))>()
+            } else {
+                encoding.starts_with($code)
+            }
+        };
+    }
+    macro_rules! number {
+        ($type:ty, $code:expr, $factory:ident) => {
+            if matches_type!($type, $code) { let value = read!($type); return msg_class![env; NSNumber $factory:value]; }
+        };
+    }
+    if matches_type!(id, "@") || matches_type!(Class, "#") {
+        return read!(id);
+    }
+    number!(bool, "B", numberWithBool);
+    number!(i8, "c", numberWithChar);
+    if matches_type!(u8, "C") {
+        let value = read!(u8) as u32;
+        return msg_class![env; NSNumber numberWithUnsignedInt:value];
+    }
+    number!(i16, "s", numberWithShort);
+    number!(u16, "S", numberWithUnsignedShort);
+    number!(i32, "i", numberWithInt);
+    number!(i32, "l", numberWithLong);
+    number!(u32, "I", numberWithUnsignedInt);
+    number!(u32, "L", numberWithUnsignedLong);
+    number!(i64, "q", numberWithLongLong);
+    number!(u64, "Q", numberWithUnsignedLongLong);
+    number!(f32, "f", numberWithFloat);
+    number!(f64, "d", numberWithDouble);
+    if matches_type!(CGPoint, "{CGPoint=") {
+        let value = read!(CGPoint);
+        return msg_class![env; NSValue valueWithCGPoint:value];
+    }
+    if matches_type!(CGSize, "{CGSize=") {
+        let value = read!(CGSize);
+        return msg_class![env; NSValue valueWithCGSize:value];
+    }
+    if matches_type!(CGRect, "{CGRect=") {
+        let value = read!(CGRect);
+        return msg_class![env; NSValue valueWithCGRect:value];
+    }
+    unimplemented!("Key-value coding for type {encoding}");
+}

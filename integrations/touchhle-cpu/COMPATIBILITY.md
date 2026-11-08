@@ -94,3 +94,25 @@ On device build `60bd8788`, Angry Birds 1.0 reaches its first level and Home ret
 to the launcher in 3.5 seconds after loading. Closing during loading took much
 longer in a separate attempt; that remains unresolved. This is a regression check
 for an original app, not one of the 40 additional compatibility passes.
+
+Instance-variable lookup, type encodings, offsets, inherited lookup, list ownership,
+and manual-reference-counted object ivar access pass ARMv6 regression checks and
+CI on `b065e116`. On the physical iPhone, Clock 2.0.2 now reaches its splash screen
+and subsequently fails on `Preferences valueForKey:`. Convertbot 1.6.1 on
+`af788f74` progresses to missing `AudioServicesAddSystemSoundCompletion`.
+Neither observation establishes functional compatibility.
+
+Trace 1.3's device stack overflow was traced to MP3 files being exposed as linear
+PCM: its streaming callback computed a zero packet count and recursively retried
+the read. MP3 packet handling and audio completion callbacks were added in
+`6fb1e3b7`. The ARMv6 audio fixture on `39dfa4bd` passes playback, pause/resume,
+packet boundaries, EOF, reset, completion callbacks, PCM conversion, and invalid
+AVAudioPlayer input checks in macOS CI. Physical-device validation is pending.
+The Windows desktop audio fixture separately crashes in OpenAL initialization's
+native `std::call_once`/`pthread_once` path, before playback decoding. Desktop
+access violations must not be treated as proof of the same failure on iOS.
+
+Basic key-value getters and nested key paths now pass local ARMv6 tests, including
+inherited ivars, numeric boxing, common Core Graphics structs, host getters, and
+overridden undefined-key handling. Collection proxies and arbitrary struct
+encodings remain unsupported. Clock still needs a device retest of these changes.

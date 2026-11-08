@@ -71,6 +71,29 @@ impl ClassHostObject {
 }
 
 impl ObjC {
+    pub(crate) fn object_lookup_typed_ivar(
+        &self,
+        mem: &Mem,
+        object: id,
+        name: &str,
+    ) -> Option<(MutVoidPtr, ConstPtr<u8>)> {
+        let mut class = ObjC::read_isa(object, mem);
+        while class != nil {
+            let owner = self.borrow::<ClassHostObject>(class);
+            if let Some((offset, _, descriptor)) = owner.ivars.get(name) {
+                if offset.is_null() {
+                    return None;
+                }
+                return Some((
+                    Ptr::from_bits(object.to_bits() + mem.read(*offset)),
+                    mem.read(*descriptor).type_,
+                ));
+            }
+            class = owner.superclass;
+        }
+        None
+    }
+
     /// Checks if the object's class has an ivar in its class chain with the
     /// provided name and returns the pointer to the object's ivar, if any,
     /// or None if the object's class doesn't have an ivar with that name.

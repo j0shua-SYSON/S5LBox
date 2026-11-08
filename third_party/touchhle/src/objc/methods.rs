@@ -368,6 +368,25 @@ impl ObjC {
         }
     }
 
+    /// Rust signature of a host method, for typed Foundation accessor dispatch.
+    pub(crate) fn class_get_host_method_signature(
+        &self,
+        mut class: Class,
+        sel: SEL,
+    ) -> Option<TypeId> {
+        while class != nil {
+            let owner = self.borrow::<ClassHostObject>(class);
+            if let Some(method) = owner.methods.get(&sel) {
+                return match method {
+                    IMP::Host(host) => Some(host.type_info().0),
+                    IMP::Guest(_) => None,
+                };
+            }
+            class = owner.superclass;
+        }
+        None
+    }
+
     /// Same as [Self::class_has_method], but using a named selector (rather
     /// than a pointer).
     pub fn class_has_method_named(&self, class: Class, sel_name: &str) -> bool {
