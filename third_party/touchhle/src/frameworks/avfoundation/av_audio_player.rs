@@ -116,10 +116,10 @@ pub const CLASSES: ClassExports = objc_classes! {
              error:(MutPtr<id>)out_error { // NSError**
     let bytes: ConstVoidPtr = msg![env; data bytes];
     let length: NSUInteger = msg![env; data length];
-    let data_vec = env
+    let data_vec = if length == 0 { Vec::new() } else { env
         .mem
         .bytes_at(bytes.cast(), length)
-        .to_vec();
+        .to_vec() };
 
     assert_eq!(env.objc.borrow::<AVAudioPlayerHostObject>(this).audio_file_url, nil);
 
