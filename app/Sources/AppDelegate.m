@@ -181,10 +181,10 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
         appNavigation.navigationBar.prefersLargeTitles=YES;
         appNavigation.tabBarItem=[[UITabBarItem alloc] initWithTitle:@"Apps" image:[UIImage systemImageNamed:@"square.grid.2x2"] tag:0];
         nav.tabBarItem=[[UITabBarItem alloc] initWithTitle:@"Machines" image:[UIImage systemImageNamed:@"iphone"] tag:1];
-        UITabBarController *tabs=[UITabBarController new]; tabs.viewControllers=@[appNavigation,nav];
-        if (!VMInstanceStore.sharedStore.count) tabs.selectedIndex=1;
+        UITabBarController *tabs=[UITabBarController new]; tabs.viewControllers=@[nav,appNavigation];
+        if (VMInstanceStore.sharedStore.count) tabs.selectedIndex=1;
         __weak UITabBarController *weakTabs=tabs; __weak VMInstanceListViewController *weakMachines=machines;
-        apps.openMachine=^(NSString *identifier) { weakTabs.selectedIndex=1; if (identifier) [weakMachines openMachineWithIdentifier:identifier]; };
+        apps.openMachine=^(NSString *identifier) { weakTabs.selectedIndex=0; if (identifier) [weakMachines openMachineWithIdentifier:identifier]; };
         self.window.rootViewController=tabs;
     }
 #endif

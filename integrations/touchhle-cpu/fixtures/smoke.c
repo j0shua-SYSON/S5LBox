@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <sys/time.h>
 #include <dlfcn.h>
+#include <math.h>
 
 extern int pthread_cond_timedwait_relative_np(pthread_cond_t *, pthread_mutex_t *, const struct timespec *);
 
@@ -34,6 +35,69 @@ static void *thread_park(void *arg) {
 }
 
 static pthread_mutex_t wait_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_key_t exit_key, repeating_key;
+static unsigned destructor_calls, repeating_calls, cleanup_order;
+static pthread_t primary_thread;
+
+static void exit_cleanup(void *value) {
+    cleanup_order = cleanup_order * 10 + (unsigned long)value;
+    usleep(1000); /* Cleanup may yield while its stack is still alive. */
+}
+static void exit_destructor(void *value) {
+    CHECK(pthread_getspecific(exit_key) == NULL);
+    CHECK(cleanup_order == 0 || cleanup_order == 21);
+    destructor_calls++;
+    if ((unsigned long)value > 1)
+        CHECK(pthread_setspecific(exit_key, (void *)((unsigned long)value - 1)) == 0);
+}
+static void repeating_destructor(void *value) {
+    CHECK(pthread_getspecific(repeating_key) == NULL);
+    repeating_calls++;
+    CHECK(pthread_setspecific(repeating_key, value) == 0);
+}
+static void *exit_worker(void *explicit_exit) {
+    CHECK(pthread_setspecific(exit_key, (void *)3) == 0);
+    CHECK(pthread_setspecific(repeating_key, (void *)1) == 0);
+    if (explicit_exit) {
+        pthread_cleanup_push(exit_cleanup, (void *)1);
+        pthread_cleanup_push(exit_cleanup, (void *)2);
+        pthread_exit((void *)42);
+        pthread_cleanup_pop(0);
+        pthread_cleanup_pop(0);
+        CHECK(0); /* pthread_exit must not return. */
+    }
+    return (void *)42;
+}
+static void thread_lifecycle_smoke(void) {
+    CHECK(pthread_key_create(&exit_key, exit_destructor) == 0);
+    CHECK(pthread_key_create(&repeating_key, repeating_destructor) == 0);
+    for (unsigned explicit_exit = 0; explicit_exit < 2; explicit_exit++) {
+        destructor_calls = repeating_calls = cleanup_order = 0;
+        pthread_t worker;
+        int created = pthread_create(&worker, NULL, exit_worker, (void *)explicit_exit);
+        CHECK(created == 0);
+        if (!created) {
+            void *result = NULL;
+            CHECK(pthread_join(worker, &result) == 0);
+            CHECK(result == (void *)42);
+            CHECK(destructor_calls == 3 && repeating_calls == 4);
+            CHECK(cleanup_order == (explicit_exit ? 21u : 0u));
+            CHECK(pthread_getspecific(exit_key) == NULL);
+        }
+    }
+    CHECK(pthread_key_delete(exit_key) == 0);
+    CHECK(pthread_key_delete(repeating_key) == 0);
+}
+static void *join_primary(void *unused) {
+    (void)unused;
+    void *result = NULL;
+    CHECK(pthread_join(primary_thread, &result) == 0);
+    CHECK(result == (void *)73);
+    printf("S5LBOX-HLE-PRIMARY-EXIT %s failures=%u\n", failures ? "FAIL" : "PASS", failures);
+    if (failures) exit(1);
+    return NULL; /* Last worker returning must exit the process successfully. */
+}
+
 static pthread_cond_t wait_cond = PTHREAD_COND_INITIALIZER;
 static int worker_finished;
 
@@ -150,6 +214,18 @@ static void dynamic_smoke(void) {
 }
 
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--thread-lifecycle-smoke") == 0) {
+        thread_lifecycle_smoke();
+        printf("S5LBOX-HLE-THREAD-LIFECYCLE %s failures=%u\n", failures ? "FAIL" : "PASS", failures);
+        return failures ? 1 : 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "--primary-exit-smoke") == 0) {
+        pthread_t worker;
+        primary_thread = pthread_self();
+        if (pthread_create(&worker, NULL, join_primary, NULL)) return 99;
+        pthread_exit((void *)73);
+        return 98;
+    }
     if (argc > 1 && strcmp(argv[1], "--dynamic-smoke") == 0) {
         dynamic_smoke();
         printf("S5LBOX-HLE-DYNAMIC %s failures=%u\n", failures ? "FAIL" : "PASS", failures);
@@ -184,6 +260,20 @@ int main(int argc, char **argv) {
         return 97;
     }
     CHECK(thumb_sum(19, 23) == 42);
+    // Call through pointers to exercise the guest ABI rather than compiler
+    // builtins folding the constants (notably double-valued nan()).
+    int (*volatile classify_double)(double) = __fpclassify;
+    int (*volatile classify_float)(float) = __fpclassifyf;
+    double (*volatile make_nan)(const char *) = nan;
+    double (*volatile stable_hypot)(double,double) = hypot;
+    CHECK(classify_double(0.0) == FP_ZERO && classify_double(-0.0) == FP_ZERO);
+    CHECK(classify_double(1.25) == FP_NORMAL);
+    CHECK(classify_double(0x1p-1074) == FP_SUBNORMAL);
+    CHECK(classify_double(INFINITY) == FP_INFINITE);
+    CHECK(classify_double(make_nan("123")) == FP_NAN);
+    CHECK(classify_float(0x1p-149f) == FP_SUBNORMAL);
+    CHECK(fabs(stable_hypot(3e200,4e200) / 1e200 - 5.0) < 1e-12);
+    CHECK(fabs(stable_hypot(3e-200,4e-200) / 1e-200 - 5.0) < 1e-12);
     volatile float a = 1.5f, b = 2.0f;
     CHECK(a * b + 0.25f == 3.25f);
     int values[] = {8, 2, 9, 1, 4};

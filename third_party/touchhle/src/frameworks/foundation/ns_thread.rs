@@ -40,7 +40,7 @@ struct NSThreadHostObject {
     object: id,
     /// `NSMutableDictionary*`
     thread_dictionary: id,
-    owned: bool,
+    started: bool,
     finished: bool,
     cancelled: bool,
     stack_size: NSUInteger,
@@ -60,7 +60,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         selector: None,
         object: nil,
         thread_dictionary: nil,
-        owned: false,
+        started: false,
         finished: false,
         cancelled: false,
         stack_size: Mem::SECONDARY_THREAD_DEFAULT_STACK_SIZE,
@@ -95,6 +95,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         // We lazily instantiate NSThreads for POSIX threads
         let ns_thread: id = msg_class![env; NSThread alloc];
         let ns_thread: id = msg![env; ns_thread init];
+        env.objc.borrow_mut::<NSThreadHostObject>(ns_thread).started = true;
         State::get(env).ns_threads.insert(pthread, ns_thread);
     }
     *State::get(env).ns_threads.get(&pthread).unwrap()
@@ -125,6 +126,10 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.current_thread == 0
 }
 
++ (())exit {
+    env.exit_current_thread(crate::mem::Ptr::null())
+}
+
 - (id)initWithTarget:(id)target
             selector:(SEL)selector
               object:(id)object {
@@ -138,6 +143,9 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())start {
+    let host_object = env.objc.borrow_mut::<NSThreadHostObject>(this);
+    assert!(!host_object.started, "An NSThread can only be started once");
+    host_object.started = true;
     let symb = "__touchHLE_NSThreadInvocationHelper";
     let hf: HostFunction = &(_touchHLE_NSThreadInvocationHelper as fn(&mut Environment, _) -> _);
     let gf = env
@@ -155,7 +163,11 @@ pub const CLASSES: ClassExports = objc_classes! {
     pthread_create(env, thread_ptr, attr.cast_const(), gf, this.cast());
 
     let pthread = env.mem.read(thread_ptr);
+    env.mem.free(thread_ptr.cast());
+    env.mem.free(attr.cast());
     assert!(!State::get(env).ns_threads.contains_key(&pthread));
+    // The runtime owns the object until exit, independently of its caller.
+    retain(env, this);
     State::get(env).ns_threads.insert(pthread, this);
 
     env.framework_state.foundation.ns_thread.is_multi_threaded = true;
@@ -223,6 +235,11 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.objc.borrow::<NSThreadHostObject>(this).finished
 }
 
+- (bool)isExecuting {
+    let thread = env.objc.borrow::<NSThreadHostObject>(this);
+    thread.started && !thread.finished
+}
+
 - (bool)isCancelled {
     env.objc.borrow::<NSThreadHostObject>(this).cancelled
 }
@@ -234,8 +251,10 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (())dealloc {
     log_dbg!("[(NSThread*){:?} dealloc]", this);
-    let host_object = env.objc.borrow::<NSThreadHostObject>(this);
-    release(env, host_object.thread_dictionary);
+    let &NSThreadHostObject { thread_dictionary, target, object, .. } = env.objc.borrow(this);
+    release(env, thread_dictionary);
+    release(env, target);
+    release(env, object);
     env.objc.dealloc_object(this, &mut env.mem)
 }
 
@@ -255,33 +274,22 @@ pub fn _touchHLE_NSThreadInvocationHelper(env: &mut Environment, ns_thread_obj: 
     assert!(env.objc.class_is_subclass_of(class, thread_class));
 
     () = msg![env; ns_thread_obj main];
+}
 
-    env.objc
-        .borrow_mut::<NSThreadHostObject>(ns_thread_obj)
-        .finished = true;
-
-    let &NSThreadHostObject {
-        target,
-        object,
-        owned,
-        ..
-    } = env.objc.borrow(ns_thread_obj);
-    // The objects target and argument are retained during the execution
-    // of the detached thread. They are released when the thread finally exits.
+/// Shared by return from main, pthread_exit, and +[NSThread exit].
+pub fn thread_exited(env: &mut Environment) {
+    let pthread = pthread_self(env);
+    let Some(ns_thread_obj) = State::get(env).ns_threads.get(&pthread).copied() else {
+        return;
+    };
+    let thread = env.objc.borrow_mut::<NSThreadHostObject>(ns_thread_obj);
+    thread.finished = true;
+    let target = std::mem::replace(&mut thread.target, nil);
+    let object = std::mem::replace(&mut thread.object, nil);
     release(env, object);
     release(env, target);
-
-    let pthread = pthread_self(env);
-    let res = State::get(env).ns_threads.remove(&pthread);
-    assert!(res.is_some());
-
-    if owned {
-        // Releasing only if the object was owned
-        // e.g. created with `detachNewThreadSelector:toTarget:withObject:`
-        release(env, ns_thread_obj);
-    }
-
-    // TODO: NSThread exit
+    State::get(env).ns_threads.remove(&pthread);
+    release(env, ns_thread_obj);
 }
 
 pub fn detach_new_thread_inner(
@@ -296,9 +304,6 @@ pub fn detach_new_thread_inner(
                                       selector:selector
                                         object:object];
 
-    // We own this thread and need to release it after it's finished
-    env.objc.borrow_mut::<NSThreadHostObject>(new).owned = true;
-
     env.objc
         .borrow_mut::<NSThreadHostObject>(new)
         .tolerate_type_mismatch = tolerate_type_mismatch;
@@ -306,5 +311,6 @@ pub fn detach_new_thread_inner(
     // Redundant with `start`, but we do it for the sake of completeness
     env.framework_state.foundation.ns_thread.is_multi_threaded = true;
 
-    msg![env; new start]
+    () = msg![env; new start];
+    release(env, new);
 }

@@ -20,6 +20,7 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 - (id)init;
 - (id)autorelease;
 - (void)release;
+- (void)dealloc;
 - (IMP)methodForSelector:(SEL)selector;
 @end
 @interface NSAutoreleasePool : NSObject @end
@@ -55,12 +56,28 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 @end
 @interface NSThread : NSObject
 + (id)currentThread;
++ (void)exit;
 + (void)sleepForTimeInterval:(double)seconds;
 - (id)initWithTarget:(id)target selector:(SEL)selector object:(id)object;
 - (void)start;
 - (void)cancel;
 - (BOOL)isCancelled;
 - (BOOL)isFinished;
+- (BOOL)isExecuting;
+@end
+static volatile unsigned exitTargetReleased, exitWorkerReached;
+@interface ExitTarget : NSObject
+- (void)worker:(id)sender;
+@end
+@implementation ExitTarget
+- (void)worker:(id)sender {
+    (void)sender;
+    [NSThread sleepForTimeInterval:0.001];
+    exitWorkerReached++;
+    [NSThread exit];
+    exitWorkerReached+=100;
+}
+- (void)dealloc { exitTargetReleased++; [super dealloc]; }
 @end
 typedef unsigned CFTypeID;
 extern CFTypeID CFGetTypeID(id object);
@@ -705,6 +722,22 @@ int main(int argc,char **argv) {
         for(unsigned i=0;i<1000 && ![worker isFinished];i++) [NSThread sleepForTimeInterval:0.001];
         failures += ![worker isCancelled] || !workerCancelled || ![worker isFinished];
         [worker release];
+        ExitTarget *exiting=[[ExitTarget alloc] init];
+        worker=[[NSThread alloc] initWithTarget:exiting selector:@selector(worker:) object:0];
+        [exiting release];
+        failures += [worker isExecuting];
+        [worker start];
+        failures += ![worker isExecuting];
+        for(unsigned i=0;i<1000 && ![worker isFinished];i++) [NSThread sleepForTimeInterval:0.001];
+        failures += ![worker isFinished] || [worker isExecuting];
+        failures += exitWorkerReached!=1 || exitTargetReleased!=1;
+        [worker release];
+        // Releasing the caller's NSThread reference must not kill its worker.
+        exiting=[[ExitTarget alloc] init];
+        worker=[[NSThread alloc] initWithTarget:exiting selector:@selector(worker:) object:0];
+        [exiting release]; [worker start]; [worker release];
+        for(unsigned i=0;i<1000 && exitTargetReleased!=2;i++) [NSThread sleepForTimeInterval:0.001];
+        failures += exitWorkerReached!=2 || exitTargetReleased!=2;
         // Image-only buttons used to retain a zero-size UIImageView. Exercise
         // image sizing, frame changes, mixed image/title layout and clearing.
         void *space=CGColorSpaceCreateDeviceRGB();

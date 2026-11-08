@@ -334,6 +334,9 @@ impl Drop for EnvironmentInstance {
 #[derive(Debug)]
 pub(crate) struct GuestExit(pub i32);
 
+#[derive(Debug)]
+struct GuestThreadExit;
+
 pub(crate) fn exit_guest(status: i32) -> ! {
     std::panic::resume_unwind(Box::new(GuestExit(status)))
 }
@@ -1082,6 +1085,22 @@ impl Environment {
         }
     }
 
+    fn finish_current_thread(&mut self, value: mem::MutVoidPtr) {
+        // Callbacks may yield or call back into Objective-C. Keep the thread
+        // alive until cleanup has finished, before allowing joiners to resume.
+        crate::libc::pthread::thread::run_cleanup_handlers(self);
+        crate::libc::pthread::key::run_destructors(self);
+        crate::frameworks::foundation::ns_thread::thread_exited(self);
+        let thread = &mut self.threads[self.current_thread];
+        thread.return_value = Some(value);
+        thread.state = ThreadState::Dead;
+    }
+
+    pub fn exit_current_thread(&mut self, value: mem::MutVoidPtr) -> ! {
+        self.finish_current_thread(value);
+        std::panic::resume_unwind(Box::new(GuestThreadExit))
+    }
+
     /// Create a new thread and return its ID. The `start_routine` and
     /// `user_data` arguments have the same meaning as the last two arguments to
     /// `pthread_create`.
@@ -1109,9 +1128,7 @@ impl Environment {
                     );
                     let return_value: mem::MutVoidPtr =
                         start_routine.call_from_host(env, (user_data,));
-                    let curr_thread = &mut env.threads[env.current_thread];
-                    curr_thread.return_value = Some(return_value);
-                    curr_thread.state = ThreadState::Dead;
+                    env.finish_current_thread(return_value);
                 });
             }));
             if let Err(e) = res {
@@ -1412,28 +1429,32 @@ impl Environment {
                         std::panic::resume_unwind(e);
                     }
 
-                    echo!("Register state immediately after panic:");
-                    env.dump_all_regs();
-                    env.stack_trace_all();
+                    if !e.is::<GuestThreadExit>() {
+                        echo!("Register state immediately after panic:");
+                        env.dump_all_regs();
+                        env.stack_trace_all();
 
-                    if env.options.popup_errors {
-                        let error_string = if let Some(s) = e.downcast_ref::<&str>() {
-                            s
-                        } else if let Some(s) = e.downcast_ref::<String>() {
-                            s
-                        } else {
-                            "(non-string payload)"
+                        if env.options.popup_errors {
+                            let error_string = if let Some(s) = e.downcast_ref::<&str>() {
+                                s
+                            } else if let Some(s) = e.downcast_ref::<String>() {
+                                s
+                            } else {
+                                "(non-string payload)"
+                            };
+                            window::show_error_messagebox(env.window.as_deref(), error_string);
+                        }
+                        // Put the host context back before resuming, the env will
+                        // clean it up on drop.
+                        let Some(thread) = env.threads.get_mut(env.current_thread) else {
+                            log_no_panic!("Bad current_thread, must abort!");
+                            std::process::exit(-1)
                         };
-                        window::show_error_messagebox(env.window.as_deref(), error_string);
+                        thread.host_context = Some(curr_host_context);
+                        std::panic::resume_unwind(e);
                     }
-                    // Put the host context back before resuming, the env will
-                    // clean it up on drop.
-                    let Some(thread) = env.threads.get_mut(env.current_thread) else {
-                        log_no_panic!("Bad current_thread, must abort!");
-                        std::process::exit(-1)
-                    };
-                    thread.host_context = Some(curr_host_context);
-                    std::panic::resume_unwind(e);
+                    kill_current_thread = true;
+                    env
                 }
             };
 
@@ -1447,13 +1468,21 @@ impl Environment {
                 };
                 self = env;
                 let stack = self.threads[self.current_thread].stack.take().unwrap();
-                let stack: mem::MutVoidPtr = mem::Ptr::from_bits(*stack.start());
-                log_dbg!("Freeing thread {} stack {:?}", self.current_thread, stack);
-                self.mem.free(stack);
+                // The main stack is a reserved address range, not a heap
+                // allocation. pthread_exit on main must leave workers alive.
+                if self.current_thread != 0 {
+                    let stack: mem::MutVoidPtr = mem::Ptr::from_bits(*stack.start());
+                    log_dbg!("Freeing thread {} stack {:?}", self.current_thread, stack);
+                    self.mem.free(stack);
+                }
                 None
             } else {
                 Some(curr_host_context)
             };
+
+            if self.threads.iter().all(|thread| !thread.is_alive()) {
+                return 0;
+            }
 
             if let Some(w) = self.window.as_mut() {
                 w.on_main_stack = true;
@@ -1662,7 +1691,7 @@ impl Environment {
                         }
                     }
                     dyld::Dyld::SVC_THREAD_EXIT => {
-                        unimplemented!("TODO: implement exit routines for threads!")
+                        self.exit_current_thread(mem::Ptr::from_bits(self.cpu.regs()[0]))
                     }
                 }
             }

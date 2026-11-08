@@ -5,7 +5,7 @@
  */
 //! Thread-specific data keys.
 
-use crate::abi::GuestFunction;
+use crate::abi::{CallFromHost, GuestFunction};
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::libc::errno::{EAGAIN, EINVAL};
 use crate::mem::{ConstVoidPtr, MutPtr, MutVoidPtr, Ptr};
@@ -28,6 +28,36 @@ impl State {
 }
 
 type pthread_key_t = u32;
+
+/// Darwin permits four passes when a destructor associates a new value.
+pub fn run_destructors(env: &mut Environment) {
+    let thread = env.current_thread;
+    for _ in 0..4 {
+        let mut called = false;
+        // Do not hold a borrow over a guest callback: it may delete keys,
+        // create new ones, or yield to another thread.
+        let count = State::get(env).keys.len();
+        for index in 0..count {
+            let callback = match State::get(env).keys.get_mut(index) {
+                Some(Some((values, destructor))) if !destructor.to_ptr().is_null() => values
+                    .remove(&thread)
+                    .filter(|value| !value.is_null())
+                    .map(|value| (*destructor, value)),
+                _ => None,
+            };
+            if let Some((destructor, value)) = callback {
+                called = true;
+                let (): () = destructor.call_from_host(env, (value,));
+            }
+        }
+        if !called {
+            break;
+        }
+    }
+    for (values, _) in State::get(env).keys.iter_mut().flatten() {
+        values.remove(&thread);
+    }
+}
 
 fn pthread_key_create(
     env: &mut Environment,

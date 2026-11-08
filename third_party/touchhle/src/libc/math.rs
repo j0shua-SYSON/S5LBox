@@ -500,16 +500,18 @@ fn fminf(_env: &mut Environment, arg1: f32, arg2: f32) -> f32 {
 }
 
 // Other
-fn nan(env: &mut Environment, arg: ConstPtr<u8>) -> f32 {
-    assert_eq!(env.mem.read(arg), b'\0'); // TODO
+fn nan(_env: &mut Environment, _tag: ConstPtr<u8>) -> f64 {
+    // The payload is implementation-defined; all tag strings produce a quiet
+    // NaN. The double return ABI matters even when the caller ignores payloads.
+    f64::NAN
+}
+fn nanf(_env: &mut Environment, _tag: ConstPtr<u8>) -> f32 {
     f32::NAN
 }
 
-fn hypot(env: &mut Environment, arg1: f64, arg2: f64) -> f64 {
-    if arg1.is_infinite() {
-        return f64::INFINITY;
-    }
-    sqrt(env, arg1 * arg1 + arg2 * arg2)
+fn hypot(_env: &mut Environment, arg1: f64, arg2: f64) -> f64 {
+    // Squaring first overflows/underflows even for representable results.
+    arg1.hypot(arg2)
 }
 
 /// This alias is for readability, POSIX just uses `int`.
@@ -521,7 +523,13 @@ const FP_NORMAL: GuestFPCategory = 4;
 const FP_SUBNORMAL: GuestFPCategory = 5;
 
 fn __fpclassifyf(_env: &mut Environment, arg: f32) -> GuestFPCategory {
-    match arg.classify() {
+    fp_category(arg.classify())
+}
+fn __fpclassify(_env: &mut Environment, arg: f64) -> GuestFPCategory {
+    fp_category(arg.classify())
+}
+fn fp_category(category: FpCategory) -> GuestFPCategory {
+    match category {
         FpCategory::Nan => FP_NAN,
         FpCategory::Infinite => FP_INFINITE,
         FpCategory::Zero => FP_ZERO,
@@ -616,6 +624,13 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(fminf(_, _)),
     // Other
     export_c_func!(nan(_)),
+    export_c_func!(nanf(_)),
     export_c_func!(hypot(_, _)),
     export_c_func!(__fpclassifyf(_)),
+    export_c_func!(__fpclassify(_)),
+    // On ARM Darwin, long double has the same representation and ABI as double.
+    (
+        "___fpclassifyl",
+        &(__fpclassify as fn(&mut Environment, _) -> _),
+    ),
 ];

@@ -25,6 +25,7 @@ on:
       - 'tools/test_guest_package_service.py'
       - 'app/Sources/VMTouchHLESurface.*'
       - 'app/Sources/VMTouchHLEViewController.*'
+      - 'app/Sources/AppDelegate.m'
       - 'app/Sources/VMPackageBridge.*'
       - 'app/Sources/VMUSBTransport.*'
       - 'app/Sources/VMUSBService.*'
@@ -302,6 +303,12 @@ jobs:
           ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/InterpreterSmoke.app --headless --args --dynamic-smoke > ../../work/hle-dynamic.log 2>&1
           cat ../../work/hle-dynamic.log
           grep -F 'S5LBOX-HLE-DYNAMIC PASS failures=0' ../../work/hle-dynamic.log
+          ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/InterpreterSmoke.app --headless --args --thread-lifecycle-smoke > ../../work/hle-thread-lifecycle.log 2>&1
+          cat ../../work/hle-thread-lifecycle.log
+          grep -F 'S5LBOX-HLE-THREAD-LIFECYCLE PASS failures=0' ../../work/hle-thread-lifecycle.log
+          ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/InterpreterSmoke.app --headless --args --primary-exit-smoke > ../../work/hle-primary-exit.log 2>&1
+          cat ../../work/hle-primary-exit.log
+          grep -F 'S5LBOX-HLE-PRIMARY-EXIT PASS failures=0' ../../work/hle-primary-exit.log
 
       - name: Preserve smoke-test output
         if: always()
@@ -312,6 +319,8 @@ jobs:
             work/hle-smoke.log
             work/hle-condition.log
             work/hle-dynamic.log
+            work/hle-thread-lifecycle.log
+            work/hle-primary-exit.log
             work/hle-smoke/InterpreterSmoke.app
             work/hle-smoke/HLEVisual.app
             work/hle-smoke/LibrarySmoke.app

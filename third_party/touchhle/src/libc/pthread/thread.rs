@@ -5,7 +5,7 @@
  */
 //! Threads.
 
-use crate::abi::GuestFunction;
+use crate::abi::{CallFromHost, GuestFunction};
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::libc::errno::{EDEADLK, EINVAL, ESRCH};
 use crate::mem::{
@@ -58,8 +58,37 @@ const DEFAULT_ATTR: pthread_attr_t = pthread_attr_t {
 pub struct OpaqueThread {
     /// Magic number (must be [MAGIC_THREAD])
     magic: u32,
+    // The public Darwin cleanup macros access this field directly at +4.
+    cleanup_stack: MutPtr<CleanupHandler>,
 }
 unsafe impl SafeRead for OpaqueThread {}
+
+#[repr(C, packed)]
+struct CleanupHandler {
+    routine: GuestFunction,
+    argument: MutVoidPtr,
+    next: MutPtr<CleanupHandler>,
+}
+unsafe impl SafeRead for CleanupHandler {}
+
+pub fn run_cleanup_handlers(env: &mut Environment) {
+    let thread = pthread_self(env);
+    loop {
+        let mut opaque = env.mem.read(thread);
+        if opaque.cleanup_stack.is_null() {
+            break;
+        }
+        let handler = env.mem.read(opaque.cleanup_stack);
+        opaque.cleanup_stack = handler.next;
+        env.mem.write(thread, opaque);
+        let routine = handler.routine;
+        let (): () = routine.call_from_host(env, (handler.argument,));
+    }
+}
+
+pub fn pthread_exit(env: &mut Environment, value: MutVoidPtr) {
+    env.exit_current_thread(value)
+}
 
 #[allow(non_camel_case_types)]
 pub type pthread_t = MutPtr<OpaqueThread>;
@@ -209,6 +238,7 @@ pub fn pthread_create(
 
     let opaque = env.mem.alloc_and_write(OpaqueThread {
         magic: MAGIC_THREAD,
+        cleanup_stack: Ptr::null(),
     });
     env.mem.write(thread, opaque);
 
@@ -247,6 +277,7 @@ pub fn pthread_self(env: &mut Environment) -> pthread_t {
 
         let opaque = env.mem.alloc_and_write(OpaqueThread {
             magic: MAGIC_THREAD,
+            cleanup_stack: Ptr::null(),
         });
 
         assert!(!State::get(env).threads.contains_key(&opaque));
@@ -277,12 +308,6 @@ fn pthread_join(env: &mut Environment, thread: pthread_t, retval: MutPtr<MutVoid
     let curr_pthread_t = pthread_self(env);
     // The joinee is the thread that is being waited on.
     let joinee_thread = State::get(env).threads.get_mut(&thread).unwrap().thread_id;
-
-    // FIXME?: Blocking on the main thread is technically allowed, but
-    // effectively useless (as the main thread exiting means the whole
-    // application exits). It complicates some handling and is probably safe to
-    // ignore here.
-    assert!(joinee_thread != 0);
 
     // Can't join thread with itself!
     if joinee_thread == current_thread {
@@ -422,6 +447,7 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(pthread_create(_, _, _, _)),
     export_c_func!(pthread_equal(_, _)),
     export_c_func!(pthread_self()),
+    export_c_func!(pthread_exit(_)),
     export_c_func!(pthread_join(_, _)),
     export_c_func!(pthread_detach(_)),
     export_c_func!(pthread_setcanceltype(_, _)),
