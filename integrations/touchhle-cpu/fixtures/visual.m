@@ -14,6 +14,7 @@ typedef struct { CGPoint origin; CGSize size; } CGRect;
 __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 + (id)alloc;
 + (Class)class;
++ (void)load;
 + (IMP)methodForSelector:(SEL)selector;
 + (IMP)instanceMethodForSelector:(SEL)selector;
 - (id)init;
@@ -56,6 +57,18 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 - (BOOL)isEqual:(id)other;
 - (int)compare:(id)other;
 @end
+@interface NSURL : NSObject
++ (id)fileURLWithPath:(id)path;
++ (id)URLWithString:(id)string;
+@end
+@interface NSData : NSObject
++ (id)dataWithContentsOfURL:(id)url options:(unsigned)options error:(id *)error;
++ (id)dataWithContentsOfFile:(id)path options:(unsigned)options error:(id *)error;
+- (unsigned)length;
+@end
+@interface NSError : NSObject
+- (int)code;
+@end
 @interface NSUserDefaults : NSObject
 + (id)standardUserDefaults;
 - (int)integerForKey:(id)key;
@@ -68,6 +81,8 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 @interface UIView : NSObject
 - (id)initWithFrame:(CGRect)rect;
 - (void)setFrame:(CGRect)rect;
+- (CGRect)frame;
+- (void)layoutSubviews;
 - (void)setBackgroundColor:(id)color;
 - (void)addSubview:(id)view;
 @end
@@ -142,7 +157,19 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 @interface UIButton : UIControl
 + (id)buttonWithType:(int)type;
 - (void)setTitle:(id)title forState:(unsigned)state;
+- (void)setImage:(id)image forState:(unsigned)state;
+- (id)imageView;
+- (id)titleLabel;
 @end
+@interface UIImage : NSObject
++ (id)imageWithCGImage:(void *)image;
+@end
+extern void *CGColorSpaceCreateDeviceRGB(void);
+extern void CGColorSpaceRelease(void *space);
+extern void *CGBitmapContextCreate(void *data,unsigned width,unsigned height,unsigned bits,unsigned stride,void *space,unsigned bitmapInfo);
+extern void *CGBitmapContextCreateImage(void *context);
+extern void CGContextRelease(void *context);
+extern void CGImageRelease(void *image);
 typedef struct { unsigned location,length; } NSRange;
 @interface UITextField : UIControl
 - (void)setDelegate:(id)delegate;
@@ -189,6 +216,7 @@ extern int alGetError(void);
 - (void)cancelled:(id)sender;
 @end
 @implementation CancelTarget
++ (void)load { [super load]; }
 - (void)ended:(id)sender { (void)sender; ended++; }
 - (void)cancelled:(id)sender { (void)sender; cancelled++; }
 @end
@@ -417,6 +445,37 @@ int main(int argc,char **argv) {
         failures += ![[resource bundleIdentifier] isEqualToString:@"org.s5lbox.fixture.resources"];
         failures += [resource executablePath]!=0;
         failures += [resource pathForResource:@"Info" ofType:@"plist"]==0;
+        id readError=0;
+        NSURL *resourceURL=[NSURL fileURLWithPath:[resource pathForResource:@"Info" ofType:@"plist"]];
+        NSData *resourceData=[NSData dataWithContentsOfURL:resourceURL options:1 error:&readError];
+        failures += [resourceData length]==0 || readError!=0;
+        failures += [NSData dataWithContentsOfFile:@"/missing-fixture" options:0 error:&readError]!=0;
+        failures += [(NSError *)readError code]!=260;
+        readError=0;
+        failures += [NSData dataWithContentsOfURL:[NSURL URLWithString:@"fixture:unsupported"] options:0 error:&readError]!=0;
+        failures += [(NSError *)readError code]!=262;
+        // Image-only buttons used to retain a zero-size UIImageView. Exercise
+        // image sizing, frame changes, mixed image/title layout and clearing.
+        void *space=CGColorSpaceCreateDeviceRGB();
+        void *bitmap=CGBitmapContextCreate(0,20,10,8,80,space,1);
+        void *cgImage=CGBitmapContextCreateImage(bitmap);
+        UIImage *buttonImage=[UIImage imageWithCGImage:cgImage];
+        UIButton *imageButton=[UIButton buttonWithType:0];
+        [imageButton setFrame:(CGRect){{0,0},{120,44}}];
+        [imageButton setImage:buttonImage forState:0];
+        CGRect imageFrame=[[imageButton imageView] frame];
+        failures += imageFrame.size.width!=20 || imageFrame.size.height!=10 || imageFrame.origin.x!=50 || imageFrame.origin.y!=17;
+        [imageButton setFrame:(CGRect){{0,0},{200,60}}];
+        imageFrame=[[imageButton imageView] frame];
+        failures += imageFrame.origin.x!=90 || imageFrame.origin.y!=25;
+        [imageButton setTitle:@"Open" forState:0];
+        imageFrame=[[imageButton imageView] frame];
+        CGRect titleFrame=[[imageButton titleLabel] frame];
+        failures += titleFrame.size.width<=0 || imageFrame.origin.x+imageFrame.size.width>titleFrame.origin.x;
+        [imageButton setImage:0 forState:0];
+        imageFrame=[[imageButton imageView] frame];
+        failures += imageFrame.size.width!=0 || [[imageButton titleLabel] frame].size.width!=200;
+        CGImageRelease(cgImage); CGContextRelease(bitmap); CGColorSpaceRelease(space);
         failures += ![[main localizedStringForKey:@"fixture-key" value:0 table:0] isEqualToString:@"fixture-key"];
         NSIndexPath *path=[NSIndexPath indexPathForRow:4 inSection:2];
         failures += [path row]!=4 || [path section]!=2 || [path length]!=2;

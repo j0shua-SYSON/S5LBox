@@ -104,6 +104,10 @@ pub const CLASSES: ClassExports = objc_classes! {
 + (())initialize {
     // Do nothing
 }
++ (())load {
+    // The loader invokes guest +load methods. NSObject itself has no startup
+    // work, but subclasses may explicitly call [super load].
+}
 
 - (id)init {
     this

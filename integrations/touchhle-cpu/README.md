@@ -255,15 +255,22 @@ No app archives or firmware are included in this repository.
 The later Angry Birds loading abort was preceded by `EMFILE` from the offline
 adapter's 64-handle ceiling. Both adapters now allow 256 concurrent handles;
 the live-service test covers the ceiling, reuse after close, stale IDs and
-disconnect cleanup. This change requires a device retest before attributing
-successful game loading to it. The live helper is published under a new
-versioned executable path so existing installations can upgrade safely.
+disconnect cleanup. Build `121ccd77` was installed on the phone: Angry Birds
+now reaches its menu and first level, responds to slingshot gestures and opens
+the pause menu. Home returns to the launcher, but the shutdown log exposes a
+missing `NSThread cancel` method. Completing a level is not yet verified.
+The live helper is published under a new versioned executable path so existing
+installations can upgrade safely.
 
 The UIKit work adds read-only table data sources, visible-cell reuse, row
 selection and scrolling, with `NSIndexPath` and `UITableViewController` support.
 An ARMv6 fixture exercises 2,000 rows, variable heights, bounded cell creation,
 reuse, programmatic selection, touch selection and cancellation. Table editing,
 insertion animations, grouped styling and indexed navigation remain incomplete.
+On the phone, build `3f3c252a` advances Doodle Jump 1.0 into gameplay and a
+Game Over screen showing a score and high score of 217; its menu images were
+still invisible. IMDb advances past table-controller creation and stops at
+`CFGetTypeID`. These are narrower results than full app compatibility.
 
 ## Boundaries
 

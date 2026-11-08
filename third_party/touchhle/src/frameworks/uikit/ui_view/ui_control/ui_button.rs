@@ -6,7 +6,7 @@
 //! `UIButton`.
 
 use super::{UIControlState, UIControlStateNormal};
-use crate::frameworks::core_graphics::{CGFloat, CGPoint, CGRect};
+use crate::frameworks::core_graphics::{CGFloat, CGPoint, CGRect, CGSize};
 use crate::frameworks::foundation::ns_string::{from_rust_string, get_static_str, to_rust_string};
 use crate::frameworks::foundation::NSInteger;
 use crate::frameworks::uikit::ui_font::UITextAlignmentCenter;
@@ -89,6 +89,49 @@ fn update(env: &mut Environment, this: id) {
     let background_image_view: id = msg![env; this backgroundImageView];
     let background_image: id = msg![env; this currentBackgroundImage];
     () = msg![env; background_image_view setImage:background_image];
+    () = msg![env; this layoutSubviews];
+}
+
+fn content_frames(env: &mut Environment, button: id, bounds: CGRect) -> (CGRect, CGRect) {
+    let image: id = msg![env; button currentImage];
+    if image == nil {
+        return (CGRect::default(), bounds);
+    }
+    let size: CGSize = msg![env; image size];
+    let size = CGSize {
+        width: size.width.min(bounds.size.width).max(0.0),
+        height: size.height.min(bounds.size.height).max(0.0),
+    };
+    let title: id = msg![env; button currentTitle];
+    let label: id = msg![env; button titleLabel];
+    let font: id = msg![env; label font];
+    let title_size: CGSize = if title == nil {
+        CGSize::default()
+    } else {
+        msg![env; title sizeWithFont:font]
+    };
+    let title_width = title_size
+        .width
+        .min((bounds.size.width - size.width).max(0.0));
+    let x = bounds.origin.x + (bounds.size.width - size.width - title_width) / 2.0;
+    let image = CGRect {
+        origin: CGPoint {
+            x,
+            y: bounds.origin.y + (bounds.size.height - size.height) / 2.0,
+        },
+        size,
+    };
+    let title = CGRect {
+        origin: CGPoint {
+            x: x + size.width,
+            y: bounds.origin.y,
+        },
+        size: CGSize {
+            width: title_width,
+            height: bounds.size.height,
+        },
+    };
+    (image, title)
 }
 
 fn init_common(env: &mut Environment, this: id) -> id {
@@ -252,12 +295,23 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (())layoutSubviews {
     let label = env.objc.borrow_mut::<UIButtonHostObject>(this).title_label;
     let background_image_view = env.objc.borrow_mut::<UIButtonHostObject>(this).background_image_view;
+    let image_view = env.objc.borrow::<UIButtonHostObject>(this).image_view;
     let bounds: CGRect = msg![env; this bounds];
 
     () = msg![env; background_image_view setFrame:bounds];
-    () = msg![env; label setFrame:bounds];
-    // TODO: layout for image
-
+    let image_frame: CGRect = msg![env; this imageRectForContentRect:bounds];
+    let title_frame: CGRect = msg![env; this titleRectForContentRect:bounds];
+    () = msg![env; image_view setFrame:image_frame];
+    () = msg![env; label setFrame:title_frame];
+}
+- (CGRect)imageRectForContentRect:(CGRect)bounds { content_frames(env, this, bounds).0 }
+- (CGRect)titleRectForContentRect:(CGRect)bounds { content_frames(env, this, bounds).1 }
+- (())setFrame:(CGRect)frame {
+    () = msg_super![env; this setFrame:frame];
+    // UIView's initializer sets the frame before UIButton's subviews exist.
+    if env.objc.borrow::<UIButtonHostObject>(this).image_view != nil {
+        () = msg![env; this layoutSubviews];
+    }
 }
 
 - (UIButtonType)buttonType {

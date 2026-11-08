@@ -6,14 +6,15 @@
 //! `NSData` and `NSMutableData`.
 
 use super::ns_string::to_rust_string;
-use super::{NSRange, NSUInteger};
+use super::{NSInteger, NSRange, NSUInteger};
 use crate::frameworks::foundation::ns_keyed_unarchiver::decode_current_data;
-use crate::fs::GuestPath;
+use crate::fs::{FsError, GuestOpenOptions, GuestPath};
 use crate::mem::{ConstPtr, ConstVoidPtr, MutPtr, MutVoidPtr, Ptr};
 use crate::objc::{
     autorelease, id, msg, nil, objc_classes, release, retain, ClassExports, HostObject, NSZonePtr,
 };
 use crate::{msg_class, Environment};
+use std::io::Read;
 
 pub(super) struct NSDataHostObject {
     pub(super) bytes: MutVoidPtr,
@@ -21,6 +22,16 @@ pub(super) struct NSDataHostObject {
     free_when_done: bool,
 }
 impl HostObject for NSDataHostObject {}
+
+fn read_failure(env: &mut Environment, this: id, error: MutPtr<id>, code: NSInteger) -> id {
+    if !error.is_null() {
+        let domain = super::ns_string::get_static_str(env, super::ns_error::NSCocoaErrorDomain);
+        let failure: id = msg_class![env; NSError errorWithDomain:domain code:code userInfo:nil];
+        env.mem.write(error, failure);
+    }
+    release(env, this);
+    nil
+}
 
 pub const CLASSES: ClassExports = objc_classes! {
 
@@ -83,6 +94,16 @@ pub const CLASSES: ClassExports = objc_classes! {
     let new: id = msg![env; new initWithContentsOfURL:url];
     autorelease(env, new)
 }
++ (id)dataWithContentsOfURL:(id)url options:(NSUInteger)options error:(MutPtr<id>)error {
+    let new: id = msg![env; this alloc];
+    let new: id = msg![env; new initWithContentsOfURL:url options:options error:error];
+    autorelease(env, new)
+}
++ (id)dataWithContentsOfFile:(id)path options:(NSUInteger)options error:(MutPtr<id>)error {
+    let new: id = msg![env; this alloc];
+    let new: id = msg![env; new initWithContentsOfFile:path options:options error:error];
+    autorelease(env, new)
+}
 
 + (id)dataWithData:(id)data {
     let new: id = msg![env; this alloc];
@@ -127,30 +148,55 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (id)initWithContentsOfURL:(id)url { // NSURL *
+    msg![env; this initWithContentsOfURL:url options:0u32 error:(MutPtr::<id>::null())]
+}
+- (id)initWithContentsOfURL:(id)url options:(NSUInteger)options error:(MutPtr<id>)error {
     if msg![env; url isFileURL] {
         let ns_path: id = msg![env; url path];
-        let path = to_rust_string(env, ns_path);
-        assert!(path.starts_with("/")); // TODO
-        msg![env; this initWithContentsOfFile:ns_path]
+        msg![env; this initWithContentsOfFile:ns_path options:options error:error]
     } else {
-        let absolute_str: id = msg![env; url absoluteString];
-        let path = to_rust_string(env, absolute_str);
-        assert!(path.starts_with("http"));
-        log!("TODO: ignoring [(NSData*){:?} initWithContentsOfURL:{:?}]", this, path);
-        release(env, this);
-        nil
+        // Network-backed NSData loading is not implemented. Report the Cocoa
+        // unsupported-scheme error instead of asserting or claiming success.
+        read_failure(env, this, error, 262)
     }
 }
 
 - (id)initWithContentsOfFile:(id)path {
+    msg![env; this initWithContentsOfFile:path options:0u32 error:(MutPtr::<id>::null())]
+}
+- (id)initWithContentsOfFile:(id)path options:(NSUInteger)_options error:(MutPtr<id>)error {
+    // Mapped-if-safe and uncached are read strategy hints. The guest-owned
+    // service supplies a private buffer; it never exposes host-file mappings.
     if path == nil {
-        return nil;
+        return read_failure(env, this, error, 258);
     }
-    let path = to_rust_string(env, path);
+    let path = to_rust_string(env, path).into_owned();
     log_dbg!("[(NSData*){:?} initWithContentsOfFile:{:?}]", this, path);
-    let Ok(bytes) = env.fs.read(GuestPath::new(&path)) else {
-        release(env, this);
-        return nil;
+    let mut open_options = GuestOpenOptions::new();
+    open_options.read();
+    let result = env.fs.open_with_options(GuestPath::new(&path), open_options)
+        .and_then(|mut file| {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).map_err(FsError::IoError)?;
+            Ok(bytes)
+        });
+    let bytes = match result {
+        Ok(bytes) => bytes,
+        Err(failure) => {
+            let code = match failure {
+                FsError::DoesNotExist | FsError::NonexistentParentDir => 260,
+                FsError::AccessDenied => 257,
+                FsError::InvalidParentDir | FsError::IsDirectory => 258,
+                FsError::IoError(error) => match error.kind() {
+                    std::io::ErrorKind::NotFound => 260,
+                    std::io::ErrorKind::PermissionDenied => 257,
+                    std::io::ErrorKind::InvalidInput => 258,
+                    _ => 256,
+                },
+                _ => 256,
+            };
+            return read_failure(env, this, error, code);
+        }
     };
     let size = bytes.len().try_into().unwrap();
     let alloc = env.mem.alloc(size);
