@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/time.h>
+#include <dlfcn.h>
 
 extern int pthread_cond_timedwait_relative_np(pthread_cond_t *, pthread_mutex_t *, const struct timespec *);
 
@@ -92,7 +93,68 @@ static void condition_smoke(void) {
     CHECK(pthread_mutex_destroy(&wait_mutex) == 0);
 }
 
+unsigned s5lbox_dynamic_value = 73;
+unsigned s5lbox_dynamic_sum(unsigned a, unsigned b) { return a + b; }
+static __attribute__((used,noinline)) unsigned s5lbox_dynamic_private(unsigned value) { return value + 1; }
+
+static void *dynamic_worker(void *arg) {
+    (void)arg;
+    CHECK(dlerror() == NULL);
+    CHECK(dlsym(RTLD_DEFAULT, "s5lbox_missing_worker") == NULL);
+    const char *error = dlerror();
+    CHECK(error && strstr(error, "s5lbox_missing_worker"));
+    CHECK(dlerror() == NULL);
+    return NULL;
+}
+
+static void dynamic_smoke(void) {
+    CHECK(dlerror() == NULL);
+    void *all = dlopen(NULL, RTLD_LAZY);
+    CHECK(all != NULL);
+    unsigned (*arm)(unsigned,unsigned) = (unsigned (*)(unsigned,unsigned))dlsym(all,"s5lbox_dynamic_sum");
+    unsigned (*thumb)(unsigned,unsigned) = (unsigned (*)(unsigned,unsigned))dlsym(all,"thumb_sum");
+    CHECK(arm && arm(19,23) == 42);
+    CHECK(thumb && thumb(20,22) == 42);
+    unsigned *value = (unsigned *)dlsym(all,"s5lbox_dynamic_value");
+    CHECK(value == &s5lbox_dynamic_value && *value == 73);
+    CHECK(dlsym(all,"s5lbox_dynamic_private") == NULL);
+    const char *error = dlerror();
+    CHECK(error && strstr(error,"s5lbox_dynamic_private"));
+    CHECK(dlerror() == NULL);
+    CHECK(dlsym(all,"s5lbox_missing_main") == NULL);
+    pthread_t worker;
+    int created = pthread_create(&worker,NULL,dynamic_worker,NULL);
+    CHECK(created == 0);
+    if (!created) CHECK(pthread_join(worker,NULL) == 0);
+    error = dlerror();
+    CHECK(error && strstr(error,"s5lbox_missing_main"));
+    CHECK(dlerror() == NULL);
+    CHECK(dlopen("/missing-fixture.dylib",RTLD_LAZY) == NULL);
+    error = dlerror();
+    CHECK(error && strstr(error,"missing-fixture"));
+    char *library = strdup("/usr/lib/libSystem.B.dylib");
+    void *system = dlopen(library,RTLD_LAZY);
+    free(library); /* The opaque handle must not alias the caller's path. */
+    void *system2 = dlopen("/usr/lib/libSystem.B.dylib",RTLD_LAZY);
+    CHECK(system && system == system2);
+    size_t (*length)(const char *) = (size_t (*)(const char *))dlsym(system,"strlen");
+    CHECK(length && length("fixture") == 7);
+    CHECK(dlclose(system) == 0);
+    CHECK(dlsym(system2,"strlen") != NULL);
+    CHECK(dlclose(system2) == 0);
+    CHECK(dlsym(system2,"strlen") == NULL);
+    CHECK(dlerror() != NULL && dlerror() == NULL);
+    CHECK(dlclose(NULL) == -1);
+    CHECK(dlerror() != NULL && dlerror() == NULL);
+    CHECK(dlclose(all) == 0);
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--dynamic-smoke") == 0) {
+        dynamic_smoke();
+        printf("S5LBOX-HLE-DYNAMIC %s failures=%u\n", failures ? "FAIL" : "PASS", failures);
+        return failures ? 1 : 0;
+    }
     if (argc > 1 && strcmp(argv[1], "--condition-smoke") == 0) {
         condition_smoke();
         printf("S5LBOX-HLE-CONDITION %s failures=%u\n", failures ? "FAIL" : "PASS", failures);

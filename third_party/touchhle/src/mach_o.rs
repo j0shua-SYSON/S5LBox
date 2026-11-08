@@ -46,6 +46,9 @@ pub struct MachO {
     /// hashmap so the dynamic linker can look things up quickly. Thumb function
     /// symbols always have the Thumb bit set.
     pub exported_symbols: HashMap<String, u32>,
+    /// External definitions eligible for dynamic lookup. Local symbols remain
+    /// in exported_symbols for relocation handling, but are not dlsym exports.
+    pub dynamic_symbols: HashMap<String, u32>,
     /// List of addresses and names of external relocations for the dynamic
     /// linker to resolve.
     pub external_relocations: Vec<(u32, String)>,
@@ -338,6 +341,7 @@ impl MachO {
         // Info used for the result
         let mut dynamic_libraries = Vec::new();
         let mut exported_symbols = HashMap::new();
+        let mut dynamic_symbols = HashMap::new();
         let mut indirect_undef_symbols: Vec<Option<String>> = Vec::new();
         let mut external_relocations: Vec<(u32, String)> = Vec::new();
         let mut entry_point_pc: Option<u32> = None;
@@ -444,6 +448,7 @@ impl MachO {
                                 name: Some(name),
                                 entry,
                                 desc,
+                                external,
                                 ..
                             } = symbol
                             {
@@ -454,6 +459,9 @@ impl MachO {
                                     entry
                                 };
                                 exported_symbols.insert(name.to_string(), slide + entry);
+                                if external {
+                                    dynamic_symbols.insert(name.to_string(), slide + entry);
+                                }
                             };
                         }
                     }
@@ -703,6 +711,7 @@ impl MachO {
             dynamic_libraries,
             sections,
             exported_symbols,
+            dynamic_symbols,
             external_relocations,
             entry_point_pc,
             last_segment_end,

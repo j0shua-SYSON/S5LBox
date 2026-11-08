@@ -305,6 +305,16 @@ idle timed waiter, invalid times, and signal/timeout paths while another thread
 holds the mutex beyond the deadline. These checks do not establish Bejeweled 2
 gameplay compatibility.
 
+A longer Skee-Ball run reaches an optional dynamic-symbol lookup during Mono
+initialization. Dynamic lookup now searches external definitions in loaded
+guest images, preserves Thumb addresses, and returns null with a per-thread
+`dlerror` for missing symbols. Local definitions are not treated as exports.
+Known framework handles are owned and reference counted; they no longer borrow
+the caller's path string. The ARMv6 fixture covers guest functions and data,
+private-symbol rejection, missing symbols, thread-local errors and repeated
+open/close. Loading additional guest libraries at runtime and complete
+library-scoped lookup remain unsupported; the Skee-Ball device retest is pending.
+
 ## Boundaries
 
 Guest support currently targets the verified iPhone OS 3.1.3 SpringBoard

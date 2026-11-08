@@ -299,6 +299,9 @@ jobs:
           ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/InterpreterSmoke.app --headless --args --condition-smoke > ../../work/hle-condition.log 2>&1
           cat ../../work/hle-condition.log
           grep -F 'S5LBOX-HLE-CONDITION PASS failures=0' ../../work/hle-condition.log
+          ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/InterpreterSmoke.app --headless --args --dynamic-smoke > ../../work/hle-dynamic.log 2>&1
+          cat ../../work/hle-dynamic.log
+          grep -F 'S5LBOX-HLE-DYNAMIC PASS failures=0' ../../work/hle-dynamic.log
 
       - name: Preserve smoke-test output
         if: always()
@@ -308,6 +311,7 @@ jobs:
           path: |
             work/hle-smoke.log
             work/hle-condition.log
+            work/hle-dynamic.log
             work/hle-smoke/InterpreterSmoke.app
             work/hle-smoke/HLEVisual.app
             work/hle-smoke/LibrarySmoke.app
