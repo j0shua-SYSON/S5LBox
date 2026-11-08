@@ -58,6 +58,15 @@ if ($LASTEXITCODE) { throw 'GLES array fixture compile failed' }
     "$outputRoot/gles_arrays.o" -lSystem -lobjc -framework Foundation -framework OpenGLES
 if ($LASTEXITCODE) { throw 'GLES array fixture link failed' }
 Copy-Item -LiteralPath "$PSScriptRoot/Info.plist" -Destination "$arrays/Info.plist"
+$alerts=Join-Path $outputRoot 'AlertsSmoke.app'
+New-Item -ItemType Directory -Force -Path $alerts | Out-Null
+& $compiler @common -marm -c "$PSScriptRoot/alerts.m" -o "$outputRoot/alerts.o"
+if ($LASTEXITCODE) { throw 'Alert fixture compile failed' }
+& $linker -arch armv6 -iphoneos_version_min 3.0 -syslibroot $sdkRoot `
+    -undefined dynamic_lookup -o "$alerts/InterpreterSmoke" "$sdkRoot/usr/lib/crt1.o" `
+    "$outputRoot/alerts.o" -lSystem -lobjc -framework Foundation -framework UIKit
+if ($LASTEXITCODE) { throw 'Alert fixture link failed' }
+Copy-Item -LiteralPath "$PSScriptRoot/Info.plist" -Destination "$alerts/Info.plist"
 New-Item -ItemType Directory -Force -Path $audio | Out-Null
 & $compiler @common -marm -c "$PSScriptRoot/audio.m" -o "$outputRoot/audio.o"
 if ($LASTEXITCODE) { throw 'Audio fixture compile failed' }

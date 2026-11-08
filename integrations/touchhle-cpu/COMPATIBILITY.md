@@ -154,3 +154,9 @@ support Darwin's four-byte numeric output conversion, and return errno for
 unknown queries, invalid buffers, read-only writes and insufficient space.
 Page size, memory size, CPU frequency and kernel-revision ABI checks pass in
 the ARMv6 fixture. The hardware values describe the emulated environment.
+
+Guest alerts now create a modal window with tappable buttons, copied titles,
+weak delegates, and presentation/dismissal callbacks. ARMv6 tests cover variadic
+buttons, real control events, nested windows, and callbacks that dismiss or
+reopen the alert. Presentation animations and text-entry alert styles remain
+unsupported; Cro-Mag Rally's pause menu still needs a device retest.
