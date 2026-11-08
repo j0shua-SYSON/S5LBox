@@ -57,6 +57,46 @@ completion status, FIFO, program memory, DMA and shared audio control remain
 unsupported. Software control-register tests do not establish engine
 execution, audio output, or further progress through the full kernel boot.
 
+## Optional AMC internal-memory DMA component
+
+A separate channel-0 component copies backed memory from a validated terminal
+descriptor. The owner supplies the powered context, writable memory, up to
+three disjoint internal-memory regions, and full idle, active and stopped
+status words. The low three status bits are constrained to 0, 1 through 6,
+and 7 respectively. The exact active encoding and other readback bits remain
+explicit inputs. No reset values, memory-window capacities or clock source
+are inferred from this interface.
+
+The matching driver's DMA test uses channel offsets `0x00` for submission,
+`0x10` for commands, and `0x14` for status. Command 4 stops an idle channel;
+command `0x10` resets a stopped channel. Submission accepts an internal
+descriptor offset tagged with low bits 2. Its four words contain a zero next
+pointer, control, source offset and destination offset. Supported control
+forms use internal source/destination modes 1/1, flags `0x20`, burst field
+zero or `0xf80`, and a word count in bits 31:18. These are the two forms the
+original descriptor builder produces for this test. Lengths are 1 through
+16,383 words; all descriptor and data spans must fit the supplied regions.
+
+Submission validates and latches the descriptor without copying bytes. Each
+explicit service call with an available clock copies whole words, bounded
+by the caller's budget and 16 bytes. Reads never advance a transfer. The
+channel returns to supplied idle status only after every byte has moved;
+`completed` records that host-side event. This scheduling is functional and
+does not establish hardware timing. Host reset cancels work while preserving
+already copied bytes and the configured backing. Chained descriptors,
+overlapping spans, external memory, other flags/modes/channels and active
+stop/reset commands refuse without mutation.
+
+The original DMA test block constructs its own descriptor, submits it, polls,
+compares 512 destination words and checks a trailing guard. It passes with
+this component using two memory placements, both descriptor forms and two
+service budgets. Withheld clocks leave it polling with no copied bytes;
+missing destination backing refuses submission. The harness supplies map
+returns, window registers, software-list BSS and status observations and
+enters after the logging call. This is not the complete self-test dispatcher
+or driver initialization. The component has no board attachment, IRQ cause
+mapping, DSP execution or sound output, and does not advance the full boot.
+
 ## Optional SDHC reset and clock component
 
 An explicitly initialized SDHC component models a bounded SDHCI-compatible
