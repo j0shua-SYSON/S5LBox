@@ -227,6 +227,11 @@ pub const CLASSES: ClassExports = objc_classes! {
     autorelease(env, new)
 }
 
++ (id)numberWithUnsignedLong:(u32)value {
+    // iPhone OS uses the 32-bit ILP32 ABI, even on a 64-bit host.
+    msg![env; this numberWithUnsignedInt:value]
+}
+
 + (id)numberWithInteger:(NSInteger)value {
     // TODO: for greater efficiency we could return a static-lifetime value
 
@@ -348,6 +353,10 @@ pub const CLASSES: ClassExports = objc_classes! {
     this
 }
 
+- (id)initWithUnsignedLong:(u32)value {
+    msg![env; this initWithUnsignedInt:value]
+}
+
 - (id)initWithInteger:(NSInteger)value {
     *env.objc.borrow_mut(this) = NSNumberHostObject::Int(value);
     this
@@ -411,6 +420,10 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (u32)unsignedIntValue {
+    env.objc.borrow::<NSNumberHostObject>(this).as_unsigned_int()
+}
+
+- (u32)unsignedLongValue {
     env.objc.borrow::<NSNumberHostObject>(this).as_unsigned_int()
 }
 

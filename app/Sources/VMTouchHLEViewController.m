@@ -691,7 +691,7 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
 @interface VMTouchHLEOfflineAppsViewController () <UISearchResultsUpdating,UICollectionViewDataSource,UICollectionViewDelegateFlowLayout>
 @end
 @implementation VMTouchHLEOfflineAppsViewController {
-    NSString *_instanceID,*_machineName,*_message;
+    NSString *_instanceID,*_machineName,*_message,*_loadingMessage;
     NSArray<VMGuestApplication *> *_apps,*_visibleApps;
     NSDictionary<NSString *,UIImage *> *_icons;
     UISearchController *_search;
@@ -817,6 +817,8 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
         _message=@"Create a machine to start your app collection."; [self filterApps]; [_collection.refreshControl endRefreshing]; return;
     }
     _loading=YES; self.navigationItem.leftBarButtonItem.enabled=NO;
+    NSString *disk=[[store directoryForInstanceWithID:_instanceID] stringByAppendingPathComponent:@"rootfs-work.img"];
+    _loadingMessage=[NSFileManager.defaultManager fileExistsAtPath:disk]?@"Reading apps…":@"Preparing profile…";
     [_loadingIndicator startAnimating]; [self filterApps];
     NSString *identifier=_instanceID;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
@@ -848,7 +850,7 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
         return [app.name localizedCaseInsensitiveContainsString:query] || [app.identifier localizedCaseInsensitiveContainsString:query];
     }]]:_apps;
     BOOL empty=!_visibleApps.count; _collection.backgroundView.hidden=!empty;
-    _emptyLabel.text=_loading?@"Reading apps…":_message ?: (_apps.count?@"No matching apps.":@"Your apps appear here. Browse the Store or import an IPA to get started.");
+    _emptyLabel.text=_loading?_loadingMessage:_message ?: (_apps.count?@"No matching apps.":@"Your apps appear here. Browse the Store or import an IPA to get started.");
     _machineButton.hidden=_loading || !_message.length;
     [_machineButton setTitle:_instanceID?@"Open Machine":@"New Profile" forState:UIControlStateNormal];
     _loadingIndicator.hidden=!_loading;
@@ -864,7 +866,11 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
 - (UICollectionViewCell *)collectionView:(UICollectionView *)collectionView cellForItemAtIndexPath:(NSIndexPath *)indexPath {
     HLELauncherCell *cell=[collectionView dequeueReusableCellWithReuseIdentifier:@"App" forIndexPath:indexPath];
     VMGuestApplication *app=_visibleApps[(NSUInteger)indexPath.row]; cell.name.text=app.name;
-    cell.artwork.image=_icons[app.identifier] ?: [UIImage systemImageNamed:@"app.fill"];
+    UIImage *icon=_icons[app.identifier];
+    cell.artwork.image=icon ?: [UIImage systemImageNamed:@"app" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:32 weight:UIImageSymbolWeightRegular]];
+    cell.artwork.contentMode=icon?UIViewContentModeScaleAspectFill:UIViewContentModeCenter;
+    cell.artwork.tintColor=UIColor.secondaryLabelColor;
+    cell.artwork.backgroundColor=icon?UIColor.clearColor:UIColor.secondarySystemBackgroundColor;
     cell.accessibilityLabel=app.name; cell.accessibilityHint=@"Opens with touchHLE";
     return cell;
 }

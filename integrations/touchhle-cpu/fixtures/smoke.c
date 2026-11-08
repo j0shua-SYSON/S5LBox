@@ -83,6 +83,11 @@ int main(int argc, char **argv) {
                 CHECK(fseek(file, 0, SEEK_SET) == 0);
                 CHECK(fgets(contents, sizeof contents, file) != NULL);
                 CHECK(strcmp(contents, "interpreter smoke") == 0);
+                /* Full elements must be counted even when supplied by ungetc. */
+                CHECK(ungetc('b', file) == 'b');
+                CHECK(ungetc('a', file) == 'a');
+                CHECK(fread(contents, 2, 1, file) == 1);
+                CHECK(contents[0] == 'a' && contents[1] == 'b');
                 CHECK(fclose(file) == 0);
                 CHECK(remove(path) == 0);
             }

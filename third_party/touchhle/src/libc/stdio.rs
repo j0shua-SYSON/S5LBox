@@ -208,7 +208,7 @@ fn fread(
         pushbacks.truncate(offset);
 
         if total_size == to_copy {
-            return total_size;
+            return total_size / item_size;
         }
         total_size -= to_copy;
         let ptr: MutPtr<u8> = buffer.cast();
@@ -218,14 +218,20 @@ fn fread(
         0
     };
     let FILE { fd } = env.mem.read(file_ptr);
-    match posix_io::read(env, fd, buffer, total_size) {
-        // TODO: ferror() support.
-        -1 => already_read / item_size,
-        bytes_read => {
-            let bytes_read: GuestUSize = bytes_read.try_into().unwrap();
-            (bytes_read + already_read) / item_size
-        }
+    let mut read = already_read;
+    while total_size != 0 {
+        crate::host::poll_control();
+        let count = posix_io::read(env, fd, buffer, total_size);
+        if count <= 0 {
+            break;
+        } // EOF or error; retain completed items.
+        let count: GuestUSize = count.try_into().unwrap();
+        read += count;
+        total_size -= count;
+        buffer = (buffer.cast::<u8>() + count).cast();
     }
+    // TODO: ferror() support.
+    read / item_size
 }
 
 fn fgetc(env: &mut Environment, file_ptr: MutPtr<FILE>) -> i32 {
@@ -386,14 +392,18 @@ fn fwrite(
         _ => {
             // The comment about the item_size/n_items split in fread() applies
             // here too.
-            match posix_io::write(env, fd, buffer, total_size) {
-                // TODO: ferror() support.
-                -1 => 0,
-                bytes_written => {
-                    let bytes_written: GuestUSize = bytes_written.try_into().unwrap();
-                    bytes_written / item_size
+            let mut written = 0;
+            while written < total_size {
+                crate::host::poll_control();
+                let next = (buffer.cast::<u8>() + written).cast();
+                let count = posix_io::write(env, fd, next, total_size - written);
+                if count <= 0 {
+                    break;
                 }
+                written += GuestUSize::try_from(count).unwrap();
             }
+            // TODO: ferror() support.
+            written / item_size
         }
     }
 }

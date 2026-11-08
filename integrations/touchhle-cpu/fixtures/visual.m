@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 typedef signed char BOOL;
+extern SEL sel_getUid(const char *name);
+extern SEL sel_registerName(const char *name);
 typedef struct { float x,y; } CGPoint;
 typedef struct { float width,height; } CGSize;
 typedef struct { CGPoint origin; CGSize size; } CGRect;
@@ -13,6 +15,13 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 - (id)init;
 @end
 @interface NSAutoreleasePool : NSObject @end
+@interface NSNumber : NSObject
++ (id)numberWithUnsignedLong:(unsigned long)value;
+- (id)initWithUnsignedLong:(unsigned long)value;
+- (unsigned long)unsignedLongValue;
+- (unsigned long long)unsignedLongLongValue;
+- (long)longValue;
+@end
 @interface NSString : NSObject
 + (id)stringWithUTF8String:(const char *)text;
 - (const char *)UTF8String;
@@ -288,6 +297,15 @@ int main(int argc,char **argv) {
         [control addTarget:target action:@selector(cancelled:) forControlEvents:256];
         [control touchesBegan:touches withEvent:0];
         unsigned failures=![control isTracking] || ![control isHighlighted];
+        // Exercise guest ABI dispatch, not just Rust numeric conversions.
+        NSNumber *wide=[NSNumber numberWithUnsignedLong:0xffffffffUL];
+        failures += [wide unsignedLongValue]!=0xffffffffUL;
+        failures += [wide unsignedLongLongValue]!=0xffffffffULL;
+        failures += [wide longValue]!=-1;
+        NSNumber *zero=[[NSNumber alloc] initWithUnsignedLong:0];
+        failures += [zero unsignedLongValue]!=0;
+        failures += sel_getUid("setText:")!=sel_registerName("setText:");
+        failures += sel_getUid("fixtureNewSelector:")!=sel_registerName("fixtureNewSelector:");
         [control touchesCancelled:touches withEvent:0];
         failures += [control isTracking] || [control isHighlighted] || target->ended || target->cancelled!=1;
         [control touchesCancelled:touches withEvent:0]; // No duplicate action.

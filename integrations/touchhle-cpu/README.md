@@ -49,8 +49,15 @@ The offline backend is bounded: binary-order, nonjournaled HFSX; at most 64 MiB
 of simultaneously modified file contents; and eight inline allocation extents
 for modified forks. Overflow extents are readable. Unsupported layouts,
 external-attribute deletion, allocation collisions and malformed metadata fail
-without publishing the private clone. Offline device testing is in progress;
-the verified live-guest results below do not establish offline compatibility.
+without publishing the private clone.
+
+Physical-device checks on the feature build verified a fresh profile, offline
+IPA installation, an offline app update preserving its container, and a saved
+counter passed from touchHLE to iPhone OS and back. A second profile started
+with separate app data. These checks establish storage and installation paths,
+not general app compatibility. A 20-app Legacy Store runtime pass is ongoing;
+missing framework APIs and rendering failures still prevent several titles
+from running. This integration remains experimental.
 
 For the existing live-guest path, use a jailbroken iPhone OS 3.1.3 guest with Packages connected. Install apps
 through the existing IPA library or Legacy Store. Machine Settings → touchHLE

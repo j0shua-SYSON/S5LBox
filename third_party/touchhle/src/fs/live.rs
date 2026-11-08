@@ -311,31 +311,60 @@ impl LiveFile {
 }
 impl Read for LiveFile {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let count = buf.len().min(LIMIT);
-        let mut request = self.handle.to_be_bytes().to_vec();
-        request.extend_from_slice(&(count as u32).to_be_bytes());
-        let reply = self.fs.0.call(4, &request)?;
-        if reply.len() > count {
-            return self.fs.0.invalid();
+        // LIMIT bounds one transport message, not one regular-file read. Apps
+        // commonly read an entire asset archive in a single call. Exposing the
+        // wire limit leaves their remaining buffer uninitialized.
+        let mut total = 0;
+        while total < buf.len() {
+            crate::host::poll_control();
+            let count = (buf.len() - total).min(LIMIT);
+            let mut request = self.handle.to_be_bytes().to_vec();
+            request.extend_from_slice(&(count as u32).to_be_bytes());
+            let reply = match self.fs.0.call(4, &request) {
+                Ok(reply) => reply,
+                Err(_) if total != 0 => return Ok(total),
+                Err(error) => return Err(error),
+            };
+            if reply.len() > count {
+                return self.fs.0.invalid();
+            }
+            buf[total..total + reply.len()].copy_from_slice(&reply);
+            total += reply.len();
+            if reply.len() < count {
+                break; // Actual short read/EOF from the filesystem.
+            }
         }
-        buf[..reply.len()].copy_from_slice(&reply);
-        Ok(reply.len())
+        Ok(total)
     }
 }
 impl Write for LiveFile {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let count = buf.len().min(LIMIT - 5);
-        let mut request = self.handle.to_be_bytes().to_vec();
-        request.extend_from_slice(&buf[..count]);
-        let reply = self.fs.0.call(5, &request)?;
-        if reply.len() != 4 {
-            return self.fs.0.invalid();
+        let mut total = 0;
+        while total < buf.len() {
+            crate::host::poll_control();
+            let count = (buf.len() - total).min(LIMIT - 5);
+            let mut request = self.handle.to_be_bytes().to_vec();
+            request.extend_from_slice(&buf[total..total + count]);
+            let reply = match self.fs.0.call(5, &request) {
+                Ok(reply) => reply,
+                // Never replay a write whose reply was lost. Report only the
+                // acknowledged prefix; the disconnected stream stays poisoned.
+                Err(_) if total != 0 => return Ok(total),
+                Err(error) => return Err(error),
+            };
+            if reply.len() != 4 {
+                return self.fs.0.invalid();
+            }
+            let written = u32_at(&reply, 0)? as usize;
+            if written > count {
+                return self.fs.0.invalid();
+            }
+            total += written;
+            if written < count {
+                break;
+            }
         }
-        let written = u32_at(&reply, 0)? as usize;
-        if written > count {
-            return self.fs.0.invalid();
-        }
-        Ok(written)
+        Ok(total)
     }
     fn flush(&mut self) -> io::Result<()> {
         self.sync_all()
@@ -485,6 +514,47 @@ mod tests {
         assert_eq!(
             file.seek(SeekFrom::Start(8 * 1024 * 1024 * 1024)).unwrap(),
             8 * 1024 * 1024 * 1024
+        );
+    }
+    #[test]
+    fn regular_file_transfers_span_transport_frames() {
+        let first = vec![0xa5; LIMIT];
+        let last = vec![0x5a; 19];
+        let fs = scripted(vec![
+            (2, reply(0, &3u32.to_be_bytes())),
+            (4, reply(0, &first)),
+            (4, reply(0, &last)),
+            (4, reply(0, &[])),
+            (5, reply(0, &((LIMIT - 5) as u32).to_be_bytes())),
+            (5, reply(0, &24u32.to_be_bytes())),
+            (3, reply(0, &[])),
+        ]);
+        let mut file = fs.open("/Documents/archive", 3).unwrap();
+        let mut bytes = vec![0; LIMIT + 19];
+        assert_eq!(file.read(&mut bytes).unwrap(), bytes.len());
+        assert_eq!(&bytes[..LIMIT], first);
+        assert_eq!(&bytes[LIMIT..], last);
+        assert_eq!(file.read(&mut bytes).unwrap(), 0);
+        assert_eq!(file.write(&bytes).unwrap(), bytes.len());
+        // A zero-length operation must not perform an exchange.
+        assert_eq!(file.read(&mut []).unwrap(), 0);
+        assert_eq!(file.write(&[]).unwrap(), 0);
+    }
+    #[test]
+    fn chunked_write_reports_only_acknowledged_bytes_after_disconnect() {
+        let fs = scripted(vec![
+            (2, reply(0, &3u32.to_be_bytes())),
+            (5, reply(0, &((LIMIT - 5) as u32).to_be_bytes())),
+            (
+                5,
+                Err(io::Error::new(io::ErrorKind::TimedOut, "lost reply")),
+            ),
+        ]);
+        let mut file = fs.open("/Documents/archive", 3).unwrap();
+        assert_eq!(file.write(&vec![0x55; LIMIT * 2]).unwrap(), LIMIT - 5);
+        assert_eq!(
+            file.write(b"retry").unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
         );
     }
     #[test]
