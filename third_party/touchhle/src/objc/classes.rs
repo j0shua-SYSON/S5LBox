@@ -529,6 +529,15 @@ impl ObjC {
         self.link_class_inner(name, /* is_metaclass: */ false, mem, false)
     }
 
+    /// Runtime feature detection must not create a placeholder for absent APIs.
+    pub fn lookup_class(&mut self, name: &str, mem: &mut Mem) -> Option<Class> {
+        if let Some(class) = self.get_class(name, false, mem) {
+            return (!self.is_unimplemented_class(class)).then_some(class);
+        }
+        Self::find_template(name)?;
+        Some(self.get_known_class(name, mem))
+    }
+
     fn link_class_inner(
         &mut self,
         name: &str,
@@ -1005,10 +1014,11 @@ impl ObjC {
 }
 
 pub(super) fn objc_getClass(env: &mut Environment, name: ConstPtr<u8>) -> id {
-    let name_str = env.mem.cstr_at_utf8(name).unwrap();
-    env.objc
-        .get_class(name_str, false, &env.mem)
-        .unwrap_or_else(|| panic!("objc_getClass() for unimplemented class {name_str}"))
+    if name.is_null() {
+        return nil;
+    }
+    let name = env.mem.cstr_at_utf8(name).unwrap().to_owned();
+    env.objc.lookup_class(&name, &mut env.mem).unwrap_or(nil)
 }
 
 pub(super) fn class_getSuperclass(env: &mut Environment, cls: Class) -> Class {

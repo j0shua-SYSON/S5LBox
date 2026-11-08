@@ -124,11 +124,8 @@ fn CFShow(env: &mut Environment, obj: CFTypeRef) {
 const CONSTANTS: ConstantExports = &[(
     "_kCFCoreFoundationVersionNumber",
     HostConstant::Custom(|env| {
-        let version_number_ptr = env.mem.alloc_and_write(478.26f64); // iPhoneOS 2.1
-        env.mem
-            .alloc_and_write(version_number_ptr)
-            .cast()
-            .cast_const()
+        // This symbol is a double, not a pointer to a double.
+        env.mem.alloc_and_write(478.26f64).cast().cast_const() // iPhoneOS 2.1
     }),
 )];
 

@@ -31,7 +31,7 @@ Archives and private test logs are not distributed in this repository.
 | Brushes - iPhone Edition | 2.2.2 | Draw, undo and reopen saved artwork | Not tested. |
 | Color Splash | 1.6.2 | Import a test image, edit and save the result | Not tested. |
 | Recorder | 1.1.1 | Record, play back, rename and reopen a recording | Not tested. |
-| iTalk Recorder | 1.0.4 | Record, play back and reopen saved audio | Archive validation blocked: duplicate Info.plist entries. |
+| iTalk Recorder Premium | 1.0.4 | Record, play back and reopen saved audio | Desktop startup blocked: missing navigationItem. Replaces the non-Premium archive, which failed duplicate-path validation. |
 | Merriam-Webster Dictionary | 1.2.1 | Offline word lookup, definitions and navigation | Not tested. |
 | Batterie Gratuite HD | 2.24 | Battery state updates and settings navigation | Not tested. |
 | Ruler | 1.1 | Switch units and measure using the ruler | Not tested. |
@@ -50,7 +50,7 @@ Archives and private test logs are not distributed in this repository.
 | R.Thunder | 1.0 | Complete a race; responsive steering and pause/resume | Not tested. |
 | Enigmo | 4.1 | Solve a level, manipulate tools and reopen saved progress | Not tested. |
 | Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Not tested. |
-| Edge | 1.62 | Complete a level, precise controls and saved progress | Not tested. |
+| Edge | 1.62 | Complete a level, precise controls and saved progress | Device build 60bd8788: offline install passes; blank display persists beyond three minutes. |
 | Canabalt | 1.7 | Sustained run, jumping, restart and saved high score | Not tested. |
 | Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Not tested. |
 | Minigore | 7.0 | Movement and firing through sustained combat; restart | Not tested. |
@@ -61,7 +61,7 @@ Archives and private test logs are not distributed in this repository.
 | Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Not tested. |
 | Chopper | 1.3.1 | Complete a mission, steer/fire and pause/resume | Not tested. |
 | SPACE DEADBEEF | 1.01 | Sustained gameplay, firing, pause/resume and restart | Not tested. |
-| Trace | 1.3 | Draw paths, complete a stage and retain progress | Not tested. |
+| Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build 60bd8788: offline install passes; audio callback recursion exhausts the guest stack before gameplay. |
 
 ## Runtime changes under validation
 
@@ -81,3 +81,16 @@ past the original failures in PCalc, Convertbot, Rolando, Labyrinth, and
 Fieldrunners, but each still has a later failure. None is a functional pass.
 Host method type encodings and preference domains for other applications remain
 unsupported. The desktop graphics failures require separate device diagnosis.
+
+Link-time strings and booleans no longer invoke guest class initializers before
+`+load`. First instance messages now initialize constant-object classes; reentrant
+and concurrent initialization are covered by the ARMv6 startup fixture. Runtime
+class lookup returns nil for unavailable classes, and nil selector conversion is
+handled. The Core Foundation version constant has the correct double layout.
+Screen-mode size and identity have regression coverage. These checks pass locally;
+the corresponding app paths still require device verification.
+
+On device build `60bd8788`, Angry Birds 1.0 reaches its first level and Home returns
+to the launcher in 3.5 seconds after loading. Closing during loading took much
+longer in a separate attempt; that remains unresolved. This is a regression check
+for an original app, not one of the 40 additional compatibility passes.

@@ -7,10 +7,33 @@
 
 use crate::frameworks::core_graphics::{CGFloat, CGPoint, CGRect, CGSize};
 use crate::objc::{id, msg, msg_class, objc_classes, ClassExports, TrivialHostObject};
+use crate::{window::DeviceFamily, Environment};
+
+fn screen_size(env: &Environment) -> CGSize {
+    let family = env
+        .window
+        .as_ref()
+        .map(|window| window.device_family())
+        .or(env.options.device_family)
+        .unwrap_or_else(|| {
+            let supported = env.bundle.device_family_array();
+            if supported.len() == 1 {
+                supported[0]
+            } else {
+                DeviceFamily::iPhone
+            }
+        });
+    let (width, height) = family.portrait_size();
+    CGSize {
+        width: width as f32,
+        height: height as f32,
+    }
+}
 
 #[derive(Default)]
 pub struct State {
     main_screen: Option<id>,
+    main_mode: Option<id>,
 }
 
 pub const CLASSES: ClassExports = objc_classes! {
@@ -45,16 +68,32 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (())release {}
 - (id)autorelease { this }
 
+- (id)currentMode {
+    if let Some(mode) = env.framework_state.uikit.ui_screen.main_mode { return mode; }
+    let class = env.objc.get_known_class("UIScreenMode", &mut env.mem);
+    let mode = env.objc.alloc_static_object(class, Box::new(TrivialHostObject), &mut env.mem);
+    env.framework_state.uikit.ui_screen.main_mode = Some(mode);
+    mode
+}
+- (id)preferredMode { msg![env; this currentMode] }
+- (id)availableModes {
+    let mode: id = msg![env; this currentMode];
+    msg_class![env; NSArray arrayWithObject:mode]
+}
+- (())setCurrentMode:(id)mode {
+    let current: id = msg![env; this currentMode];
+    assert_eq!(mode, current, "Only this screen's available modes may be selected");
+}
+
 // TODO: more accessors
 
 - (CGRect)bounds {
     // While Apple's documentation says this changes with the interface
     // orientation, https://useyourloaf.com/blog/uiscreen-bounds-in-ios-8/ says
     // ths wasn't the case prior to iOS 8.
-    let (width, height) = env.window().device_family().portrait_size();
     CGRect {
         origin: CGPoint { x: 0.0, y: 0.0 },
-        size: CGSize { width: width as f32, height: height as f32 },
+        size: screen_size(env),
     }
 }
 
@@ -74,6 +113,16 @@ pub const CLASSES: ClassExports = objc_classes! {
     1.0
 }
 
+@end
+
+@implementation UIScreenMode: NSObject
+- (id)retain { this }
+- (())release {}
+- (id)autorelease { this }
+- (CGSize)size {
+    screen_size(env)
+}
+- (CGFloat)pixelAspectRatio { 1.0 }
 @end
 
 };

@@ -1,17 +1,24 @@
 //! Things from `NSObjCRuntime.h`.
 
 use super::ns_string;
+use crate::abi::GuestArg;
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::objc::{id, nil, Class, SEL};
 use crate::Environment;
 
 fn NSStringFromSelector(env: &mut Environment, selector: SEL) -> id {
+    if selector.is_null() {
+        return nil;
+    }
     // TODO: caching?
     let string = selector.as_str(&env.mem).to_string();
     ns_string::from_rust_string(env, string)
 }
 
 fn NSSelectorFromString(env: &mut Environment, string: id) -> SEL {
+    if string == nil {
+        return <SEL as GuestArg>::from_regs(&[0]);
+    }
     // TODO: avoid copy?
     let string = ns_string::to_rust_string(env, string);
     env.objc.register_host_selector(string.into(), &mut env.mem)
@@ -33,12 +40,7 @@ fn NSClassFromString(env: &mut Environment, string: id) -> Class {
     // TODO: avoid copy?
     let string = ns_string::to_rust_string(env, string);
 
-    // While this method is supposed to return nil if the class is not found,
-    // touchHLE is missing many classes that apps might expect to be present,
-    // so this could be troublesome. So, let's use get_known_class, which panics
-    // when it can't find the class. We could except certain classes or apps if
-    // we need to.
-    env.objc.get_known_class(&string, &mut env.mem)
+    env.objc.lookup_class(&string, &mut env.mem).unwrap_or(nil)
 }
 
 pub const FUNCTIONS: FunctionExports = &[

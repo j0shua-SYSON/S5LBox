@@ -13,7 +13,7 @@ use super::{CFComparisonResult, CFIndex, CFTypeRef};
 use crate::dyld::{export_c_func, ConstantExports, FunctionExports, HostConstant};
 use crate::frameworks::foundation::ns_value::is_conversion_lossless;
 use crate::mem::{ConstVoidPtr, MutVoidPtr};
-use crate::objc::{id, msg, msg_class};
+use crate::objc::{msg, msg_class};
 use crate::Environment;
 
 pub type CFNumberType = CFIndex;
@@ -122,8 +122,7 @@ pub const CONSTANTS: ConstantExports = &[
     (
         "_kCFBooleanFalse",
         HostConstant::Custom(|env| {
-            let num = msg_class![env; NSNumber alloc];
-            let num: id = msg![env; num initWithBool:false];
+            let num = crate::frameworks::foundation::ns_value::boolean_constant(env, false);
             // Apparently, it's a pointer to pointer
             env.mem.alloc_and_write(num).cast_void().cast_const()
         }),
@@ -131,8 +130,7 @@ pub const CONSTANTS: ConstantExports = &[
     (
         "_kCFBooleanTrue",
         HostConstant::Custom(|env| {
-            let num = msg_class![env; NSNumber alloc];
-            let num: id = msg![env; num initWithBool:true];
+            let num = crate::frameworks::foundation::ns_value::boolean_constant(env, true);
             // Apparently, it's a pointer to pointer
             env.mem.alloc_and_write(num).cast_void().cast_const()
         }),

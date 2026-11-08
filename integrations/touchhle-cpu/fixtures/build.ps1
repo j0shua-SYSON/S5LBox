@@ -39,6 +39,15 @@ if ($LASTEXITCODE) { throw 'Visual fixture compile failed' }
 if ($LASTEXITCODE) { throw 'Visual fixture link failed' }
 Copy-Item -LiteralPath "$PSScriptRoot/visual.plist" -Destination "$visual/Info.plist"
 Copy-Item -LiteralPath "$PSScriptRoot/Fixture.bundle" -Destination $visual -Recurse -Force
+$startup=Join-Path $outputRoot 'StartupSmoke.app'
+New-Item -ItemType Directory -Force -Path $startup | Out-Null
+& $compiler @common -marm -c "$PSScriptRoot/startup.m" -o "$outputRoot/startup.o"
+if ($LASTEXITCODE) { throw 'Startup fixture compile failed' }
+& $linker -arch armv6 -iphoneos_version_min 3.0 -syslibroot $sdkRoot `
+    -undefined dynamic_lookup -o "$startup/InterpreterSmoke" "$sdkRoot/usr/lib/crt1.o" `
+    "$outputRoot/startup.o" -lSystem -lobjc -framework Foundation -framework CoreFoundation
+if ($LASTEXITCODE) { throw 'Startup fixture link failed' }
+Copy-Item -LiteralPath "$PSScriptRoot/Info.plist" -Destination "$startup/Info.plist"
 $dylibs=Join-Path $outputRoot 'LibrarySmoke.app'
 New-Item -ItemType Directory -Force -Path $dylibs | Out-Null
 & $compiler @common -marm -c "$PSScriptRoot/dylibs.c" -o "$outputRoot/dylibs.o"

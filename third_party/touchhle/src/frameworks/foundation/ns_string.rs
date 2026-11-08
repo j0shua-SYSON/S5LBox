@@ -1760,8 +1760,17 @@ pub fn get_static_str(env: &mut Environment, from: &'static str) -> id {
     if let Some(&existing) = State::get(env).static_str_pool.get(from) {
         existing
     } else {
-        let new = msg_class![env; _touchHLE_NSString_Static alloc];
-        *env.objc.borrow_mut(new) = StringHostObject::Utf8(Cow::Borrowed(from));
+        // Constants are materialized by the linker, before guest execution.
+        // Sending +alloc here can invoke an app's NSString category +initialize
+        // before +load, with no coroutine stack on which guest code may yield.
+        let class = env
+            .objc
+            .get_known_class("_touchHLE_NSString_Static", &mut env.mem);
+        let new = env.objc.alloc_static_object(
+            class,
+            Box::new(StringHostObject::Utf8(Cow::Borrowed(from))),
+            &mut env.mem,
+        );
         State::get(env).static_str_pool.insert(from, new);
         new
     }

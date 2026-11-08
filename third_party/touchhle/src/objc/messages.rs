@@ -43,15 +43,12 @@ fn maybe_initialize_class(env: &mut Environment, receiver: id) {
         ..
     }) = class_host_object.as_any().downcast_ref()
     else {
-        // If it's here, there's one of two cases:
-        //
-        // 1: The receiver is an instance. The class should then have already
-        // called +initialize since you need to call +alloc to create an
-        // instance (this also needs to be upheld for instances created with
-        // class_createInstance(), whenever we implement that)
-        //
-        // 2: The reciever is a fake/unimplemented class. There's no reason to
-        // send +initialize to those, so we don't bother.
+        // Linker-created constants and runtime-created instances do not send
+        // +alloc. Their first instance message must initialize the class too.
+        if !env.objc.is_fake_class(receiver) && !env.objc.is_unimplemented_class(receiver) {
+            let class = ObjC::read_isa(receiver, &env.mem);
+            maybe_initialize_class(env, class);
+        }
         return;
     };
 
@@ -68,12 +65,16 @@ fn maybe_initialize_class(env: &mut Environment, receiver: id) {
         maybe_initialize_class(env, superclass);
     }
 
+    // A superclass initializer may have sent a message to this class.
+    let is_initialized = env
+        .objc
+        .borrow::<super::ClassHostObject>(receiver)
+        .is_initialized;
+    if is_initialized == InitializationStatus::Initialized {
+        return;
+    }
+
     if is_initialized == InitializationStatus::Initializing {
-        env.objc
-            .initializer_threads
-            .get_mut(&receiver)
-            .unwrap()
-            .waiters += 1;
         let ThreadInitializer {
             mutex, cond, tid, ..
         } = *env.objc.initializer_threads.get(&receiver).unwrap();
@@ -83,6 +84,11 @@ fn maybe_initialize_class(env: &mut Environment, receiver: id) {
         if tid == env.current_thread {
             return;
         }
+        env.objc
+            .initializer_threads
+            .get_mut(&receiver)
+            .unwrap()
+            .waiters += 1;
 
         // We are waiting for another thread to initialize, wait for it to
         // broadcast that it has finished.
@@ -107,6 +113,8 @@ fn maybe_initialize_class(env: &mut Environment, receiver: id) {
             // the way out.
             pthread_cond_destroy(env, cond);
             pthread_mutex_destroy(env, mutex);
+            env.mem.free(cond.cast());
+            env.mem.free(mutex.cast());
             env.objc.initializer_threads.remove(&receiver);
         }
     } else {
@@ -147,6 +155,8 @@ fn maybe_initialize_class(env: &mut Environment, receiver: id) {
             // destroy it.
             pthread_cond_destroy(env, cond);
             pthread_mutex_destroy(env, mutex);
+            env.mem.free(cond.cast());
+            env.mem.free(mutex.cast());
             env.objc.initializer_threads.remove(&receiver);
         } else {
             pthread_mutex_lock(env, mutex);

@@ -313,6 +313,9 @@ jobs:
           ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/InterpreterSmoke.app --headless --args --format-overflow-smoke > ../../work/hle-format-overflow.log 2>&1 || result=$?
           test "$result" -ne 0
           grep -F 'checked sprintf buffer overflow' ../../work/hle-format-overflow.log
+          ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/StartupSmoke.app --headless > ../../work/hle-startup.log 2>&1
+          cat ../../work/hle-startup.log
+          grep -F 'S5LBOX-HLE-STARTUP PASS failures=0' ../../work/hle-startup.log
 
       - name: Preserve smoke-test output
         if: always()
@@ -326,6 +329,8 @@ jobs:
             work/hle-thread-lifecycle.log
             work/hle-primary-exit.log
             work/hle-format-overflow.log
+            work/hle-startup.log
+            work/hle-smoke/StartupSmoke.app
             work/hle-smoke/InterpreterSmoke.app
             work/hle-smoke/HLEVisual.app
             work/hle-smoke/LibrarySmoke.app

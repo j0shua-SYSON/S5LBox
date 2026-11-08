@@ -21,6 +21,18 @@ extern void method_exchangeImplementations(Method,Method);
 typedef struct { float x,y; } CGPoint;
 typedef struct { float width,height; } CGSize;
 typedef struct { CGPoint origin; CGSize size; } CGRect;
+@interface UIScreenMode
+- (CGSize)size;
+- (float)pixelAspectRatio;
+@end
+@interface UIScreen
++ (id)mainScreen;
+- (id)currentMode;
+- (id)preferredMode;
+- (id)availableModes;
+- (void)setCurrentMode:(id)mode;
+- (CGRect)bounds;
+@end
 __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 + (id)alloc;
 + (Class)class;
@@ -692,6 +704,13 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
 }
 @end
 static unsigned foundation_compat_smoke(void) {
+    UIScreen *screen=[UIScreen mainScreen];
+    UIScreenMode *mode=[screen currentMode];
+    CGSize size=[mode size]; CGRect bounds=[screen bounds];
+    unsigned screenFailures=!mode || mode!=[screen preferredMode] || size.width!=320 || size.height!=480 ||
+        bounds.size.width!=size.width || bounds.size.height!=size.height || [mode pixelAspectRatio]!=1;
+    [screen setCurrentMode:mode];
+    screenFailures += [screen currentMode]!=mode || [[screen availableModes] count]!=1;
     unsigned failures=0;
     id domain=kCFPreferencesCurrentApplication,key=@"CompatibilityValue";
     unsigned char valid=9;
@@ -748,7 +767,7 @@ static unsigned foundation_compat_smoke(void) {
     [NSObject cancelPreviousPerformRequestsWithTarget:other];
     failures += [other retainCount]!=1;
     [target release]; [other release];
-    return failures;
+    return failures+screenFailures;
 }
 
 int main(int argc,char **argv) {

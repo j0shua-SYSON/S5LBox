@@ -67,6 +67,28 @@ pub(super) enum NSNumberHostObject {
 }
 impl HostObject for NSNumberHostObject {}
 
+#[derive(Default)]
+pub struct State {
+    booleans: [Option<id>; 2],
+}
+
+/// Link-time CFBoolean constants must not dispatch guest +initialize methods.
+pub(crate) fn boolean_constant(env: &mut Environment, value: bool) -> id {
+    if let Some(object) = env.framework_state.foundation.ns_value.booleans[value as usize] {
+        return object;
+    }
+    let class = env
+        .objc
+        .get_known_class("_touchHLE_CFBoolean", &mut env.mem);
+    let object = env.objc.alloc_static_object(
+        class,
+        Box::new(NSNumberHostObject::Bool(value)),
+        &mut env.mem,
+    );
+    env.framework_state.foundation.ns_value.booleans[value as usize] = Some(object);
+    object
+}
+
 /// CFBoolean is bridged to NSNumber, but has a distinct Core Foundation type.
 /// Inspect the stored variant: numeric zero/one and char values are not booleans.
 pub(crate) fn is_boolean(env: &Environment, object: id) -> bool {
@@ -123,6 +145,13 @@ impl NSNumberHostObject {
 pub const CLASSES: ClassExports = objc_classes! {
 
 (env, this, _cmd);
+
+@implementation _touchHLE_CFBoolean: NSNumber
+- (id)retain { this }
+- (())release {}
+- (id)autorelease { this }
+- (NSUInteger)retainCount { u32::MAX }
+@end
 
 // NSValue is an abstract class. None of the things it should provide are
 // implemented here yet (TODO).
