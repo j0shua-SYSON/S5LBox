@@ -323,8 +323,8 @@ jobs:
         env:
           ALSOFT_DRIVERS: 'null'
         run: |
+          trap 'cat ../../work/hle-audio.log' EXIT
           ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/AudioSmoke.app --headless > ../../work/hle-audio.log 2>&1
-          cat ../../work/hle-audio.log
           grep -F 'S5LBOX-HLE-AUDIO PASS failures=0' ../../work/hle-audio.log
 
       - name: Preserve smoke-test output

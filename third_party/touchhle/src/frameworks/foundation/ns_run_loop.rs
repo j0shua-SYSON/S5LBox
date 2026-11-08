@@ -361,7 +361,7 @@ pub fn run_run_loop(
         ca_transaction::ThreadLocalState::commit_implicit_transaction(env);
 
         // We want to process those only on the main run loop
-        if is_main_run_loop {
+        if is_main_run_loop && env.window.is_some() {
             let next_due = uikit::handle_events(env);
             limit_sleep_time(&mut sleep_until, next_due);
 
