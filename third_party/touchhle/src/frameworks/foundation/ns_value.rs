@@ -67,6 +67,17 @@ pub(super) enum NSNumberHostObject {
 }
 impl HostObject for NSNumberHostObject {}
 
+/// CFBoolean is bridged to NSNumber, but has a distinct Core Foundation type.
+/// Inspect the stored variant: numeric zero/one and char values are not booleans.
+pub(crate) fn is_boolean(env: &Environment, object: id) -> bool {
+    matches!(
+        env.objc
+            .get_host_object(object)
+            .and_then(|host| host.as_any().downcast_ref::<NSNumberHostObject>()),
+        Some(NSNumberHostObject::Bool(_))
+    )
+}
+
 impl NSNumberHostObject {
     fn as_bool(&self) -> bool {
         match self {

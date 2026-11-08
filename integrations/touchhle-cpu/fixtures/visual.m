@@ -24,6 +24,9 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 @end
 @interface NSAutoreleasePool : NSObject @end
 @interface NSNumber : NSObject
++ (id)numberWithBool:(BOOL)value;
++ (id)numberWithInt:(int)value;
++ (id)numberWithChar:(signed char)value;
 + (id)numberWithUnsignedLong:(unsigned long)value;
 - (id)initWithUnsignedLong:(unsigned long)value;
 - (unsigned long)unsignedLongValue;
@@ -31,11 +34,43 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 - (long)longValue;
 @end
 @interface NSString : NSObject
++ (id)stringWithString:(id)text;
 + (id)stringWithUTF8String:(const char *)text;
 - (const char *)UTF8String;
 - (BOOL)isEqualToString:(id)other;
 - (id)stringByAppendingPathComponent:(id)component;
 @end
+@interface NSMutableString : NSString @end
+@interface NSDictionary : NSObject
++ (id)dictionary;
+@end
+@interface NSMutableDictionary : NSDictionary @end
+@interface NSNull : NSObject
++ (id)null;
+@end
+@interface NSDate : NSObject
++ (id)date;
+@end
+@interface NSThread : NSObject
++ (id)currentThread;
++ (void)sleepForTimeInterval:(double)seconds;
+- (id)initWithTarget:(id)target selector:(SEL)selector object:(id)object;
+- (void)start;
+- (void)cancel;
+- (BOOL)isCancelled;
+- (BOOL)isFinished;
+@end
+typedef unsigned CFTypeID;
+extern CFTypeID CFGetTypeID(id object);
+#define CF_TYPE(name) extern CFTypeID CF##name##GetTypeID(void)
+CF_TYPE(String); CF_TYPE(Number); CF_TYPE(Boolean); CF_TYPE(Array);
+CF_TYPE(Dictionary); CF_TYPE(Data); CF_TYPE(Date); CF_TYPE(URL);
+CF_TYPE(Set); CF_TYPE(Null); CF_TYPE(CharacterSet); CF_TYPE(Locale);
+CF_TYPE(TimeZone); CF_TYPE(RunLoop); CF_TYPE(RunLoopTimer); CF_TYPE(Bundle);
+CF_TYPE(UUID); CF_TYPE(Error);
+#undef CF_TYPE
+extern id const kCFBooleanTrue,kCFBooleanFalse;
+extern id CFUUIDCreate(void *allocator);
 @interface NSBundle : NSObject
 + (id)mainBundle;
 + (id)bundleWithPath:(id)path;
@@ -96,8 +131,10 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 - (void)setTextAlignment:(int)alignment;
 @end
 @interface NSArray : NSObject
++ (id)array;
 - (unsigned)count;
 @end
+@interface NSMutableArray : NSArray @end
 @interface UITableViewCell : UIView
 - (id)initWithStyle:(int)style reuseIdentifier:(id)identifier;
 - (id)textLabel;
@@ -214,11 +251,21 @@ extern int alGetError(void);
 @interface CancelTarget : NSObject { @public unsigned ended,cancelled; }
 - (void)ended:(id)sender;
 - (void)cancelled:(id)sender;
+- (void)worker:(id)sender;
 @end
+static volatile unsigned workerStarted,workerCancelled;
 @implementation CancelTarget
 + (void)load { [super load]; }
 - (void)ended:(id)sender { (void)sender; ended++; }
 - (void)cancelled:(id)sender { (void)sender; cancelled++; }
+- (void)worker:(id)sender {
+    (void)sender;
+    NSThread *thread=[NSThread currentThread];
+    workerStarted=1;
+    for (unsigned i=0;i<2000 && ![thread isCancelled];i++)
+        [NSThread sleepForTimeInterval:0.001];
+    workerCancelled=[thread isCancelled];
+}
 @end
 @interface UIApplication : NSObject
 + (id)sharedApplication;
@@ -454,6 +501,48 @@ int main(int argc,char **argv) {
         readError=0;
         failures += [NSData dataWithContentsOfURL:[NSURL URLWithString:@"fixture:unsupported"] options:0 error:&readError]!=0;
         failures += [(NSError *)readError code]!=262;
+        // Toll-free families retain their ID across mutable subclasses.
+        CFTypeID typeIDs[]={CFStringGetTypeID(),CFNumberGetTypeID(),CFBooleanGetTypeID(),
+            CFArrayGetTypeID(),CFDictionaryGetTypeID(),CFDataGetTypeID(),CFDateGetTypeID(),
+            CFURLGetTypeID(),CFSetGetTypeID(),CFNullGetTypeID(),CFCharacterSetGetTypeID(),
+            CFLocaleGetTypeID(),CFTimeZoneGetTypeID(),CFRunLoopGetTypeID(),
+            CFRunLoopTimerGetTypeID(),CFBundleGetTypeID(),CFUUIDGetTypeID(),CFErrorGetTypeID()};
+        for(unsigned i=0;i<sizeof(typeIDs)/sizeof(*typeIDs);i++) {
+            failures += typeIDs[i]==0;
+            for(unsigned j=0;j<i;j++) failures += typeIDs[i]==typeIDs[j];
+        }
+        failures += CFGetTypeID(@"constant")!=CFStringGetTypeID();
+        failures += CFGetTypeID([NSMutableString stringWithString:@"mutable"])!=CFStringGetTypeID();
+        failures += CFGetTypeID([NSArray array])!=CFArrayGetTypeID();
+        failures += CFGetTypeID([NSMutableArray array])!=CFArrayGetTypeID();
+        failures += CFGetTypeID([NSDictionary dictionary])!=CFDictionaryGetTypeID();
+        failures += CFGetTypeID([NSMutableDictionary dictionary])!=CFDictionaryGetTypeID();
+        failures += CFGetTypeID(resourceData)!=CFDataGetTypeID();
+        failures += CFGetTypeID(resourceURL)!=CFURLGetTypeID();
+        failures += CFGetTypeID([NSDate date])!=CFDateGetTypeID();
+        failures += CFGetTypeID([NSNull null])!=CFNullGetTypeID();
+        failures += CFGetTypeID(touches)!=CFSetGetTypeID();
+        failures += CFGetTypeID(readError)!=CFErrorGetTypeID();
+        failures += CFGetTypeID(main)!=CFBundleGetTypeID();
+        id uuid=CFUUIDCreate(0);
+        failures += CFGetTypeID(uuid)!=CFUUIDGetTypeID();
+        [uuid release];
+        failures += CFGetTypeID(kCFBooleanTrue)!=CFBooleanGetTypeID();
+        failures += CFGetTypeID(kCFBooleanFalse)!=CFBooleanGetTypeID();
+        failures += CFGetTypeID([NSNumber numberWithBool:1])!=CFBooleanGetTypeID();
+        failures += CFGetTypeID([NSNumber numberWithInt:1])!=CFNumberGetTypeID();
+        failures += CFGetTypeID([NSNumber numberWithInt:0])!=CFNumberGetTypeID();
+        failures += CFGetTypeID([NSNumber numberWithChar:1])!=CFNumberGetTypeID();
+        // A running worker must observe cancellation and exit cooperatively.
+        NSThread *worker=[[NSThread alloc] initWithTarget:target selector:@selector(worker:) object:0];
+        failures += [worker isCancelled] || [worker isFinished];
+        [worker start];
+        for(unsigned i=0;i<1000 && !workerStarted;i++) [NSThread sleepForTimeInterval:0.001];
+        failures += !workerStarted || [worker isCancelled];
+        [worker cancel]; [worker cancel];
+        for(unsigned i=0;i<1000 && ![worker isFinished];i++) [NSThread sleepForTimeInterval:0.001];
+        failures += ![worker isCancelled] || !workerCancelled || ![worker isFinished];
+        [worker release];
         // Image-only buttons used to retain a zero-size UIImageView. Exercise
         // image sizing, frame changes, mixed image/title layout and clearing.
         void *space=CGColorSpaceCreateDeviceRGB();

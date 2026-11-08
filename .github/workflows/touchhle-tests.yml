@@ -173,7 +173,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p work/hle-xcodegen app/Generated
-          curl -fsSL --retry 3 https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip -o work/hle-xcodegen.zip
+          curl -fsSL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 180 https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip -o work/hle-xcodegen.zip
           unzip -q work/hle-xcodegen.zip -d work/hle-xcodegen
           python3 tools/gen_a64_static.py app/Generated/a64_static_handlers.S
           work/hle-xcodegen/xcodegen/bin/xcodegen generate --spec app/project-touchhle.yml
@@ -262,7 +262,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p work/hle-sdk
-          curl -fL --retry 3 https://github.com/touchHLE/common-3.0-sdk/releases/download/v0.3.7/common-3.0.sdk-macOS-universal.tar.gz -o work/hle-sdk/sdk.tar.gz
+          curl -fL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 180 https://github.com/touchHLE/common-3.0-sdk/releases/download/v0.3.7/common-3.0.sdk-macOS-universal.tar.gz -o work/hle-sdk/sdk.tar.gz
           tar -xzf work/hle-sdk/sdk.tar.gz -C work/hle-sdk
 
       - name: Build the ARM and Thumb test app

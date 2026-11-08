@@ -42,6 +42,7 @@ struct NSThreadHostObject {
     thread_dictionary: id,
     owned: bool,
     finished: bool,
+    cancelled: bool,
     stack_size: NSUInteger,
     tolerate_type_mismatch: bool,
 }
@@ -61,6 +62,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         thread_dictionary: nil,
         owned: false,
         finished: false,
+        cancelled: false,
         stack_size: Mem::SECONDARY_THREAD_DEFAULT_STACK_SIZE,
         tolerate_type_mismatch: false,
     });
@@ -222,8 +224,12 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (bool)isCancelled {
-    log_dbg!("TODO: [(NSThread *){:?} isCancelled]", this);
-    false
+    env.objc.borrow::<NSThreadHostObject>(this).cancelled
+}
+- (())cancel {
+    // Cancellation is cooperative: the worker observes this flag and performs
+    // its own cleanup. It must not kill the emulated thread or release locks.
+    env.objc.borrow_mut::<NSThreadHostObject>(this).cancelled = true;
 }
 
 - (())dealloc {

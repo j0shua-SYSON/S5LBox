@@ -271,6 +271,8 @@ On the phone, build `3f3c252a` advances Doodle Jump 1.0 into gameplay and a
 Game Over screen showing a score and high score of 217; its menu images were
 still invisible. IMDb advances past table-controller creation and stops at
 `CFGetTypeID`. These are narrower results than full app compatibility.
+With `121ccd77`, Doodle Jump scored 371; closing and relaunching the app and
+finishing a zero-point round still showed the saved high score of 371.
 
 ## Boundaries
 
