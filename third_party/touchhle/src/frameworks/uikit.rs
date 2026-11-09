@@ -29,6 +29,7 @@ pub mod ui_pasteboard;
 pub mod ui_responder;
 pub mod ui_screen;
 pub mod ui_touch;
+pub mod ui_toolbar;
 pub mod ui_view;
 pub mod ui_view_controller;
 
@@ -51,6 +52,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ui_responder::CLASSES,
         ui_screen::CLASSES,
         ui_touch::CLASSES,
+        ui_toolbar::CLASSES,
         ui_view::CLASSES,
         ui_view::ui_alert_view::CLASSES,
         ui_view::ui_control::CLASSES,

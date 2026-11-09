@@ -48,19 +48,19 @@ they establish the next failure or a 25-second observation, not functionality.
 | Crash Bandicoot Nitro Kart 3D | 1.0 | Complete a race, pause/resume and retain progress | Device build 23a5d292: Quick Race renders and continues running; pause and options respond. Tilt steering, race completion and persistence remain unverified. |
 | Rolando | 1.9 | Complete a level using touch and tilt; resume saved progress | Desktop startup: guest CPU memory fault; cause unconfirmed. |
 | Labyrinth | 1.9.1 | Tilt through a maze, calibrate and restart | Desktop startup: missing UINavigationController setNavigationBarHidden:animated:. |
-| Cro-Mag Rally | 3.0.3 | Complete a race, pause/resume and retain settings | Device build 3322b6fd: race and pause/resume work. The pause dialog is upside down and loses the paused background; presentation fixes await a device retest. Driving, completion and persistence remain unverified. |
+| Cro-Mag Rally | 3.0.3 | Complete a race, pause/resume and retain settings | Device build 6fde244b: race renders; pause labels are upright and the paused frame remains visible. Resume exposes an object-lifetime failure under investigation. Driving, completion and persistence remain unverified. |
 | R.Thunder | 1.0 | Complete a race; responsive steering and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
-| Enigmo | 4.1 | Solve a level, manipulate tools and reopen saved progress | Desktop startup: missing UIToolbar. |
+| Enigmo | 4.1 | Solve a level, manipulate tools and reopen saved progress | Toolbar class implemented; desktop startup now reaches missing UIProgressView during NIB loading. Functionality remains unverified. |
 | Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Edge | 1.62 | Complete a level, precise controls and saved progress | Device build 60bd8788: offline install passes; blank display persists beyond three minutes. |
 | Canabalt | 1.7 | Sustained run, jumping, restart and saved high score | Device build b065e116: offline install passes; missing NSOperationQueue prevents launch. |
 | Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Minigore | 7.0 | Movement and firing through sustained combat; restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
-| iCopter | 1.4 | Sustained flight, restart and saved high score | Sort descriptors implemented and checked with ARMv6 tests. Desktop startup now reaches missing UIToolbar; gameplay remains blocked. |
+| iCopter | 1.4 | Sustained flight, restart and saved high score | Sort descriptors and programmatic toolbars pass ARMv6 checks. Desktop startup runs for 30 seconds; interaction and saved scores need device testing. |
 | Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
 | Tap Tap Revenge | 1.7 | Play a bundled song, timing/scoring and restart | Desktop startup: missing NSNetServiceBrowser. |
 | Trism | 1.4 | Complete a puzzle session and retain progress | Desktop startup: missing UIButton setTitleShadowColor:forState:. |
-| Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Desktop startup: missing UIToolbar. |
+| Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Toolbar class implemented; desktop startup now reaches missing hypotf. NIB controls, rendering and functionality still need work. |
 | Chopper | 1.3.1 | Complete a mission, steer/fire and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | SPACE DEADBEEF | 1.01 | Sustained gameplay, firing, pause/resume and restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build 23a5d292: orientation corrected, first two levels completed, platform drawing and jumping work. First-level completion time survives relaunch and app reinstall; longer play remains untested. |
@@ -71,7 +71,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | --- | --- | --- |
 | Angry Birds | 1.0 | Build 3322b6fd: one menu load finished within 34 seconds, versus more than 56 seconds on 425e7f36 in the same offline profile. A repeat finished between 30 and 70 seconds. First level completed with score 7830; aiming and pause/resume respond. Relaunch preserves the star and unlocks level 2. Timings are observation bounds, not exact durations or a universal speedup. |
 | Super Monkey Ball Lite | 1.0 | Build 3322b6fd: title reached within 40 seconds; mode selection, level flyover and tilt-calibration screens respond. Physical calibration and stage completion remain unverified. One delayed close recovered without Force Close. This is separate from the full version above. |
-| Beer Pong U | 1.2 | Build 46f9c6f9: the oversized-read crash is fixed on the iPhone; Time Attack and CPU Challenge render, and shot-style, help and quit controls respond. Relaunch works. Landscape presentation verified with a local option override, now included in the defaults. The game uses physical tilt to throw; throwing, scoring and saved results remain unverified. |
+| Beer Pong U | 1.2 | Build 46f9c6f9: the oversized-read crash is fixed on the iPhone; Time Attack and CPU Challenge render, and shot-style, help and quit controls respond. Relaunch works. Build 6fde244b confirms landscape presentation with no local override. The game uses physical tilt to throw; throwing, scoring and saved results remain unverified. |
 
 ## Runtime changes under validation
 
@@ -198,7 +198,8 @@ the preceding fullscreen GL frame once for composition, including paused games.
 The ARMv6 graphics fixture checks context switching, preserved framebuffer and
 renderbuffer bindings, unchanged pixels, and deleted-buffer handling. Normal
 fullscreen presentation retains its direct path. Cro-Mag's appearance needs a
-device retest.
+device retest. The subsequent 6fde244b device check confirms the upright dialog
+and preserved race background, but exposes a separate failure on Resume.
 
 Sort descriptors now compare key paths or whole objects with a chosen selector,
 reverse ordering, and sort arrays by multiple keys. ARMv6 checks pass locally for
@@ -206,3 +207,11 @@ numeric and case-insensitive comparisons, nested keys, nil values, copied keys,
 immutable results, ties, empty descriptor lists and reversed order. iCopter's
 desktop startup advances to the separate missing toolbar API. Block comparators
 and descriptor archiving are not implemented.
+
+Programmatic toolbars now lay out title/image buttons, custom views, fixed spaces
+and flexible spaces, resize their contents, and deliver actions with the bar item
+as sender. ARMv6 tests cover touch activation, disabled and nil actions, explicit
+targets, responder-chain dispatch, callbacks that remove items, and items that
+outlive the toolbar. System items use text labels; original system artwork,
+insertion animations and NIB item decoding are not implemented. The three app
+startup retests above establish progress, not functional compatibility.

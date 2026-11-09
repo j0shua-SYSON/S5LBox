@@ -48,6 +48,7 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 + (IMP)methodForSelector:(SEL)selector;
 + (IMP)instanceMethodForSelector:(SEL)selector;
 - (id)init;
+- (id)retain;
 - (id)autorelease;
 - (id)copy;
 - (id)mutableCopy;
@@ -359,6 +360,11 @@ static unsigned permissions_smoke(BOOL unavailable) {
 - (void)layoutSubviews;
 - (void)setBackgroundColor:(id)color;
 - (void)addSubview:(id)view;
+- (id)subviews;
+- (id)superview;
+- (void)removeFromSuperview;
+- (BOOL)becomeFirstResponder;
+- (BOOL)resignFirstResponder;
 @end
 @interface UIWindow : UIView
 - (void)makeKeyAndVisible;
@@ -442,10 +448,12 @@ static unsigned permissions_smoke(BOOL unavailable) {
 @interface UIControl : UIView
 - (void)addTarget:(id)target action:(SEL)action forControlEvents:(unsigned)events;
 - (void)touchesBegan:(id)touches withEvent:(id)event;
+- (void)touchesEnded:(id)touches withEvent:(id)event;
 - (void)touchesCancelled:(id)touches withEvent:(id)event;
 - (void)cancelTrackingWithEvent:(id)event;
 - (BOOL)isTracking;
 - (BOOL)isHighlighted;
+- (BOOL)isEnabled;
 @end
 @interface UIButton : UIControl
 + (id)buttonWithType:(int)type;
@@ -457,6 +465,98 @@ static unsigned permissions_smoke(BOOL unavailable) {
 @interface UIImage : NSObject
 + (id)imageWithCGImage:(void *)image;
 @end
+@interface NSSet : NSObject
++ (id)setWithObject:(id)object;
+@end
+@interface UIBarButtonItem : NSObject
+- (id)initWithTitle:(id)title style:(int)style target:(id)target action:(SEL)action;
+- (id)initWithBarButtonSystemItem:(int)item target:(id)target action:(SEL)action;
+- (id)initWithCustomView:(id)view;
+- (void)setTitle:(id)title;
+- (id)title;
+- (void)setEnabled:(BOOL)enabled;
+- (BOOL)isEnabled;
+- (void)setWidth:(float)width;
+- (float)width;
+- (id)target;
+- (void)setTarget:(id)target;
+- (SEL)action;
+- (void)setAction:(SEL)action;
+@end
+@interface UIToolbar : UIView
+- (id)items;
+- (void)setItems:(id)items;
+- (void)setItems:(id)items animated:(BOOL)animated;
+- (void)sizeToFit;
+- (CGSize)sizeThatFits:(CGSize)size;
+@end
+@interface ToolbarTarget : UIView { @public unsigned calls; id sender; UIToolbar *toolbar; BOOL clear; }
+@end
+@implementation ToolbarTarget
+- (BOOL)canBecomeFirstResponder { return 1; }
+- (void)pressed:(id)item { calls++; sender=item; if (clear) [toolbar setItems:0]; }
+@end
+static void toolbar_click(UIControl *button) {
+    [button retain];
+    TableTouch *touch=[[TableTouch alloc] init]; touch->point=(CGPoint){4,4};
+    id touches=[NSSet setWithObject:touch];
+    [button touchesBegan:touches withEvent:0]; [button touchesEnded:touches withEvent:0];
+    [touch release]; [button release];
+}
+static unsigned toolbar_smoke(void) {
+    unsigned failures=0;
+    ToolbarTarget *target=[[ToolbarTarget alloc] initWithFrame:(CGRect){{0,0},{320,480}}];
+    UIToolbar *bar=[[UIToolbar alloc] initWithFrame:(CGRect){{0,400},{320,44}}];
+    target->toolbar=bar; [target addSubview:bar];
+    NSMutableString *title=[@"First" mutableCopy];
+    UIBarButtonItem *first=[[UIBarButtonItem alloc] initWithTitle:title style:0 target:target action:@selector(pressed:)];
+    [title setString:@"Changed"]; [title release];
+    failures += ![[first title] isEqualToString:@"First"] || ![first isEnabled];
+    failures += [first target]!=target || [first action]!=@selector(pressed:) || [target retainCount]!=1;
+    UIBarButtonItem *space=[[UIBarButtonItem alloc] initWithBarButtonSystemItem:5 target:0 action:0];
+    UIBarButtonItem *last=[[UIBarButtonItem alloc] initWithBarButtonSystemItem:0 target:target action:@selector(pressed:)];
+    failures += [space action]!=0;
+    [first setWidth:50]; [last setWidth:60];
+    [bar setItems:[NSArray arrayWithObjects:first,space,last,0] animated:1];
+    NSArray *views=[bar subviews];
+    failures += [[bar items] count]!=3 || [views count]!=2;
+    CGRect a=[[views objectAtIndex:0] frame],b=[[views objectAtIndex:1] frame];
+    failures += a.origin.x!=6 || a.size.width!=50 || b.origin.x!=254 || b.size.width!=60;
+    toolbar_click([views objectAtIndex:0]);
+    failures += target->calls!=1 || target->sender!=first;
+    [first setEnabled:0];
+    views=[bar subviews]; failures += [[views objectAtIndex:0] isEnabled];
+    toolbar_click([views objectAtIndex:0]); failures += target->calls!=1;
+    [first setEnabled:1]; [first setAction:0];
+    toolbar_click([[bar subviews] objectAtIndex:0]); failures += target->calls!=1;
+    [first setAction:@selector(pressed:)]; [first setTarget:0];
+    toolbar_click([[bar subviews] objectAtIndex:0]);
+    failures += target->calls!=2 || target->sender!=first;
+    [target becomeFirstResponder];
+    toolbar_click([[bar subviews] objectAtIndex:0]); failures += target->calls!=3;
+    [target resignFirstResponder];
+    [bar setFrame:(CGRect){{0,400},{200,44}}];
+    b=[[[bar subviews] objectAtIndex:1] frame]; failures += b.origin.x!=134;
+    UIView *custom=[[UIView alloc] initWithFrame:(CGRect){{0,0},{40,20}}];
+    UIBarButtonItem *customItem=[[UIBarButtonItem alloc] initWithCustomView:custom];
+    [bar setItems:[NSArray arrayWithObjects:customItem,0]];
+    failures += [[[bar subviews] objectAtIndex:0] superview]!=bar || [custom superview]!=bar;
+    a=[custom frame]; failures += a.origin.y!=12 || a.size.width!=40 || a.size.height!=20;
+    [bar setItems:[NSArray arrayWithObjects:first,0]];
+    failures += [custom superview]!=0;
+    [first setTarget:target]; target->clear=1;
+    toolbar_click([[bar subviews] objectAtIndex:0]);
+    failures += target->calls!=4 || [bar items]!=0 || [[bar subviews] count]!=0;
+    CGSize fit=[bar sizeThatFits:(CGSize){123,456}]; failures += fit.width!=123 || fit.height!=44;
+    [bar sizeToFit]; failures += [bar frame].size.height!=44;
+    [bar setItems:[NSArray arrayWithObjects:first,0]];
+    [bar removeFromSuperview]; [bar release];
+    // Items may outlive a toolbar; notifications must not reference freed views.
+    [first setTitle:@"After removal"];
+    [customItem release]; [custom release]; [first release]; [space release]; [last release]; [target release];
+    printf("S5LBOX-HLE-TOOLBAR %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
 extern void *CGColorSpaceCreateDeviceRGB(void);
 extern void CGColorSpaceRelease(void *space);
 extern void *CGBitmapContextCreate(void *data,unsigned width,unsigned height,unsigned bits,unsigned stride,void *space,unsigned bitmapInfo);
@@ -542,9 +642,6 @@ typedef struct { unsigned location,length; } NSRange;
 - (void)setText:(id)text;
 - (id)text;
 - (BOOL)resignFirstResponder;
-@end
-@interface NSSet : NSObject
-+ (id)setWithObject:(id)object;
 @end
 @interface UITouch : NSObject @end
 @interface NSTimer : NSObject
@@ -979,7 +1076,7 @@ static unsigned foundation_compat_smoke(void) {
     [NSObject cancelPreviousPerformRequestsWithTarget:other];
     failures += [other retainCount]!=1;
     [target release]; [other release];
-    return failures+screenFailures+kvc_smoke()+sort_smoke();
+    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke();
 }
 
 int main(int argc,char **argv) {
