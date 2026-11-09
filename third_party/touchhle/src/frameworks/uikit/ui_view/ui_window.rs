@@ -98,6 +98,9 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())setHidden:(bool)is_hidden {
+    if !is_hidden && msg![env; this isHidden] {
+        crate::frameworks::opengles::preserve_fullscreen_frame(env);
+    }
     () = msg_super![env; this setHidden:is_hidden];
 
     // TODO: post UIWindowDidBecomeVisibleNotification,

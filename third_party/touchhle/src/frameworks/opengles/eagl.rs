@@ -71,6 +71,45 @@ pub(super) struct EAGLContextHostObject {
 }
 impl HostObject for EAGLContextHostObject {}
 
+/// The fullscreen fast path does not keep CPU pixels for composition. Capture
+/// once before another UIWindow becomes visible, including when the game has
+/// stopped rendering for an alert. Normal frames keep the direct GPU path.
+pub(crate) fn preserve_fullscreen_frame(env: &mut Environment) {
+    if env.window.is_none() {
+        return;
+    }
+    let Some((context, renderbuffer, drawable)) = env.framework_state.opengles.last_presented else {
+        return;
+    };
+    if find_fullscreen_eagl_layer(env) != drawable {
+        return;
+    }
+    let pixels = get_pixels_vec_for_presenting(env, drawable);
+    let captured = {
+        let object = env.objc.borrow_mut::<EAGLContextHostObject>(context);
+        let Some(context) = object.gles_ctx.as_mut() else { return; };
+        let mut gles = context.make_current(env.window.as_mut().unwrap());
+        unsafe {
+            if gles.IsRenderbufferOES(renderbuffer) == gles11::FALSE {
+                return;
+            }
+            let previous = get_int(gles.as_mut(), gles11::RENDERBUFFER_BINDING_OES) as GLuint;
+            gles.BindRenderbufferOES(gles11::RENDERBUFFER_OES, renderbuffer);
+            let (width, height) = get_renderbuffer_size(gles.as_mut());
+            let result = if width > 0 && height > 0 {
+                Some(read_renderbuffer(gles.as_mut(), pixels))
+            } else {
+                None
+            };
+            gles.BindRenderbufferOES(gles11::RENDERBUFFER_OES, previous);
+            result
+        }
+    };
+    if let Some((pixels, width, height)) = captured {
+        present_pixels(env, drawable, pixels, width, height);
+    }
+}
+
 pub const CLASSES: ClassExports = objc_classes! {
 
 (env, this, _cmd);
@@ -187,6 +226,9 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())dealloc {
+    if env.framework_state.opengles.last_presented.is_some_and(|(context, _, _)| context == this) {
+        env.framework_state.opengles.last_presented = None;
+    }
     let host_obj = env.objc.borrow_mut::<EAGLContextHostObject>(this);
     for &(guest_buf, _host_buf) in host_obj.mapped_buffers.values() {
         env.mem.free(guest_buf);
@@ -250,6 +292,9 @@ pub const CLASSES: ClassExports = objc_classes! {
         }
     };
 
+    if env.framework_state.opengles.last_presented.is_some_and(|(_, buffer, _)| buffer == renderbuffer) {
+        env.framework_state.opengles.last_presented = None;
+    }
     retain(env, drawable);
     let host_obj = env.objc.borrow_mut::<EAGLContextHostObject>(this);
     let maybe_old_drawable = host_obj.renderbuffer_drawable_bindings.borrow_mut().insert(
@@ -307,6 +352,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     // We're presenting to the opaque CAEAGLLayer that covers the screen.
     // We can use the fast path where we skip composition and present directly.
     if drawable == fullscreen_layer {
+        env.framework_state.opengles.last_presented = Some((this, renderbuffer, drawable));
         log_dbg!(
             "Layer {:?} is the fullscreen layer, presenting renderbuffer {:?} directly (fast path).",
             drawable,
@@ -353,6 +399,7 @@ pub const CLASSES: ClassExports = objc_classes! {
             }
         };
         present_pixels(env, drawable, pixels_vec, width, height);
+        env.framework_state.opengles.last_presented = Some((this, renderbuffer, drawable));
     }
 
     if let Some(sleep_for) = sleep_for {
@@ -516,7 +563,8 @@ unsafe fn read_renderbuffer(gles: &mut dyn GLES, mut pixel_buffer: Vec<u8>) -> (
         .checked_mul(4)
         .unwrap();
     pixel_buffer.clear();
-    pixel_buffer.reserve_exact(size);
+    // A failed driver read must not expose uninitialized host memory.
+    pixel_buffer.resize(size, 0);
     let before = Instant::now();
     gles.ReadPixels(
         0,
@@ -533,7 +581,6 @@ unsafe fn read_renderbuffer(gles: &mut dyn GLES, mut pixel_buffer: Vec<u8>) -> (
         height,
         Instant::now().saturating_duration_since(before)
     );
-    pixel_buffer.set_len(size);
 
     // Clean up the framebuffer object since we no longer need it.
     gles.DeleteFramebuffersOES(1, &src_framebuffer);

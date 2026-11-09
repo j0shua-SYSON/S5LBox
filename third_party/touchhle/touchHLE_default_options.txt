@@ -31,6 +31,9 @@
 # - Use --stabilize-virtual-cursor= if the game's menus are practically unusable
 #   without it.
 
+# Beer Pong U
+com.closoft.BeerPongU: --landscape-left
+
 # Super Monkey Ball and Super Monkey Ball Lite
 # B = speed up level intro, Start = pause
 com.ooi.supermonkeyball: --landscape-left --y-tilt-offset=24 --button-to-touch=B,470,160 --button-to-touch=Start,240,10

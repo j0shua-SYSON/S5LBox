@@ -1547,6 +1547,14 @@ fn glDeleteFramebuffersOES(env: &mut Environment, n: GLsizei, framebuffers: Cons
     })
 }
 fn glDeleteRenderbuffersOES(env: &mut Environment, n: GLsizei, renderbuffers: ConstPtr<GLuint>) {
+    if let Some((_, presented, _)) = env.framework_state.opengles.last_presented {
+        for index in 0..n.max(0) as u32 {
+            if env.mem.read(renderbuffers + index) == presented {
+                env.framework_state.opengles.last_presented = None;
+                break;
+            }
+        }
+    }
     with_ctx_and_mem(env, |gles, mem| {
         let n_usize: GuestUSize = n.try_into().unwrap();
         let renderbuffers = mem.ptr_at(renderbuffers, n_usize);

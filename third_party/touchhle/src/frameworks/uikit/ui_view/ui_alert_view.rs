@@ -145,12 +145,12 @@ fn layout(env: &mut Environment, alert: id) {
         DeviceOrientation::LandscapeLeft => (
             bounds.size.height,
             bounds.size.width,
-            -std::f32::consts::FRAC_PI_2,
+            std::f32::consts::FRAC_PI_2,
         ),
         DeviceOrientation::LandscapeRight => (
             bounds.size.height,
             bounds.size.width,
-            std::f32::consts::FRAC_PI_2,
+            -std::f32::consts::FRAC_PI_2,
         ),
         DeviceOrientation::PortraitUpsideDown => {
             (bounds.size.width, bounds.size.height, std::f32::consts::PI)

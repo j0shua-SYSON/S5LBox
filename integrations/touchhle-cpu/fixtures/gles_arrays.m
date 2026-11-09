@@ -4,6 +4,9 @@
 #include <stdlib.h>
 typedef unsigned int GLenum, GLuint;
 typedef int GLint, GLsizei;
+typedef struct { float x,y; } CGPoint;
+typedef struct { float width,height; } CGSize;
+typedef struct { CGPoint origin; CGSize size; } CGRect;
 extern GLenum glGetError(void);
 extern void glGetIntegerv(GLenum,GLint *);
 extern void glGetPointerv(GLenum,void **);
@@ -23,6 +26,7 @@ extern void glDeleteBuffers(GLsizei,const GLuint *);
 extern void glGenFramebuffersOES(GLsizei,GLuint *);
 extern void glBindFramebufferOES(GLenum,GLuint);
 extern void glGenRenderbuffersOES(GLsizei,GLuint *);
+extern void glDeleteRenderbuffersOES(GLsizei,const GLuint *);
 extern void glBindRenderbufferOES(GLenum,GLuint);
 extern void glRenderbufferStorageOES(GLenum,GLenum,GLsizei,GLsizei);
 extern void glFramebufferRenderbufferOES(GLenum,GLenum,GLenum,GLuint);
@@ -33,12 +37,26 @@ extern void glColor4f(float,float,float,float);
 extern void glClear(GLenum);
 extern void glReadPixels(GLint,GLint,GLsizei,GLsizei,GLenum,GLenum,void *);
 __attribute__((objc_root_class)) @interface NSObject { Class isa; }
-+ (id)alloc; + (id)new; - (void)release;
++ (id)alloc; + (id)new; + (Class)class; - (void)release;
 @end
 @interface NSAutoreleasePool : NSObject @end
 @interface EAGLContext : NSObject
 - (id)initWithAPI:(unsigned)api;
 + (signed char)setCurrentContext:(id)context;
+- (signed char)renderbufferStorage:(unsigned)target fromDrawable:(id)drawable;
+- (signed char)presentRenderbuffer:(unsigned)target;
+@end
+@interface UIView : NSObject
+- (id)initWithFrame:(CGRect)frame; - (id)layer; - (void)addSubview:(id)view;
+- (void)setHidden:(signed char)hidden;
+@end
+@interface UIWindow : UIView
+- (void)makeKeyAndVisible;
+@end
+@interface CAEAGLLayer : NSObject @end
+@interface RenderView : UIView @end
+@implementation RenderView
++ (Class)layerClass { return [CAEAGLLayer class]; }
 @end
 enum { VERTEX=0x8074,NORMAL=0x8075,COLOR=0x8076,TEXCOORD=0x8078,
     VERTEX_POINTER=0x808e,TEXCOORD_POINTER=0x8092,ARRAY_BUFFER=0x8892,
@@ -117,6 +135,29 @@ int main(void) {
     CHECK([EAGLContext setCurrentContext:context]);
     glGetPointerv(VERTEX_POINTER,&returned); CHECK(returned==vertices);
     glClear(0x4000); glDrawArrays(TRIANGLES,0,3); red_pixel();
+    // A paused fullscreen renderer must survive a covering window even when
+    // another EAGLContext is current. Snapshotting cannot alter guest bindings.
+    CGRect screen={{0,0},{320,480}};
+    UIWindow *base=[[UIWindow alloc] initWithFrame:screen];
+    RenderView *view=[[RenderView alloc] initWithFrame:screen];
+    [base addSubview:view]; [base makeKeyAndVisible];
+    CHECK([context renderbufferStorage:0x8d41 fromDrawable:[view layer]]);
+    glViewport(0,0,320,480); glClearColor(1,0,0,1); glClear(0x4000);
+    CHECK([context presentRenderbuffer:0x8d41]);
+    CHECK([EAGLContext setCurrentContext:other]);
+    UIWindow *overlay=[[UIWindow alloc] initWithFrame:screen];
+    [overlay makeKeyAndVisible];
+    glGetIntegerv(0x8ca7,&binding); CHECK(binding==0);
+    CHECK([EAGLContext setCurrentContext:context]);
+    glGetIntegerv(0x8ca7,&binding); CHECK(binding==(GLint)renderbuffer);
+    glGetIntegerv(0x8ca6,&binding); CHECK(binding==(GLint)framebuffer);
+    red_pixel();
+    [overlay setHidden:1];
+    CHECK([context presentRenderbuffer:0x8d41]);
+    glDeleteRenderbuffersOES(1,&renderbuffer);
+    [overlay makeKeyAndVisible]; // Deleted buffers must not be captured.
+    CHECK(glGetError()==0);
+    [overlay release]; [view release]; [base release];
     [EAGLContext setCurrentContext:0]; [other release]; [context release];
     printf("S5LBOX-HLE-GLES-ARRAYS %s failures=%u\n",failures?"FAIL":"PASS",failures);
     [pool release]; return failures?1:0;

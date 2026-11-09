@@ -48,7 +48,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Crash Bandicoot Nitro Kart 3D | 1.0 | Complete a race, pause/resume and retain progress | Device build 23a5d292: Quick Race renders and continues running; pause and options respond. Tilt steering, race completion and persistence remain unverified. |
 | Rolando | 1.9 | Complete a level using touch and tilt; resume saved progress | Desktop startup: guest CPU memory fault; cause unconfirmed. |
 | Labyrinth | 1.9.1 | Tilt through a maze, calibrate and restart | Desktop startup: missing UINavigationController setNavigationBarHidden:animated:. |
-| Cro-Mag Rally | 3.0.3 | Complete a race, pause/resume and retain settings | Device build 4efcbc30: offline install, track/vehicle/character selection and race rendering work. Pause requests an unimplemented UIAlertView. Driving, completion and persistence remain unverified. |
+| Cro-Mag Rally | 3.0.3 | Complete a race, pause/resume and retain settings | Device build 3322b6fd: race and pause/resume work. The pause dialog is upside down and loses the paused background; presentation fixes await a device retest. Driving, completion and persistence remain unverified. |
 | R.Thunder | 1.0 | Complete a race; responsive steering and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Enigmo | 4.1 | Solve a level, manipulate tools and reopen saved progress | Desktop startup: missing UIToolbar. |
 | Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Desktop startup: no crash during 25 seconds; functionality unverified. |
@@ -69,9 +69,9 @@ they establish the next failure or a 25-second observation, not functionality.
 
 | App | Version | Latest device result |
 | --- | --- | --- |
-| Angry Birds | 1.0 | Build 3322b6fd: menu reached within 34 seconds, compared with more than 56 seconds on 425e7f36 in the same offline profile. First level completed with score 7830; aiming and pause/resume respond. Save/relaunch verification remains pending. Timings are observation bounds, not exact load durations. |
-| Super Monkey Ball Lite | 1.0 | Build 425e7f36: title, mode selection and tilt-calibration screens respond. Gameplay remains unverified because the physical tilt calibration has not been completed. This is separate from the full version above. |
-| Beer Pong U | 1.2 | Build 425e7f36: menus respond; One Player / Time Attack crashes during an oversized fread request. The shared file-I/O fix needs a device retest. |
+| Angry Birds | 1.0 | Build 3322b6fd: one menu load finished within 34 seconds, versus more than 56 seconds on 425e7f36 in the same offline profile. A repeat finished between 30 and 70 seconds. First level completed with score 7830; aiming and pause/resume respond. Relaunch preserves the star and unlocks level 2. Timings are observation bounds, not exact durations or a universal speedup. |
+| Super Monkey Ball Lite | 1.0 | Build 3322b6fd: title reached within 40 seconds; mode selection, level flyover and tilt-calibration screens respond. Physical calibration and stage completion remain unverified. One delayed close recovered without Force Close. This is separate from the full version above. |
+| Beer Pong U | 1.2 | Build 46f9c6f9: the oversized-read crash is fixed on the iPhone; Time Attack renders, its timer runs, and shot-style and quit controls respond. Landscape presentation verified with a local option override, now included in the defaults. Throwing, scoring and persistence remain under test. |
 
 ## Runtime changes under validation
 
@@ -191,4 +191,11 @@ range to be mapped. Reads and writes also support adjacent guest mappings backed
 by separate host allocations, reject invalid ranges through errno, and preserve
 position and errors for pread/pwrite. Local unit and ARMv6 checks pass for EOF,
 oversized fread, invalid buffers and descriptors, split mappings and positioning.
-Beer Pong U's match-start crash still needs a device retest with this change.
+Both CI workflows pass. Beer Pong U now starts Time Attack on the iPhone.
+
+Landscape alerts now counter-rotate their contents. Showing a window captures
+the preceding fullscreen GL frame once for composition, including paused games.
+The ARMv6 graphics fixture checks context switching, preserved framebuffer and
+renderbuffer bindings, unchanged pixels, and deleted-buffer handling. Normal
+fullscreen presentation retains its direct path. Cro-Mag's appearance needs a
+device retest.

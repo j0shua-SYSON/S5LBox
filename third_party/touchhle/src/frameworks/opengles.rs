@@ -12,6 +12,7 @@
 mod eagl;
 mod gles_guest;
 
+pub(crate) use eagl::preserve_fullscreen_frame;
 use touchHLE_gl_bindings::gles11::types::GLenum;
 
 use crate::mem::ConstPtr;
@@ -28,6 +29,9 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
 pub struct State {
     /// Current EAGLContext for each thread
     current_ctxs: std::collections::HashMap<crate::ThreadId, Option<crate::objc::id>>,
+    // Weak context/layer references, cleared when the context or buffer is
+    // destroyed. Used only to preserve a paused frame before a window covers it.
+    last_presented: Option<(crate::objc::id, u32, crate::objc::id)>,
     strings_cache: std::collections::HashMap<GLenum, ConstPtr<u8>>,
 }
 impl State {
