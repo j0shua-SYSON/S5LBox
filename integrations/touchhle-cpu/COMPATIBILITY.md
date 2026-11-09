@@ -27,7 +27,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Clock | 2.0.2 | Clock updates, settings and timer behavior | Device build 3ffc8cb7: passes key-value getters and setters, then fails on missing change-observer registration. |
 | Notes | 1.0 | Create, edit, delete and reopen a saved note | Desktop startup: missing WebPreferences. |
 | ToDo | 2.0 | Create, complete and edit tasks; relaunch persistence | Desktop startup: missing NSPersistentStoreCoordinator. |
-| SketchBook Mobile | 1.5 | Draw, undo, save and reopen a sketch | Device startup exposed missing rectangular redraw invalidation. That API passes ARMv6 checks; desktop startup now reaches missing unkeyed encodeObject: on NSKeyedArchiver. Drawing and persistence remain unverified. |
+| SketchBook Mobile | 1.5 | Draw, undo, save and reopen a sketch | Rectangular redraw and sequential object/number archiving pass ARMv6 checks. Desktop startup now reaches missing UIBarButtonItem initWithCoder: during NIB loading. Drawing and persistence remain unverified. |
 | Good Reader (large PDF viewer) - read big PDF files with reflow | 3.8.1 | Open a local document, navigate pages and remember position | Desktop startup: guest CPU memory fault; cause unconfirmed. |
 | Stanza | 3.2 | Open an offline book, turn pages and save position | Desktop startup: missing UITabBarController. |
 | Brushes - iPhone Edition | 2.2.2 | Draw, undo and reopen saved artwork | Desktop startup: missing CGImageMaskCreate. |
@@ -48,7 +48,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Crash Bandicoot Nitro Kart 3D | 1.0 | Complete a race, pause/resume and retain progress | Device build 23a5d292: Quick Race renders and continues running; pause and options respond. Tilt steering, race completion and persistence remain unverified. |
 | Rolando | 1.9 | Complete a level using touch and tilt; resume saved progress | Desktop startup: guest CPU memory fault; cause unconfirmed. |
 | Labyrinth | 1.9.1 | Tilt through a maze, calibrate and restart | Desktop startup: missing UINavigationController setNavigationBarHidden:animated:. |
-| Cro-Mag Rally | 3.0.3 | Complete a race, pause/resume and retain settings | Device build 6fde244b: race renders; pause labels are upright and the paused frame remains visible. Resume exposes a released alert delegate. A matching ARMv6 regression now passes with the lifetime fix; device retest pending. Driving, completion and persistence remain unverified. |
+| Cro-Mag Rally | 3.0.3 | Complete a race, pause/resume and retain settings | Device build 1f8d4c8e: race renders; pause labels are upright and the paused frame remains visible. Resume works after the delegate lifetime fix; a second pause and End Game return to the main menu. Tilt steering, race completion, sustained play and persistence remain unverified. |
 | R.Thunder | 1.0 | Complete a race; responsive steering and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Enigmo | 4.1 | Solve a level, manipulate tools and reopen saved progress | Toolbar class implemented; desktop startup now reaches missing UIProgressView during NIB loading. Functionality remains unverified. |
 | Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Desktop startup: no crash during 25 seconds; functionality unverified. |
@@ -56,7 +56,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Canabalt | 1.7 | Sustained run, jumping, restart and saved high score | Device build b065e116: offline install passes; missing NSOperationQueue prevents launch. |
 | Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Minigore | 7.0 | Movement and firing through sustained combat; restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
-| iCopter | 1.4 | Sustained flight, restart and saved high score | Sort descriptors and programmatic toolbars pass ARMv6 checks. Desktop startup runs for 30 seconds; interaction and saved scores need device testing. |
+| iCopter | 1.4 | Sustained flight, restart and saved high score | Device build 1f8d4c8e: title and instructions work, but play-area input does not start the game. Its UIImageView overlay incorrectly receives touches by default. The passive-view correction passes ARMv6 checks; gameplay and saved scores need a device retest. |
 | Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
 | Tap Tap Revenge | 1.7 | Play a bundled song, timing/scoring and restart | Desktop startup: missing NSNetServiceBrowser. |
 | Trism | 1.4 | Complete a puzzle session and retain progress | Desktop startup: missing UIButton setTitleShadowColor:forState:. |
@@ -220,7 +220,8 @@ Cro-Mag's Resume failure was reproduced on the iPhone and traced to dismissal
 notifying a delegate released by the click callback. Alerts now retain the
 assigned delegate only for the active callback sequence. An ARMv6 fixture
 reproduces the original failure and passes after the fix, including release
-during programmatic dismissal; the physical-device retest is still pending.
+during programmatic dismissal. Both CI workflows pass on 1f8d4c8e. The device
+retest confirms Resume, a second pause, and End Game without the original panic.
 
 The single-precision hypotf entry point now uses a scaled hypotenuse calculation.
 ARMv6 checks pass for ordinary values, large and tiny inputs, signed zero,
@@ -240,3 +241,17 @@ needed. Flush defers while an explicit transaction is open, and timing functions
 are retained for the transaction lifetime. ARMv6 checks cover default and changed
 settings, custom values, replacement, nested flush, reset and ownership. Aqua
 Forest progresses to the separate unsupported transition rendering path.
+
+Keyed archives now support sequential object entries alongside named keys,
+including escaped dollar-prefixed keys, per-object ordering, nil, shared identity
+and cycles. Unarchiving releases its internal reader while preserving returned
+objects. Number encoding covers floating-point and signed/unsigned integer
+variants. ARMv6 round-trip checks cover nested objects, mixed keys, lifetime,
+cycles, large integers and fractional values. SketchBook advances to NIB toolbar
+item decoding; this does not yet establish working sketch persistence.
+
+Programmatically initialized image views and labels now ignore touches by
+default, as UIKit specifies. Explicitly enabling interaction remains supported.
+An ARMv6 test verifies that an image-view subclass with empty touch handlers no
+longer blocks the underlying receiver, and that opting in restores hit testing.
+iCopter uses this overlay pattern; its physical-device retest remains pending.

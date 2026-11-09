@@ -153,6 +153,10 @@ static unsigned methods_smoke(void) {
 + (id)numberWithBool:(BOOL)value;
 + (id)numberWithInt:(int)value;
 + (id)numberWithDouble:(double)value;
++ (id)numberWithFloat:(float)value;
++ (id)numberWithShort:(short)value;
++ (id)numberWithUnsignedShort:(unsigned short)value;
++ (id)numberWithUnsignedInt:(unsigned)value;
 + (id)numberWithChar:(signed char)value;
 + (id)numberWithUnsignedLong:(unsigned long)value;
 + (id)numberWithLongLong:(long long)value;
@@ -368,6 +372,10 @@ static unsigned permissions_smoke(BOOL unavailable) {
 - (id)layer;
 - (void)setNeedsDisplay;
 - (void)setNeedsDisplayInRect:(CGRect)rect;
+- (BOOL)isUserInteractionEnabled;
+- (void)setUserInteractionEnabled:(BOOL)enabled;
+- (id)hitTest:(CGPoint)point withEvent:(id)event;
+- (void)touchesBegan:(id)touches withEvent:(id)event;
 @end
 @interface CALayer : NSObject
 - (void)displayIfNeeded;
@@ -395,6 +403,117 @@ extern id const kCATransition,kCATransitionFromRight,kCATransitionFromLeft,kCATr
 @interface CAMediaTimingFunction : NSObject
 + (id)functionWithControlPoints:(float)x1 :(float)y1 :(float)x2 :(float)y2;
 @end
+@interface NSArray : NSObject
++ (id)array;
++ (id)arrayWithObjects:(id)first,...;
+- (unsigned)count;
+- (BOOL)containsObject:(id)object;
+- (id)objectAtIndex:(unsigned)index;
+- (id)sortedArrayUsingDescriptors:(id)descriptors;
+@end
+@interface NSKeyedArchiver : NSObject
++ (id)archivedDataWithRootObject:(id)object;
+- (BOOL)allowsKeyedCoding;
+- (void)encodeObject:(id)object;
+- (void)encodeObject:(id)object forKey:(id)key;
+- (void)finishEncoding;
+- (id)encodedData;
+@end
+@interface NSKeyedUnarchiver : NSObject
++ (id)unarchiveObjectWithData:(id)data;
+- (id)initForReadingWithData:(id)data;
+- (BOOL)allowsKeyedCoding;
+- (id)decodeObject;
+- (id)decodeObjectForKey:(id)key;
+@end
+static unsigned archiveNodesReleased;
+@interface ArchiveNode : NSObject { @public id first,second,keyed,selfReference; }
+@end
+@implementation ArchiveNode
+- (void)encodeWithCoder:(NSKeyedArchiver *)coder {
+    [coder encodeObject:first];
+    [coder encodeObject:keyed forKey:@"$0"];
+    [coder encodeObject:second];
+    [coder encodeObject:selfReference forKey:@"self"];
+}
+- (id)initWithCoder:(NSKeyedUnarchiver *)coder {
+    first=[[coder decodeObject] retain];
+    keyed=[[coder decodeObjectForKey:@"$0"] retain];
+    second=[[coder decodeObject] retain];
+    selfReference=[coder decodeObjectForKey:@"self"]; // non-owning back reference
+    return self;
+}
+- (void)dealloc {
+    archiveNodesReleased++;
+    [first release]; [second release]; [keyed release];
+    [super dealloc];
+}
+@end
+static unsigned archive_smoke(void) {
+    unsigned failures=0;
+    NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+    ArchiveNode *child=[[ArchiveNode alloc] init];
+    child->first=[@"nested-first" retain]; child->second=[@"nested-last" retain];
+    child->keyed=[@"nested-keyed" retain]; child->selfReference=child;
+    ArchiveNode *parent=[[ArchiveNode alloc] init];
+    parent->first=[child retain]; parent->second=[child retain];
+    parent->keyed=[@"parent-keyed" retain]; parent->selfReference=parent;
+    NSKeyedArchiver *coder=[[NSKeyedArchiver alloc] init];
+    failures += ![coder allowsKeyedCoding];
+    [coder encodeObject:@"top-first"];
+    [coder encodeObject:parent];
+    [coder encodeObject:0];
+    [coder encodeObject:@"top-last"];
+    [coder encodeObject:@"escaped" forKey:@"$0"];
+    [coder encodeObject:parent forKey:@"shared"];
+    [coder finishEncoding];
+    id data=[[coder encodedData] retain]; [coder release];
+    NSKeyedUnarchiver *reader=[[NSKeyedUnarchiver alloc] initForReadingWithData:data];
+    failures += ![reader allowsKeyedCoding];
+    failures += ![[reader decodeObject] isEqualToString:@"top-first"];
+    ArchiveNode *copy=[[reader decodeObject] retain];
+    failures += copy==parent || copy->first!=copy->second || copy->selfReference!=copy;
+    failures += ![copy->keyed isEqualToString:@"parent-keyed"];
+    ArchiveNode *nested=copy->first;
+    failures += nested==child || nested->selfReference!=nested;
+    failures += ![nested->first isEqualToString:@"nested-first"];
+    failures += ![nested->second isEqualToString:@"nested-last"];
+    failures += ![nested->keyed isEqualToString:@"nested-keyed"];
+    failures += [reader decodeObject]!=0;
+    failures += ![[reader decodeObject] isEqualToString:@"top-last"];
+    failures += [reader decodeObject]!=0;
+    failures += ![[reader decodeObjectForKey:@"$0"] isEqualToString:@"escaped"];
+    failures += [reader decodeObjectForKey:@"shared"]!=copy;
+    [reader release]; [data release];
+    id rootData=[NSKeyedArchiver archivedDataWithRootObject:parent];
+    ArchiveNode *rootCopy=[[NSKeyedUnarchiver unarchiveObjectWithData:rootData] retain];
+    failures += rootCopy->first!=rootCopy->second || rootCopy->selfReference!=rootCopy;
+    NSArray *numbers=[NSArray arrayWithObjects:[NSNumber numberWithFloat:1.25f],
+        [NSNumber numberWithDouble:1e100],[NSNumber numberWithBool:1],
+        [NSNumber numberWithLongLong:-9000000000LL],
+        [NSNumber numberWithUnsignedLongLong:0xfedcba9876543210ULL],
+        [NSNumber numberWithShort:-1234],[NSNumber numberWithUnsignedShort:65535],
+        [NSNumber numberWithChar:-100],[NSNumber numberWithUnsignedInt:0xfedcba98U],0];
+    NSArray *decoded=[NSKeyedUnarchiver unarchiveObjectWithData:[NSKeyedArchiver archivedDataWithRootObject:numbers]];
+    failures += [decoded count]!=9;
+    failures += [[decoded objectAtIndex:0] doubleValue]!=1.25;
+    failures += [[decoded objectAtIndex:1] doubleValue]!=1e100;
+    failures += [[decoded objectAtIndex:2] longLongValue]!=1;
+    failures += [[decoded objectAtIndex:3] longLongValue]!=-9000000000LL;
+    failures += [[decoded objectAtIndex:4] unsignedLongLongValue]!=0xfedcba9876543210ULL;
+    failures += [[decoded objectAtIndex:5] longLongValue]!=-1234;
+    failures += [[decoded objectAtIndex:6] unsignedLongLongValue]!=65535;
+    failures += [[decoded objectAtIndex:7] longLongValue]!=-100;
+    failures += [[decoded objectAtIndex:8] unsignedLongLongValue]!=0xfedcba98U;
+    [parent release]; [child release]; [pool release];
+    // Decoded objects retained by the caller must survive the reader and pool.
+    failures += ![copy->keyed isEqualToString:@"parent-keyed"];
+    failures += ![rootCopy->keyed isEqualToString:@"parent-keyed"];
+    [copy release]; [rootCopy release];
+    failures += archiveNodesReleased!=6;
+    printf("S5LBOX-HLE-ARCHIVE %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
 static unsigned transaction_smoke(void) {
     unsigned failures=0;
     [CATransaction flush];
@@ -466,14 +585,6 @@ static unsigned redraw_smoke(void) {
 - (void)setText:(id)text;
 - (void)setTextColor:(id)color;
 - (void)setTextAlignment:(int)alignment;
-@end
-@interface NSArray : NSObject
-+ (id)array;
-+ (id)arrayWithObjects:(id)first,...;
-- (unsigned)count;
-- (BOOL)containsObject:(id)object;
-- (id)objectAtIndex:(unsigned)index;
-- (id)sortedArrayUsingDescriptors:(id)descriptors;
 @end
 @interface NSMutableArray : NSArray
 - (void)sortUsingDescriptors:(id)descriptors;
@@ -557,6 +668,45 @@ static unsigned redraw_smoke(void) {
 @interface UIImage : NSObject
 + (id)imageWithCGImage:(void *)image;
 @end
+@interface UIImageView : UIView
+- (id)initWithImage:(id)image;
+@end
+@interface InputReceiver : UIView { @public unsigned presses; }
+@end
+@implementation InputReceiver
+- (void)touchesBegan:(id)touches withEvent:(id)event { presses++; }
+@end
+@interface InputOverlay : UIImageView { @public unsigned swallowed; }
+@end
+@implementation InputOverlay
+- (void)touchesBegan:(id)touches withEvent:(id)event { swallowed++; }
+@end
+static unsigned passive_view_smoke(void) {
+    unsigned failures=0;
+    CGRect frame={{0,0},{100,100}}; CGPoint point={10,10};
+    InputReceiver *root=[[InputReceiver alloc] initWithFrame:frame];
+    InputOverlay *overlay=[[InputOverlay alloc] initWithFrame:frame];
+    [root addSubview:overlay];
+    failures += ![root isUserInteractionEnabled] || [overlay isUserInteractionEnabled];
+    id hit=[root hitTest:point withEvent:0];
+    failures += hit!=root;
+    [hit touchesBegan:0 withEvent:0];
+    failures += root->presses!=1 || overlay->swallowed;
+    [overlay setUserInteractionEnabled:1];
+    hit=[root hitTest:point withEvent:0]; failures += hit!=overlay;
+    [hit touchesBegan:0 withEvent:0];
+    failures += root->presses!=1 || overlay->swallowed!=1;
+    [overlay setUserInteractionEnabled:0];
+    UILabel *label=[[UILabel alloc] initWithFrame:frame]; [root addSubview:label];
+    failures += [label isUserInteractionEnabled] || [root hitTest:point withEvent:0]!=root;
+    [label setUserInteractionEnabled:1]; failures += [root hitTest:point withEvent:0]!=label;
+    UIImageView *image=[[UIImageView alloc] initWithImage:0];
+    failures += [image isUserInteractionEnabled];
+    [image setUserInteractionEnabled:1]; failures += ![image isUserInteractionEnabled];
+    [image release]; [label release]; [overlay release]; [root release];
+    printf("S5LBOX-HLE-PASSIVE-INPUT %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
 @interface NSSet : NSObject
 + (id)setWithObject:(id)object;
 @end
@@ -1168,7 +1318,7 @@ static unsigned foundation_compat_smoke(void) {
     [NSObject cancelPreviousPerformRequestsWithTarget:other];
     failures += [other retainCount]!=1;
     [target release]; [other release];
-    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke();
+    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke();
 }
 
 int main(int argc,char **argv) {

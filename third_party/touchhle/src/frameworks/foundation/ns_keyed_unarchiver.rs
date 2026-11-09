@@ -37,6 +37,7 @@ pub const CONSTANTS: ConstantExports = &[(
 struct NSKeyedUnarchiverHostObject {
     plist: Dictionary,
     current_key: Option<Uid>,
+    sequential_key: u64,
     /// linear map of Uid => id
     already_unarchived: Vec<Option<id>>,
     /// Something responding to NSKeyedUnarchiverDelegate
@@ -58,6 +59,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     let unarchiver = Box::new(NSKeyedUnarchiverHostObject {
         plist: Dictionary::new(),
         current_key: None,
+        sequential_key: 0,
         already_unarchived: Vec::new(),
         delegate: nil,
         temporary_buffers: Vec::new(),
@@ -78,6 +80,8 @@ pub const CLASSES: ClassExports = objc_classes! {
     let new: id = msg![env; new initForReadingWithData:data];
     let root_key = get_static_str(env, NSKeyedArchiveRootObjectKey);
     let result: id = msg![env; new decodeObjectForKey:root_key];
+    retain(env, result);
+    release(env, new);
     autorelease(env, result)
 }
 
@@ -195,6 +199,21 @@ pub const CLASSES: ClassExports = objc_classes! {
     )
 }
 
+- (bool)allowsKeyedCoding { true }
+
+- (id)decodeObject {
+    let state = borrow_host_obj(env, this);
+    let key = format!("${}", state.sequential_key);
+    state.sequential_key += 1;
+    let Some(next_uid) = get_value_to_decode_for_normalized_key(env, this, &key) else {
+        return nil;
+    };
+    let next_uid = next_uid.as_uid().copied().unwrap();
+    let object = unarchive_key(env, this, next_uid);
+    retain(env, object);
+    autorelease(env, object)
+}
+
 - (id)decodeObjectForKey:(id)key { // NSString*
     let Some(next_uid) = get_value_to_decode_for_key(env, this, key) else {
         return nil;
@@ -258,6 +277,11 @@ fn borrow_host_obj(env: &mut Environment, unarchiver: id) -> &mut NSKeyedUnarchi
 
 fn get_value_to_decode_for_key(env: &mut Environment, unarchiver: id, key: id) -> Option<&Value> {
     let key = to_rust_string(env, key); // TODO: avoid copying string
+    let key = if key.starts_with('$') { format!("${key}") } else { key.to_string() };
+    get_value_to_decode_for_normalized_key(env, unarchiver, &key)
+}
+
+fn get_value_to_decode_for_normalized_key<'a>(env: &'a mut Environment, unarchiver: id, key: &str) -> Option<&'a Value> {
     let host_obj = borrow_host_obj(env, unarchiver);
     let scope = match host_obj.current_key {
         Some(current_uid) => {
@@ -267,7 +291,7 @@ fn get_value_to_decode_for_key(env: &mut Environment, unarchiver: id, key: id) -
     }
     .as_dictionary()
     .unwrap();
-    scope.get(&key)
+    scope.get(key)
 }
 
 /// The core of the implementation: unarchive something by its uid.
@@ -280,6 +304,7 @@ fn get_value_to_decode_for_key(env: &mut Environment, unarchiver: id, key: id) -
 /// The object returned is retained only by the archiver. Remember to retain and
 /// possibly autorelease it as appropriate.
 fn unarchive_key(env: &mut Environment, unarchiver: id, key: Uid) -> id {
+    if key.get() == 0 { return nil; }
     let host_obj = borrow_host_obj(env, unarchiver);
     if let Some(existing) = host_obj.already_unarchived[key.get() as usize] {
         return existing;
@@ -317,12 +342,15 @@ fn unarchive_key(env: &mut Environment, unarchiver: id, key: Uid) -> id {
             let host_obj = borrow_host_obj(env, unarchiver); // reborrow
             let old_current_key = host_obj.current_key;
             host_obj.current_key = Some(key);
+            let old_sequential_key = std::mem::replace(&mut host_obj.sequential_key, 0);
 
             let new_object: id = msg![env; class alloc];
+            borrow_host_obj(env, unarchiver).already_unarchived[key.get() as usize] = Some(new_object);
             let new_object: id = msg![env; new_object initWithCoder:unarchiver];
 
             let host_obj = borrow_host_obj(env, unarchiver); // reborrow
             host_obj.current_key = old_current_key;
+            host_obj.sequential_key = old_sequential_key;
 
             new_object
         }
@@ -458,8 +486,12 @@ pub fn decode_current_number(env: &mut Environment, unarchiver: id) -> id {
     let bool_key = get_static_str(env, "NS.boolval");
     if let Some(value) = get_value_to_decode_for_key(env, unarchiver, int_key) {
         // TODO: deal with type coercion
-        let longlong = value.as_signed_integer().unwrap();
-        msg![env; num initWithLongLong:longlong]
+        if let Some(longlong) = value.as_signed_integer() {
+            msg![env; num initWithLongLong:longlong]
+        } else {
+            let unsigned = value.as_unsigned_integer().unwrap();
+            msg![env; num initWithUnsignedLongLong:unsigned]
+        }
     } else if let Some(value) = get_value_to_decode_for_key(env, unarchiver, dbl_key) {
         // TODO: deal with type coercion
         let double = value.as_real().unwrap();

@@ -358,9 +358,15 @@ pub const CLASSES: ClassExports = objc_classes! {
     let host_object = env.objc.borrow::<NSNumberHostObject>(this);
     let (key, val) = match host_object {
         NSNumberHostObject::Int(i) => ("NS.intval", plist::Value::Integer((*i).into())),
+        NSNumberHostObject::UnsignedInt(i) => ("NS.intval", plist::Value::Integer((*i).into())),
+        NSNumberHostObject::LongLong(i) => ("NS.intval", plist::Value::Integer((*i).into())),
+        NSNumberHostObject::UnsignedLongLong(i) => ("NS.intval", plist::Value::Integer((*i).into())),
+        NSNumberHostObject::Short(i) => ("NS.intval", plist::Value::Integer((*i as i64).into())),
+        NSNumberHostObject::UnsignedShort(i) => ("NS.intval", plist::Value::Integer((*i as u64).into())),
+        NSNumberHostObject::Char(i) => ("NS.intval", plist::Value::Integer((*i as i64).into())),
+        NSNumberHostObject::Float(f) => ("NS.dblval", plist::Value::Real(*f as f64)),
         NSNumberHostObject::Double(d) => ("NS.dblval", plist::Value::Real(*d)),
         NSNumberHostObject::Bool(b) => ("NS.boolval", plist::Value::Boolean(*b)),
-        _ => unimplemented!("{:?}", host_object)
     };
 
     let scope = get_value_to_encode_for_current_key(env, coder);

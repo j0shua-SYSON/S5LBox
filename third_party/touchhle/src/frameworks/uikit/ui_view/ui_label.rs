@@ -93,6 +93,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (id)initWithFrame:(CGRect)frame {
     let this: id = msg_super![env; this initWithFrame:frame];
+    () = msg![env; this setUserInteractionEnabled:false];
     // These aren't redundant, the setters fetch the real defaults.
     () = msg![env; this setFont:nil];
     () = msg![env; this setTextColor:nil];

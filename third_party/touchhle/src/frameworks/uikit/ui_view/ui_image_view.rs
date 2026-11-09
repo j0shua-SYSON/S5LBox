@@ -35,6 +35,8 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (id)initWithFrame:(CGRect)frame {
     let this: id = msg_super![env; this initWithFrame:frame];
+    // Unlike UIView, image views are passive unless explicitly enabled.
+    () = msg![env; this setUserInteractionEnabled:false];
     // Not sure if UIImageView does this unconditionally, or only for images
     // with alpha channels.
     () = msg![env; this setOpaque:false];
@@ -69,6 +71,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         size
     };
     let this = msg_super![env; this initWithFrame:frame];
+    () = msg![env; this setUserInteractionEnabled:false];
     () = msg![env; this setImage:image];
     // Not sure if UIImageView does this unconditionally, or only for images
     // with alpha channels.

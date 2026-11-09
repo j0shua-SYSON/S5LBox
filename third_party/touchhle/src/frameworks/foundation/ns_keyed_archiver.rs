@@ -29,6 +29,7 @@ struct NSKeyedArchiverHostObject {
     plist: Dictionary,
     encoded_data: id, // NSData *
     current_key: Option<Uid>,
+    sequential_key: u64,
     /// map of id => Uid
     already_archived: HashMap<id, Uid>,
 }
@@ -55,6 +56,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         plist,
         encoded_data: nil,
         current_key: None,
+        sequential_key: 0,
         already_archived
     }), &mut env.mem)
 }
@@ -74,6 +76,15 @@ pub const CLASSES: ClassExports = objc_classes! {
     log_dbg!("[NSKeyedArchiver archiveRootObject:{:?} toFile:{:?}('{}')]", root_object, file, to_rust_string(env, file));
     let data: id = msg![env; this archivedDataWithRootObject:root_object];
     msg![env; data writeToFile:file atomically:true]
+}
+
+- (bool)allowsKeyedCoding { true }
+
+- (())encodeObject:(id)object {
+    let state = env.objc.borrow_mut::<NSKeyedArchiverHostObject>(this);
+    let key = format!("${}", state.sequential_key);
+    state.sequential_key += 1;
+    encode_object_for_key(env, this, object, key);
 }
 
 - (())encodeObject:(id)object // NSCoding *
@@ -133,8 +144,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 fn normalize_key(env: &mut Environment, key: id) -> String {
     assert_ne!(key, nil);
     let key = to_rust_string(env, key);
-    assert!(!key.starts_with('$')); // TODO: Mangle keys with $ prefix
-    key.to_string()
+    if key.starts_with('$') { format!("${key}") } else { key.to_string() }
 }
 
 pub fn set_value_to_encode_for_current_key(env: &mut Environment, archiver: id, value: Value) {
@@ -194,6 +204,9 @@ pub fn encode_object(env: &mut Environment, archiver: id, object: id) -> Uid {
             .push(Dictionary::new().into());
         let len = host_object.plist["$objects"].as_array().unwrap().len();
         let new_uid = Uid::new(len as u64 - 1);
+        // Reserve identity before invoking guest encoders, which can refer back
+        // to an object whose fields are still being encoded.
+        host_object.already_archived.insert(object, new_uid);
         if object == class {
             // If the class selector returns itself, we're encoding a Class
             let mut classname = None;
@@ -236,6 +249,10 @@ pub fn encode_object(env: &mut Environment, archiver: id, object: id) -> Uid {
                 .borrow_mut::<NSKeyedArchiverHostObject>(archiver)
                 .current_key
                 .replace(new_uid);
+            let previous_sequential_key = std::mem::replace(
+                &mut env.objc.borrow_mut::<NSKeyedArchiverHostObject>(archiver).sequential_key,
+                0,
+            );
             let class: id = msg![env; object class];
             // TODO: it seems that NSString class itself is _not_ encoded??
             let str_class = env.objc.get_known_class("NSString", &mut env.mem);
@@ -246,6 +263,7 @@ pub fn encode_object(env: &mut Environment, archiver: id, object: id) -> Uid {
             env.objc
                 .borrow_mut::<NSKeyedArchiverHostObject>(archiver)
                 .current_key = previous_key;
+            env.objc.borrow_mut::<NSKeyedArchiverHostObject>(archiver).sequential_key = previous_sequential_key;
         }
         let host_object = env.objc.borrow_mut::<NSKeyedArchiverHostObject>(archiver);
         host_object.already_archived.insert(object, new_uid);
