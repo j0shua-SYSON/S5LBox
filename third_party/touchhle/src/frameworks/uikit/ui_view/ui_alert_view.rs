@@ -296,8 +296,13 @@ pub const CLASSES: ClassExports = objc_classes! {
     let state = env.objc.borrow::<UIAlertViewHostObject>(this);
     if !state.visible || state.dismissing || state.handling_click { return; }
     let presentation = state.presentation;
+    let delegate = state.delegate;
     let index: NSInteger = msg![env; button tag];
     retain(env, this);
+    // A delegate can release its last external reference from the click
+    // callback. Keep it alive through the ensuing dismissal notifications,
+    // without retaining the assigned delegate throughout presentation.
+    retain(env, delegate);
     env.objc.borrow_mut::<UIAlertViewHostObject>(this).handling_click = true;
     notify(env, this, "alertView:clickedButtonAtIndex:", Some(index));
     env.objc.borrow_mut::<UIAlertViewHostObject>(this).handling_click = false;
@@ -305,12 +310,16 @@ pub const CLASSES: ClassExports = objc_classes! {
     if state.visible && state.presentation == presentation {
         () = msg![env; this dismissWithClickedButtonIndex:index animated:true];
     }
+    release(env, delegate);
     release(env, this);
 }
 - (())dismissWithClickedButtonIndex:(NSInteger)index animated:(bool)_animated {
     let state = env.objc.borrow::<UIAlertViewHostObject>(this);
     if !state.visible || state.dismissing { return; }
+    let delegate = state.delegate;
     retain(env, this);
+    // The same rule applies to programmatic dismissal and willDismiss callbacks.
+    retain(env, delegate);
     env.objc.borrow_mut::<UIAlertViewHostObject>(this).dismissing = true;
     notify(env, this, "alertView:willDismissWithButtonIndex:", Some(index));
     let state = env.objc.borrow_mut::<UIAlertViewHostObject>(this);
@@ -337,6 +346,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     release(env, previous);
     env.objc.borrow_mut::<UIAlertViewHostObject>(this).dismissing = false;
     notify(env, this, "alertView:didDismissWithButtonIndex:", Some(index));
+    release(env, delegate);
     release(env, this);
 }
 - (())dealloc {

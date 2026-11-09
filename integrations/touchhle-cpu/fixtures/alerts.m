@@ -9,6 +9,7 @@ typedef struct { CGPoint origin; CGSize size; } CGRect;
 __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 + (id)alloc; + (id)new; + (Class)class;
 - (id)init; - (id)retain; - (void)release; - (BOOL)isKindOfClass:(Class)class;
+- (void)dealloc;
 - (unsigned)retainCount;
 @end
 @interface NSAutoreleasePool : NSObject @end
@@ -43,6 +44,7 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 - (void)setCancelButtonIndex:(int)index;
 - (id)buttonTitleAtIndex:(int)index; - (int)addButtonWithTitle:(id)title;
 - (id)title; - (void)setTitle:(id)title;
+- (void)setDelegate:(id)delegate;
 - (void)dismissWithClickedButtonIndex:(int)index animated:(BOOL)animated;
 @end
 static unsigned failures;
@@ -71,6 +73,19 @@ static unsigned failures;
 - (void)alertView:(UIAlertView *)alert didDismissWithButtonIndex:(int)index {
     (void)index; sequence=sequence*10+5; CHECK(![alert isVisible]);
 }
+@end
+static unsigned releasedObservers,lastSequence;
+@interface SelfReleasingObserver : AlertObserver @end
+@implementation SelfReleasingObserver
+- (void)alertView:(UIAlertView *)alert clickedButtonAtIndex:(int)index {
+    [super alertView:alert clickedButtonAtIndex:index];
+    if (mode==3) [self release];
+}
+- (void)alertView:(UIAlertView *)alert willDismissWithButtonIndex:(int)index {
+    [super alertView:alert willDismissWithButtonIndex:index];
+    if (mode==4) [self release];
+}
+- (void)dealloc { releasedObservers++; lastSequence=sequence; [super dealloc]; }
 @end
 static UIButton *find_button(UIView *view,int index) {
     if ([view isKindOfClass:[UIButton class]] && [view tag]==index) return (UIButton *)view;
@@ -136,6 +151,19 @@ int main(void) {
     id top=[application keyWindow];
     [alert dismissWithClickedButtonIndex:0 animated:0]; CHECK([application keyWindow]==top);
     click(nested,0); CHECK([application keyWindow]==base && ![nested isVisible]);
+    for (int mode=3;mode<=4;mode++) {
+        SelfReleasingObserver *temporary=[SelfReleasingObserver new]; temporary->mode=mode;
+        UIAlertView *transient=[[UIAlertView alloc] initWithTitle:@"Release during callback" message:0
+            delegate:temporary cancelButtonTitle:@"Done" otherButtonTitles:(id)0];
+        CHECK([temporary retainCount]==1);
+        [transient show];
+        if (mode==3) click(transient,0);
+        else [transient dismissWithClickedButtonIndex:0 animated:0];
+        CHECK(releasedObservers==(unsigned)(mode-2));
+        CHECK(lastSequence==(mode==3?12345u:1245u));
+        CHECK(![transient isVisible] && [application keyWindow]==base);
+        [transient setDelegate:0]; [transient release];
+    }
     [nested release]; [alert release]; [observer release]; [base release];
     printf("S5LBOX-HLE-ALERTS %s failures=%u\n",failures?"FAIL":"PASS",failures);
     [pool release]; return failures?1:0;

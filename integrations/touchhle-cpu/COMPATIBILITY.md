@@ -48,7 +48,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Crash Bandicoot Nitro Kart 3D | 1.0 | Complete a race, pause/resume and retain progress | Device build 23a5d292: Quick Race renders and continues running; pause and options respond. Tilt steering, race completion and persistence remain unverified. |
 | Rolando | 1.9 | Complete a level using touch and tilt; resume saved progress | Desktop startup: guest CPU memory fault; cause unconfirmed. |
 | Labyrinth | 1.9.1 | Tilt through a maze, calibrate and restart | Desktop startup: missing UINavigationController setNavigationBarHidden:animated:. |
-| Cro-Mag Rally | 3.0.3 | Complete a race, pause/resume and retain settings | Device build 6fde244b: race renders; pause labels are upright and the paused frame remains visible. Resume exposes an object-lifetime failure under investigation. Driving, completion and persistence remain unverified. |
+| Cro-Mag Rally | 3.0.3 | Complete a race, pause/resume and retain settings | Device build 6fde244b: race renders; pause labels are upright and the paused frame remains visible. Resume exposes a released alert delegate. A matching ARMv6 regression now passes with the lifetime fix; device retest pending. Driving, completion and persistence remain unverified. |
 | R.Thunder | 1.0 | Complete a race; responsive steering and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Enigmo | 4.1 | Solve a level, manipulate tools and reopen saved progress | Toolbar class implemented; desktop startup now reaches missing UIProgressView during NIB loading. Functionality remains unverified. |
 | Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Desktop startup: no crash during 25 seconds; functionality unverified. |
@@ -60,7 +60,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
 | Tap Tap Revenge | 1.7 | Play a bundled song, timing/scoring and restart | Desktop startup: missing NSNetServiceBrowser. |
 | Trism | 1.4 | Complete a puzzle session and retain progress | Desktop startup: missing UIButton setTitleShadowColor:forState:. |
-| Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Toolbar class implemented; desktop startup now reaches missing hypotf. NIB controls, rendering and functionality still need work. |
+| Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Toolbar and hypotf blockers addressed. Desktop startup now reaches a guest CPU memory fault; its cause is unconfirmed. NIB controls, rendering and functionality still need work. |
 | Chopper | 1.3.1 | Complete a mission, steer/fire and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | SPACE DEADBEEF | 1.01 | Sustained gameplay, firing, pause/resume and restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build 23a5d292: orientation corrected, first two levels completed, platform drawing and jumping work. First-level completion time survives relaunch and app reinstall; longer play remains untested. |
@@ -215,3 +215,14 @@ targets, responder-chain dispatch, callbacks that remove items, and items that
 outlive the toolbar. System items use text labels; original system artwork,
 insertion animations and NIB item decoding are not implemented. The three app
 startup retests above establish progress, not functional compatibility.
+
+Cro-Mag's Resume failure was reproduced on the iPhone and traced to dismissal
+notifying a delegate released by the click callback. Alerts now retain the
+assigned delegate only for the active callback sequence. An ARMv6 fixture
+reproduces the original failure and passes after the fix, including release
+during programmatic dismissal; the physical-device retest is still pending.
+
+The single-precision hypotf entry point now uses a scaled hypotenuse calculation.
+ARMv6 checks pass for ordinary values, large and tiny inputs, signed zero,
+infinity and NaN. Aqua Forest progresses beyond this missing function but still
+fails later during guest execution.
