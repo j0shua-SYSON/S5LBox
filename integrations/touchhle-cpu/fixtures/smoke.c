@@ -341,6 +341,12 @@ int main(int argc, char **argv) {
     CHECK(classify_float(0x1p-149f) == FP_SUBNORMAL);
     CHECK(fabs(stable_hypot(3e200,4e200) / 1e200 - 5.0) < 1e-12);
     CHECK(fabs(stable_hypot(3e-200,4e-200) / 1e-200 - 5.0) < 1e-12);
+    float (*volatile stable_hypotf)(float,float) = hypotf;
+    CHECK(stable_hypotf(3.0f,-4.0f) == 5.0f);
+    CHECK(fabsf(stable_hypotf(3e30f,4e30f) / 1e30f - 5.0f) < 1e-5f);
+    CHECK(fabsf(stable_hypotf(3e-30f,4e-30f) / 1e-30f - 5.0f) < 1e-5f);
+    CHECK(stable_hypotf(-0.0f,0.0f) == 0.0f && !signbit(stable_hypotf(-0.0f,0.0f)));
+    CHECK(isinf(stable_hypotf(INFINITY,NAN)) && isnan(stable_hypotf(NAN,1.0f)));
     volatile float a = 1.5f, b = 2.0f;
     CHECK(a * b + 0.25f == 3.25f);
     int values[] = {8, 2, 9, 1, 4};

@@ -514,6 +514,10 @@ fn hypot(_env: &mut Environment, arg1: f64, arg2: f64) -> f64 {
     arg1.hypot(arg2)
 }
 
+fn hypotf(_env: &mut Environment, arg1: f32, arg2: f32) -> f32 {
+    arg1.hypot(arg2)
+}
+
 /// This alias is for readability, POSIX just uses `int`.
 type GuestFPCategory = i32;
 const FP_NAN: GuestFPCategory = 1;
@@ -626,6 +630,7 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(nan(_)),
     export_c_func!(nanf(_)),
     export_c_func!(hypot(_, _)),
+    export_c_func!(hypotf(_, _)),
     export_c_func!(__fpclassifyf(_)),
     export_c_func!(__fpclassify(_)),
     // On ARM Darwin, long double has the same representation and ABI as double.
