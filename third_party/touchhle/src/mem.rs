@@ -344,6 +344,11 @@ impl Mem {
         self.backing.bytes_mut(addr.to_bits(), count)
     }
 
+    /// Check a complete guest range, including adjacent host allocations.
+    pub(crate) fn is_range_mapped(&self, address: u32, length: usize) -> bool {
+        address >= self.null_segment_size && self.backing.is_mapped(address, length)
+    }
+
     /// Interpreter transfers can cross adjacent VM mapping boundaries.
     pub(crate) fn interpreter_read(&self, address: u32, bytes: &mut [u8]) -> bool {
         address >= self.null_segment_size && self.backing.read(address, bytes)

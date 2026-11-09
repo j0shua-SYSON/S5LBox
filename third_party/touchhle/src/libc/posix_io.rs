@@ -18,7 +18,7 @@ use crate::libc::errno::{
 use crate::libc::sys::socket::close_socket;
 use crate::libc::unistd::pid_t;
 use crate::mem::{
-    ConstPtr, ConstVoidPtr, GuestISize, GuestUSize, MutPtr, MutVoidPtr, Ptr, SafeRead,
+    ConstPtr, ConstVoidPtr, GuestISize, GuestUSize, Mem, MutPtr, MutVoidPtr, Ptr, SafeRead,
 };
 use crate::Environment;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -30,13 +30,14 @@ pub struct State {
 }
 impl State {
     fn file_for_fd(&mut self, fd: FileDescriptor) -> Option<&mut PosixFileHostObject> {
+        let index = usize::try_from(fd.checked_sub(NORMAL_FILENO_BASE)?).ok()?;
         self.files
-            .get_mut(fd_to_file_idx(fd))
+            .get_mut(index)
             .and_then(|file_or_none| file_or_none.as_mut())
     }
 
     pub(crate) fn is_fd_open(&mut self, fd: FileDescriptor) -> bool {
-        self.files.get(fd_to_file_idx(fd)).is_some()
+        self.file_for_fd(fd).is_some()
     }
 }
 
@@ -44,6 +45,7 @@ struct PosixFileHostObject {
     file: GuestFile,
     needs_flush: bool,
     reached_eof: bool,
+    access_mode: OpenFlag,
     flags: i32,
 }
 
@@ -213,6 +215,7 @@ pub fn open_direct(env: &mut Environment, path: ConstPtr<u8>, flags: i32) -> Fil
                 file,
                 needs_flush,
                 reached_eof: false,
+                access_mode: flags & O_ACCMODE,
                 flags: 0,
             };
 
@@ -259,19 +262,72 @@ pub fn open_direct(env: &mut Environment, path: ConstPtr<u8>, flags: i32) -> Fil
     res
 }
 
+fn io_errno(error: std::io::Error) -> i32 {
+    crate::fs::live::guest_errno(&error).unwrap_or(EIO)
+}
+
+/// A regular-file read only touches the bytes available before EOF. Guest
+/// buffers may also span adjacent VM regions with separate host allocations.
+fn read_into_guest(
+    file: &mut (impl Read + Seek),
+    mem: &mut Mem,
+    buffer: MutVoidPtr,
+    size: GuestUSize,
+) -> Result<usize, i32> {
+    if size > GuestISize::MAX as u32 {
+        return Err(EINVAL);
+    }
+    if size == 0 {
+        return Ok(0);
+    }
+    // Keep ordinary reads direct: no staging allocation or extra seeks.
+    if let Some(bytes) = mem.get_bytes_fallible_mut(buffer.cast_const(), size) {
+        return file.read(bytes).map_err(io_errno);
+    }
+
+    let position = file.stream_position().map_err(io_errno)?;
+    let end = file.seek(SeekFrom::End(0));
+    file.seek(SeekFrom::Start(position)).map_err(io_errno)?;
+    let available = end.map_err(io_errno)?.saturating_sub(position);
+    let count = u64::from(size).min(available) as u32;
+    if count == 0 {
+        return Ok(0);
+    }
+    if !mem.is_range_mapped(buffer.to_bits(), count as usize) {
+        return Err(EFAULT);
+    }
+    if let Some(bytes) = mem.get_bytes_fallible_mut(buffer.cast_const(), count) {
+        return file.read(bytes).map_err(io_errno);
+    }
+
+    let mut scratch = vec![0; (count as usize).min(65536)];
+    let mut total = 0;
+    while total < count as usize {
+        let chunk = scratch.len().min(count as usize - total);
+        match file.read(&mut scratch[..chunk]) {
+            Ok(n) => {
+                // The complete destination was checked before advancing the
+                // file, and mappings cannot change during this host call.
+                assert!(mem.interpreter_write(buffer.to_bits() + total as u32, &scratch[..n]));
+                total += n;
+                if n < chunk {
+                    break;
+                }
+            }
+            Err(error) if total == 0 => return Err(io_errno(error)),
+            Err(_) => break,
+        }
+    }
+    Ok(total)
+}
+
 pub fn read(
     env: &mut Environment,
     fd: FileDescriptor,
     buffer: MutVoidPtr,
     size: GuestUSize,
 ) -> GuestISize {
-    // TODO: handle errno properly
     set_errno(env, 0);
-
-    if buffer.is_null() {
-        // TODO: set errno to EFAULT
-        return -1;
-    }
 
     let Some(file) = env.libc_state.posix_io.file_for_fd(fd) else {
         log!(
@@ -280,57 +336,44 @@ pub fn read(
             buffer,
             size,
         );
-        // TODO: set errno
+        set_errno(env, EBADF);
         return -1;
     };
-
-    let buffer_slice = env.mem.bytes_at_mut(buffer.cast(), size);
-    match file.file.read(buffer_slice) {
+    if file.access_mode == O_WRONLY {
+        set_errno(env, EBADF);
+        return -1;
+    }
+    // Preserve the existing directory-read result without trying to seek it.
+    if matches!(file.file, GuestFile::Directory) {
+        set_errno(env, EISDIR);
+        return 0;
+    }
+    match read_into_guest(&mut file.file, &mut env.mem, buffer, size) {
         Ok(bytes_read) => {
             if bytes_read == 0 && size != 0 {
                 // need to set EOF
                 file.reached_eof = true;
             }
-            if bytes_read < buffer_slice.len() {
-                log!(
-                    "Warning: read({:?}, {:?}, {:#x}) read only {:#x} bytes",
-                    fd,
-                    buffer,
-                    size,
-                    bytes_read,
-                );
-            } else {
-                log_dbg!(
-                    "read({:?}, {:?}, {:#x}) => {:#x}",
-                    fd,
-                    buffer,
-                    size,
-                    bytes_read,
-                );
-            }
+            log_dbg!(
+                "read({:?}, {:?}, {:#x}) => {:#x}",
+                fd,
+                buffer,
+                size,
+                bytes_read,
+            );
             bytes_read.try_into().unwrap()
         }
-        Err(e) => {
-            let res = match e.kind() {
-                std::io::ErrorKind::IsADirectory => {
-                    set_errno(env, EISDIR);
-                    // the returned value was validated on iOS
-                    0
-                }
-                _ => {
-                    // TODO: set errno
-                    -1
-                }
-            };
+        Err(error) => {
+            set_errno(env, error);
             log!(
                 "Warning: read({:?}, {:?}, {:#x}) encountered error {:?}, returning {}",
                 fd,
                 buffer,
                 size,
-                e,
-                res,
+                error,
+                -1,
             );
-            res
+            -1
         }
     }
 }
@@ -359,8 +402,11 @@ pub fn pread(
     }
 
     let bytes_read = read(env, fd, buffer, size);
-
-    assert!(lseek(env, fd, original_position, SEEK_SET) != -1);
+    let error = crate::libc::errno::get_errno(env);
+    if lseek(env, fd, original_position, SEEK_SET) == -1 {
+        return -1;
+    }
+    set_errno(env, error);
 
     bytes_read
 }
@@ -399,27 +445,65 @@ pub(super) fn fflush(env: &mut Environment, fd: FileDescriptor) -> i32 {
     }
 }
 
+fn write_from_guest(
+    file: &mut impl Write,
+    mem: &Mem,
+    buffer: ConstVoidPtr,
+    size: GuestUSize,
+) -> Result<usize, i32> {
+    if size > GuestISize::MAX as u32 {
+        return Err(EINVAL);
+    }
+    if size == 0 {
+        return Ok(0);
+    }
+    if let Some(bytes) = mem.get_bytes_fallible(buffer, size) {
+        return file.write(bytes).map_err(io_errno);
+    }
+    if !mem.is_range_mapped(buffer.to_bits(), size as usize) {
+        return Err(EFAULT);
+    }
+    let mut scratch = vec![0; (size as usize).min(65536)];
+    let mut total = 0;
+    while total < size as usize {
+        let chunk = scratch.len().min(size as usize - total);
+        assert!(mem.interpreter_read(buffer.to_bits() + total as u32, &mut scratch[..chunk]));
+        match file.write(&scratch[..chunk]) {
+            Ok(n) => {
+                total += n;
+                if n < chunk {
+                    break;
+                }
+            }
+            Err(error) if total == 0 => return Err(io_errno(error)),
+            Err(_) => break,
+        }
+    }
+    Ok(total)
+}
+
 pub fn write(
     env: &mut Environment,
     fd: FileDescriptor,
     buffer: ConstVoidPtr,
     size: GuestUSize,
 ) -> GuestISize {
-    // TODO: handle errno properly
     set_errno(env, 0);
-
-    // TODO: error handling for unknown fd?
-    let file = env.libc_state.posix_io.file_for_fd(fd).unwrap();
-
-    if buffer.is_null() {
-        assert_eq!(size, 0);
-        return 0;
+    let Some(file) = env.libc_state.posix_io.file_for_fd(fd) else {
+        set_errno(env, EBADF);
+        return -1;
+    };
+    if file.access_mode == O_RDONLY {
+        set_errno(env, EBADF);
+        return -1;
     }
-
-    let buffer_slice = env.mem.bytes_at(buffer.cast(), size);
-    match file.file.write(buffer_slice) {
+    if matches!(file.file, GuestFile::Directory) {
+        set_errno(env, EISDIR);
+        return -1;
+    }
+    match write_from_guest(&mut file.file, &env.mem, buffer, size) {
         Ok(bytes_written) => {
-            if bytes_written < buffer_slice.len() {
+            if bytes_written < size as usize {
                 log!(
                     "Warning: write({:?}, {:?}, {:#x}) wrote only {:#x} bytes",
                     fd,
@@ -439,7 +523,7 @@ pub fn write(
             bytes_written.try_into().unwrap()
         }
         Err(e) => {
-            // TODO: set errno
+            set_errno(env, e);
             log!(
                 "Warning: write({:?}, {:?}, {:#x}) encountered error {:?}, returning -1",
                 fd,
@@ -476,8 +560,11 @@ pub fn pwrite(
     }
 
     let bytes_written = write(env, fd, buffer, size);
-
-    assert!(lseek(env, fd, original_position, SEEK_SET) != -1);
+    let error = crate::libc::errno::get_errno(env);
+    if lseek(env, fd, original_position, SEEK_SET) == -1 {
+        return -1;
+    }
+    set_errno(env, error);
 
     bytes_written
 }
@@ -1123,6 +1210,88 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(truncate(_, _)),
 ];
 
+#[cfg(test)]
+mod file_io_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn oversized_read_only_requires_the_bytes_before_eof() {
+        let mut mem = Mem::new();
+        mem.set_null_segment_size(4096);
+        mem.reserve(0x10000, 4096);
+        let buffer = Ptr::from_bits(0x10ff0);
+        let mut file = Cursor::new(b"short resource");
+        assert_eq!(read_into_guest(&mut file, &mut mem, buffer, 0x100000), Ok(14));
+        assert_eq!(mem.bytes_at(buffer.cast(), 14), b"short resource");
+        assert_eq!(file.position(), 14);
+        assert_eq!(read_into_guest(&mut file, &mut mem, buffer, 0x100000), Ok(0));
+        assert_eq!(read_into_guest(&mut file, &mut mem, Ptr::null(), 0), Ok(0));
+    }
+
+    #[test]
+    fn reads_cross_separate_host_allocations_and_stop_at_eof() {
+        let mut mem = Mem::new();
+        mem.set_null_segment_size(4096);
+        mem.reserve(0x10000, 0x10000);
+        mem.reserve(0x20000, 0x10000);
+        let buffer = Ptr::from_bits(0x10013);
+        let data: Vec<u8> = (0..80001).map(|n| (n % 251) as u8).collect();
+        let mut file = Cursor::new(&data);
+        assert_eq!(read_into_guest(&mut file, &mut mem, buffer, 0x20000), Ok(data.len()));
+        let mut actual = vec![0; data.len()];
+        assert!(mem.interpreter_read(buffer.to_bits(), &mut actual));
+        assert_eq!(actual, data);
+        assert_eq!(file.position(), data.len() as u64);
+    }
+
+    #[test]
+    fn invalid_destinations_fail_without_consuming_or_writing_data() {
+        let mut mem = Mem::new();
+        mem.set_null_segment_size(4096);
+        mem.reserve(0x10000, 4096);
+        let buffer = Ptr::from_bits(0x10ffc);
+        let mut file = Cursor::new(b"0123456789");
+        file.set_position(1);
+        assert_eq!(read_into_guest(&mut file, &mut mem, buffer, 9), Err(EFAULT));
+        assert_eq!(file.position(), 1);
+        assert_eq!(mem.bytes_at(buffer.cast(), 4), &[0; 4]);
+        for address in [0, 0x60000000, 0xfffffffc] {
+            assert_eq!(read_into_guest(&mut file, &mut mem, Ptr::from_bits(address), 9), Err(EFAULT));
+            assert_eq!(file.position(), 1);
+        }
+        assert_eq!(read_into_guest(&mut file, &mut mem, buffer, u32::MAX), Err(EINVAL));
+        assert_eq!(file.position(), 1);
+    }
+
+    #[test]
+    fn invalid_descriptors_are_rejected_without_panicking() {
+        let mut state = State::default();
+        for fd in [i32::MIN, -1, 0, 1, 2, 3, i32::MAX] {
+            assert!(!state.is_fd_open(fd));
+        }
+        state.files.push(None);
+        assert!(!state.is_fd_open(3));
+    }
+
+    #[test]
+    fn writes_cross_regions_and_reject_holes_before_changing_the_file() {
+        let mut mem = Mem::new();
+        mem.set_null_segment_size(4096);
+        mem.reserve(0x10000, 4096);
+        mem.reserve(0x11000, 4096);
+        assert!(mem.interpreter_write(0x10ffd, b"resource"));
+        let mut file = Cursor::new(Vec::new());
+        assert_eq!(write_from_guest(&mut file, &mem, Ptr::from_bits(0x10ffd), 8), Ok(8));
+        assert_eq!(file.get_ref(), b"resource");
+        assert_eq!(write_from_guest(&mut file, &mem, Ptr::from_bits(0x11ffd), 8), Err(EFAULT));
+        assert_eq!(file.position(), 8);
+        assert_eq!(file.get_ref(), b"resource");
+        assert_eq!(write_from_guest(&mut file, &mem, Ptr::null(), 1), Err(EFAULT));
+        assert_eq!(write_from_guest(&mut file, &mem, Ptr::null(), 0), Ok(0));
+    }
+}
+
 /// Helper function, not part of API
 fn find_or_create_fd(env: &mut Environment, host_object: PosixFileHostObject) -> FileDescriptor {
     let idx = if let Some(free_idx) = env
@@ -1148,6 +1317,7 @@ pub fn find_or_create_socket(env: &mut Environment) -> FileDescriptor {
         file: GuestFile::Socket,
         needs_flush: false,
         reached_eof: false,
+        access_mode: O_RDWR,
         flags: 0,
     };
     find_or_create_fd(env, host_object)

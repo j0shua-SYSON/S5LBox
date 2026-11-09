@@ -65,6 +65,14 @@ they establish the next failure or a 25-second observation, not functionality.
 | SPACE DEADBEEF | 1.01 | Sustained gameplay, firing, pause/resume and restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build 23a5d292: orientation corrected, first two levels completed, platform drawing and jumping work. First-level completion time survives relaunch and app reinstall; longer play remains untested. |
 
+## Additional reported games
+
+| App | Version | Latest device result |
+| --- | --- | --- |
+| Angry Birds | 1.0 | Build 3322b6fd: menu reached within 34 seconds, compared with more than 56 seconds on 425e7f36 in the same offline profile. First level completed with score 7830; aiming and pause/resume respond. Save/relaunch verification remains pending. Timings are observation bounds, not exact load durations. |
+| Super Monkey Ball Lite | 1.0 | Build 425e7f36: title, mode selection and tilt-calibration screens respond. Gameplay remains unverified because the physical tilt calibration has not been completed. This is separate from the full version above. |
+| Beer Pong U | 1.2 | Build 425e7f36: menus respond; One Player / Time Attack crashes during an oversized fread request. The shared file-I/O fix needs a device retest. |
+
 ## Runtime changes under validation
 
 Thread exit now runs Darwin cleanup handlers and thread-local destructors before
@@ -175,4 +183,12 @@ existing instruction/read/write caches. All mappings are invalidated when a CPU
 batch returns, so framework calls can unmap or replace memory safely. Callback
 fallback remains available for refused mappings. C and Rust checks cover faults,
 permissions, changed backing and self-modifying code. This uses no generated
-code or executable allocation. App loading-time comparisons are pending.
+code or executable allocation. All three CI workflows pass. The first device
+comparison improves Angry Birds loading; other apps still need timed checks.
+
+File reads now handle short resources without requiring the unused destination
+range to be mapped. Reads and writes also support adjacent guest mappings backed
+by separate host allocations, reject invalid ranges through errno, and preserve
+position and errors for pread/pwrite. Local unit and ARMv6 checks pass for EOF,
+oversized fread, invalid buffers and descriptors, split mappings and positioning.
+Beer Pong U's match-start crash still needs a device retest with this change.

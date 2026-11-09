@@ -434,6 +434,28 @@ int main(int argc, char **argv) {
                 CHECK(ungetc('a', file) == 'a');
                 CHECK(fread(contents, 2, 1, file) == 1);
                 CHECK(contents[0] == 'a' && contents[1] == 'b');
+                /* Only actual file bytes need a destination, even when an app
+                   supplies a larger maximum count than its resource buffer. */
+                void *resource = malloc(512 * 1024);
+                CHECK(resource != NULL);
+                if (resource) {
+                    CHECK(fseek(file, 0, SEEK_SET) == 0);
+                    CHECK(fread(resource, 1, 1024 * 1024, file) == 17);
+                    CHECK(memcmp(resource, "interpreter smoke", 17) == 0);
+                    CHECK(feof(file) != 0);
+                    CHECK(ftell(file) == 17);
+                    free(resource);
+                }
+                errno=0; CHECK(read(-1, contents, 1)==-1 && errno==EBADF);
+                errno=0;
+                CHECK(pread(fileno(file), (void *)0x60000000, 1, 0)==-1 && errno==EFAULT);
+                CHECK(ftell(file)==17);
+                CHECK(pread(fileno(file), contents, 4, 0)==4);
+                CHECK(memcmp(contents,"inte",4)==0 && ftell(file)==17);
+                errno=0; CHECK(write(-1, contents, 1)==-1 && errno==EBADF);
+                errno=0;
+                CHECK(pwrite(fileno(file), (void *)0x60000000, 1, 0)==-1 && errno==EFAULT);
+                CHECK(ftell(file)==17);
                 CHECK(fclose(file) == 0);
                 CHECK(remove(path) == 0);
             }
