@@ -27,7 +27,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Clock | 2.0.2 | Clock updates, settings and timer behavior | Device build 3ffc8cb7: passes key-value getters and setters, then fails on missing change-observer registration. |
 | Notes | 1.0 | Create, edit, delete and reopen a saved note | Desktop startup: missing WebPreferences. |
 | ToDo | 2.0 | Create, complete and edit tasks; relaunch persistence | Desktop startup: missing NSPersistentStoreCoordinator. |
-| SketchBook Mobile | 1.5 | Draw, undo, save and reopen a sketch | Rectangular redraw and sequential object/number archiving pass ARMv6 checks. Desktop startup now reaches missing UIBarButtonItem initWithCoder: during NIB loading. Drawing and persistence remain unverified. |
+| SketchBook Mobile | 1.5 | Draw, undo, save and reopen a sketch | Rectangular redraw, sequential object/number archiving and NIB toolbar decoding pass ARMv6 checks. Desktop startup now reaches missing CGPointCreateDictionaryRepresentation. Drawing and persistence remain unverified. |
 | Good Reader (large PDF viewer) - read big PDF files with reflow | 3.8.1 | Open a local document, navigate pages and remember position | Desktop startup: guest CPU memory fault; cause unconfirmed. |
 | Stanza | 3.2 | Open an offline book, turn pages and save position | Desktop startup: missing UITabBarController. |
 | Brushes - iPhone Edition | 2.2.2 | Draw, undo and reopen saved artwork | Desktop startup: missing CGImageMaskCreate. |
@@ -255,3 +255,11 @@ default, as UIKit specifies. Explicitly enabling interaction remains supported.
 An ARMv6 test verifies that an image-view subclass with empty touch handlers no
 longer blocks the underlying receiver, and that opting in restores hit testing.
 iCopter uses this overlay pattern; its physical-device retest remains pending.
+
+NIB toolbars now decode bar-item titles, images, enabled state, tags, styles,
+widths, system items and custom views, along with toolbar appearance and items.
+NIB event connections assign bar-button targets/actions and release their
+retained references on destruction. ARMv6 checks cover decoding, layout,
+disabled actions, enabled actions and connection ownership. SketchBook advances
+to geometry dictionary serialization; this is startup progress, not a drawing
+or persistence pass.

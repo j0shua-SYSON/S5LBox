@@ -185,6 +185,7 @@ static unsigned methods_smoke(void) {
 @interface NSDictionary : NSObject
 + (id)dictionary;
 + (id)dictionaryWithObject:(id)value forKey:(id)key;
++ (id)dictionaryWithObjectsAndKeys:(id)first,...;
 - (id)objectForKey:(id)key;
 @end
 @interface NSMutableDictionary : NSDictionary @end
@@ -711,6 +712,9 @@ static unsigned passive_view_smoke(void) {
 + (id)setWithObject:(id)object;
 @end
 @interface UIBarButtonItem : NSObject
+- (id)initWithCoder:(id)coder;
+- (int)tag;
+- (int)style;
 - (id)initWithTitle:(id)title style:(int)style target:(id)target action:(SEL)action;
 - (id)initWithBarButtonSystemItem:(int)item target:(id)target action:(SEL)action;
 - (id)initWithCustomView:(id)view;
@@ -726,6 +730,10 @@ static unsigned passive_view_smoke(void) {
 - (void)setAction:(SEL)action;
 @end
 @interface UIToolbar : UIView
+- (id)initWithCoder:(id)coder;
+- (int)barStyle;
+- (BOOL)isTranslucent;
+- (id)tintColor;
 - (id)items;
 - (void)setItems:(id)items;
 - (void)setItems:(id)items animated:(BOOL)animated;
@@ -797,6 +805,62 @@ static unsigned toolbar_smoke(void) {
     [first setTitle:@"After removal"];
     [customItem release]; [custom release]; [first release]; [space release]; [last release]; [target release];
     printf("S5LBOX-HLE-TOOLBAR %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
+@interface ToolbarArchive : NSObject { @public NSDictionary *values; }
+@end
+@implementation ToolbarArchive
+- (id)decodeObjectForKey:(id)key { return [values objectForKey:key]; }
+- (BOOL)containsValueForKey:(id)key { return [values objectForKey:key]!=0; }
+- (BOOL)decodeBoolForKey:(id)key { return [[values objectForKey:key] longValue]!=0; }
+- (int)decodeIntForKey:(id)key { return [[values objectForKey:key] longValue]; }
+- (int)decodeIntegerForKey:(id)key { return [[values objectForKey:key] longValue]; }
+- (float)decodeFloatForKey:(id)key { return [[values objectForKey:key] doubleValue]; }
+- (CGRect)decodeCGRectForKey:(id)key { return (CGRect){{0,0},{320,44}}; }
+- (CGPoint)decodeCGPointForKey:(id)key { return (CGPoint){160,22}; }
+@end
+@interface UIRuntimeEventConnection : NSObject
+- (id)initWithCoder:(id)coder;
+- (void)connect;
+@end
+static unsigned toolbar_archive_smoke(void) {
+    unsigned failures=0;
+    ToolbarArchive *coder=[[ToolbarArchive alloc] init];
+    NSMutableString *title=[@"Loaded" mutableCopy];
+    coder->values=[NSDictionary dictionaryWithObjectsAndKeys:title,@"UITitle",
+        [NSNumber numberWithBool:0],@"UIEnabled",[NSNumber numberWithInt:7],@"UITag",
+        [NSNumber numberWithInt:1],@"UIStyle",[NSNumber numberWithFloat:50],@"UIWidth",0];
+    UIBarButtonItem *item=[[UIBarButtonItem alloc] initWithCoder:coder];
+    [title setString:@"Changed"]; [title release];
+    failures += ![[item title] isEqualToString:@"Loaded"] || [item isEnabled];
+    failures += [item tag]!=7 || [item style]!=1 || [item width]!=50;
+    coder->values=[NSDictionary dictionaryWithObjectsAndKeys:[NSNumber numberWithBool:1],@"UIIsSystemItem",
+        [NSNumber numberWithInt:5],@"UISystemItem",0];
+    UIBarButtonItem *space=[[UIBarButtonItem alloc] initWithCoder:coder];
+    failures += ![space isEnabled];
+    UIView *custom=[[UIView alloc] initWithFrame:(CGRect){{0,0},{40,20}}];
+    coder->values=[NSDictionary dictionaryWithObject:custom forKey:@"UICustomView"];
+    UIBarButtonItem *customItem=[[UIBarButtonItem alloc] initWithCoder:coder];
+    id tint=[UIColor whiteColor];
+    coder->values=[NSDictionary dictionaryWithObjectsAndKeys:[NSArray arrayWithObjects:item,space,customItem,0],@"UIItems",
+        [NSNumber numberWithInt:2],@"UIBarStyle",tint,@"UITintColor",0];
+    UIToolbar *bar=[[UIToolbar alloc] initWithCoder:coder];
+    failures += [bar barStyle]!=2 || ![bar isTranslucent] || [bar tintColor]!=tint;
+    failures += [[bar items] count]!=3 || [[bar subviews] count]!=2 || [custom superview]!=bar;
+    CGRect frame=[custom frame]; failures += frame.origin.x!=274 || frame.origin.y!=12;
+    ToolbarTarget *target=[[ToolbarTarget alloc] initWithFrame:(CGRect){{0,0},{320,480}}];
+    coder->values=[NSDictionary dictionaryWithObjectsAndKeys:target,@"UIDestination",item,@"UISource",
+        @"pressed:",@"UILabel",[NSNumber numberWithInt:64],@"UIEventMask",0];
+    unsigned references=[target retainCount];
+    UIRuntimeEventConnection *connection=[[UIRuntimeEventConnection alloc] initWithCoder:coder];
+    [connection connect]; [connection release];
+    failures += [target retainCount]!=references || [item target]!=target || [item action]!=@selector(pressed:);
+    toolbar_click([[bar subviews] objectAtIndex:0]); failures += target->calls!=0;
+    [item setEnabled:1]; toolbar_click([[bar subviews] objectAtIndex:0]);
+    failures += target->calls!=1 || target->sender!=item;
+    [bar release]; [item release]; [space release]; [customItem release];
+    [custom release]; [target release]; [coder release];
+    printf("S5LBOX-HLE-TOOLBAR-ARCHIVE %s failures=%u\n",failures?"FAIL":"PASS",failures);
     return failures;
 }
 extern void *CGColorSpaceCreateDeviceRGB(void);
@@ -1318,7 +1382,7 @@ static unsigned foundation_compat_smoke(void) {
     [NSObject cancelPreviousPerformRequestsWithTarget:other];
     failures += [other retainCount]!=1;
     [target release]; [other release];
-    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke();
+    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke();
 }
 
 int main(int argc,char **argv) {

@@ -3,9 +3,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-//! Programmatic toolbars, bar items, and target/action delivery.
+//! Toolbars, bar items, NIB decoding, and target/action delivery.
 //! System items use text labels; legacy artwork and insertion animations are
-//! not reproduced. NIB decoding and appearance-proxy APIs remain unsupported.
+//! not reproduced. Appearance-proxy APIs remain unsupported.
 
 use super::ui_view::UIViewHostObject;
 use crate::frameworks::core_graphics::{CGFloat, CGPoint, CGRect, CGSize};
@@ -168,6 +168,20 @@ pub const CLASSES: ClassExports = objc_classes! {
 + (id)allocWithZone:(NSZonePtr)_zone {
     env.objc.alloc_object(this, Box::<BarItem>::default(), &mut env.mem)
 }
+- (id)initWithCoder:(id)coder {
+    let title: id = msg![env; coder decodeObjectForKey:(get_static_str(env, "UITitle"))];
+    let image: id = msg![env; coder decodeObjectForKey:(get_static_str(env, "UIImage"))];
+    let tag: NSInteger = msg![env; coder decodeIntegerForKey:(get_static_str(env, "UITag"))];
+    () = msg![env; this setTitle:title];
+    () = msg![env; this setImage:image];
+    () = msg![env; this setTag:tag];
+    let key = get_static_str(env, "UIEnabled");
+    if msg![env; coder containsValueForKey:key] {
+        let enabled: bool = msg![env; coder decodeBoolForKey:key];
+        () = msg![env; this setEnabled:enabled];
+    }
+    this
+}
 - (id)title { env.objc.borrow::<BarItem>(this).title }
 - (())setTitle:(id)value {
     let value = msg![env; value copy];
@@ -195,6 +209,23 @@ pub const CLASSES: ClassExports = objc_classes! {
 @implementation UIBarButtonItem: UIBarItem
 + (id)allocWithZone:(NSZonePtr)_zone {
     env.objc.alloc_object(this, Box::<BarButtonItem>::default(), &mut env.mem)
+}
+- (id)initWithCoder:(id)coder {
+    let this: id = msg_super![env; this initWithCoder:coder];
+    let style: NSInteger = msg![env; coder decodeIntegerForKey:(get_static_str(env, "UIStyle"))];
+    let width: CGFloat = msg![env; coder decodeFloatForKey:(get_static_str(env, "UIWidth"))];
+    let is_system: bool = msg![env; coder decodeBoolForKey:(get_static_str(env, "UIIsSystemItem"))];
+    if is_system {
+        let system: NSInteger = msg![env; coder decodeIntegerForKey:(get_static_str(env, "UISystemItem"))];
+        env.objc.borrow_mut::<BarButtonItem>(this).system = Some(system);
+    }
+    let custom: id = msg![env; coder decodeObjectForKey:(get_static_str(env, "UICustomView"))];
+    () = msg![env; this setStyle:style];
+    () = msg![env; this setWidth:width];
+    () = msg![env; this setCustomView:custom];
+    // NIB event connections assign the non-retained target and action after
+    // the object graph has finished decoding.
+    this
 }
 - (id)initWithTitle:(id)title style:(NSInteger)style target:(id)target action:(SEL)action {
     () = msg![env; this setTitle:title];
@@ -269,6 +300,21 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (id)initWithFrame:(CGRect)frame {
     let this: id = msg_super![env; this initWithFrame:frame];
     layout(env, this); this
+}
+- (id)initWithCoder:(id)coder {
+    let this: id = msg_super![env; this initWithCoder:coder];
+    let style: NSInteger = msg![env; coder decodeIntegerForKey:(get_static_str(env, "UIBarStyle"))];
+    let key = get_static_str(env, "UITranslucent");
+    let translucent: bool = if msg![env; coder containsValueForKey:key] {
+        msg![env; coder decodeBoolForKey:key]
+    } else { style == 2 };
+    let tint: id = msg![env; coder decodeObjectForKey:(get_static_str(env, "UITintColor"))];
+    let items: id = msg![env; coder decodeObjectForKey:(get_static_str(env, "UIItems"))];
+    () = msg![env; this setBarStyle:style];
+    () = msg![env; this setTranslucent:translucent];
+    () = msg![env; this setTintColor:tint];
+    () = msg![env; this setItems:items];
+    this
 }
 - (())setFrame:(CGRect)frame { () = msg_super![env; this setFrame:frame]; layout(env, this); }
 - (CGSize)sizeThatFits:(CGSize)size { CGSize { width: size.width, height: 44.0 } }

@@ -276,7 +276,14 @@ pub const CLASSES: ClassExports = objc_classes! {
     let selector = to_rust_string(env, label);
     let action = env.objc.lookup_selector(&selector).unwrap();
 
-    () = msg![env; source addTarget:destination action:action forControlEvents:event_mask];
+    let source_class: Class = msg![env; source class];
+    let bar_item_class: Class = msg_class![env; UIBarButtonItem class];
+    if source != nil && env.objc.class_is_subclass_of(source_class, bar_item_class) {
+        () = msg![env; source setTarget:destination];
+        () = msg![env; source setAction:action];
+    } else {
+        () = msg![env; source addTarget:destination action:action forControlEvents:event_mask];
+    }
 }
 
 // NSCoding implementation
@@ -293,7 +300,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())dealloc {
-    env.objc.dealloc_object(this, &mut env.mem)
+    msg_super![env; this dealloc]
 }
 
 @end
