@@ -351,6 +351,13 @@ impl Mem {
     pub(crate) fn interpreter_write(&mut self, address: u32, bytes: &[u8]) -> bool {
         address >= self.null_segment_size && self.backing.write(address, bytes)
     }
+    /// Plain RAM only. CPU execution exclusively borrows Mem; VM mappings can
+    /// change again only after the interpreter has discarded its cached pointers.
+    pub(crate) fn interpreter_mapping(&mut self, address: u32, length: usize) -> *mut u8 {
+        if address < self.null_segment_size { return std::ptr::null_mut(); }
+        let Ok(length) = u32::try_from(length) else { return std::ptr::null_mut(); };
+        self.backing.pointer(address, length).unwrap_or(std::ptr::null_mut())
+    }
 
     /// Get a slice for reading `count` bytes. This is the basic primitive for
     /// safe read-only memory access.

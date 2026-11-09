@@ -48,12 +48,36 @@ static void write8(void *u, uint32_t a, uint8_t v) { write_value(u, a, v, 1); }
 static void write16(void *u, uint32_t a, uint16_t v) { write_value(u, a, v, 2); }
 static void write32(void *u, uint32_t a, uint32_t v) { write_value(u, a, v, 4); }
 
+static uint8_t *map_read(void *context, uint32_t address, uint32_t length) {
+    arm_user_cpu_t *u = context;
+    if (!u->memory || !u->memory->map) return NULL;
+    return u->memory->map(u->memory->context, address, length, false);
+}
+static uint8_t *map_write(void *context, uint32_t address, uint32_t length) {
+    arm_user_cpu_t *u = context;
+    if (!u->memory || !u->memory->map) return NULL;
+    return u->memory->map(u->memory->context, address, length, true);
+}
+
+static uint32_t fetch_instruction(arm_user_cpu_t *u, uint32_t pc, unsigned size) {
+    // Share the interpreter's checked fetch block, including the SVC probe.
+    // Mapping refusal preserves the ordinary fault-reporting read path.
+    if (u->memory->map && arm_fetch_cache_try_refill(&u->cpu, pc, false)) {
+        const uint8_t *p = u->cpu.fetch_host + (pc & 0x3ffu);
+        uint32_t value = (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+        if (size == 4) value |= ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+        return value;
+    }
+    return read_value(u, pc, size);
+}
+
 arm_user_cpu_t *arm_user_create(void) {
     arm_user_cpu_t *u = calloc(1, sizeof *u);
     if (!u) return NULL;
     u->bus.ctx = u;
     u->bus.read8 = read8; u->bus.read16 = read16; u->bus.read32 = read32;
     u->bus.write8 = write8; u->bus.write16 = write16; u->bus.write32 = write32;
+    u->bus.host_ram = map_read; u->bus.host_ram_write = map_write;
     arm_reset(&u->cpu, &u->bus);
     u->cpu.cpsr = ARM_MODE_USR;
     u->cpu.cp15.sctlr = ARM_SCTLR_U;
@@ -100,6 +124,9 @@ int32_t arm_user_run(arm_user_cpu_t *u, const arm_user_memory_t *memory,
     if (!u || !memory || !memory->read || !memory->write) return ARM_USER_MEMORY_FAULT;
     if (u->stopped) return u->stopped;
     uint64_t left = budget ? *budget : 1;
+    // Guest VM mappings can change while host framework calls run between
+    // interpreter batches. Never reuse a pointer from a previous borrow.
+    arm_mmu_tlb_flush(&u->cpu);
     u->memory = memory;
     int32_t result = ARM_USER_BUDGET;
     while (left) {
@@ -111,7 +138,7 @@ int32_t arm_user_run(arm_user_cpu_t *u, const arm_user_memory_t *memory,
             result = ARM_USER_MEMORY_FAULT;
             break;
         }
-        uint32_t instruction = read_value(u, pc, size);
+        uint32_t instruction = fetch_instruction(u, pc, size);
         if (u->memory_fault) { result = ARM_USER_MEMORY_FAULT; break; }
         bool conditional = thumb || ((instruction >> 28) != 15u &&
                                       arm_cond_passed(&u->cpu, instruction >> 28));
@@ -141,6 +168,7 @@ int32_t arm_user_run(arm_user_cpu_t *u, const arm_user_memory_t *memory,
         }
         left--;
     }
+    arm_mmu_tlb_flush(&u->cpu);
     u->memory = NULL;
     if (budget) *budget = left;
     if (result >= ARM_USER_MEMORY_FAULT) u->stopped = result;

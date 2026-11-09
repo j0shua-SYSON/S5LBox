@@ -8,17 +8,24 @@ static unsigned checks, failures;
 #define CHECK(x) do { checks++; if (!(x)) { failures++; \
     fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); } } while (0)
 static uint8_t ram[16384];
+static unsigned reads, writes, maps;
+static bool writable = true;
 static bool read_memory(void *ctx, uint32_t a, void *out, size_t n) {
-    (void)ctx;
+    reads++;
     if (a < 4096 || (uint64_t)a + n > sizeof ram) return false;
-    memcpy(out, ram + a, n); return true;
+    memcpy(out, (ctx ? (uint8_t *)ctx : ram) + a, n); return true;
 }
 static bool write_memory(void *ctx, uint32_t a, const void *in, size_t n) {
-    (void)ctx;
-    if (a < 4096 || (uint64_t)a + n > sizeof ram) return false;
-    memcpy(ram + a, in, n); return true;
+    writes++;
+    if (!writable || a < 4096 || (uint64_t)a + n > sizeof ram) return false;
+    memcpy((ctx ? (uint8_t *)ctx : ram) + a, in, n); return true;
 }
-static const arm_user_memory_t memory = {NULL, read_memory, write_memory};
+static uint8_t *map_memory(void *ctx, uint32_t a, size_t n, bool write) {
+    maps++;
+    if ((write && !writable) || a < 4096 || (uint64_t)a + n > sizeof ram) return NULL;
+    return (ctx ? (uint8_t *)ctx : ram) + a;
+}
+static arm_user_memory_t memory = {NULL, read_memory, write_memory, NULL};
 static void word(unsigned at, uint32_t value) { memcpy(ram + at, &value, 4); }
 static void half(unsigned at, uint16_t value) { memcpy(ram + at, &value, 2); }
 static void reset(arm_user_cpu_t *cpu, bool thumb) {
@@ -113,11 +120,47 @@ static void faults_and_memory(arm_user_cpu_t *cpu) {
     reset(cpu, false); arm_user_regs(cpu)[15] = 0; ticks = 0;
     CHECK(arm_user_run(cpu, &memory, &ticks, NULL) == ARM_USER_BUDGET);
 }
+static void mapped_memory(arm_user_cpu_t *cpu) {
+    reset(cpu, false);
+    word(4096, 0xe5810000); /* str r0, [r1] */
+    word(4100, 0xe5912000); /* ldr r2, [r1] */
+    word(4104, 0xeafffffc); /* b 4096 */
+    arm_user_regs(cpu)[0] = 42; arm_user_regs(cpu)[1] = 8192;
+    reads = writes = maps = 0;
+    uint64_t ticks = 3000;
+    CHECK(arm_user_run(cpu, &memory, &ticks, NULL) == ARM_USER_BUDGET);
+    CHECK(arm_user_regs(cpu)[2] == 42 && ticks == 0);
+    CHECK(reads < 8 && writes < 8 && maps < 8);
+
+    // Same guest addresses, different owner after a run boundary.
+    uint8_t replacement[sizeof ram]; memcpy(replacement, ram, sizeof ram);
+    arm_user_memory_t replaced = {replacement, read_memory, write_memory, map_memory};
+    arm_user_regs(cpu)[0] = 99; ticks = 3;
+    CHECK(arm_user_run(cpu, &replaced, &ticks, NULL) == ARM_USER_BUDGET);
+    CHECK(arm_user_regs(cpu)[2] == 99 && ram[8192] == 42 && replacement[8192] == 99);
+    // A formerly writable mapping can become read-only between calls.
+    writable = false; ticks = 3;
+    CHECK(arm_user_run(cpu, &replaced, &ticks, NULL) == ARM_USER_MEMORY_FAULT);
+    CHECK(arm_user_regs(cpu)[15] == 4096 && replacement[8192] == 99);
+    writable = true;
+
+    // Code stores in the same batch must be visible to the cached fetch path.
+    reset(cpu, false);
+    word(4096, 0xe5810000); word(4100, 0xe3a02000); word(4104, 0xef000023);
+    arm_user_regs(cpu)[0] = 0xe3a0202a; arm_user_regs(cpu)[1] = 4100;
+    ticks = 3; uint32_t svc;
+    CHECK(arm_user_run(cpu, &memory, &ticks, &svc) == ARM_USER_SVC);
+    CHECK(arm_user_regs(cpu)[2] == 42 && svc == 35);
+}
 int main(void) {
     arm_user_cpu_t *cpu = arm_user_create();
     if (!cpu) return 1;
     integer_and_svc(cpu); thumb_and_conditions(cpu);
     contexts_and_vfp(cpu); faults_and_memory(cpu);
+    memory.map = map_memory;
+    integer_and_svc(cpu); thumb_and_conditions(cpu);
+    contexts_and_vfp(cpu); faults_and_memory(cpu);
+    mapped_memory(cpu);
     arm_user_destroy(cpu);
     printf("ARM user interpreter: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;

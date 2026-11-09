@@ -20,6 +20,17 @@ pub trait Memory {
     fn read(&mut self, address: u32, bytes: &mut [u8]) -> bool;
     fn write(&mut self, address: u32, bytes: &[u8]) -> bool;
 }
+/// Optional stable plain-RAM mappings for the interpreter's existing caches.
+///
+/// # Safety
+/// Non-null mappings must cover the entire requested range, alias `read` and
+/// `write`, and remain valid throughout a `run_mapped` call. Other callbacks
+/// cannot move, free, revoke or borrow the mapped memory. A writable mapping
+/// permits stores without invoking `write`; read-only mappings forbid that.
+/// Returning null always falls back to the ordinary callbacks.
+pub unsafe trait DirectMemory: Memory {
+    fn map(&mut self, address: u32, length: usize, writable: bool) -> *mut u8;
+}
 #[derive(Debug, PartialEq, Eq)]
 pub enum Stop { Budget, Svc(u32), MemoryFault, Undefined, Breakpoint }
 #[repr(C)]
@@ -27,6 +38,7 @@ struct MemoryCallbacks {
     context: *mut c_void,
     read: unsafe extern "C" fn(*mut c_void, u32, *mut c_void, usize) -> bool,
     write: unsafe extern "C" fn(*mut c_void, u32, *const c_void, usize) -> bool,
+    map: Option<unsafe extern "C" fn(*mut c_void, u32, usize, bool) -> *mut u8>,
 }
 extern "C" {
     fn arm_user_create() -> *mut c_void;
@@ -75,6 +87,19 @@ impl Cpu {
         unsafe { arm_user_swap_context(self.raw.as_ptr(), context) }
     }
     pub fn run<M: Memory>(&mut self, memory: &mut M, ticks: Option<&mut u64>) -> Stop {
+        self.run_inner(memory, ticks, None)
+    }
+    pub fn run_mapped<M: DirectMemory>(&mut self, memory: &mut M, ticks: Option<&mut u64>) -> Stop {
+        unsafe extern "C" fn map<M: DirectMemory>(ctx: *mut c_void, address: u32,
+            len: usize, writable: bool) -> *mut u8 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                unsafe { &mut *ctx.cast::<M>() }.map(address, len, writable)
+            })).unwrap_or(std::ptr::null_mut())
+        }
+        self.run_inner(memory, ticks, Some(map::<M>))
+    }
+    fn run_inner<M: Memory>(&mut self, memory: &mut M, ticks: Option<&mut u64>,
+        map: Option<unsafe extern "C" fn(*mut c_void, u32, usize, bool) -> *mut u8>) -> Stop {
         unsafe extern "C" fn read<M: Memory>(ctx: *mut c_void, address: u32,
             out: *mut c_void, len: usize) -> bool {
             // Never unwind a Rust memory-provider panic through the C interpreter.
@@ -93,7 +118,7 @@ impl Cpu {
             })).unwrap_or(false)
         }
         let callbacks = MemoryCallbacks { context: (memory as *mut M).cast(),
-            read: read::<M>, write: write::<M> };
+            read: read::<M>, write: write::<M>, map };
         let mut svc = 0;
         let result = unsafe { arm_user_run(self.raw.as_ptr(), &callbacks,
             ticks.map_or(std::ptr::null_mut(), |t| t), &mut svc) };
@@ -120,6 +145,35 @@ mod tests {
                 .and_then(|s| s.get_mut(..bytes.len())) else { return false };
             dst.copy_from_slice(bytes); true
         }
+    }
+    // Test RAM never reallocates or changes permissions during a CPU call.
+    unsafe impl DirectMemory for Ram {
+        fn map(&mut self, address: u32, length: usize, _: bool) -> *mut u8 {
+            if (address as u64) + (length as u64) > self.0.len() as u64 {
+                return std::ptr::null_mut();
+            }
+            unsafe { self.0.as_mut_ptr().add(address as usize) }
+        }
+    }
+    #[test]
+    fn mapped_execution_releases_borrow_between_runs() {
+        let mut ram = Ram(vec![0; 2048]);
+        ram.0[..12].copy_from_slice(&[0xe5810000u32, 0xe5912000, 0xef000042]
+            .into_iter().flat_map(u32::to_le_bytes).collect::<Vec<_>>());
+        let mut cpu = Cpu::new().unwrap();
+        cpu.regs_mut()[0] = 123; cpu.regs_mut()[1] = 1024;
+        let mut ticks = 3;
+        assert_eq!(cpu.run_mapped(&mut ram, Some(&mut ticks)), Stop::Svc(66));
+        assert_eq!(cpu.regs()[2], 123);
+        // Replace all backing memory while retaining the CPU and guest address.
+        let mut replacement = Ram(vec![0; 2048]);
+        replacement.0[..8].copy_from_slice(&[0xe5912000u32, 0xef000043]
+            .into_iter().flat_map(u32::to_le_bytes).collect::<Vec<_>>());
+        replacement.0[1024..1028].copy_from_slice(&456u32.to_le_bytes());
+        drop(ram);
+        cpu.regs_mut()[15] = 0; ticks = 2;
+        assert_eq!(cpu.run_mapped(&mut replacement, Some(&mut ticks)), Stop::Svc(67));
+        assert_eq!(cpu.regs()[2], 456);
     }
     #[test]
     fn executes_and_switches_without_jit() {

@@ -14,6 +14,13 @@ typedef struct {
      * Calls are synchronous and only valid for the duration of run(). */
     bool (*read)(void *, uint32_t, void *, size_t);
     bool (*write)(void *, uint32_t, const void *, size_t);
+    /* Optional plain-RAM mapping. NULL refuses the range and keeps callbacks.
+     * A non-NULL pointer covers the ENTIRE range, aliases read/write memory,
+     * and remains valid until run() returns, including across other callbacks.
+     * writable=true explicitly permits bypassing write callbacks. No mapping
+     * may have MMIO, protection, tracing or other required per-access effects.
+     * The adapter invalidates all cached pointers at every run boundary. */
+    uint8_t *(*map)(void *, uint32_t, size_t, bool writable);
 } arm_user_memory_t;
 
 typedef struct {

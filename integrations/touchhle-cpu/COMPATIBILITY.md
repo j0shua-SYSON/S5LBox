@@ -169,3 +169,10 @@ Repeated input now releases temporary touch sets and event objects, including
 duplicate presses and cancelled drags. Hidden windows no longer intercept
 touches. A local 200-cycle ownership test checks event destruction and stable
 view reference counts; physical-device sustained-use checks remain pending.
+
+The touchHLE CPU adapter now supplies checked plain-RAM mappings to the core's
+existing instruction/read/write caches. All mappings are invalidated when a CPU
+batch returns, so framework calls can unmap or replace memory safely. Callback
+fallback remains available for refused mappings. C and Rust checks cover faults,
+permissions, changed backing and self-modifying code. This uses no generated
+code or executable allocation. App loading-time comparisons are pending.

@@ -8,7 +8,7 @@
 
 use crate::abi::GuestFunction;
 use crate::mem::{GuestUSize, Mem};
-use s5lbox_touchhle_cpu::{Cpu as Interpreter, Memory, Stop};
+use s5lbox_touchhle_cpu::{Cpu as Interpreter, DirectMemory, Memory, Stop};
 
 pub type CpuContext = s5lbox_touchhle_cpu::Context;
 
@@ -111,6 +111,13 @@ impl Memory for GuestMemory<'_> {
         self.0.interpreter_write(address, bytes)
     }
 }
+// The borrow excludes framework calls and VM changes until run_mapped returns.
+// Backing::pointer returns allocation-owned pointers, not temporary slice borrows.
+unsafe impl DirectMemory for GuestMemory<'_> {
+    fn map(&mut self, address: u32, length: usize, _writable: bool) -> *mut u8 {
+        self.0.interpreter_mapping(address, length)
+    }
+}
 
 impl Cpu {
     pub const SP: usize = 13;
@@ -201,7 +208,7 @@ impl Cpu {
 
     #[must_use]
     pub fn run_or_step(&mut self, mem: &mut Mem, ticks: Option<&mut u64>) -> CpuState {
-        match self.interpreter.run(&mut GuestMemory(mem), ticks) {
+        match self.interpreter.run_mapped(&mut GuestMemory(mem), ticks) {
             Stop::Budget => CpuState::Normal,
             Stop::Svc(number) => CpuState::Svc(number),
             Stop::MemoryFault => CpuState::Error(CpuError::MemoryError),

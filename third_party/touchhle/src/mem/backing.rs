@@ -87,7 +87,7 @@ impl Backing {
         }
     }
 
-    fn pointer(&self, address: u32, count: u32) -> Option<*mut u8> {
+    pub(super) fn pointer(&self, address: u32, count: u32) -> Option<*mut u8> {
         let (&base, region) = self.regions.range(..=address).next_back()?;
         let offset = address.checked_sub(base)? as u64;
         if offset + count as u64 > region.size as u64 {
