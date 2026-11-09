@@ -54,13 +54,13 @@ they establish the next failure or a 25-second observation, not functionality.
 | Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Edge | 1.62 | Complete a level, precise controls and saved progress | Device build 60bd8788: offline install passes; blank display persists beyond three minutes. |
 | Canabalt | 1.7 | Sustained run, jumping, restart and saved high score | Device build b065e116: offline install passes; missing NSOperationQueue prevents launch. |
-| Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
+| Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Device build cf7c00bf: startup exhausts host memory and iOS terminates S5LBox. The scanner EOF fix ends the replacement loop on desktop. Main-thread lookup and selector dispatch then advance startup to missing UIImagePNGRepresentation. Gameplay and a device retest remain pending. |
 | Minigore | 7.0 | Movement and firing through sustained combat; restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | iCopter | 1.4 | Sustained flight, restart and saved high score | Device build cf7c00bf: transitions now complete; short flights render and touch holds/releases work. Collisions return to the title normally. Score 122 survives Home and relaunch. Longer play and frame pacing remain unverified. |
 | Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
 | Tap Tap Revenge | 1.7 | Play a bundled song, timing/scoring and restart | Desktop startup: missing NSNetServiceBrowser. |
 | Trism | 1.4 | Complete a puzzle session and retain progress | Desktop startup: missing UIButton setTitleShadowColor:forState:. |
-| Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Device build cf7c00bf: animated title renders; tapping through reaches missing UITableViewCell setBackgroundView:. Cell backgrounds now pass ARMv6 layout, selection and ownership checks; the menu and gameplay need a device retest. |
+| Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Device build b6082ad3: category and level menus work; touch-tutorial scenes respond to swipes, and a drawing tutorial displays water drawn with a sustained stroke. The material picker opens but clips some labels. Level completion, saved progress, sustained frame pacing and audio remain unverified. |
 | Chopper | 1.3.1 | Complete a mission, steer/fire and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | SPACE DEADBEEF | 1.01 | Sustained gameplay, firing, pause/resume and restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build 23a5d292: orientation corrected, first two levels completed, platform drawing and jumping work. First-level completion time survives relaunch and app reinstall; longer play remains untested. |
@@ -301,3 +301,19 @@ hierarchy with selection/highlighting; reuse clears those states. ARMv6 checks
 cover replacement, nil, self-assignment, layering, resizing and retained-view
 cleanup. These changes address Aqua Forest's observed menu-construction failure;
 selection fades and complete legacy cell styling remain unimplemented.
+
+String scanners now fail at end-of-input without replacing the output string;
+scanning an empty match also fails. ARMv6 checks cover a bounded replacement
+loop, absent and adjacent delimiters, skipped whitespace, null output pointers
+and UTF-16 positions. This fixes Fieldrunners' unbounded startup replacement
+loop; it does not establish the game's functionality.
+
+NSThread main-thread lookup shares the same object as currentThread on the main
+thread, including when a worker requests it first. Thread-targeted selectors use
+the target's existing run loop, with synchronous same-thread delivery and
+queued asynchronous delivery. Delayed-request cancellation leaves these
+cross-thread messages intact. ARMv6 checks cover identity, FIFO delivery,
+worker-to-main and main-to-worker waiting, class targets and retained-object
+cleanup; the existing cancellation/exit suite also passes. Custom run-loop
+modes and dispatch to threads that have not started or have exited remain
+unsupported.

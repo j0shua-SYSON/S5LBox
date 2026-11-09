@@ -164,14 +164,19 @@ pub const CLASSES: ClassExports = objc_classes! {
             intoString:(MutPtr<id>)result { // NSString **
     skip_characters(env, this);
 
-    let NSScannerHostObject { to_be_skipped, string, len, pos } = std::mem::take(env.objc.borrow_mut::<NSScannerHostObject>(this));
+    let NSScannerHostObject { string, len, pos, .. } = env.objc.borrow::<NSScannerHostObject>(this).clone();
     log_dbg!("scanUpToString:'{}' intoString: from '{}' at {}", to_rust_string(env, stop_string), to_rust_string(env, string), pos);
+
+    // Success requires consuming characters. At EOF an absent delimiter would
+    // otherwise produce an empty string and report success forever.
+    if pos >= len {
+        return false;
+    }
 
     // TODO: avoid string copying
     let left: id = msg![env; string substringFromIndex:pos];
     let range: NSRange = msg![env; left rangeOfString:stop_string];
     if range.location == 0 {
-        *env.objc.borrow_mut::<NSScannerHostObject>(this) = NSScannerHostObject { to_be_skipped, string, len, pos };
         return false;
     }
 
@@ -181,7 +186,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         range.location
     };
     assert!(pos + scan_len <= len);
-    *env.objc.borrow_mut::<NSScannerHostObject>(this) = NSScannerHostObject { to_be_skipped, string, len, pos: pos + scan_len };
+    env.objc.borrow_mut::<NSScannerHostObject>(this).pos = pos + scan_len;
 
     if !result.is_null() {
         let copy: id = msg![env; left substringToIndex:scan_len];
@@ -196,20 +201,23 @@ pub const CLASSES: ClassExports = objc_classes! {
         intoString:(MutPtr<id>)result { // NSString **
     skip_characters(env, this);
 
-    let NSScannerHostObject { to_be_skipped, string, len, pos } = std::mem::take(env.objc.borrow_mut::<NSScannerHostObject>(this));
+    let NSScannerHostObject { string, len, pos, .. } = env.objc.borrow::<NSScannerHostObject>(this).clone();
     log_dbg!("scanString:{} intoString: from '{}' at {}", to_rust_string(env, scan_string), to_rust_string(env, string), pos);
+
+    let scan_len: NSUInteger = msg![env; scan_string length];
+    if scan_len == 0 || pos >= len {
+        return false;
+    }
 
     // TODO: avoid string copying
     let left: id = msg![env; string substringFromIndex:pos];
     let same_prefix: bool = msg![env; left hasPrefix:scan_string];
     if !same_prefix {
-        *env.objc.borrow_mut::<NSScannerHostObject>(this) = NSScannerHostObject { to_be_skipped, string, len, pos };
         return false;
     }
 
-    let scan_len: NSUInteger = msg![env; scan_string length];
     assert!(pos + scan_len <= len);
-    *env.objc.borrow_mut::<NSScannerHostObject>(this) = NSScannerHostObject { to_be_skipped, string, len, pos: pos + scan_len };
+    env.objc.borrow_mut::<NSScannerHostObject>(this).pos = pos + scan_len;
 
     if !result.is_null() {
         let copy: id = msg![env; scan_string copy];

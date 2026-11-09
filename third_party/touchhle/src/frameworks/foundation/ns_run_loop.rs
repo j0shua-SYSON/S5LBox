@@ -276,7 +276,9 @@ fn cancel_requests(env: &mut Environment, run_loop: id, target: id, filter: Opti
     let host_object = env.objc.borrow_mut::<NSRunLoopHostObject>(run_loop);
     let mut selector_objects = std::mem::take(&mut host_object.selector_objects);
     while let Some(obj) = selector_objects.pop_front() {
-        if obj.target != target || filter.is_some_and(|(selector, _)| obj.selector != selector) {
+        // Only delayed performs can be cancelled. Cross-thread requests must
+        // still execute, including synchronous callers waiting for completion.
+        if obj.due_by.is_none() || obj.target != target || filter.is_some_and(|(selector, _)| obj.selector != selector) {
             new_selector_objects.push_back(obj);
             continue;
         }
@@ -496,8 +498,8 @@ pub fn run_run_loop(
     }
 }
 
-/// Helper method for `mainRunLoop` and `currentRunLoop` NSThread class methods
-fn run_loop_for_thread(env: &mut Environment, this: Class, thread_id: ThreadId) -> id {
+/// Shared lookup for NSRunLoop accessors and cross-thread perform requests.
+pub(super) fn run_loop_for_thread(env: &mut Environment, this: Class, thread_id: ThreadId) -> id {
     if env.threads[thread_id]
         .framework_state
         .foundation

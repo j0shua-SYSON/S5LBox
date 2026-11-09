@@ -18,7 +18,7 @@ use super::ns_string::{from_rust_string, to_rust_string};
 use super::{NSTimeInterval, NSUInteger};
 use crate::frameworks::core_graphics::{CGPoint, CGRect, CGSize};
 use crate::frameworks::foundation::ns_run_loop::{
-    add_perform_request, cancel_all_perform_requests, cancel_perform_requests,
+    add_perform_request, cancel_all_perform_requests, cancel_perform_requests, run_loop_for_thread,
 };
 use crate::frameworks::foundation::ns_thread::detach_new_thread_inner;
 use crate::libc::semaphore::{host_destroy_semaphore, sem_wait};
@@ -342,6 +342,28 @@ forUndefinedKey:(id)key { // NSString*
 - (())performSelector:(SEL)sel withObject:(id)arg afterDelay:(NSTimeInterval)delay {
     let run_loop: id = msg_class![env; NSRunLoop currentRunLoop];
     add_perform_request(env, run_loop, this, sel, arg, Some(delay), false);
+}
+
+- (())performSelector:(SEL)sel onThread:(id)thread withObject:(id)arg waitUntilDone:(bool)wait {
+    let thread_id = super::ns_thread::thread_id(env, thread)
+        .expect("performSelector:onThread: requires a started thread");
+    assert!(!matches!(env.threads[thread_id].state, crate::environment::ThreadState::Dead),
+        "performSelector:onThread: target thread has exited");
+    if wait && env.current_thread == thread_id {
+        if sel.as_str(&env.mem).ends_with(':') {
+            () = msg_send(env, (this, sel, arg));
+        } else {
+            () = msg_send(env, (this, sel));
+        }
+        return;
+    }
+    let class = env.objc.get_known_class("NSRunLoop", &mut env.mem);
+    let run_loop = run_loop_for_thread(env, class, thread_id);
+    let sem = add_perform_request(env, run_loop, this, sel, arg, None, wait);
+    if wait {
+        sem_wait(env, sem);
+        host_destroy_semaphore(env, sem);
+    }
 }
 
 - (())performSelectorOnMainThread:(SEL)sel withObject:(id)arg waitUntilDone:(bool)wait {

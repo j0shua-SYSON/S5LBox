@@ -11,14 +11,14 @@ use crate::frameworks::core_foundation::CFTypeRef;
 use crate::frameworks::foundation::NSUInteger;
 use crate::libc::pthread::thread::{
     pthread_attr_init, pthread_attr_setdetachstate, pthread_attr_setstacksize, pthread_attr_t,
-    pthread_create, pthread_self, pthread_t, PTHREAD_CREATE_DETACHED,
+    pthread_create, pthread_for_thread, pthread_self, pthread_t, pthread_thread_id, PTHREAD_CREATE_DETACHED,
 };
 use crate::mem::{guest_size_of, Mem, MutPtr};
 use crate::objc::{
     id, msg_send, msg_send_no_type_checking, nil, objc_classes, release, retain, todo_objc_setter,
     Class, ClassExports, HostObject, NSZonePtr, SEL,
 };
-use crate::Environment;
+use crate::{Environment, ThreadId};
 use crate::{msg, msg_class};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -45,6 +45,7 @@ struct NSThreadHostObject {
     cancelled: bool,
     stack_size: NSUInteger,
     tolerate_type_mismatch: bool,
+    thread_id: Option<ThreadId>,
 }
 impl HostObject for NSThreadHostObject {}
 
@@ -65,6 +66,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         cancelled: false,
         stack_size: Mem::SECONDARY_THREAD_DEFAULT_STACK_SIZE,
         tolerate_type_mismatch: false,
+        thread_id: None,
     });
     env.objc.alloc_object(this, host_object, &mut env.mem)
 }
@@ -89,16 +91,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     // TODO: use ThreadId as key for lookup
     // `pthread_self` internally is O(num of threads) time
     let pthread = pthread_self(env);
-    // Clippy suggestion for this warning will not build!
-    #[allow(clippy::map_entry)]
-    if !State::get(env).ns_threads.contains_key(&pthread) {
-        // We lazily instantiate NSThreads for POSIX threads
-        let ns_thread: id = msg_class![env; NSThread alloc];
-        let ns_thread: id = msg![env; ns_thread init];
-        env.objc.borrow_mut::<NSThreadHostObject>(ns_thread).started = true;
-        State::get(env).ns_threads.insert(pthread, ns_thread);
-    }
-    *State::get(env).ns_threads.get(&pthread).unwrap()
+    thread_object(env, pthread, env.current_thread)
+}
+
++ (id)mainThread {
+    let pthread = pthread_for_thread(env, 0);
+    thread_object(env, pthread, 0)
 }
 
 + (id)callStackReturnAddresses {
@@ -163,6 +161,8 @@ pub const CLASSES: ClassExports = objc_classes! {
     pthread_create(env, thread_ptr, attr.cast_const(), gf, this.cast());
 
     let pthread = env.mem.read(thread_ptr);
+    let thread_id = pthread_thread_id(env, pthread);
+    env.objc.borrow_mut::<NSThreadHostObject>(this).thread_id = Some(thread_id);
     env.mem.free(thread_ptr.cast());
     env.mem.free(attr.cast());
     assert!(!State::get(env).ns_threads.contains_key(&pthread));
@@ -235,6 +235,10 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.objc.borrow::<NSThreadHostObject>(this).finished
 }
 
+- (bool)isMainThread {
+    env.objc.borrow::<NSThreadHostObject>(this).thread_id == Some(0)
+}
+
 - (bool)isExecuting {
     let thread = env.objc.borrow::<NSThreadHostObject>(this);
     thread.started && !thread.finished
@@ -264,6 +268,26 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 type NSThreadRef = CFTypeRef;
 
+pub(super) fn thread_id(env: &Environment, thread: id) -> Option<ThreadId> {
+    env.objc.borrow::<NSThreadHostObject>(thread).thread_id
+}
+
+fn thread_object(env: &mut Environment, pthread: pthread_t, thread_id: ThreadId) -> id {
+    if let Some(&thread) = State::get(env).ns_threads.get(&pthread) {
+        return thread;
+    }
+    // POSIX threads, including the main thread, acquire a Cocoa wrapper lazily.
+    // The map owns this reference just as it does for -start-created threads.
+    let thread: id = msg_class![env; NSThread new];
+    let finished = matches!(env.threads[thread_id].state, crate::environment::ThreadState::Dead);
+    let host = env.objc.borrow_mut::<NSThreadHostObject>(thread);
+    host.started = true;
+    host.thread_id = Some(thread_id);
+    host.finished = finished;
+    State::get(env).ns_threads.insert(pthread, thread);
+    thread
+}
+
 pub fn _touchHLE_NSThreadInvocationHelper(env: &mut Environment, ns_thread_obj: NSThreadRef) {
     let class: Class = msg![env; ns_thread_obj class];
     log_dbg!(
@@ -288,6 +312,11 @@ pub fn thread_exited(env: &mut Environment) {
     let object = std::mem::replace(&mut thread.object, nil);
     release(env, object);
     release(env, target);
+    if env.objc.borrow::<NSThreadHostObject>(ns_thread_obj).thread_id == Some(0) {
+        // Keep mainThread's identity stable if the main thread exits while
+        // secondary threads remain alive. Its execution state is now finished.
+        return;
+    }
     State::get(env).ns_threads.remove(&pthread);
     release(env, ns_thread_obj);
 }

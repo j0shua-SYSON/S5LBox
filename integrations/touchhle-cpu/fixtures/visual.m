@@ -70,6 +70,8 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 - (void)setNilValueForKey:(id)key;
 + (BOOL)accessInstanceVariablesDirectly;
 - (void)performSelector:(SEL)selector withObject:(id)object afterDelay:(double)delay;
+- (void)performSelector:(SEL)selector onThread:(id)thread withObject:(id)object waitUntilDone:(BOOL)wait;
++ (void)performSelector:(SEL)selector onThread:(id)thread withObject:(id)object waitUntilDone:(BOOL)wait;
 + (void)cancelPreviousPerformRequestsWithTarget:(id)target;
 - (IMP)methodForSelector:(SEL)selector;
 @end
@@ -187,6 +189,7 @@ static unsigned methods_smoke(void) {
 @end
 @interface NSMutableString : NSString
 - (void)setString:(id)text;
+- (void)appendString:(id)text;
 @end
 @interface NSDictionary : NSObject
 + (id)dictionary;
@@ -200,16 +203,21 @@ static unsigned methods_smoke(void) {
 @end
 @interface NSDate : NSObject
 + (id)date;
++ (id)dateWithTimeIntervalSinceNow:(double)seconds;
 @end
 @interface NSScanner : NSObject
 + (id)scannerWithString:(id)string;
 - (BOOL)scanHexInt:(unsigned *)value;
 - (BOOL)scanHexLongLong:(unsigned long long *)value;
+- (BOOL)scanUpToString:(id)stop intoString:(id *)value;
+- (BOOL)scanString:(id)string intoString:(id *)value;
+- (void)setCharactersToBeSkipped:(id)set;
 - (unsigned)scanLocation;
 - (void)setScanLocation:(unsigned)position;
 @end
 @interface NSRunLoop : NSObject
 + (id)currentRunLoop;
+- (void)runUntilDate:(id)date;
 - (void)cancelPerformSelectorsWithTarget:(id)target;
 - (void)cancelPerformSelector:(SEL)selector target:(id)target argument:(id)argument;
 @end
@@ -221,6 +229,8 @@ extern id CFPreferencesCopyAppValue(id,id);
 extern BOOL CFPreferencesAppSynchronize(id);
 @interface NSThread : NSObject
 + (id)currentThread;
++ (id)mainThread;
++ (BOOL)isMainThread;
 + (void)exit;
 + (void)sleepForTimeInterval:(double)seconds;
 - (id)initWithTarget:(id)target selector:(SEL)selector object:(id)object;
@@ -229,6 +239,52 @@ extern BOOL CFPreferencesAppSynchronize(id);
 - (BOOL)isCancelled;
 - (BOOL)isFinished;
 - (BOOL)isExecuting;
+- (BOOL)isMainThread;
+@end
+static id observedMainThread,observedWorkerThread;
+static volatile unsigned threadIdentityFailures;
+@interface ThreadIdentityProbe : NSObject
+- (void)worker:(id)sender;
+@end
+@implementation ThreadIdentityProbe
+- (void)worker:(id)sender {
+    (void)sender;
+    observedMainThread=[NSThread mainThread];
+    observedWorkerThread=[NSThread currentThread];
+    threadIdentityFailures += !observedMainThread || observedMainThread==observedWorkerThread;
+    threadIdentityFailures += [NSThread isMainThread] || [observedWorkerThread isMainThread];
+    threadIdentityFailures += ![observedMainThread isMainThread] || ![observedMainThread isExecuting];
+    threadIdentityFailures += observedMainThread!=[NSThread mainThread] || observedWorkerThread!=[NSThread currentThread];
+}
+@end
+static unsigned dispatchClassCalls;
+@interface DispatchProbe : NSObject {
+@public NSThread *expected; NSMutableString *order; unsigned calls,failures,ready,stop;
+}
++ (void)recordClass:(id)value;
+- (void)record:(id)value;
+- (void)worker:(id)sender;
+- (void)sendToMain:(id)target;
+@end
+@implementation DispatchProbe
++ (void)recordClass:(id)value {
+    if ([NSThread isMainThread] && [value isEqualToString:@"class"]) dispatchClassCalls++;
+}
+- (void)record:(id)value {
+    failures += [NSThread currentThread]!=expected;
+    [order appendString:value]; calls++;
+}
+- (void)worker:(id)sender {
+    (void)sender;
+    id pool=[[NSAutoreleasePool alloc] init];
+    expected=[NSThread currentThread]; ready=1;
+    for (unsigned i=0;i<1000 && !stop;i++)
+        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.002]];
+    [pool release];
+}
+- (void)sendToMain:(id)target {
+    [target performSelector:@selector(record:) onThread:[NSThread mainThread] withObject:@"D" waitUntilDone:1];
+}
 @end
 static volatile unsigned exitTargetReleased, exitWorkerReached;
 @interface ExitTarget : NSObject
@@ -1557,6 +1613,102 @@ static unsigned geometry_dictionary_smoke(void) {
     return failures;
 }
 
+static unsigned scanner_string_smoke(void) {
+    unsigned failures=0;
+    id sentinel=@"unchanged",part=sentinel;
+    NSScanner *scanner=[NSScanner scannerWithString:@""];
+    failures += [scanner scanUpToString:@";" intoString:&part] || part!=sentinel;
+    failures += [scanner scanString:@";" intoString:&part] || part!=sentinel;
+    failures += [scanner scanString:@"" intoString:&part] || part!=sentinel;
+    scanner=[NSScanner scannerWithString:@"   \n"];
+    failures += [scanner scanUpToString:@";" intoString:&part] || part!=sentinel;
+    scanner=[NSScanner scannerWithString:@";tail"];
+    failures += [scanner scanUpToString:@";" intoString:&part] || part!=sentinel || [scanner scanLocation]!=0;
+    failures += [scanner scanString:@"other" intoString:&part] || part!=sentinel || [scanner scanLocation]!=0;
+    failures += [scanner scanString:@"" intoString:&part] || part!=sentinel || [scanner scanLocation]!=0;
+    failures += ![scanner scanString:@";" intoString:NULL] || [scanner scanLocation]!=1;
+    failures += ![scanner scanUpToString:@";" intoString:&part] || ![part isEqualToString:@"tail"] || [scanner scanLocation]!=5;
+    part=sentinel;
+    failures += [scanner scanUpToString:@";" intoString:&part] || part!=sentinel || [scanner scanLocation]!=5;
+
+    // A common replacement loop must terminate after the last unmatched suffix.
+    // Bound the fixture so a regression reports failure rather than exhausting memory.
+    scanner=[NSScanner scannerWithString:@"one&amp;two&amp;tail"];
+    NSMutableString *joined=[NSMutableString stringWithString:@""];
+    unsigned count=0;
+    while (count<8 && [scanner scanUpToString:@"&amp;" intoString:&part]) {
+        [joined appendString:part];
+        if ([scanner scanString:@"&amp;" intoString:NULL]) [joined appendString:@"&"];
+        count++;
+    }
+    failures += count!=3 || ![joined isEqualToString:@"one&two&tail"] || [scanner scanLocation]!=20;
+
+    scanner=[NSScanner scannerWithString:@" \U0001F34E;end"];
+    [scanner setCharactersToBeSkipped:0];
+    failures += ![scanner scanUpToString:@";" intoString:&part] || ![part isEqualToString:@" \U0001F34E"] || [scanner scanLocation]!=3;
+    failures += ![scanner scanString:@";" intoString:&part] || ![part isEqualToString:@";"] || [scanner scanLocation]!=4;
+    failures += ![scanner scanUpToString:@";" intoString:NULL] || [scanner scanLocation]!=7;
+    failures += [scanner scanUpToString:@";" intoString:NULL] || [scanner scanString:@";" intoString:NULL];
+    printf("S5LBOX-HLE-SCANNER-STRING %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
+
+static unsigned thread_identity_smoke(void) {
+    ThreadIdentityProbe *target=[[ThreadIdentityProbe alloc] init];
+    NSThread *worker=[[NSThread alloc] initWithTarget:target selector:@selector(worker:) object:0];
+    [target release];
+    unsigned failures=[worker isMainThread];
+    [worker start];
+    for (unsigned i=0;i<1000 && ![worker isFinished];i++) [NSThread sleepForTimeInterval:0.001];
+    failures += ![worker isFinished] || [worker isExecuting] || [worker isMainThread];
+    failures += observedWorkerThread!=worker || observedMainThread!=[NSThread currentThread];
+    failures += observedMainThread!=[NSThread mainThread] || ![NSThread isMainThread];
+    failures += ![observedMainThread isMainThread] || threadIdentityFailures;
+    [worker release];
+    printf("S5LBOX-HLE-THREAD-IDENTITY %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
+
+static unsigned thread_dispatch_smoke(void) {
+    unsigned failures=0;
+    DispatchProbe *main=[[DispatchProbe alloc] init];
+    main->expected=[NSThread mainThread];
+    main->order=[NSMutableString stringWithString:@""];
+    [main performSelector:@selector(record:) onThread:main->expected withObject:@"A" waitUntilDone:1];
+    failures += main->calls!=1;
+    [main performSelector:@selector(record:) onThread:main->expected withObject:@"B" waitUntilDone:0];
+    failures += main->calls!=1 || [main retainCount]!=2;
+    [NSObject cancelPreviousPerformRequestsWithTarget:main];
+    failures += [main retainCount]!=2;
+    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    failures += main->calls!=2 || [main retainCount]!=1;
+    [DispatchProbe performSelector:@selector(recordClass:) onThread:main->expected withObject:@"class" waitUntilDone:1];
+    failures += dispatchClassCalls!=1;
+
+    DispatchProbe *background=[[DispatchProbe alloc] init];
+    background->order=[NSMutableString stringWithString:@""];
+    NSThread *worker=[[NSThread alloc] initWithTarget:background selector:@selector(worker:) object:0];
+    [worker start];
+    for (unsigned i=0;i<1000 && !background->ready;i++) [NSThread sleepForTimeInterval:0.001];
+    failures += !background->ready;
+    [background performSelector:@selector(record:) onThread:worker withObject:@"1" waitUntilDone:1];
+    failures += background->calls!=1;
+    [background performSelector:@selector(record:) onThread:worker withObject:@"2" waitUntilDone:0];
+    [background performSelector:@selector(record:) onThread:worker withObject:@"3" waitUntilDone:1];
+    failures += ![background->order isEqualToString:@"123"] || background->failures || background->calls!=3;
+    // Synchronous worker-to-main delivery must let the main loop run the callback.
+    [background performSelector:@selector(sendToMain:) onThread:worker withObject:main waitUntilDone:0];
+    for (unsigned i=0;i<1000 && main->calls!=3;i++)
+        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.002]];
+    failures += main->calls!=3 || main->failures || ![main->order isEqualToString:@"ABD"];
+    background->stop=1;
+    for (unsigned i=0;i<1000 && ![worker isFinished];i++) [NSThread sleepForTimeInterval:0.001];
+    failures += ![worker isFinished] || [background retainCount]!=1 || [main retainCount]!=1;
+    [worker release]; [background release]; [main release];
+    printf("S5LBOX-HLE-THREAD-DISPATCH %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
+
 static unsigned foundation_compat_smoke(void) {
     UIScreen *screen=[UIScreen mainScreen];
     UIScreenMode *mode=[screen currentMode];
@@ -1649,7 +1801,7 @@ static unsigned foundation_compat_smoke(void) {
     failures += [[basicCopy toValue] longValue]!=2 || [[basicCopy byValue] longValue]!=3;
     failures += ![[basicCopy keyPath] isEqualToString:@"opacity"];
     [basicCopy release]; failures += [from retainCount]!=1; [from release];
-    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke()+progress_view_smoke()+cell_background_smoke();
+    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke()+progress_view_smoke()+cell_background_smoke()+scanner_string_smoke()+thread_identity_smoke()+thread_dispatch_smoke();
 }
 
 int main(int argc,char **argv) {

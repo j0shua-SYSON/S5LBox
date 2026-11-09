@@ -269,10 +269,18 @@ fn pthread_equal(env: &mut Environment, thread1: pthread_t, thread2: pthread_t) 
 
 pub fn pthread_self(env: &mut Environment) -> pthread_t {
     let current_thread = env.current_thread;
+    pthread_for_thread(env, current_thread)
+}
 
+pub(crate) fn pthread_thread_id(env: &mut Environment, pthread: pthread_t) -> ThreadId {
+    State::get(env).threads[&pthread].thread_id
+}
+
+/// Resolve a scheduler thread without changing the currently executing thread.
+pub(crate) fn pthread_for_thread(env: &mut Environment, thread: ThreadId) -> pthread_t {
     // The main thread is a special case since it's not created via pthreads,
     // so we need to create its object on-demand.
-    if current_thread == 0 && !State::get(env).main_thread_object_created {
+    if thread == 0 && !State::get(env).main_thread_object_created {
         State::get(env).main_thread_object_created = true;
 
         let opaque = env.mem.alloc_and_write(OpaqueThread {
@@ -298,7 +306,7 @@ pub fn pthread_self(env: &mut Environment) -> pthread_t {
     let (&ptr, _) = State::get(env)
         .threads
         .iter()
-        .find(|&(_ptr, host_obj)| host_obj.thread_id == current_thread)
+        .find(|&(_ptr, host_obj)| host_obj.thread_id == thread)
         .unwrap();
     ptr
 }
