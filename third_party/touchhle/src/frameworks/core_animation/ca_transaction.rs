@@ -3,7 +3,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-//! `CAAnimation` and its subclasses
+//! `CATransaction` and per-thread animation transactions.
 use std::collections::HashMap;
 
 use crate::dyld::{ConstantExports, HostConstant};
@@ -44,6 +44,13 @@ impl ThreadLocalState {
             .or(thread_state.implicit_transaction.as_mut())
     }
 
+    fn ensure_current_transaction(env: &mut Environment) {
+        if Self::get_current_transaction(env).is_none() {
+            let transaction = Transaction::new(env);
+            Self::get_mut(env).implicit_transaction = Some(transaction);
+        }
+    }
+
     pub fn add_animation(env: &mut Environment, layer: id, animation: id) {
         let layer_class = msg![env; layer class];
         let ca_layer = env.objc.get_known_class("CALayer", &mut env.mem);
@@ -53,20 +60,19 @@ impl ThreadLocalState {
         retain(env, layer);
         retain(env, animation);
         assert!(env.objc.class_is_subclass_of(anim_class, ca_animation));
-        if let Some(transaction) = ThreadLocalState::get_current_transaction_mut(env) {
-            transaction.add_animation(layer, animation);
-        } else {
-            let mut transaction = Transaction::new(env);
-            transaction.add_animation(layer, animation);
-            let thread_state = ThreadLocalState::get_mut(env);
-            assert!(thread_state.implicit_transaction.is_none());
-            thread_state.implicit_transaction = Some(transaction);
-        };
+        Self::ensure_current_transaction(env);
+        Self::get_current_transaction_mut(env)
+            .unwrap()
+            .add_animation(layer, animation);
     }
 
     pub fn commit_implicit_transaction(env: &mut Environment) {
         let state = ThreadLocalState::get_mut(env);
-        assert!(state.explicit_transactions.is_empty()); // TODO: Verify what should happen
+        // A flush/run-loop iteration must not commit the implicit parent while
+        // an explicit transaction is still open.
+        if !state.explicit_transactions.is_empty() {
+            return;
+        }
         if let Some(transaction) = std::mem::take(&mut state.implicit_transaction) {
             transaction.commit(env);
         }
@@ -99,6 +105,7 @@ impl Transaction {
         let animation_timing_function_name = get_static_str(env, kCAMediaTimingFunctionDefault);
         let animation_timing_function =
             msg_class![env; CAMediaTimingFunction functionWithName:animation_timing_function_name];
+        retain(env, animation_timing_function);
         Self {
             disable_actions: false,
             animation_duration: 0.25,
@@ -130,6 +137,7 @@ impl Transaction {
         for (_key, value) in self.data {
             release(env, value);
         }
+        release(env, self.animation_timing_function);
     }
 }
 
@@ -165,6 +173,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 + (())setValue:(id)value forKey:(id)key {
     let key_string = to_rust_string(env, key);
+    ThreadLocalState::ensure_current_transaction(env);
     log_dbg!("[CATransaction setValue:{:?} forKey:{:?} ({})]", value, key, key_string);
     match &*key_string  {
         kCATransactionAnimationDuration => {
@@ -194,6 +203,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 + (id)valueForKey:(id)key { // NSString*
     let key_string = to_rust_string(env, key);
+    ThreadLocalState::ensure_current_transaction(env);
     let value = match &*key_string {
         kCATransactionAnimationDuration => {
             let animation_duration = ThreadLocalState::get_current_transaction(env).unwrap().animation_duration;
@@ -225,6 +235,10 @@ pub const CLASSES: ClassExports = objc_classes! {
 + (())commit {
     log_dbg!("[CATransaction commit]");
     ThreadLocalState::pop_explicit_transaction(env).commit(env);
+}
+
++ (())flush {
+    ThreadLocalState::commit_implicit_transaction(env);
 }
 
 + (bool)disableActions {

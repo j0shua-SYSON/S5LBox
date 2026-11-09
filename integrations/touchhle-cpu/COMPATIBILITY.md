@@ -60,7 +60,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
 | Tap Tap Revenge | 1.7 | Play a bundled song, timing/scoring and restart | Desktop startup: missing NSNetServiceBrowser. |
 | Trism | 1.4 | Complete a puzzle session and retain progress | Desktop startup: missing UIButton setTitleShadowColor:forState:. |
-| Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Toolbar, hypotf and the missing kCATransition constant addressed. Desktop startup now fails when setting a transaction value without an active transaction. NIB controls, rendering and functionality still need work. |
+| Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Toolbar, hypotf, transition constants and implicit transaction access addressed. Desktop startup now fails when the renderer treats CATransition as a basic property animation. NIB controls, rendering and functionality still need work. |
 | Chopper | 1.3.1 | Complete a mission, steer/fire and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | SPACE DEADBEEF | 1.01 | Sustained gameplay, firing, pause/resume and restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build 23a5d292: orientation corrected, first two levels completed, platform drawing and jumping work. First-level completion time survives relaunch and app reinstall; longer play remains untested. |
@@ -234,3 +234,9 @@ invalidation. Transition action and direction string constants are also exported
 and checked. SketchBook progresses to its archive handling, and Aqua Forest to
 implicit transaction handling. Partial backing-store redraw and transition
 animation rendering are not implemented by these changes.
+
+Animation transaction property access now creates an implicit transaction when
+needed. Flush defers while an explicit transaction is open, and timing functions
+are retained for the transaction lifetime. ARMv6 checks cover default and changed
+settings, custom values, replacement, nested flush, reset and ownership. Aqua
+Forest progresses to the separate unsupported transition rendering path.

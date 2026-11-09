@@ -379,6 +379,59 @@ extern id const kCATransition,kCATransitionFromRight,kCATransitionFromLeft,kCATr
 @implementation RedrawView
 - (void)drawRect:(CGRect)rect { draws++; drawn=rect; }
 @end
+@interface CATransaction : NSObject
++ (void)begin;
++ (void)commit;
++ (void)flush;
++ (double)animationDuration;
++ (void)setAnimationDuration:(double)value;
++ (BOOL)disableActions;
++ (void)setDisableActions:(BOOL)value;
++ (id)animationTimingFunction;
++ (void)setAnimationTimingFunction:(id)value;
++ (id)valueForKey:(id)key;
++ (void)setValue:(id)value forKey:(id)key;
+@end
+@interface CAMediaTimingFunction : NSObject
++ (id)functionWithControlPoints:(float)x1 :(float)y1 :(float)x2 :(float)y2;
+@end
+static unsigned transaction_smoke(void) {
+    unsigned failures=0;
+    [CATransaction flush];
+    failures += [CATransaction animationDuration]!=0.25 || [CATransaction disableActions];
+    [CATransaction setAnimationDuration:1.75];
+    [CATransaction setDisableActions:1];
+    failures += [CATransaction animationDuration]!=1.75 || ![CATransaction disableActions];
+    NSObject *value=[[NSObject alloc] init];
+    [CATransaction setValue:value forKey:@"custom"];
+    failures += [CATransaction valueForKey:@"custom"]!=value || [value retainCount]!=2;
+    [CATransaction setValue:value forKey:@"custom"];
+    failures += [value retainCount]!=2;
+    id timing=[CAMediaTimingFunction functionWithControlPoints:0.1f :0.2f :0.8f :0.9f];
+    unsigned references=[timing retainCount];
+    [CATransaction setAnimationTimingFunction:timing];
+    failures += [CATransaction animationTimingFunction]!=timing || [timing retainCount]!=references+1;
+    [CATransaction setAnimationTimingFunction:timing];
+    failures += [timing retainCount]!=references+1;
+    [CATransaction begin];
+    [CATransaction setAnimationDuration:3.0];
+    [CATransaction flush];
+    failures += [CATransaction animationDuration]!=3.0 || [value retainCount]!=2;
+    [CATransaction commit];
+    failures += [CATransaction animationDuration]!=1.75 || [CATransaction valueForKey:@"custom"]!=value;
+    [CATransaction flush];
+    failures += [value retainCount]!=1 || [timing retainCount]!=references;
+    failures += [CATransaction animationDuration]!=0.25 || [CATransaction disableActions];
+    failures += [CATransaction valueForKey:@"custom"]!=0;
+    [CATransaction flush];
+    [CATransaction setValue:value forKey:@"custom"];
+    failures += [value retainCount]!=2;
+    [CATransaction setValue:0 forKey:@"custom"];
+    failures += [value retainCount]!=1 || [CATransaction valueForKey:@"custom"]!=0;
+    [CATransaction flush]; [value release];
+    printf("S5LBOX-HLE-TRANSACTION %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
 static unsigned redraw_smoke(void) {
     unsigned failures=0;
     RedrawView *view=[[RedrawView alloc] initWithFrame:(CGRect){{0,0},{32,24}}];
@@ -1115,7 +1168,7 @@ static unsigned foundation_compat_smoke(void) {
     [NSObject cancelPreviousPerformRequestsWithTarget:other];
     failures += [other retainCount]!=1;
     [target release]; [other release];
-    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke();
+    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke();
 }
 
 int main(int argc,char **argv) {
