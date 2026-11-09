@@ -365,7 +365,46 @@ static unsigned permissions_smoke(BOOL unavailable) {
 - (void)removeFromSuperview;
 - (BOOL)becomeFirstResponder;
 - (BOOL)resignFirstResponder;
+- (id)layer;
+- (void)setNeedsDisplay;
+- (void)setNeedsDisplayInRect:(CGRect)rect;
 @end
+@interface CALayer : NSObject
+- (void)displayIfNeeded;
+- (void)setNeedsDisplayInRect:(CGRect)rect;
+@end
+extern id const kCATransition,kCATransitionFromRight,kCATransitionFromLeft,kCATransitionFromTop,kCATransitionFromBottom;
+@interface RedrawView : UIView { @public unsigned draws; CGRect drawn; }
+@end
+@implementation RedrawView
+- (void)drawRect:(CGRect)rect { draws++; drawn=rect; }
+@end
+static unsigned redraw_smoke(void) {
+    unsigned failures=0;
+    RedrawView *view=[[RedrawView alloc] initWithFrame:(CGRect){{0,0},{32,24}}];
+    CALayer *layer=[view layer];
+    [view setNeedsDisplay]; [layer displayIfNeeded];
+    failures += view->draws!=1;
+    [view setNeedsDisplayInRect:(CGRect){{0,0},{0,4}}];
+    [view setNeedsDisplayInRect:(CGRect){{32,24},{4,4}}];
+    [layer displayIfNeeded]; failures += view->draws!=1;
+    [view setNeedsDisplayInRect:(CGRect){{1,2},{3,4}}];
+    [view setNeedsDisplayInRect:(CGRect){{5,6},{7,8}}];
+    failures += view->draws!=1;
+    [layer displayIfNeeded]; failures += view->draws!=2;
+    failures += view->drawn.size.width!=32 || view->drawn.size.height!=24;
+    [layer displayIfNeeded]; failures += view->draws!=2;
+    [layer setNeedsDisplayInRect:(CGRect){{-2,-2},{4,4}}];
+    [layer displayIfNeeded]; failures += view->draws!=3;
+    [view release];
+    failures += ![kCATransition isEqualToString:@"transition"];
+    failures += ![kCATransitionFromRight isEqualToString:@"fromRight"];
+    failures += ![kCATransitionFromLeft isEqualToString:@"fromLeft"];
+    failures += ![kCATransitionFromTop isEqualToString:@"fromTop"];
+    failures += ![kCATransitionFromBottom isEqualToString:@"fromBottom"];
+    printf("S5LBOX-HLE-REDRAW %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
 @interface UIWindow : UIView
 - (void)makeKeyAndVisible;
 @end
@@ -1076,7 +1115,7 @@ static unsigned foundation_compat_smoke(void) {
     [NSObject cancelPreviousPerformRequestsWithTarget:other];
     failures += [other retainCount]!=1;
     [target release]; [other release];
-    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke();
+    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke();
 }
 
 int main(int argc,char **argv) {

@@ -413,7 +413,14 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.objc.borrow_mut::<CALayerHostObject>(this).needs_display_on_bounds_change = value;
 }
 
-// TODO: support setNeedsDisplayInRect:
+- (())setNeedsDisplayInRect:(CGRect)rect {
+    let bounds = env.objc.borrow::<CALayerHostObject>(this).bounds;
+    if intersects_display_bounds(rect, bounds) {
+        // Backing stores are currently redrawn as a whole. Preserve deferred,
+        // coalesced invalidation until partial backing-store updates exist.
+        () = msg![env; this setNeedsDisplay];
+    }
+}
 - (())displayIfNeeded {
     let &mut CALayerHostObject {
         ref mut needs_display,
@@ -610,6 +617,15 @@ pub fn remove_anonymous_animation(env: &mut Environment, layer: id, animation: i
         .remove(&animation);
     assert!(removed);
     release(env, animation);
+}
+
+pub(crate) fn intersects_display_bounds(rect: CGRect, bounds: CGRect) -> bool {
+    rect.size.width > 0.0 && rect.size.height > 0.0
+        && bounds.size.width > 0.0 && bounds.size.height > 0.0
+        && rect.origin.x < bounds.origin.x + bounds.size.width
+        && rect.origin.x + rect.size.width > bounds.origin.x
+        && rect.origin.y < bounds.origin.y + bounds.size.height
+        && rect.origin.y + rect.size.height > bounds.origin.y
 }
 
 fn transform_for_conversion(env: &mut Environment, this: id, other: id) -> CGAffineTransform {

@@ -27,7 +27,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Clock | 2.0.2 | Clock updates, settings and timer behavior | Device build 3ffc8cb7: passes key-value getters and setters, then fails on missing change-observer registration. |
 | Notes | 1.0 | Create, edit, delete and reopen a saved note | Desktop startup: missing WebPreferences. |
 | ToDo | 2.0 | Create, complete and edit tasks; relaunch persistence | Desktop startup: missing NSPersistentStoreCoordinator. |
-| SketchBook Mobile | 1.5 | Draw, undo, save and reopen a sketch | Filesystem-stat path restriction fixed; desktop startup runs for 25 seconds. Drawing and persistence need device testing. |
+| SketchBook Mobile | 1.5 | Draw, undo, save and reopen a sketch | Device startup exposed missing rectangular redraw invalidation. That API passes ARMv6 checks; desktop startup now reaches missing unkeyed encodeObject: on NSKeyedArchiver. Drawing and persistence remain unverified. |
 | Good Reader (large PDF viewer) - read big PDF files with reflow | 3.8.1 | Open a local document, navigate pages and remember position | Desktop startup: guest CPU memory fault; cause unconfirmed. |
 | Stanza | 3.2 | Open an offline book, turn pages and save position | Desktop startup: missing UITabBarController. |
 | Brushes - iPhone Edition | 2.2.2 | Draw, undo and reopen saved artwork | Desktop startup: missing CGImageMaskCreate. |
@@ -60,7 +60,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
 | Tap Tap Revenge | 1.7 | Play a bundled song, timing/scoring and restart | Desktop startup: missing NSNetServiceBrowser. |
 | Trism | 1.4 | Complete a puzzle session and retain progress | Desktop startup: missing UIButton setTitleShadowColor:forState:. |
-| Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Toolbar and hypotf blockers addressed. Desktop startup now reaches a guest CPU memory fault; its cause is unconfirmed. NIB controls, rendering and functionality still need work. |
+| Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Toolbar, hypotf and the missing kCATransition constant addressed. Desktop startup now fails when setting a transaction value without an active transaction. NIB controls, rendering and functionality still need work. |
 | Chopper | 1.3.1 | Complete a mission, steer/fire and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | SPACE DEADBEEF | 1.01 | Sustained gameplay, firing, pause/resume and restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build 23a5d292: orientation corrected, first two levels completed, platform drawing and jumping work. First-level completion time survives relaunch and app reinstall; longer play remains untested. |
@@ -226,3 +226,11 @@ The single-precision hypotf entry point now uses a scaled hypotenuse calculation
 ARMv6 checks pass for ordinary values, large and tiny inputs, signed zero,
 infinity and NaN. Aqua Forest progresses beyond this missing function but still
 fails later during guest execution.
+
+Rectangular redraw invalidation now schedules the existing deferred full backing
+store redraw for nonempty regions intersecting view/layer bounds. ARMv6 checks
+cover coalescing, empty and outside rectangles, partial overlap and direct layer
+invalidation. Transition action and direction string constants are also exported
+and checked. SketchBook progresses to its archive handling, and Aqua Forest to
+implicit transaction handling. Partial backing-store redraw and transition
+animation rendering are not implemented by these changes.

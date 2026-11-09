@@ -689,7 +689,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     msg![env; layer setBackgroundColor:color]
 }
 
-// TODO: support setNeedsDisplayInRect:
+- (())setNeedsDisplayInRect:(CGRect)rect {
+    let bounds: CGRect = msg![env; this bounds];
+    if crate::frameworks::core_animation::ca_layer::intersects_display_bounds(rect, bounds) {
+        () = msg![env; this setNeedsDisplay];
+    }
+}
 - (())setNeedsDisplay {
     // UIView has a method called drawRect: that subclasses override if they
     // need custom drawing. touchHLE's UIView (a CALayerDelegate) provides

@@ -29,6 +29,11 @@ pub const kCAFillModeForwards: &str = "forwards";
 pub const kCAFillModeRemoved: &str = "removed";
 
 pub const CONSTANTS: ConstantExports = &[
+    ("_kCATransition", HostConstant::NSString("transition")),
+    ("_kCATransitionFromRight", HostConstant::NSString("fromRight")),
+    ("_kCATransitionFromLeft", HostConstant::NSString("fromLeft")),
+    ("_kCATransitionFromTop", HostConstant::NSString("fromTop")),
+    ("_kCATransitionFromBottom", HostConstant::NSString("fromBottom")),
     // `CATransitionType` values.
     (
         "_kCATransitionFade",
