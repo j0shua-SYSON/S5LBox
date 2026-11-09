@@ -60,7 +60,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
 | Tap Tap Revenge | 1.7 | Play a bundled song, timing/scoring and restart | Desktop startup: missing NSNetServiceBrowser. |
 | Trism | 1.4 | Complete a puzzle session and retain progress | Desktop startup: missing UIButton setTitleShadowColor:forState:. |
-| Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Toolbar, hypotf, transition constants and implicit transaction access addressed. Desktop startup now fails when the renderer treats CATransition as a basic property animation. NIB controls, rendering and functionality still need work. |
+| Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | The transition renderer no longer takes the basic-animation path. Desktop startup runs for 30 seconds without the previous crash. NIB controls, rendering and gameplay still need device verification. |
 | Chopper | 1.3.1 | Complete a mission, steer/fire and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | SPACE DEADBEEF | 1.01 | Sustained gameplay, firing, pause/resume and restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build 23a5d292: orientation corrected, first two levels completed, platform drawing and jumping work. First-level completion time survives relaunch and app reinstall; longer play remains untested. |
@@ -271,3 +271,18 @@ probes confirmed the flat key format and sequential decoding of missing fields;
 ARMv6 checks cover negative dimensions, ownership, archive round trips, mixed
 numeric values and incomplete dictionaries. SketchBook advances to navigation
 controller configuration. These checks do not establish its drawing support.
+
+Transition animations now have separate slide/fade rendering, direction and
+progress properties, and copies with independent playback state. The compositor
+retains outgoing render trees and freezes their texture versions when content
+changes. It releases unused textures after those trees are no longer referenced.
+An ARMv6 desktop visual fixture completes push, move-in, reveal and fade, then
+checks cancellation; completion callbacks remove and replace their own animation.
+Foundation checks also cover copied properties and retained-value ownership.
+iCopter's gameplay retest on the iPhone is still pending.
+
+Transition visuals are not pixel-identical to Core Animation: translucent
+subtrees use per-layer alpha, arbitrary rotations use rectangular clip bounds,
+and the direct fullscreen OpenGL path does not supply an outgoing cached tree.
+Opaque, compositor-rendered scenes have the outgoing texture available. Custom
+transition filters and keyframe animation rendering remain unsupported.

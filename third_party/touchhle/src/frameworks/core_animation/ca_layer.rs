@@ -60,7 +60,7 @@ pub(super) struct CALayerHostObject {
     /// Internal, only exposed when calling `drawLayer:inContext:`
     pub(super) cg_context: Option<CGContextRef>,
     /// Internal state for compositor
-    pub(super) gles_texture: Option<crate::gles::gles11_raw::types::GLuint>,
+    pub(super) gles_texture: Option<std::rc::Rc<crate::gles::gles11_raw::types::GLuint>>,
     /// Internal state for compositor
     pub(super) gles_texture_is_up_to_date: bool,
     pub(super) animations: HashMap<String, id>, // CAAnimation*
@@ -147,15 +147,24 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())dealloc {
+    super::composition::forget_layer(env, this);
     let &mut CALayerHostObject {
         drawable_properties,
         contents,
         superlayer,
         cg_context,
         ref mut sublayers,
+        ref mut animations,
+        ref mut anonymous_animations,
         ..
     } = env.objc.borrow_mut(this);
     let sublayers = std::mem::take(sublayers);
+    let animations = std::mem::take(animations);
+    let anonymous_animations = std::mem::take(anonymous_animations);
+
+    for animation in animations.into_values().chain(anonymous_animations) {
+        release(env, animation);
+    }
 
     if drawable_properties != nil {
         release(env, drawable_properties);
@@ -572,8 +581,12 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (())addAnimation:(id)anim // CAAnimation*
             forKey:(id)key { // NSString*
+    let transition = super::ca_animation::is_transition(env, anim);
+    // Playback state belongs to the installed copy, not the caller's object.
+    let anim: id = msg![env; anim copy];
+    if transition { super::ca_animation::capture_transition(env, anim, this); }
     let duration: CFTimeInterval = msg![env; anim duration];
-    if duration == 0.0 {
+    if duration <= 0.0 {
         // From the docs:
         //  If the duration property of the animation is zero or negative, the
         //  duration is changed to the current value of the
@@ -590,17 +603,36 @@ pub const CLASSES: ClassExports = objc_classes! {
     } else {
         let key_string = to_rust_string(env, key);
         log_dbg!("[(CALayer*){:?} addAnimation:{:?} forKey:{:?} ({:?})]", this, anim, key, key_string);
-        env.objc.borrow_mut::<CALayerHostObject>(this).animations.insert(key_string.to_string(), anim);
+        let replaced = env.objc.borrow_mut::<CALayerHostObject>(this).animations.insert(key_string.to_string(), anim);
+        if let Some(replaced) = replaced {
+            super::ca_animation::cancel(env, replaced);
+            release(env, replaced);
+        }
     }
-    retain(env, anim);
 }
 
 - (())removeAnimationForKey:(id)key { // NSString*
     let key_string = to_rust_string(env, key);
     log_dbg!("[(CALayer*){:?} removeAnimationForKey:{:?} ({:?})]", this, key, key_string);
     if let Some(anim) = env.objc.borrow_mut::<CALayerHostObject>(this).animations.remove(&*key_string) {
+        super::ca_animation::cancel(env, anim);
         release(env, anim);
     };
+}
+
+- (())removeAllAnimations {
+    let state = env.objc.borrow_mut::<CALayerHostObject>(this);
+    let named = std::mem::take(&mut state.animations);
+    let anonymous = std::mem::take(&mut state.anonymous_animations);
+    for animation in named.into_values().chain(anonymous) {
+        super::ca_animation::cancel(env, animation);
+        release(env, animation);
+    }
+}
+
+- (id)animationForKey:(id)key {
+    let key = to_rust_string(env, key);
+    env.objc.borrow::<CALayerHostObject>(this).animations.get(key.as_ref()).copied().unwrap_or(nil)
 }
 
 // TODO: more
@@ -620,8 +652,10 @@ pub fn remove_anonymous_animation(env: &mut Environment, layer: id, animation: i
 }
 
 pub(crate) fn intersects_display_bounds(rect: CGRect, bounds: CGRect) -> bool {
-    rect.size.width > 0.0 && rect.size.height > 0.0
-        && bounds.size.width > 0.0 && bounds.size.height > 0.0
+    rect.size.width > 0.0
+        && rect.size.height > 0.0
+        && bounds.size.width > 0.0
+        && bounds.size.height > 0.0
         && rect.origin.x < bounds.origin.x + bounds.size.width
         && rect.origin.x + rect.size.width > bounds.origin.x
         && rect.origin.y < bounds.origin.y + bounds.size.height

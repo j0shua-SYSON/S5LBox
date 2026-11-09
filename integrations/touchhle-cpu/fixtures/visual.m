@@ -387,8 +387,38 @@ static unsigned permissions_smoke(BOOL unavailable) {
 @interface CALayer : NSObject
 - (void)displayIfNeeded;
 - (void)setNeedsDisplayInRect:(CGRect)rect;
+- (void)addAnimation:(id)animation forKey:(id)key;
+- (void)removeAnimationForKey:(id)key;
+- (void)removeAllAnimations;
+- (id)animationForKey:(id)key;
 @end
 extern id const kCATransition,kCATransitionFromRight,kCATransitionFromLeft,kCATransitionFromTop,kCATransitionFromBottom;
+@interface CATransition : NSObject
++ (id)animation;
+- (void)setType:(id)type;
+- (id)type;
+- (void)setSubtype:(id)subtype;
+- (id)subtype;
+- (void)setStartProgress:(float)value;
+- (float)startProgress;
+- (void)setEndProgress:(float)value;
+- (float)endProgress;
+- (void)setDuration:(double)duration;
+- (double)duration;
+- (void)setDelegate:(id)delegate;
+- (id)delegate;
+- (void)setRemovedOnCompletion:(BOOL)value;
+@end
+@interface CABasicAnimation : NSObject
++ (id)animationWithKeyPath:(id)path;
+- (id)keyPath;
+- (void)setFromValue:(id)value;
+- (id)fromValue;
+- (void)setToValue:(id)value;
+- (id)toValue;
+- (void)setByValue:(id)value;
+- (id)byValue;
+@end
 @interface RedrawView : UIView { @public unsigned draws; CGRect drawn; }
 @end
 @implementation RedrawView
@@ -1012,6 +1042,72 @@ static volatile unsigned workerStarted,workerCancelled;
 - (void)setIdleTimerDisabled:(BOOL)disabled;
 @end
 extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
+@interface TransitionProbeDelegate : NSObject {
+    UIWindow *_window;
+    UIView *_scene,*_child;
+    unsigned _completed,_failures;
+    BOOL _cancelling;
+}
+@end
+@implementation TransitionProbeDelegate
+- (void)applicationDidFinishLaunching:(UIApplication *)app {
+    [app setStatusBarHidden:1];
+    _window=[[UIWindow alloc] initWithFrame:(CGRect){{0,0},{320,480}}];
+    [_window setBackgroundColor:[UIColor whiteColor]];
+    _scene=[[UIView alloc] initWithFrame:(CGRect){{40,80},{240,240}}];
+    [_scene setBackgroundColor:[UIColor colorWithRed:1 green:0 blue:0 alpha:1]];
+    [_window addSubview:_scene]; [_window makeKeyAndVisible];
+    _child=[[UILabel alloc] initWithFrame:(CGRect){{20,30},{200,50}}];
+    [(UILabel *)_child setText:@"Outgoing texture"];
+    [_scene addSubview:_child];
+    [NSTimer scheduledTimerWithTimeInterval:0.2 target:self selector:@selector(next:) userInfo:0 repeats:0];
+    [NSTimer scheduledTimerWithTimeInterval:8 target:self selector:@selector(timeout:) userInfo:0 repeats:0];
+}
+- (void)next:(id)unused {
+    (void)unused;
+    id kinds[]={@"push",@"moveIn",@"reveal",@"fade"};
+    id directions[]={kCATransitionFromRight,kCATransitionFromLeft,kCATransitionFromTop,kCATransitionFromBottom};
+    CATransition *animation=[CATransition animation];
+    [animation setType:kinds[_completed]]; [animation setSubtype:directions[_completed]];
+    [animation setDuration:0.3]; [animation setDelegate:self];
+    // Replace and release content before attaching the transition. It must
+    // preserve the last rendered tree rather than read the modified model.
+    [_child removeFromSuperview]; [_child release];
+    _child=[[UILabel alloc] initWithFrame:(CGRect){{20,60},{200,50}}];
+    [(UILabel *)_child setText:@"Incoming texture"];
+    [_scene addSubview:_child];
+    [_scene setBackgroundColor:[UIColor colorWithRed:(_completed&1)?1:0 green:0 blue:(_completed&1)?0:1 alpha:1]];
+    [[_scene layer] addAnimation:animation forKey:@"transition"];
+    // Mutating the caller's animation must not affect the installed copy.
+    [animation setDuration:100];
+}
+// animationDidStart: is optional and intentionally omitted.
+- (void)animationDidStop:(id)animation finished:(BOOL)finished {
+    _failures += finished==_cancelling;
+    if (!_cancelling) _failures += [(CATransition *)animation duration]!=0.3;
+    ++_completed;
+    printf("S5LBOX-HLE-TRANSITION CALLBACK %u\n",_completed); fflush(stdout);
+    [[_scene layer] removeAnimationForKey:@"transition"];
+    if (_completed<4) {
+        [self next:0]; // Replacement under the same key must survive cleanup.
+    } else if (_completed==4) {
+        CATransition *cancel=[CATransition animation];
+        [cancel setDuration:10]; [cancel setDelegate:self];
+        [[_scene layer] addAnimation:cancel forKey:@"cancel"];
+        _cancelling=1;
+        [[_scene layer] removeAllAnimations];
+    } else {
+        [NSTimer scheduledTimerWithTimeInterval:0.3 target:self selector:@selector(done:) userInfo:0 repeats:0];
+    }
+}
+- (void)done:(id)unused {
+    (void)unused;
+    _failures += _completed!=5;
+    printf("S5LBOX-HLE-TRANSITION %s failures=%u\n",_failures?"FAIL":"PASS",_failures); fflush(stdout);
+    exit(_failures?1:0);
+}
+- (void)timeout:(id)unused { (void)unused; puts("S5LBOX-HLE-TRANSITION FAIL timeout"); fflush(stdout); exit(1); }
+@end
 @interface HLEVisualDelegate : NSObject {
     UIWindow *_window;
     UILabel *_label;
@@ -1423,11 +1519,42 @@ static unsigned foundation_compat_smoke(void) {
     [NSObject cancelPreviousPerformRequestsWithTarget:other];
     failures += [other retainCount]!=1;
     [target release]; [other release];
+    CATransition *transition=[CATransition animation];
+    failures += ![[transition type] isEqualToString:@"fade"] || [transition subtype]!=0;
+    failures += [transition startProgress]!=0 || [transition endProgress]!=1;
+    NSMutableString *direction=[NSMutableString stringWithString:kCATransitionFromLeft];
+    [transition setType:@"push"]; [transition setSubtype:direction];
+    [direction setString:@"fromRight"];
+    [transition setStartProgress:0.25f]; [transition setEndProgress:0.75f];
+    CATransition *copy=[transition copy];
+    [transition setSubtype:0]; [transition setType:@"reveal"];
+    failures += ![[copy type] isEqualToString:@"push"] || ![[copy subtype] isEqualToString:kCATransitionFromLeft];
+    failures += [copy startProgress]!=0.25f || [copy endProgress]!=0.75f;
+    NSObject *owner=[[NSObject alloc] init];
+    [copy setDelegate:owner]; [copy setDelegate:owner];
+    failures += [owner retainCount]!=2;
+    [copy setDelegate:0]; failures += [owner retainCount]!=1;
+    [copy release]; [owner release];
+    CABasicAnimation *basic=[CABasicAnimation animationWithKeyPath:@"opacity"];
+    NSNumber *from=[[NSNumber alloc] initWithUnsignedLong:1];
+    [basic setFromValue:from]; [basic setFromValue:from];
+    [basic setToValue:[NSNumber numberWithInt:2]];
+    [basic setByValue:[NSNumber numberWithInt:3]];
+    failures += [from retainCount]!=2;
+    CABasicAnimation *basicCopy=[basic copy];
+    [basic setFromValue:0];
+    failures += [basicCopy fromValue]!=from || [from retainCount]!=2;
+    failures += [[basicCopy toValue] longValue]!=2 || [[basicCopy byValue] longValue]!=3;
+    failures += ![[basicCopy keyPath] isEqualToString:@"opacity"];
+    [basicCopy release]; failures += [from retainCount]!=1; [from release];
     return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke();
 }
 
 int main(int argc,char **argv) {
     (void)[[NSAutoreleasePool alloc] init];
+    if (argc>1 && !strcmp(argv[1],"--transition-smoke")) {
+        return UIApplicationMain(argc,argv,0,@"TransitionProbeDelegate");
+    }
     if (argc>1 && !strcmp(argv[1],"--foundation-compat-smoke")) {
         unsigned failures=foundation_compat_smoke();
         printf("S5LBOX-HLE-FOUNDATION-COMPAT %s failures=%u\n",failures?"FAIL":"PASS",failures);

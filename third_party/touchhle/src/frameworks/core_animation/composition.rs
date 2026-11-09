@@ -10,6 +10,7 @@
 //! diverges wildly from what the real iPhone OS does.
 #![allow(clippy::zero_ptr)] // alas, as you know, opengl
 
+use super::ca_animation::TransitionFrame;
 use super::ca_eagl_layer::find_fullscreen_eagl_layer;
 use super::ca_layer::CALayerHostObject;
 use crate::frameworks::core_animation::animation;
@@ -24,6 +25,8 @@ use crate::matrix::Matrix;
 use crate::mem::SafeWrite;
 use crate::objc::{id, msg, msg_class, nil, ObjC};
 use crate::Environment;
+use std::collections::HashMap;
+use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
@@ -32,6 +35,40 @@ pub(super) struct State {
     recomposite_next: Option<Instant>,
     fps_counter: Option<FpsCounter>,
     misc_gl_objects: Option<MiscGlObjects>,
+    previous_layers: HashMap<id, Rc<RenderLayer>>,
+    textures: Vec<(GLuint, Weak<GLuint>)>,
+}
+
+#[derive(Clone)]
+pub(super) struct RenderLayer {
+    bounds: CGRect,
+    transform: Matrix<4>,
+    hidden: bool,
+    opaque: bool,
+    opacity: f32,
+    background_color: Option<CGColorHostObject>,
+    corner_radius: CGFloat,
+    texture: Option<Rc<GLuint>>,
+    flipped: bool,
+    children: Vec<Rc<RenderLayer>>,
+    transition: Option<TransitionFrame>,
+}
+
+pub(super) fn previous_layer(env: &Environment, layer: id) -> Option<Rc<RenderLayer>> {
+    env.framework_state
+        .core_animation
+        .composition
+        .previous_layers
+        .get(&layer)
+        .cloned()
+}
+
+pub(super) fn forget_layer(env: &mut Environment, layer: id) {
+    env.framework_state
+        .core_animation
+        .composition
+        .previous_layers
+        .remove(&layer);
 }
 
 struct MiscGlObjects {
@@ -72,6 +109,12 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
 
     if find_fullscreen_eagl_layer(env) != nil {
         // No composition done, EAGLContext will present directly.
+        // Earlier UIKit trees no longer describe the displayed frame.
+        env.framework_state
+            .core_animation
+            .composition
+            .previous_layers
+            .clear();
         log_dbg!("Using CAEAGLLayer fast path, skipping composition");
         return None;
     }
@@ -128,6 +171,16 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
             display_layers(env, layer);
             layer
         })
+        .collect();
+
+    env.framework_state
+        .core_animation
+        .composition
+        .previous_layers
+        .clear();
+    let render_layers: Vec<_> = window_layers
+        .iter()
+        .map(|&layer| prepare_render_layer(env, &mut animation_state, layer))
         .collect();
 
     let screen_bounds: CGRect = {
@@ -298,6 +351,7 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
 
     // Clear the framebuffer and set up state to prepare for rendering
     unsafe {
+        gles.Disable(gles11::SCISSOR_TEST);
         gles.Viewport(0, 0, fb_width as _, fb_height as _);
         gles.ClearColor(0.0, 0.0, 0.0, 1.0);
         gles.Clear(gles11::COLOR_BUFFER_BIT);
@@ -325,20 +379,39 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
     }
     std::mem::drop(gles);
 
-    // Assumes the windows in the list are ordered back-to-front.
-    // TODO: this may not be correct once we support windowLevel.
-    for root_layer in window_layers {
-        // Here's where the actual drawing happens
+    // Render trees retain the exact texture versions used by outgoing content.
+    // Only textures referenced by a transition need copying on later updates.
+    let window = env.window.as_mut().unwrap();
+    let mut gles = window.make_internal_gl_ctx_current();
+    let state = &mut env.framework_state.core_animation.composition;
+    state.textures.retain(|(texture, owner)| {
+        if owner.strong_count() == 0 {
+            unsafe {
+                gles.DeleteTextures(1, texture);
+            }
+            false
+        } else {
+            true
+        }
+    });
+    let misc = state.misc_gl_objects.as_ref().unwrap();
+    for layer in render_layers {
         unsafe {
-            composite_layer_recursive(
-                env,
-                &mut animation_state,
-                root_layer,
+            composite_render_layer(
+                gles.as_mut(),
+                misc,
+                &layer,
                 cumulative_transform,
                 opacity,
+                scale_hack,
+                fb_height,
+                None,
+                [0.0, 0.0],
+                false,
             );
         }
     }
+    std::mem::drop(gles);
 
     // Re-borrow
     let window = env.window.as_mut().unwrap();
@@ -346,6 +419,7 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
 
     // Clean up some GL state
     unsafe {
+        gles.Disable(gles11::SCISSOR_TEST);
         gles.Viewport(0, 0, fb_width as _, fb_height as _);
         gles.Color4f(1.0, 1.0, 1.0, 1.0);
         gles.Disable(gles11::BLEND);
@@ -404,61 +478,252 @@ fn display_layers(env: &mut Environment, root_layer: id) {
     }
 }
 
-/// Traverses the layer tree and draws each layer.
-unsafe fn composite_layer_recursive(
+/// Prepare immutable visual state without holding guest object references.
+fn prepare_render_layer(
     env: &mut Environment,
     animation_state: &mut animation::State,
     layer: id,
-    cumulative_transform: Matrix<4>,
+) -> Rc<RenderLayer> {
+    let (mut host_obj, transition) = animation_state.create_presentation_layer(env, layer);
+    let child_layers = host_obj.sublayers.clone();
+    if !host_obj.hidden {
+        let window = env.window.as_mut().unwrap();
+        let mut gles = window.make_internal_gl_ctx_current();
+        unsafe {
+            let need_texture = host_obj.presented_pixels.is_some()
+                || host_obj.contents != nil
+                || host_obj.cg_context.is_some();
+            let need_update = need_texture && !host_obj.gles_texture_is_up_to_date;
+
+            if need_texture {
+                // The model and this presentation copy are the normal two owners.
+                // A retained outgoing render tree adds another owner and freezes this
+                // texture version until its transition completes.
+                let frozen = host_obj
+                    .gles_texture
+                    .as_ref()
+                    .is_some_and(|texture| Rc::strong_count(texture) > 2);
+                if host_obj.gles_texture.is_none() || (need_update && frozen) {
+                    let mut name = 0;
+                    gles.GenTextures(1, &mut name);
+                    let texture = Rc::new(name);
+                    env.framework_state
+                        .core_animation
+                        .composition
+                        .textures
+                        .push((name, Rc::downgrade(&texture)));
+                    env.objc.borrow_mut::<CALayerHostObject>(layer).gles_texture =
+                        Some(texture.clone());
+                    host_obj.gles_texture = Some(texture);
+                }
+                gles.BindTexture(
+                    gles11::TEXTURE_2D,
+                    **host_obj.gles_texture.as_ref().unwrap(),
+                );
+            }
+
+            // Update original layer texture with CAEAGLLayer pixels (slow path), if any
+            if need_update {
+                let original_host_obj = env.objc.borrow_mut::<CALayerHostObject>(layer);
+                if let Some((ref mut pixels, width, height)) = original_host_obj.presented_pixels {
+                    // The pixels are always RGBA, but if the layer is opaque then the
+                    // alpha channel is meant to be ignored. glTexImage2D() has no
+                    // option to ignore it, so let's manually set them to 255.
+                    if original_host_obj.opaque {
+                        let mut i = 3;
+                        while i < pixels.len() {
+                            pixels[i] = 255;
+                            i += 4;
+                        }
+                    }
+
+                    upload_rgba8_pixels(gles.as_mut(), pixels, (width, height));
+                }
+            }
+
+            // Update texture with CGImageRef or CGContextRef pixels, if any
+            if need_update {
+                if host_obj.contents != nil {
+                    let image = cg_image::borrow_image(&env.objc, host_obj.contents);
+
+                    // No special handling for opacity is needed here: the alpha channel
+                    // on an image is meaningful and won't be ignored.
+                    upload_rgba8_pixels(gles.as_mut(), image.pixels(), image.dimensions());
+                } else if let Some(cg_context) = host_obj.cg_context {
+                    // Make sure this is in sync with the code in ca_layer.rs that
+                    // sets up the context!
+                    let (width, height, data) = cg_bitmap_context::get_data(&env.objc, cg_context);
+                    let size = width * height * 4;
+                    let pixels = env.mem.bytes_at(data.cast(), size);
+                    upload_rgba8_pixels(gles.as_mut(), pixels, (width, height));
+                }
+            }
+
+            if need_update {
+                // Update original layer field
+                env.objc
+                    .borrow_mut::<CALayerHostObject>(layer)
+                    .gles_texture_is_up_to_date = true;
+            }
+        }
+    }
+    let children = if host_obj.hidden {
+        Vec::new()
+    } else {
+        child_layers
+            .iter()
+            .map(|&child| prepare_render_layer(env, animation_state, child))
+            .collect()
+    };
+    let render = Rc::new(RenderLayer {
+        bounds: host_obj.bounds,
+        transform: host_obj.superlayer_to_layer_transform().into(),
+        hidden: host_obj.hidden,
+        opaque: host_obj.opaque,
+        opacity: host_obj.opacity,
+        background_color: host_obj.background_color,
+        corner_radius: host_obj.corner_radius,
+        texture: if host_obj.presented_pixels.is_some()
+            || host_obj.contents != nil
+            || host_obj.cg_context.is_some()
+        {
+            host_obj.gles_texture
+        } else {
+            None
+        },
+        flipped: host_obj.contents == nil,
+        children,
+        transition,
+    });
+    env.framework_state
+        .core_animation
+        .composition
+        .previous_layers
+        .insert(layer, render.clone());
+    render
+}
+
+/// Draw a cached subtree. No guest messages or mutable guest resources are used
+/// here, so removed views and changed bitmaps remain valid during a transition.
+unsafe fn composite_render_layer(
+    gles: &mut dyn GLES,
+    misc: &MiscGlObjects,
+    host_obj: &RenderLayer,
+    parent_transform: Matrix<4>,
     opacity: CGFloat,
+    scale: u32,
+    fb_height: u32,
+    clip: Option<[i32; 4]>,
+    offset: [f32; 2],
+    skip_transition: bool,
 ) {
-    // TODO: this can't handle zPosition among other things, but it is not
-    //       supported yet :)
-    // TODO: back-to-front drawing is not efficient, could we use front-to-back?
-
-    // This is both acting as the presentationLayer and the private render layer
-    // It might need to be reworked in the future into a guest presentationLayer
-    let host_obj = animation_state.create_presentation_layer(env, layer);
-
+    let local_transform =
+        Matrix::translate_3d(offset[0], offset[1], 0.0).multiply(&host_obj.transform);
+    let cumulative_transform = local_transform.multiply(&parent_transform);
+    if !skip_transition {
+        if let Some(transition) = &host_obj.transition {
+            let bounds_clip = transition_clip(
+                host_obj.bounds,
+                cumulative_transform,
+                scale,
+                fb_height,
+                clip,
+            );
+            let progress = transition.progress.clamp(0.0, 1.0);
+            let direction = match transition.subtype.as_deref() {
+                Some("fromLeft") => [-1.0, 0.0],
+                Some("fromTop") => [0.0, -1.0],
+                Some("fromBottom") => [0.0, 1.0],
+                _ => [1.0, 0.0],
+            };
+            let displacement = [
+                direction[0] * host_obj.bounds.size.width,
+                direction[1] * host_obj.bounds.size.height,
+            ];
+            let incoming = [
+                displacement[0] * (1.0 - progress),
+                displacement[1] * (1.0 - progress),
+            ];
+            let outgoing = [-displacement[0] * progress, -displacement[1] * progress];
+            let previous = transition.previous.as_deref();
+            let draw_old = |gles: &mut dyn GLES, shift: [f32; 2], alpha| {
+                if let Some(previous) = previous {
+                    composite_render_layer(
+                        gles,
+                        misc,
+                        previous,
+                        parent_transform,
+                        opacity * alpha,
+                        scale,
+                        fb_height,
+                        bounds_clip,
+                        [offset[0] + shift[0], offset[1] + shift[1]],
+                        false,
+                    );
+                }
+            };
+            let draw_new = |gles: &mut dyn GLES, shift: [f32; 2], alpha| {
+                composite_render_layer(
+                    gles,
+                    misc,
+                    host_obj,
+                    parent_transform,
+                    opacity * alpha,
+                    scale,
+                    fb_height,
+                    bounds_clip,
+                    [offset[0] + shift[0], offset[1] + shift[1]],
+                    true,
+                );
+            };
+            match transition.kind.as_str() {
+                "push" => {
+                    draw_old(gles, outgoing, 1.0);
+                    draw_new(gles, incoming, 1.0);
+                }
+                "moveIn" => {
+                    draw_old(gles, [0.0, 0.0], 1.0);
+                    draw_new(gles, incoming, 1.0);
+                }
+                "reveal" => {
+                    draw_new(gles, [0.0, 0.0], 1.0);
+                    draw_old(gles, outgoing, 1.0);
+                }
+                _ => {
+                    // Opaque incoming content can blend directly over the old
+                    // image. Translucent subtrees currently use per-layer alpha.
+                    let opaque = !host_obj.hidden
+                        && host_obj.opacity == 1.0
+                        && (host_obj.opaque
+                            || host_obj.background_color.is_some_and(|c| c.a == 1.0));
+                    draw_old(gles, [0.0, 0.0], if opaque { 1.0 } else { 1.0 - progress });
+                    draw_new(gles, [0.0, 0.0], progress);
+                }
+            }
+            return;
+        }
+    }
     if host_obj.hidden {
         return;
     }
-
-    let window = env.window.as_mut().unwrap();
-    let mut gles = window.make_internal_gl_ctx_current();
-
+    if let Some([x, y, w, h]) = clip {
+        gles.Enable(gles11::SCISSOR_TEST);
+        gles.Scissor(x, y, w, h);
+    } else {
+        gles.Disable(gles11::SCISSOR_TEST);
+    }
     let opacity = opacity * host_obj.opacity;
-    let cumulative_transform = {
-        let CALayerHostObject { bounds, .. } = host_obj;
-
-        // Update the transform to match this layer's co-ordinate space.
-        let cumulative_transform =
-            <Matrix<4> as From<_>>::from(host_obj.superlayer_to_layer_transform())
-                .multiply(&cumulative_transform);
-
-        // Reposition and scale the unit quad (see ARRAY_BUFFER binding)
-        // so it will have the right size in this layer's co-ordinate space.
-        gles.MatrixMode(gles11::MODELVIEW);
-        load_matrix(
-            gles.as_mut(),
-            Matrix::<4>::from(&Matrix::scale_2d(bounds.size.width, bounds.size.height))
-                .multiply(&Matrix::translate_3d(bounds.origin.x, bounds.origin.y, 0.0))
-                .multiply(&cumulative_transform),
-        );
-
-        cumulative_transform
-    };
+    let bounds = host_obj.bounds;
+    gles.MatrixMode(gles11::MODELVIEW);
+    load_matrix(
+        gles,
+        Matrix::<4>::from(&Matrix::scale_2d(bounds.size.width, bounds.size.height))
+            .multiply(&Matrix::translate_3d(bounds.origin.x, bounds.origin.y, 0.0))
+            .multiply(&cumulative_transform),
+    );
 
     // Draw background color, if any
     let have_background = if let Some(background_color) = host_obj.background_color {
-        let misc = env
-            .framework_state
-            .core_animation
-            .composition
-            .misc_gl_objects
-            .as_ref()
-            .unwrap();
-
         let CGColorHostObject { r, g, b, a, .. } = background_color;
         gles.Color4f(
             r * a * opacity,
@@ -494,7 +759,7 @@ unsafe fn composite_layer_recursive(
             gles.EnableClientState(gles11::VERTEX_ARRAY);
             gles.BindBuffer(gles11::ARRAY_BUFFER, misc.rounded_vertex_buffer);
             upload_slice(
-                gles.as_mut(),
+                gles,
                 gles11::ARRAY_BUFFER,
                 &make_9patch_coords(
                     [
@@ -527,78 +792,9 @@ unsafe fn composite_layer_recursive(
         false
     };
 
-    let need_texture = host_obj.presented_pixels.is_some()
-        || host_obj.contents != nil
-        || host_obj.cg_context.is_some();
-    let need_update = need_texture && !host_obj.gles_texture_is_up_to_date;
-
-    if need_texture {
-        if let Some(texture) = host_obj.gles_texture {
-            gles.BindTexture(gles11::TEXTURE_2D, texture);
-        } else {
-            assert!(!host_obj.gles_texture_is_up_to_date);
-            let mut texture = 0;
-            gles.GenTextures(1, &mut texture);
-            gles.BindTexture(gles11::TEXTURE_2D, texture);
-            // Update original layer texture
-            env.objc.borrow_mut::<CALayerHostObject>(layer).gles_texture = Some(texture);
-        }
-    }
-
-    // Update original layer texture with CAEAGLLayer pixels (slow path), if any
-    if need_update {
-        let original_host_obj = env.objc.borrow_mut::<CALayerHostObject>(layer);
-        if let Some((ref mut pixels, width, height)) = original_host_obj.presented_pixels {
-            // The pixels are always RGBA, but if the layer is opaque then the
-            // alpha channel is meant to be ignored. glTexImage2D() has no
-            // option to ignore it, so let's manually set them to 255.
-            if original_host_obj.opaque {
-                let mut i = 3;
-                while i < pixels.len() {
-                    pixels[i] = 255;
-                    i += 4;
-                }
-            }
-
-            upload_rgba8_pixels(gles.as_mut(), pixels, (width, height));
-        }
-    }
-
-    // Update texture with CGImageRef or CGContextRef pixels, if any
-    if need_update {
-        if host_obj.contents != nil {
-            let image = cg_image::borrow_image(&env.objc, host_obj.contents);
-
-            // No special handling for opacity is needed here: the alpha channel
-            // on an image is meaningful and won't be ignored.
-            upload_rgba8_pixels(gles.as_mut(), image.pixels(), image.dimensions());
-        } else if let Some(cg_context) = host_obj.cg_context {
-            // Make sure this is in sync with the code in ca_layer.rs that
-            // sets up the context!
-            let (width, height, data) = cg_bitmap_context::get_data(&env.objc, cg_context);
-            let size = width * height * 4;
-            let pixels = env.mem.bytes_at(data.cast(), size);
-            upload_rgba8_pixels(gles.as_mut(), pixels, (width, height));
-        }
-    }
-
-    if need_update {
-        // Update original layer field
-        env.objc
-            .borrow_mut::<CALayerHostObject>(layer)
-            .gles_texture_is_up_to_date = true;
-    }
-
     // Draw texture, if any
-    if need_texture {
-        let misc = env
-            .framework_state
-            .core_animation
-            .composition
-            .misc_gl_objects
-            .as_ref()
-            .unwrap();
-
+    if let Some(texture) = &host_obj.texture {
+        gles.BindTexture(gles11::TEXTURE_2D, **texture);
         gles.Color4f(opacity, opacity, opacity, opacity);
         if opacity == 1.0 && host_obj.opaque && !have_background {
             gles.Disable(gles11::BLEND);
@@ -616,7 +812,7 @@ unsafe fn composite_layer_recursive(
         // expects bottom-to-top, so flip the UVs in that case.
         gles.BindBuffer(
             gles11::ARRAY_BUFFER,
-            if host_obj.contents != nil {
+            if !host_obj.flipped {
                 misc.basic_square_buffer
             } else {
                 misc.flipped_square_buffer
@@ -631,23 +827,107 @@ unsafe fn composite_layer_recursive(
             0 as *const GLvoid,
         );
     }
-    std::mem::drop(gles);
 
-    // avoid holding mutable borrow while recursing
-    let original_host_obj = env.objc.borrow_mut::<CALayerHostObject>(layer);
-    for &child_layer in &original_host_obj.sublayers.clone() {
-        // TODO: clipping/masksToBounds support
-        composite_layer_recursive(
-            env,
-            animation_state,
-            child_layer,
+    for child in &host_obj.children {
+        composite_render_layer(
+            gles,
+            misc,
+            child,
             cumulative_transform,
             opacity,
-        )
+            scale,
+            fb_height,
+            clip,
+            [0.0, 0.0],
+            false,
+        );
     }
 }
 
+/// Axis-aligned clipping in framebuffer coordinates; quarter-turn guest
+/// orientations preserve exact rectangular clipping.
+fn transition_clip(
+    bounds: CGRect,
+    transform: Matrix<4>,
+    scale: u32,
+    fb_height: u32,
+    parent: Option<[i32; 4]>,
+) -> Option<[i32; 4]> {
+    let corners = [
+        (bounds.origin.x, bounds.origin.y),
+        (bounds.origin.x + bounds.size.width, bounds.origin.y),
+        (bounds.origin.x, bounds.origin.y + bounds.size.height),
+        (
+            bounds.origin.x + bounds.size.width,
+            bounds.origin.y + bounds.size.height,
+        ),
+    ];
+    let mut min = [f32::INFINITY; 2];
+    let mut max = [f32::NEG_INFINITY; 2];
+    for (x, y) in corners {
+        let point = transform.transform([x, y, 0.0, 1.0]);
+        let p = [
+            point[0] * scale as f32,
+            fb_height as f32 - point[1] * scale as f32,
+        ];
+        for i in 0..2 {
+            min[i] = min[i].min(p[i]);
+            max[i] = max[i].max(p[i]);
+        }
+    }
+    let mut left = min[0].floor() as i32;
+    let mut bottom = min[1].floor() as i32;
+    let mut right = max[0].ceil() as i32;
+    let mut top = max[1].ceil() as i32;
+    if let Some([x, y, w, h]) = parent {
+        left = left.max(x);
+        bottom = bottom.max(y);
+        right = right.min(x + w);
+        top = top.min(y + h);
+    }
+    Some([left, bottom, (right - left).max(0), (top - bottom).max(0)])
+}
+
 const FLOATS_PER_POINT: usize = 2;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frameworks::core_graphics::{CGPoint, CGSize};
+
+    #[test]
+    fn clips_transitions_in_rotated_and_nested_layer_coordinates() {
+        let bounds = CGRect {
+            origin: CGPoint { x: 0.0, y: 0.0 },
+            size: CGSize {
+                width: 100.0,
+                height: 50.0,
+            },
+        };
+        assert_eq!(
+            transition_clip(bounds, Matrix::identity(), 1, 480, None),
+            Some([0, 430, 100, 50])
+        );
+        let rotated = Matrix::from_columns([
+            [0.0, 1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [320.0, 0.0, 0.0, 1.0],
+        ]);
+        assert_eq!(
+            transition_clip(bounds, rotated, 2, 960, None),
+            Some([540, 760, 100, 200])
+        );
+        assert_eq!(
+            transition_clip(bounds, Matrix::identity(), 1, 480, Some([20, 440, 60, 20])),
+            Some([20, 440, 60, 20])
+        );
+        assert_eq!(
+            transition_clip(bounds, Matrix::identity(), 1, 480, Some([200, 0, 20, 20])),
+            Some([200, 430, 0, 0])
+        );
+    }
+}
 const BASIC_SQUARE_POINTS: [f32; 4 * FLOATS_PER_POINT] = [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0];
 const SQUARE_INDICES: [u8; 6] = [0, 1, 2, 2, 1, 3];
 const FLIPPED_SQUARE_POINTS: [f32; 4 * FLOATS_PER_POINT] = [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0];

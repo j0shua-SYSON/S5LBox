@@ -18,6 +18,7 @@
 //!   <https://developer.apple.com/documentation/quartzcore/cabasicanimation?language=objc>
 use std::ops::Sub;
 
+use super::ca_animation::{is_transition, transition_frame, TransitionFrame};
 use crate::frameworks::core_animation::ca_animation::{
     get_animation_start_time, kCAFillModeBackwards, kCAFillModeBoth, kCAFillModeForwards,
     CAMediaTimingFillMode,
@@ -40,10 +41,11 @@ impl State {
         &mut self,
         env: &mut Environment,
         layer: id,
-    ) -> CALayerHostObject {
+    ) -> (CALayerHostObject, Option<TransitionFrame>) {
         // Clone given layer
         let original = env.objc.borrow::<CALayerHostObject>(layer);
         let mut presentation = original.clone();
+        let mut transition = None;
 
         // Loop over all animations and set the presentation layer's values
         let named_animations: Vec<(Option<String>, id)> = presentation
@@ -69,6 +71,7 @@ impl State {
             let current_time = CACurrentMediaTime(env);
             let begin_time: CFTimeInterval = msg![env; animation beginTime];
             let start_time = get_animation_start_time(env, animation);
+            let just_started = current_time >= begin_time && start_time.is_none();
 
             if current_time >= begin_time {
                 if start_time.is_none() {
@@ -81,6 +84,9 @@ impl State {
             }
 
             let effective_begin_time = start_time.unwrap_or(begin_time);
+            if just_started {
+                retain(env, animation);
+            }
 
             if let Some(key) = key {
                 log_dbg!(
@@ -111,6 +117,9 @@ impl State {
                 .min(effective_repeat_count);
 
             let mut progress = current_repeat.fract();
+            if current_repeat >= effective_repeat_count && progress == 0.0 {
+                progress = 1.0;
+            }
 
             let autoreverses: bool = msg![env; animation autoreverses];
             if autoreverses {
@@ -128,20 +137,29 @@ impl State {
 
             if current_repeat >= effective_repeat_count {
                 let removed_on_completion: bool = msg![env; animation isRemovedOnCompletion];
-                self.finished_animations.push((
-                    layer,
-                    animation,
-                    true,
-                    removed_on_completion,
-                    key.to_owned(),
-                ));
+                if super::ca_animation::mark_finished(env, animation) {
+                    retain(env, layer);
+                    retain(env, animation);
+                    self.finished_animations.push((
+                        layer,
+                        animation,
+                        true,
+                        removed_on_completion,
+                        key.to_owned(),
+                    ));
+                }
                 if fill_mode != kCAFillModeForwards && fill_mode != kCAFillModeBoth {
                     continue;
                 }
             }
 
-            // Assuming all animations here are CABasicAnimation
-            // TODO: Handle other types of animations
+            if is_transition(env, animation) {
+                transition = Some(transition_frame(env, animation, interpolation_amount));
+                continue;
+            }
+
+            // Property animations follow their key path; transitions operate
+            // on cached layer content in the compositor instead.
 
             let from_value: id = msg![env; animation fromValue];
             let to_value: id = msg![env; animation toValue];
@@ -253,35 +271,59 @@ impl State {
             }
         }
 
-        presentation
+        (presentation, transition)
     }
 
     pub fn update_started_and_finished_animations(self, env: &mut Environment) {
         for animation in self.started_animations {
             let delegate = msg![env; animation delegate];
-            if delegate != nil {
+            let selector = env
+                .objc
+                .register_host_selector("animationDidStart:".into(), &mut env.mem);
+            if delegate != nil && msg![env; delegate respondsToSelector:selector] {
+                retain(env, delegate);
                 () = msg![env; delegate animationDidStart: animation];
+                release(env, delegate);
             }
+            release(env, animation);
         }
 
-        for (layer, ..) in &self.finished_animations {
-            retain(env, *layer);
-        }
         for (layer, animation, finished, removed_on_completion, key) in self.finished_animations {
             let delegate = msg![env; animation delegate];
-            if delegate != nil {
+            let selector = env
+                .objc
+                .register_host_selector("animationDidStop:finished:".into(), &mut env.mem);
+            if delegate != nil && msg![env; delegate respondsToSelector:selector] {
+                retain(env, delegate);
                 () = msg![env; delegate animationDidStop: animation finished: finished];
+                release(env, delegate);
             }
 
             if removed_on_completion {
                 if let Some(key) = key {
-                    let key = from_rust_string(env, key);
-                    () = msg![env; layer removeAnimationForKey: key];
-                } else {
+                    // The delegate may replace the animation under this key.
+                    if env
+                        .objc
+                        .borrow::<CALayerHostObject>(layer)
+                        .animations
+                        .get(&key)
+                        == Some(&animation)
+                    {
+                        let key = from_rust_string(env, key);
+                        () = msg![env; layer removeAnimationForKey: key];
+                        release(env, key);
+                    }
+                } else if env
+                    .objc
+                    .borrow::<CALayerHostObject>(layer)
+                    .anonymous_animations
+                    .contains(&animation)
+                {
                     remove_anonymous_animation(env, layer, animation);
                 }
             }
 
+            release(env, animation);
             release(env, layer);
         }
     }

@@ -89,6 +89,8 @@ pub fn find_fullscreen_eagl_layer(env: &mut Environment) -> id {
                 })
             || layer_host_obj.hidden
             || layer_host_obj.opacity != 1.0
+            || !layer_host_obj.animations.is_empty()
+            || !layer_host_obj.anonymous_animations.is_empty()
             // TODO: support affine transforms that result in a full-screen
             //       layer (typical example is 90° rotation).
             || !layer_host_obj.affine_transform.is_identity()
