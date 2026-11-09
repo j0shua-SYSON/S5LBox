@@ -5,7 +5,7 @@
  */
 //! `NSBundle`.
 
-use super::{ns_string, NSNotFound, NSRange, NSUInteger};
+use super::{ns_array, ns_string, NSNotFound, NSRange, NSUInteger};
 use crate::bundle::Bundle;
 use crate::frameworks::core_foundation::cf_bundle::{
     CFBundleCopyBundleLocalizations, CFBundleCopyPreferredLocalizationsFromArray,
@@ -102,6 +102,21 @@ pub const CLASSES: ClassExports = objc_classes! {
         env.framework_state.foundation.ns_bundle.main_bundle = Some(new);
         new
    }
+}
+
++ (id)allBundles {
+    let main: id = msg_class![env; NSBundle mainBundle];
+    // Enumerate instantiated resource bundles, not arbitrary directories on
+    // disk. Framework bundles have their own enumeration API.
+    let mut bundles = vec![main];
+    bundles.extend(env.framework_state.foundation.ns_bundle.bundles.iter()
+        .filter(|(path, _)| !path.ends_with(".framework"))
+        .map(|(_, &bundle)| bundle));
+    for &bundle in &bundles {
+        retain(env, bundle);
+    }
+    let array = ns_array::from_vec(env, bundles);
+    autorelease(env, array)
 }
 
 + (id)preferredLocalizationsFromArray:(id)localizations_array { // NSArray<NSString *> *

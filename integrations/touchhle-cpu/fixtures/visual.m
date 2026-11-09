@@ -241,6 +241,7 @@ extern id const kCFBooleanTrue,kCFBooleanFalse;
 extern id CFUUIDCreate(void *allocator);
 @interface NSBundle : NSObject
 + (id)mainBundle;
++ (id)allBundles;
 + (id)bundleWithPath:(id)path;
 + (id)bundleForClass:(Class)class;
 - (id)bundlePath;
@@ -367,6 +368,7 @@ static unsigned permissions_smoke(BOOL unavailable) {
 @interface NSArray : NSObject
 + (id)array;
 - (unsigned)count;
+- (BOOL)containsObject:(id)object;
 @end
 @interface NSMutableArray : NSArray @end
 @interface UITableViewCell : UIView
@@ -976,6 +978,8 @@ int main(int argc,char **argv) {
         failures += sel_getUid("setText:")!=sel_registerName("setText:");
         failures += sel_getUid("fixtureNewSelector:")!=sel_registerName("fixtureNewSelector:");
         NSBundle *main=[NSBundle mainBundle];
+        NSArray *initialBundles=[NSBundle allBundles];
+        failures += [initialBundles count]!=1 || ![initialBundles containsObject:main];
         id resourcePath=[[main bundlePath] stringByAppendingPathComponent:@"Fixture.bundle"];
         NSBundle *resource=[NSBundle bundleWithPath:resourcePath];
         failures += resource==0;
@@ -987,6 +991,12 @@ int main(int argc,char **argv) {
         failures += ![[resource bundleIdentifier] isEqualToString:@"org.s5lbox.fixture.resources"];
         failures += [resource executablePath]!=0;
         failures += [resource pathForResource:@"Info" ofType:@"plist"]==0;
+        NSBundle *framework=[NSBundle bundleWithPath:[[main bundlePath] stringByAppendingPathComponent:@"Fixture.framework"]];
+        failures += framework==0;
+        NSArray *allBundles=[NSBundle allBundles];
+        failures += [allBundles count]!=2 || ![allBundles containsObject:main] || ![allBundles containsObject:resource];
+        failures += [allBundles containsObject:framework];
+        failures += [initialBundles count]!=1; // Enumeration is an immutable snapshot.
         id readError=0;
         NSURL *resourceURL=[NSURL fileURLWithPath:[resource pathForResource:@"Info" ofType:@"plist"]];
         NSData *resourceData=[NSData dataWithContentsOfURL:resourceURL options:1 error:&readError];

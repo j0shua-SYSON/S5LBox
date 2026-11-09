@@ -34,7 +34,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Color Splash | 1.6.2 | Import a test image, edit and save the result | Desktop startup: missing UITabBar. |
 | Recorder | 1.1.1 | Record, play back, rename and reopen a recording | Desktop startup: missing UINavigationBar. |
 | iTalk Recorder Premium | 1.0.4 | Record, play back and reopen saved audio | Desktop startup blocked: missing navigationItem. Replaces the non-Premium archive, which failed duplicate-path validation. |
-| Merriam-Webster Dictionary | 1.2.1 | Offline word lookup, definitions and navigation | Desktop startup: missing NSBundle allBundles. |
+| Merriam-Webster Dictionary | 1.2.1 | Offline word lookup, definitions and navigation | Bundle enumeration fixed; desktop startup now reaches missing NSOperationQueue. |
 | Batterie Gratuite HD | 2.24 | Battery state updates and settings navigation | Desktop startup: missing CALayer setContentsScale:. |
 | Ruler | 1.1 | Switch units and measure using the ruler | Desktop startup: missing CGContextSetShouldAntialias. |
 | Convert ~ the unit calculator | 1.0.1 | Arithmetic and unit conversion; history or choices persist | Desktop startup: missing NSNumberFormatter. |
@@ -160,3 +160,7 @@ weak delegates, and presentation/dismissal callbacks. ARMv6 tests cover variadic
 buttons, real control events, nested windows, and callbacks that dismiss or
 reopen the alert. Presentation animations and text-entry alert styles remain
 unsupported; Cro-Mag Rally's pause menu still needs a device retest.
+
+Bundle enumeration includes the main bundle and instantiated resource bundles,
+excludes frameworks, and returns an independent array. The ARMv6 resource and
+ownership fixture passes locally; Merriam-Webster still needs other APIs.

@@ -39,6 +39,9 @@ if ($LASTEXITCODE) { throw 'Visual fixture compile failed' }
 if ($LASTEXITCODE) { throw 'Visual fixture link failed' }
 Copy-Item -LiteralPath "$PSScriptRoot/visual.plist" -Destination "$visual/Info.plist"
 Copy-Item -LiteralPath "$PSScriptRoot/Fixture.bundle" -Destination $visual -Recurse -Force
+$framework=Join-Path $visual 'Fixture.framework'
+New-Item -ItemType Directory -Force -Path $framework | Out-Null
+Copy-Item -LiteralPath "$PSScriptRoot/Fixture.bundle/Info.plist" -Destination "$framework/Info.plist" -Force
 $startup=Join-Path $outputRoot 'StartupSmoke.app'
 New-Item -ItemType Directory -Force -Path $startup | Out-Null
 & $compiler @common -marm -c "$PSScriptRoot/startup.m" -o "$outputRoot/startup.o"
