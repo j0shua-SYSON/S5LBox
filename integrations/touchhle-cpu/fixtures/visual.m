@@ -49,6 +49,8 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 + (IMP)instanceMethodForSelector:(SEL)selector;
 - (id)init;
 - (id)autorelease;
+- (id)copy;
+- (id)mutableCopy;
 - (void)release;
 - (void)dealloc;
 - (unsigned)retainCount;
@@ -172,7 +174,9 @@ static unsigned methods_smoke(void) {
 - (BOOL)isEqualToString:(id)other;
 - (id)stringByAppendingPathComponent:(id)component;
 @end
-@interface NSMutableString : NSString @end
+@interface NSMutableString : NSString
+- (void)setString:(id)text;
+@end
 @interface NSDictionary : NSObject
 + (id)dictionary;
 + (id)dictionaryWithObject:(id)value forKey:(id)key;
@@ -367,10 +371,26 @@ static unsigned permissions_smoke(BOOL unavailable) {
 @end
 @interface NSArray : NSObject
 + (id)array;
++ (id)arrayWithObjects:(id)first,...;
 - (unsigned)count;
 - (BOOL)containsObject:(id)object;
+- (id)objectAtIndex:(unsigned)index;
+- (id)sortedArrayUsingDescriptors:(id)descriptors;
 @end
-@interface NSMutableArray : NSArray @end
+@interface NSMutableArray : NSArray
+- (void)sortUsingDescriptors:(id)descriptors;
+@end
+@interface NSSortDescriptor : NSObject
+- (id)initWithKey:(id)key ascending:(BOOL)ascending;
+- (id)initWithKey:(id)key ascending:(BOOL)ascending selector:(SEL)selector;
++ (id)sortDescriptorWithKey:(id)key ascending:(BOOL)ascending;
++ (id)sortDescriptorWithKey:(id)key ascending:(BOOL)ascending selector:(SEL)selector;
+- (id)key;
+- (BOOL)ascending;
+- (SEL)selector;
+- (id)reversedSortDescriptor;
+- (int)compareObject:(id)left toObject:(id)right;
+@end
 @interface UITableViewCell : UIView
 - (id)initWithStyle:(int)style reuseIdentifier:(id)identifier;
 - (id)textLabel;
@@ -852,6 +872,49 @@ static unsigned kvc_smoke(void) {
     failures += [scanner valueForKey:@"charactersToBeSkipped"]!=0;
     return failures;
 }
+static unsigned sort_smoke(void) {
+    unsigned failures=0;
+    NSMutableString *key=[@"score" mutableCopy];
+    NSSortDescriptor *score=[[NSSortDescriptor alloc] initWithKey:key ascending:1];
+    [key setString:@"changed"]; [key release];
+    failures += ![[score key] isEqualToString:@"score"] || ![score ascending] || [score selector]!=@selector(compare:);
+    id low=[NSDictionary dictionaryWithObject:[NSNumber numberWithInt:1] forKey:@"score"];
+    id high=[NSDictionary dictionaryWithObject:[NSNumber numberWithInt:3] forKey:@"score"];
+    id tie=[NSDictionary dictionaryWithObject:[NSNumber numberWithInt:1] forKey:@"score"];
+    id missing=[NSDictionary dictionary];
+    failures += [score compareObject:low toObject:high]>=0 || [score compareObject:high toObject:low]<=0;
+    failures += [score compareObject:low toObject:tie]!=0;
+    failures += [score compareObject:missing toObject:low]>=0 || [score compareObject:low toObject:missing]<=0;
+    NSSortDescriptor *reverse=[score reversedSortDescriptor];
+    failures += [reverse ascending] || ![[reverse key] isEqualToString:@"score"];
+    failures += [reverse compareObject:low toObject:high]<=0;
+    id copied=[score copy]; failures += copied!=score; [copied release];
+    NSArray *source=[NSArray arrayWithObjects:high,low,tie,missing,0];
+    NSArray *sorted=[source sortedArrayUsingDescriptors:[NSArray arrayWithObjects:score,0]];
+    failures += [source objectAtIndex:0]!=high || [sorted count]!=4;
+    failures += [sorted objectAtIndex:0]!=missing || [sorted objectAtIndex:1]!=low || [sorted objectAtIndex:2]!=tie || [sorted objectAtIndex:3]!=high;
+    NSMutableArray *mutable=[source mutableCopy];
+    [mutable sortUsingDescriptors:[NSArray arrayWithObjects:reverse,0]];
+    failures += [mutable objectAtIndex:0]!=high || [mutable objectAtIndex:3]!=missing;
+    [mutable sortUsingDescriptors:[NSArray array]];
+    failures += [mutable objectAtIndex:0]!=high || [mutable count]!=4;
+    [mutable release];
+    id nestedLow=[NSDictionary dictionaryWithObject:low forKey:@"entry"];
+    id nestedHigh=[NSDictionary dictionaryWithObject:high forKey:@"entry"];
+    NSSortDescriptor *nested=[NSSortDescriptor sortDescriptorWithKey:@"entry.score" ascending:1];
+    failures += [nested compareObject:nestedLow toObject:nestedHigh]>=0;
+    NSSortDescriptor *text=[NSSortDescriptor sortDescriptorWithKey:0 ascending:1 selector:@selector(caseInsensitiveCompare:)];
+    failures += [text key]!=0 || [text selector]!=@selector(caseInsensitiveCompare:);
+    failures += [text compareObject:@"a" toObject:@"B"]>=0 || [text compareObject:@"A" toObject:@"a"]!=0;
+    // A second descriptor must resolve equal primary values.
+    id byLength=[NSSortDescriptor sortDescriptorWithKey:@"length" ascending:1];
+    NSArray *strings=[NSArray arrayWithObjects:@"bb",@"a",@"AA",0];
+    sorted=[strings sortedArrayUsingDescriptors:[NSArray arrayWithObjects:byLength,text,0]];
+    failures += ![[sorted objectAtIndex:0] isEqualToString:@"a"] || ![[sorted objectAtIndex:1] isEqualToString:@"AA"];
+    [score release];
+    printf("S5LBOX-HLE-SORT %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
 static unsigned foundation_compat_smoke(void) {
     UIScreen *screen=[UIScreen mainScreen];
     UIScreenMode *mode=[screen currentMode];
@@ -916,7 +979,7 @@ static unsigned foundation_compat_smoke(void) {
     [NSObject cancelPreviousPerformRequestsWithTarget:other];
     failures += [other retainCount]!=1;
     [target release]; [other release];
-    return failures+screenFailures+kvc_smoke();
+    return failures+screenFailures+kvc_smoke()+sort_smoke();
 }
 
 int main(int argc,char **argv) {

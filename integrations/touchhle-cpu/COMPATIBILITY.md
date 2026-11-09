@@ -56,7 +56,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Canabalt | 1.7 | Sustained run, jumping, restart and saved high score | Device build b065e116: offline install passes; missing NSOperationQueue prevents launch. |
 | Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Minigore | 7.0 | Movement and firing through sustained combat; restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
-| iCopter | 1.4 | Sustained flight, restart and saved high score | Desktop startup: missing NSSortDescriptor. |
+| iCopter | 1.4 | Sustained flight, restart and saved high score | Sort descriptors implemented and checked with ARMv6 tests. Desktop startup now reaches missing UIToolbar; gameplay remains blocked. |
 | Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
 | Tap Tap Revenge | 1.7 | Play a bundled song, timing/scoring and restart | Desktop startup: missing NSNetServiceBrowser. |
 | Trism | 1.4 | Complete a puzzle session and retain progress | Desktop startup: missing UIButton setTitleShadowColor:forState:. |
@@ -71,7 +71,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | --- | --- | --- |
 | Angry Birds | 1.0 | Build 3322b6fd: one menu load finished within 34 seconds, versus more than 56 seconds on 425e7f36 in the same offline profile. A repeat finished between 30 and 70 seconds. First level completed with score 7830; aiming and pause/resume respond. Relaunch preserves the star and unlocks level 2. Timings are observation bounds, not exact durations or a universal speedup. |
 | Super Monkey Ball Lite | 1.0 | Build 3322b6fd: title reached within 40 seconds; mode selection, level flyover and tilt-calibration screens respond. Physical calibration and stage completion remain unverified. One delayed close recovered without Force Close. This is separate from the full version above. |
-| Beer Pong U | 1.2 | Build 46f9c6f9: the oversized-read crash is fixed on the iPhone; Time Attack renders, its timer runs, and shot-style and quit controls respond. Landscape presentation verified with a local option override, now included in the defaults. Throwing, scoring and persistence remain under test. |
+| Beer Pong U | 1.2 | Build 46f9c6f9: the oversized-read crash is fixed on the iPhone; Time Attack and CPU Challenge render, and shot-style, help and quit controls respond. Relaunch works. Landscape presentation verified with a local option override, now included in the defaults. The game uses physical tilt to throw; throwing, scoring and saved results remain unverified. |
 
 ## Runtime changes under validation
 
@@ -199,3 +199,10 @@ The ARMv6 graphics fixture checks context switching, preserved framebuffer and
 renderbuffer bindings, unchanged pixels, and deleted-buffer handling. Normal
 fullscreen presentation retains its direct path. Cro-Mag's appearance needs a
 device retest.
+
+Sort descriptors now compare key paths or whole objects with a chosen selector,
+reverse ordering, and sort arrays by multiple keys. ARMv6 checks pass locally for
+numeric and case-insensitive comparisons, nested keys, nil values, copied keys,
+immutable results, ties, empty descriptor lists and reversed order. iCopter's
+desktop startup advances to the separate missing toolbar API. Block comparators
+and descriptor archiving are not implemented.

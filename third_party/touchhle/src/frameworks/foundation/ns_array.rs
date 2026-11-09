@@ -214,6 +214,14 @@ pub const CLASSES: ClassExports = objc_classes! {
     autorelease(env, array_imm)
 }
 
+- (id)sortedArrayUsingDescriptors:(id)descriptors {
+    let array: id = msg![env; this mutableCopy];
+    () = msg![env; array sortUsingDescriptors:descriptors];
+    let result: id = msg![env; array copy];
+    release(env, array);
+    autorelease(env, result)
+}
+
 - (NSUInteger)hash {
     // TODO: define better hash
     msg![env; this count]
@@ -623,6 +631,25 @@ pub const CLASSES: ClassExports = objc_classes! {
 
     let (env, _) = user_data;
     env.objc.borrow_mut::<ArrayHostObject>(this).array = array;
+}
+
+- (())sortUsingDescriptors:(id)descriptors {
+    // Copy the descriptor list and leave the original array visible while guest
+    // comparison methods run. No host-object borrow may span a guest callback.
+    let descriptors: id = msg![env; descriptors copy];
+    let count: NSUInteger = msg![env; descriptors count];
+    let descriptors_vec: Vec<id> = (0..count)
+        .map(|index| msg![env; descriptors objectAtIndex:index]).collect();
+    let mut array = env.objc.borrow::<ArrayHostObject>(this).array.clone();
+    array.sort_by(|left, right| {
+        for &descriptor in &descriptors_vec {
+            let result: NSComparisonResult = msg![env; descriptor compareObject:(*left) toObject:(*right)];
+            if result != 0 { return result.cmp(&0); }
+        }
+        std::cmp::Ordering::Equal
+    });
+    env.objc.borrow_mut::<ArrayHostObject>(this).array = array;
+    release(env, descriptors);
 }
 
 // NSFastEnumeration implementation
