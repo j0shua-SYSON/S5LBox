@@ -5,6 +5,7 @@
  */
 //! `UIImage`.
 
+use crate::dyld::{export_c_func, FunctionExports};
 use crate::frameworks::core_graphics::cg_context::CGContextDrawImage;
 use crate::frameworks::core_graphics::cg_image::{
     self, CGImageGetHeight, CGImageGetWidth, CGImageRef, CGImageRelease, CGImageRetain,
@@ -21,6 +22,31 @@ use crate::objc::{
 };
 use crate::Environment;
 use std::collections::HashMap;
+
+fn UIImagePNGRepresentation(env: &mut Environment, image: id) -> id {
+    if image == nil {
+        return nil;
+    }
+    let cg_image: CGImageRef = msg![env; image CGImage];
+    if cg_image == nil {
+        return nil;
+    }
+    let bytes = match cg_image::borrow_image(&env.objc, cg_image).to_png() {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            log!("Unable to encode image as PNG: {error}");
+            return nil;
+        }
+    };
+    let Ok(length) = u32::try_from(bytes.len()) else {
+        return nil;
+    };
+    let storage = env.mem.alloc(length);
+    env.mem.bytes_at_mut(storage.cast(), length).copy_from_slice(&bytes);
+    msg_class![env; NSData dataWithBytesNoCopy:storage length:length]
+}
+
+pub const FUNCTIONS: FunctionExports = &[export_c_func!(UIImagePNGRepresentation(_))];
 
 const CACHE_SIZE: usize = 60;
 

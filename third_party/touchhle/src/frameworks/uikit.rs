@@ -86,6 +86,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ui_application::FUNCTIONS,
         ui_geometry::FUNCTIONS,
         ui_graphics::FUNCTIONS,
+        ui_image::FUNCTIONS,
     ],
 };
 

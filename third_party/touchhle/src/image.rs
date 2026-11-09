@@ -105,6 +105,31 @@ impl Image {
         self.dimensions
     }
 
+    /// Encode ordinary PNG, whose RGB channels are not premultiplied by alpha.
+    /// Work on a copy so exporting never changes the image used for rendering.
+    pub fn to_png(&self) -> Result<Vec<u8>, png::EncodingError> {
+        let mut rgba = self.pixels().to_vec();
+        for pixel in rgba.chunks_exact_mut(4) {
+            let alpha = pixel[3] as u16;
+            for channel in &mut pixel[..3] {
+                *channel = if alpha == 0 {
+                    0
+                } else {
+                    ((*channel as u16 * 255 + alpha / 2) / alpha).min(255) as u8
+                };
+            }
+        }
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, self.dimensions.0, self.dimensions.1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&rgba)?;
+        writer.finish()?;
+        Ok(bytes)
+    }
+
     /// Get image data as bytes (8 bits per channel sRGB RGBA with premultiplied
     /// alpha). Rows are in top-to-bottom order.
     pub fn pixels(&self) -> &[u8] {
@@ -232,6 +257,34 @@ impl Drop for Image {
             PixelStore::StbImage(ptr) => unsafe { stbi_image_free(ptr.cast()) },
             PixelStore::Vec(_) => (),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn png_preserves_rows_and_unpremultiplies_alpha_without_mutating_source() {
+        let pixels = vec![255, 0, 0, 255, 64, 32, 0, 128, 0, 0, 0, 0, 1, 1, 1, 1];
+        let image = Image::from_pixel_vec(pixels.clone(), (2, 2));
+        let bytes = image.to_png().unwrap();
+        assert_eq!(image.pixels(), pixels);
+        let mut reader = png::Decoder::new(std::io::Cursor::new(&bytes)).read_info().unwrap();
+        let mut decoded = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut decoded).unwrap();
+        assert_eq!((info.width, info.height), (2, 2));
+        assert_eq!(info.color_type, png::ColorType::Rgba);
+        assert_eq!(decoded, [255, 0, 0, 255, 128, 64, 0, 128, 0, 0, 0, 0, 255, 255, 255, 1]);
+        // Also decode through the independent stb path used by guest apps.
+        let loaded = Image::from_bytes(&bytes).unwrap();
+        assert_eq!(loaded.dimensions(), (2, 2));
+        assert_eq!(loaded.pixels(), pixels);
+    }
+
+    #[test]
+    fn png_rejects_empty_image() {
+        assert!(Image::from_pixel_vec(Vec::new(), (0, 0)).to_png().is_err());
     }
 }
 

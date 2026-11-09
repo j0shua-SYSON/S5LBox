@@ -54,7 +54,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Edge | 1.62 | Complete a level, precise controls and saved progress | Device build 60bd8788: offline install passes; blank display persists beyond three minutes. |
 | Canabalt | 1.7 | Sustained run, jumping, restart and saved high score | Device build b065e116: offline install passes; missing NSOperationQueue prevents launch. |
-| Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Device build cf7c00bf: startup exhausts host memory and iOS terminates S5LBox. The scanner EOF fix ends the replacement loop on desktop. Main-thread lookup and selector dispatch then advance startup to missing UIImagePNGRepresentation. Gameplay and a device retest remain pending. |
+| Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Device build cf7c00bf: startup exhausts host memory and iOS terminates S5LBox. Scanner, thread dispatch, PNG export and nil dictionary-key fixes advance desktop startup to a stale default-file-manager reference during resource lookup. Its cause is under investigation. Gameplay and a device retest remain pending. |
 | Minigore | 7.0 | Movement and firing through sustained combat; restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | iCopter | 1.4 | Sustained flight, restart and saved high score | Device build cf7c00bf: transitions now complete; short flights render and touch holds/releases work. Collisions return to the title normally. Score 122 survives Home and relaunch. Longer play and frame pacing remain unverified. |
 | Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
@@ -317,3 +317,16 @@ worker-to-main and main-to-worker waiting, class targets and retained-object
 cleanup; the existing cancellation/exit suite also passes. Custom run-loop
 modes and dispatch to threads that have not started or have exited remain
 unsupported.
+
+UIImagePNGRepresentation encodes the existing CGImage pixels as ordinary PNG
+and returns autoreleased NSData. It converts premultiplied alpha without
+changing the source image. Rust and ARMv6 fixtures check round-trip pixels,
+transparency, row order, and nil/empty-image handling. The 71 active Rust unit
+tests pass; four pre-existing tests remain ignored. This covers the runtime's
+existing 8-bit RGBA image representation, not additional UIImage orientation
+or bitmap-format support.
+
+NSDictionary valueForKey: now forwards nil keys to objectForKey: without trying
+to convert nil into a host string. ARMv6 tests cover empty, populated and mutable
+dictionaries. Native Foundation on the iOS 15 test device also returns nil for
+the empty and populated cases; that reference is not an iPhone OS 3 measurement.

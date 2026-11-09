@@ -808,7 +808,10 @@ static unsigned cell_background_smoke(void) {
 @end
 @interface UIImage : NSObject
 + (id)imageWithCGImage:(void *)image;
++ (id)imageWithData:(id)data;
+- (void *)CGImage;
 @end
+extern NSData *UIImagePNGRepresentation(id image);
 @interface UIImageView : UIView
 - (id)initWithImage:(id)image;
 @end
@@ -1470,6 +1473,12 @@ static unsigned kvc_smoke(void) {
     object->_fraction=1.5f;
     object->_object=@"key";
     unsigned failures=[[object valueForKey:@"priority"] longValue]!=3;
+    NSDictionary *dictionary=[NSDictionary dictionaryWithObject:@"value" forKey:@"key"];
+    failures += [dictionary valueForKey:0]!=0 || [[NSDictionary dictionary] valueForKey:0]!=0;
+    failures += [dictionary valueForKey:@"missing"]!=0 || ![[dictionary valueForKey:@"key"] isEqualToString:@"value"];
+    id mutableDictionary=[dictionary mutableCopy];
+    failures += [mutableDictionary valueForKey:0]!=0 || ![[mutableDictionary valueForKey:@"key"] isEqualToString:@"value"];
+    [mutableDictionary release];
     failures += [[object valueForKey:@"count"] longValue]!=-42;
     failures += [[object valueForKey:@"tiny"] longValue]!=-7;
     failures += [[object valueForKey:@"wide"] longLongValue]!=-9000000000LL;
@@ -1653,6 +1662,39 @@ static unsigned scanner_string_smoke(void) {
     return failures;
 }
 
+extern void *CGImageGetDataProvider(void *image);
+extern unsigned CGImageGetWidth(void *image),CGImageGetHeight(void *image);
+static unsigned png_export_smoke(void) {
+    unsigned char pixels[]={255,0,0,255,64,32,0,128,0,0,0,0,1,1,1,1};
+    void *space=CGColorSpaceCreateDeviceRGB();
+    void *context=CGBitmapContextCreate(pixels,2,2,8,8,space,1);
+    void *cg=CGBitmapContextCreateImage(context);
+    UIImage *image=[UIImage imageWithCGImage:cg];
+    NSData *png=UIImagePNGRepresentation(image);
+    unsigned failures=!png || [png length]<8;
+    const unsigned char magic[]={137,80,78,71,13,10,26,10};
+    if (!failures) failures += memcmp([png bytes],magic,8)!=0;
+    UIImage *decoded=[UIImage imageWithData:png];
+    void *decodedCG=[decoded CGImage];
+    failures += !decodedCG || CGImageGetWidth(decodedCG)!=2 || CGImageGetHeight(decodedCG)!=2;
+    if (decodedCG) {
+        NSData *data=CGDataProviderCopyData(CGImageGetDataProvider(decodedCG));
+        failures += [data length]!=sizeof(pixels);
+        if ([data length]==sizeof(pixels)) failures += memcmp([data bytes],pixels,sizeof(pixels))!=0;
+        [data release];
+    }
+    NSData *source=CGDataProviderCopyData(CGImageGetDataProvider(cg));
+    failures += memcmp([source bytes],pixels,sizeof(pixels))!=0;
+    [source release];
+    failures += UIImagePNGRepresentation(0)!=0;
+    UIImage *empty=[[UIImage alloc] init];
+    failures += UIImagePNGRepresentation(empty)!=0;
+    [empty release];
+    CGImageRelease(cg); CGContextRelease(context); CGColorSpaceRelease(space);
+    printf("S5LBOX-HLE-PNG-EXPORT %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
+
 static unsigned thread_identity_smoke(void) {
     ThreadIdentityProbe *target=[[ThreadIdentityProbe alloc] init];
     NSThread *worker=[[NSThread alloc] initWithTarget:target selector:@selector(worker:) object:0];
@@ -1801,7 +1843,7 @@ static unsigned foundation_compat_smoke(void) {
     failures += [[basicCopy toValue] longValue]!=2 || [[basicCopy byValue] longValue]!=3;
     failures += ![[basicCopy keyPath] isEqualToString:@"opacity"];
     [basicCopy release]; failures += [from retainCount]!=1; [from release];
-    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke()+progress_view_smoke()+cell_background_smoke()+scanner_string_smoke()+thread_identity_smoke()+thread_dispatch_smoke();
+    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke()+progress_view_smoke()+cell_background_smoke()+scanner_string_smoke()+thread_identity_smoke()+thread_dispatch_smoke()+png_export_smoke();
 }
 
 int main(int argc,char **argv) {
