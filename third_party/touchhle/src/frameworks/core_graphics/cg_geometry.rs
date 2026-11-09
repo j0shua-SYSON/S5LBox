@@ -12,7 +12,10 @@ use std::ops::{Add, Mul, Sub};
 use super::CGFloat;
 use crate::abi::{impl_GuestRet_for_large_struct, GuestArg};
 use crate::dyld::{export_c_func, ConstantExports, FunctionExports, HostConstant};
-use crate::mem::SafeRead;
+use crate::frameworks::core_foundation::cf_dictionary::CFDictionaryRef;
+use crate::frameworks::foundation::{ns_dictionary, ns_string};
+use crate::mem::{MutPtr, SafeRead};
+use crate::objc::{id, msg, msg_class, nil, release, ObjC};
 use crate::Environment;
 
 fn parse_tuple(s: &str) -> Result<(f32, f32), ()> {
@@ -407,7 +410,109 @@ pub(super) fn CGRectIntegral(_env: &mut Environment, rect: CGRect) -> CGRect {
     }
 }
 
+// These dictionaries are property-list compatible and follow the CF Create
+// ownership rule. The flat, case-sensitive keys also work with saved native
+// geometry dictionaries (including negative dimensions).
+fn geometry_dictionary(
+    env: &mut Environment,
+    fields: &[(&'static str, CGFloat)],
+) -> CFDictionaryRef {
+    let fields: Vec<(id, id)> = fields
+        .iter()
+        .map(|&(key, value)| {
+            let key = ns_string::get_static_str(env, key);
+            let number: id = msg_class![env; NSNumber alloc];
+            let number = msg![env; number initWithFloat:value];
+            (key, number)
+        })
+        .collect();
+    let dictionary = ns_dictionary::dict_from_keys_and_objects(env, &fields);
+    for (_, number) in fields {
+        release(env, number);
+    }
+    dictionary
+}
+
+fn geometry_from_dictionary(
+    env: &mut Environment,
+    dictionary: CFDictionaryRef,
+    output: MutPtr<CGFloat>,
+    keys: &[&'static str],
+) -> bool {
+    if dictionary == nil || output.is_null() {
+        return false;
+    }
+    let number_class = env.objc.get_known_class("NSNumber", &mut env.mem);
+    for (index, &key) in keys.iter().enumerate() {
+        let key = ns_string::get_static_str(env, key);
+        let value: id = msg![env; dictionary objectForKey:key];
+        if value == nil {
+            return false;
+        }
+        assert!(
+            env.objc
+                .class_is_subclass_of(ObjC::read_isa(value, &env.mem), number_class),
+            "Core Graphics geometry dictionaries require numeric components"
+        );
+        let value: CGFloat = msg![env; value floatValue];
+        // Native decoding visits components in order; preceding fields may
+        // already have been written when a later key is missing.
+        env.mem.write(output + index as u32, value);
+    }
+    true
+}
+
+fn CGPointCreateDictionaryRepresentation(env: &mut Environment, point: CGPoint) -> CFDictionaryRef {
+    geometry_dictionary(env, &[("X", point.x), ("Y", point.y)])
+}
+
+fn CGSizeCreateDictionaryRepresentation(env: &mut Environment, size: CGSize) -> CFDictionaryRef {
+    geometry_dictionary(env, &[("Width", size.width), ("Height", size.height)])
+}
+
+fn CGRectCreateDictionaryRepresentation(env: &mut Environment, rect: CGRect) -> CFDictionaryRef {
+    geometry_dictionary(
+        env,
+        &[
+            ("X", rect.origin.x),
+            ("Y", rect.origin.y),
+            ("Width", rect.size.width),
+            ("Height", rect.size.height),
+        ],
+    )
+}
+
+fn CGPointMakeWithDictionaryRepresentation(
+    env: &mut Environment,
+    dictionary: CFDictionaryRef,
+    point: MutPtr<CGPoint>,
+) -> bool {
+    geometry_from_dictionary(env, dictionary, point.cast(), &["X", "Y"])
+}
+
+fn CGSizeMakeWithDictionaryRepresentation(
+    env: &mut Environment,
+    dictionary: CFDictionaryRef,
+    size: MutPtr<CGSize>,
+) -> bool {
+    geometry_from_dictionary(env, dictionary, size.cast(), &["Width", "Height"])
+}
+
+fn CGRectMakeWithDictionaryRepresentation(
+    env: &mut Environment,
+    dictionary: CFDictionaryRef,
+    rect: MutPtr<CGRect>,
+) -> bool {
+    geometry_from_dictionary(env, dictionary, rect.cast(), &["X", "Y", "Width", "Height"])
+}
+
 pub const FUNCTIONS: FunctionExports = &[
+    export_c_func!(CGPointCreateDictionaryRepresentation(_)),
+    export_c_func!(CGSizeCreateDictionaryRepresentation(_)),
+    export_c_func!(CGRectCreateDictionaryRepresentation(_)),
+    export_c_func!(CGPointMakeWithDictionaryRepresentation(_, _)),
+    export_c_func!(CGSizeMakeWithDictionaryRepresentation(_, _)),
+    export_c_func!(CGRectMakeWithDictionaryRepresentation(_, _)),
     export_c_func!(CGPointEqualToPoint(_, _)),
     export_c_func!(CGSizeEqualToSize(_, _)),
     export_c_func!(CGRectEqualToRect(_, _)),

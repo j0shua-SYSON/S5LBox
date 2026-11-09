@@ -27,7 +27,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Clock | 2.0.2 | Clock updates, settings and timer behavior | Device build 3ffc8cb7: passes key-value getters and setters, then fails on missing change-observer registration. |
 | Notes | 1.0 | Create, edit, delete and reopen a saved note | Desktop startup: missing WebPreferences. |
 | ToDo | 2.0 | Create, complete and edit tasks; relaunch persistence | Desktop startup: missing NSPersistentStoreCoordinator. |
-| SketchBook Mobile | 1.5 | Draw, undo, save and reopen a sketch | Rectangular redraw, sequential object/number archiving and NIB toolbar decoding pass ARMv6 checks. Desktop startup now reaches missing CGPointCreateDictionaryRepresentation. Drawing and persistence remain unverified. |
+| SketchBook Mobile | 1.5 | Draw, undo, save and reopen a sketch | Redraw, archives, NIB toolbars and geometry dictionaries pass ARMv6 checks. Desktop startup now reaches missing UINavigationController setNavigationBarHidden:animated:. Drawing and persistence remain unverified. |
 | Good Reader (large PDF viewer) - read big PDF files with reflow | 3.8.1 | Open a local document, navigate pages and remember position | Desktop startup: guest CPU memory fault; cause unconfirmed. |
 | Stanza | 3.2 | Open an offline book, turn pages and save position | Desktop startup: missing UITabBarController. |
 | Brushes - iPhone Edition | 2.2.2 | Draw, undo and reopen saved artwork | Desktop startup: missing CGImageMaskCreate. |
@@ -56,7 +56,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Canabalt | 1.7 | Sustained run, jumping, restart and saved high score | Device build b065e116: offline install passes; missing NSOperationQueue prevents launch. |
 | Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Minigore | 7.0 | Movement and firing through sustained combat; restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
-| iCopter | 1.4 | Sustained flight, restart and saved high score | Device build 1f8d4c8e: title and instructions work, but play-area input does not start the game. Its UIImageView overlay incorrectly receives touches by default. The passive-view correction passes ARMv6 checks; gameplay and saved scores need a device retest. |
+| iCopter | 1.4 | Sustained flight, restart and saved high score | Device build cc5d2bb6: title-screen input now reaches game-start code after fixing passive image-view input. It then fails on missing CATransition setSubtype:. Gameplay and saved scores remain unverified. |
 | Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
 | Tap Tap Revenge | 1.7 | Play a bundled song, timing/scoring and restart | Desktop startup: missing NSNetServiceBrowser. |
 | Trism | 1.4 | Complete a puzzle session and retain progress | Desktop startup: missing UIButton setTitleShadowColor:forState:. |
@@ -254,7 +254,8 @@ Programmatically initialized image views and labels now ignore touches by
 default, as UIKit specifies. Explicitly enabling interaction remains supported.
 An ARMv6 test verifies that an image-view subclass with empty touch handlers no
 longer blocks the underlying receiver, and that opting in restores hit testing.
-iCopter uses this overlay pattern; its physical-device retest remains pending.
+iCopter uses this overlay pattern. Device build cc5d2bb6 confirms that input now
+reaches game-start code, exposing missing CATransition subtype support.
 
 NIB toolbars now decode bar-item titles, images, enabled state, tags, styles,
 widths, system items and custom views, along with toolbar appearance and items.
@@ -263,3 +264,10 @@ retained references on destruction. ARMv6 checks cover decoding, layout,
 disabled actions, enabled actions and connection ownership. SketchBook advances
 to geometry dictionary serialization; this is startup progress, not a drawing
 or persistence pass.
+
+Core Graphics geometry dictionaries now serialize and restore points, sizes and
+rectangles with numeric components and CF Create ownership. Native iOS 15.8.5
+probes confirmed the flat key format and sequential decoding of missing fields;
+ARMv6 checks cover negative dimensions, ownership, archive round trips, mixed
+numeric values and incomplete dictionaries. SketchBook advances to navigation
+controller configuration. These checks do not establish its drawing support.

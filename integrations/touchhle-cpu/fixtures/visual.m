@@ -29,6 +29,12 @@ extern void object_setIvar(id,Ivar,id);
 typedef struct CGPoint { float x,y; } CGPoint;
 typedef struct CGSize { float width,height; } CGSize;
 typedef struct CGRect { CGPoint origin; CGSize size; } CGRect;
+extern id CGPointCreateDictionaryRepresentation(CGPoint);
+extern id CGSizeCreateDictionaryRepresentation(CGSize);
+extern id CGRectCreateDictionaryRepresentation(CGRect);
+extern _Bool CGPointMakeWithDictionaryRepresentation(id,CGPoint *);
+extern _Bool CGSizeMakeWithDictionaryRepresentation(id,CGSize *);
+extern _Bool CGRectMakeWithDictionaryRepresentation(id,CGRect *);
 @interface UIScreenMode
 - (CGSize)size;
 - (float)pixelAspectRatio;
@@ -1318,6 +1324,41 @@ static unsigned sort_smoke(void) {
     printf("S5LBOX-HLE-SORT %s failures=%u\n",failures?"FAIL":"PASS",failures);
     return failures;
 }
+static unsigned geometry_dictionary_smoke(void) {
+    unsigned failures=0;
+    NSAutoreleasePool *pool=[[NSAutoreleasePool alloc] init];
+    id point=CGPointCreateDictionaryRepresentation((CGPoint){1.25f,-2.5f});
+    id size=CGSizeCreateDictionaryRepresentation((CGSize){3.5f,-4.25f});
+    id rect=CGRectCreateDictionaryRepresentation((CGRect){{-12.5f,6.25f},{-3,4}});
+    [pool release];
+    failures += [point retainCount]!=1 || [size retainCount]!=1 || [rect retainCount]!=1;
+    failures += CFGetTypeID(point)!=CFDictionaryGetTypeID();
+    failures += CFGetTypeID([point objectForKey:@"X"])!=CFNumberGetTypeID();
+    failures += [[point objectForKey:@"X"] doubleValue]!=1.25 || [[point objectForKey:@"Y"] doubleValue]!=-2.5;
+    failures += [[size objectForKey:@"Width"] doubleValue]!=3.5 || [[size objectForKey:@"Height"] doubleValue]!=-4.25;
+    CGPoint p={0,0}; CGSize s={0,0}; CGRect r={{0,0},{0,0}};
+    failures += !CGPointMakeWithDictionaryRepresentation(point,&p) || p.x!=1.25f || p.y!=-2.5f;
+    failures += !CGSizeMakeWithDictionaryRepresentation(size,&s) || s.width!=3.5f || s.height!=-4.25f;
+    failures += !CGRectMakeWithDictionaryRepresentation(rect,&r) || r.origin.x!=-12.5f || r.origin.y!=6.25f || r.size.width!=-3 || r.size.height!=4;
+    // Saved geometry must remain usable after an archive round trip.
+    id data=[NSKeyedArchiver archivedDataWithRootObject:rect];
+    id decoded=[NSKeyedUnarchiver unarchiveObjectWithData:data];
+    failures += !CGRectMakeWithDictionaryRepresentation(decoded,&r) || r.origin.x!=-12.5f || r.size.width!=-3;
+    p=(CGPoint){77,88};
+    failures += CGPointMakeWithDictionaryRepresentation([NSDictionary dictionary],&p) || p.x!=77 || p.y!=88;
+    id onlyX=[NSDictionary dictionaryWithObject:[NSNumber numberWithInt:5] forKey:@"X"];
+    failures += CGPointMakeWithDictionaryRepresentation(onlyX,&p) || p.x!=5 || p.y!=88;
+    p=(CGPoint){77,88};
+    id onlyY=[NSDictionary dictionaryWithObject:[NSNumber numberWithInt:5] forKey:@"Y"];
+    failures += CGPointMakeWithDictionaryRepresentation(onlyY,&p) || p.x!=77 || p.y!=88;
+    id mixed=[NSDictionary dictionaryWithObjectsAndKeys:kCFBooleanTrue,@"X",
+        [NSNumber numberWithInt:-4],@"Y",@"ignored",@"extra",0];
+    failures += !CGPointMakeWithDictionaryRepresentation(mixed,&p) || p.x!=1 || p.y!=-4;
+    [point release]; [size release]; [rect release];
+    printf("S5LBOX-HLE-GEOMETRY-DICTIONARY %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
+
 static unsigned foundation_compat_smoke(void) {
     UIScreen *screen=[UIScreen mainScreen];
     UIScreenMode *mode=[screen currentMode];
@@ -1382,7 +1423,7 @@ static unsigned foundation_compat_smoke(void) {
     [NSObject cancelPreviousPerformRequestsWithTarget:other];
     failures += [other retainCount]!=1;
     [target release]; [other release];
-    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke();
+    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke();
 }
 
 int main(int argc,char **argv) {
