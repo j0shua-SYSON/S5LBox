@@ -640,8 +640,56 @@ static unsigned redraw_smoke(void) {
 @interface UITableViewCell : UIView
 - (id)initWithStyle:(int)style reuseIdentifier:(id)identifier;
 - (id)textLabel;
+- (id)contentView;
+- (id)backgroundView;
+- (id)selectedBackgroundView;
+- (void)setBackgroundView:(id)view;
+- (void)setSelectedBackgroundView:(id)view;
+- (void)setSelected:(BOOL)selected;
+- (void)setHighlighted:(BOOL)highlighted;
+- (void)setSelectionStyle:(int)style;
+- (void)prepareForReuse;
 - (BOOL)isSelected;
 @end
+static unsigned cell_background_smoke(void) {
+    unsigned failures=0;
+    id pool=[[NSAutoreleasePool alloc] init];
+    UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:0 reuseIdentifier:@"background"];
+    UIView *back=[[UIView alloc] initWithFrame:(CGRect){{0,0},{10,10}}];
+    UIView *selected=[[UIView alloc] initWithFrame:(CGRect){{0,0},{10,10}}];
+    failures += [cell backgroundView]!=0 || [cell selectedBackgroundView]!=0;
+    [cell setBackgroundView:back]; [cell setSelectedBackgroundView:selected];
+    failures += [cell backgroundView]!=back || [back superview]!=cell;
+    failures += [cell selectedBackgroundView]!=selected || [selected superview]!=0;
+    unsigned refs=[back retainCount]; [cell setBackgroundView:back];
+    failures += [back retainCount]!=refs;
+    [cell setSelected:1]; failures += [selected superview]!=cell;
+    NSArray *children=[cell subviews];
+    failures += [children objectAtIndex:0]!=back;
+    unsigned contentIndex=0,selectedIndex=0;
+    for(unsigned i=0;i<[children count];i++) {
+        if([children objectAtIndex:i]==[cell contentView])contentIndex=i;
+        if([children objectAtIndex:i]==selected)selectedIndex=i;
+    }
+    failures += !selectedIndex || selectedIndex>=contentIndex;
+    [cell setFrame:(CGRect){{0,0},{180,60}}]; [cell layoutSubviews];
+    CGRect frame=[back frame]; failures += frame.size.width!=180 || frame.size.height!=60;
+    frame=[selected frame]; failures += frame.size.width!=180 || frame.size.height!=60;
+    [cell setSelected:0]; failures += [selected superview]!=0;
+    [cell setHighlighted:1]; failures += [selected superview]!=cell;
+    [cell setSelectionStyle:0]; failures += [selected superview]!=0;
+    [cell setSelectionStyle:1]; failures += [selected superview]!=cell;
+    [cell prepareForReuse]; failures += [selected superview]!=0 || [cell isSelected];
+    [cell setBackgroundView:0]; failures += [back superview]!=0 || [cell backgroundView]!=0;
+    [cell setSelected:1]; [cell setSelectedBackgroundView:back];
+    failures += [selected superview]!=0 || [back superview]!=cell;
+    [pool release];
+    [cell release];
+    failures += [back retainCount]!=1 || [selected retainCount]!=1 || [back superview]!=0;
+    [back release]; [selected release];
+    printf("S5LBOX-HLE-CELL-BACKGROUND %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
 @interface UITableView : UIView
 - (id)initWithFrame:(CGRect)frame style:(int)style;
 - (void)setDataSource:(id)source;
@@ -1601,7 +1649,7 @@ static unsigned foundation_compat_smoke(void) {
     failures += [[basicCopy toValue] longValue]!=2 || [[basicCopy byValue] longValue]!=3;
     failures += ![[basicCopy keyPath] isEqualToString:@"opacity"];
     [basicCopy release]; failures += [from retainCount]!=1; [from release];
-    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke()+progress_view_smoke();
+    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke()+progress_view_smoke()+cell_background_smoke();
 }
 
 int main(int argc,char **argv) {

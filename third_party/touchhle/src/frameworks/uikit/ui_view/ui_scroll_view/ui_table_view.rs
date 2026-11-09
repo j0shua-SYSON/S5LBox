@@ -81,6 +81,8 @@ struct Cell {
     detail: id,
     image: id,
     selection: id,
+    background: id, // retained independently of the view hierarchy
+    selected_background: id, // retained even while deselected
     separator: id, // subviews
     selected: bool,
     highlighted: bool,
@@ -117,6 +119,21 @@ fn child(env: &mut Environment, parent: id, class: &str) -> id {
     () = msg![env; parent addSubview:view];
     release(env, view);
     view
+}
+
+fn update_cell_selection(env: &mut Environment, cell: id) {
+    let c = env.objc.borrow::<Cell>(cell);
+    let (selection, custom, content, visible) = (c.selection, c.selected_background,
+        c.content, c.selection_style != 0 && (c.selected || c.highlighted));
+    () = msg![env; selection setHidden:(!visible || custom != nil)];
+    if custom != nil {
+        if visible {
+            let parent: id = msg![env; custom superview];
+            if parent != cell { () = msg![env; cell insertSubview:custom belowSubview:content]; }
+            let bounds: CGRect = msg![env; cell bounds];
+            () = msg![env; custom setFrame:bounds];
+        } else { () = msg![env; custom removeFromSuperview]; }
+    }
 }
 
 fn recycle(env: &mut Environment, table: id, cell: id) {
@@ -522,7 +539,11 @@ pub const CLASSES: ClassExports = objc_classes! {
     let detail = child(env, content, "UILabel");
     let image = child(env, content, "UIImageView");
     let separator = child(env, this, "UIView");
-    for label in [text, detail] { () = msg![env; label setOpaque:false]; }
+    let clear: id = msg_class![env; UIColor clearColor];
+    for label in [text, detail] {
+        () = msg![env; label setOpaque:false];
+        () = msg![env; label setBackgroundColor:clear];
+    }
     let font: id = msg_class![env; UIFont systemFontOfSize:14.0f32];
     () = msg![env; detail setFont:font];
     let gray: id = msg_class![env; UIColor grayColor];
@@ -534,6 +555,29 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 - (id)reuseIdentifier { env.objc.borrow::<Cell>(this).identifier }
 - (id)contentView { env.objc.borrow::<Cell>(this).content }
+- (id)backgroundView { env.objc.borrow::<Cell>(this).background }
+- (())setBackgroundView:(id)view {
+    let old = env.objc.borrow::<Cell>(this).background;
+    if old == view { return; }
+    assert!(view != this);
+    retain(env, view);
+    env.objc.borrow_mut::<Cell>(this).background = view;
+    () = msg![env; old removeFromSuperview];
+    release(env, old);
+    if view != nil { () = msg![env; this insertSubview:view atIndex:0i32]; }
+    () = msg![env; this layoutSubviews];
+}
+- (id)selectedBackgroundView { env.objc.borrow::<Cell>(this).selected_background }
+- (())setSelectedBackgroundView:(id)view {
+    let old = env.objc.borrow::<Cell>(this).selected_background;
+    if old == view { return; }
+    assert!(view != this);
+    retain(env, view);
+    env.objc.borrow_mut::<Cell>(this).selected_background = view;
+    () = msg![env; old removeFromSuperview];
+    release(env, old);
+    update_cell_selection(env, this);
+}
 - (id)textLabel { env.objc.borrow::<Cell>(this).text }
 - (id)detailTextLabel { if env.objc.borrow::<Cell>(this).style == 0 { nil } else { env.objc.borrow::<Cell>(this).detail } }
 - (id)imageView { env.objc.borrow::<Cell>(this).image }
@@ -547,9 +591,8 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (bool)isSelected { env.objc.borrow::<Cell>(this).selected }
 - (())setSelected:(bool)selected { () = msg![env; this setSelected:selected animated:false]; }
 - (())setSelected:(bool)selected animated:(bool)_animated {
-    let c = env.objc.borrow_mut::<Cell>(this); c.selected = selected;
-    let (view, hidden) = (c.selection, c.selection_style == 0 || !(c.selected || c.highlighted));
-    () = msg![env; view setHidden:hidden];
+    env.objc.borrow_mut::<Cell>(this).selected = selected;
+    update_cell_selection(env, this);
 }
 - (bool)isHighlighted { env.objc.borrow::<Cell>(this).highlighted }
 - (())setHighlighted:(bool)highlighted { () = msg![env; this setHighlighted:highlighted animated:false]; }
@@ -570,11 +613,13 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 - (())layoutSubviews {
     let c = env.objc.borrow::<Cell>(this);
-    let (content, text, detail, image, selection, separator, style) = (c.content, c.text, c.detail, c.image, c.selection, c.separator, c.style);
+    let (content, text, detail, image, selection, separator, style, background, selected_background) = (c.content, c.text, c.detail, c.image, c.selection, c.separator, c.style, c.background, c.selected_background);
     if content == nil { return; }
     let bounds: CGRect = msg![env; this bounds];
     () = msg![env; content setFrame:bounds];
     () = msg![env; selection setFrame:bounds];
+    () = msg![env; background setFrame:bounds];
+    () = msg![env; selected_background setFrame:bounds];
     () = msg![env; separator setFrame:(rect((bounds.size.height - 1.0).max(0.0), bounds.size.width, 1.0))];
     let picture: id = msg![env; image image];
     let edge = if picture == nil { 0.0 } else { bounds.size.height.min(40.0) };
@@ -591,8 +636,11 @@ pub const CLASSES: ClassExports = objc_classes! {
     () = msg![env; detail setHidden:(style == 0)];
 }
 - (())dealloc {
-    let identifier = env.objc.borrow::<Cell>(this).identifier;
+    let c = env.objc.borrow::<Cell>(this);
+    let (identifier, background, selected_background) = (c.identifier, c.background, c.selected_background);
     release(env, identifier);
+    release(env, background);
+    release(env, selected_background);
     () = msg_super![env; this dealloc];
 }
 @end

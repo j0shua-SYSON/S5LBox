@@ -60,7 +60,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
 | Tap Tap Revenge | 1.7 | Play a bundled song, timing/scoring and restart | Desktop startup: missing NSNetServiceBrowser. |
 | Trism | 1.4 | Complete a puzzle session and retain progress | Desktop startup: missing UIButton setTitleShadowColor:forState:. |
-| Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | The transition renderer no longer takes the basic-animation path. Desktop startup runs for 30 seconds without the previous crash. NIB controls, rendering and gameplay still need device verification. |
+| Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Device build cf7c00bf: animated title renders; tapping through reaches missing UITableViewCell setBackgroundView:. Cell backgrounds now pass ARMv6 layout, selection and ownership checks; the menu and gameplay need a device retest. |
 | Chopper | 1.3.1 | Complete a mission, steer/fire and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | SPACE DEADBEEF | 1.01 | Sustained gameplay, firing, pause/resume and restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build 23a5d292: orientation corrected, first two levels completed, platform drawing and jumping work. First-level completion time survives relaunch and app reinstall; longer play remains untested. |
@@ -71,7 +71,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | --- | --- | --- |
 | Angry Birds | 1.0 | Build 3322b6fd: one menu load finished within 34 seconds, versus more than 56 seconds on 425e7f36 in the same offline profile. A repeat finished between 30 and 70 seconds. First level completed with score 7830; aiming and pause/resume respond. Relaunch preserves the star and unlocks level 2. Timings are observation bounds, not exact durations or a universal speedup. |
 | Super Monkey Ball Lite | 1.0 | Build 3322b6fd: title reached within 40 seconds; mode selection, level flyover and tilt-calibration screens respond. Physical calibration and stage completion remain unverified. One delayed close recovered without Force Close. This is separate from the full version above. |
-| Beer Pong U | 1.2 | Build 46f9c6f9: the oversized-read crash is fixed on the iPhone; Time Attack and CPU Challenge render, and shot-style, help and quit controls respond. Relaunch works. Build 6fde244b confirms landscape presentation with no local override. The game uses physical tilt to throw; throwing, scoring and saved results remain unverified. |
+| Beer Pong U | 1.2 | Build 46f9c6f9: the oversized-read crash is fixed on the iPhone; Time Attack and CPU Challenge render, and shot-style, help and quit controls respond. Relaunch works. Build 6fde244b confirms landscape presentation with no local override. Build cf7c00bf again passes Time Attack rendering, advancing timer, Lob selection and quit-to-menu. The game uses physical tilt to throw; throwing, scoring and saved results remain unverified. |
 
 ## Runtime changes under validation
 
@@ -294,3 +294,10 @@ range, and draw default/bar tracks that update when progress decreases or the
 view resizes. ARMv6 checks cover properties, missing archive keys and actual
 empty/partial/full track pixels. Shading approximates the legacy controls;
 pixel-identical UIKit assets and newer animated progress APIs are not provided.
+
+Table cells retain normal and selected background views, keep them behind the
+content, and size them during layout. Selected backgrounds enter and leave the
+hierarchy with selection/highlighting; reuse clears those states. ARMv6 checks
+cover replacement, nil, self-assignment, layering, resizing and retained-view
+cleanup. These changes address Aqua Forest's observed menu-construction failure;
+selection fades and complete legacy cell styling remain unimplemented.
