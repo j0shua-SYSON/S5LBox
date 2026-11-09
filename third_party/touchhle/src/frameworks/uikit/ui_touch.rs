@@ -8,7 +8,6 @@
 use super::ui_event;
 use crate::frameworks::core_graphics::{CGPoint, CGRect};
 use crate::frameworks::foundation::{NSInteger, NSTimeInterval, NSUInteger};
-use crate::mem::MutVoidPtr;
 use crate::objc::{
     autorelease, id, msg, msg_class, nil, objc_classes, release, retain, ClassExports, HostObject,
     NSZonePtr,
@@ -126,6 +125,21 @@ pub fn handle_event(env: &mut Environment, event: Event) {
 }
 
 fn handle_touches_down(env: &mut Environment, map: HashMap<FingerId, Coords>) {
+    // A duplicate down is a movement. Handle it before creating this event's
+    // autorelease pool, and preserve any genuinely new fingers in the batch.
+    let (moves, map): (HashMap<_, _>, HashMap<_, _>) = map.into_iter().partition(|(finger, _)| {
+        env.framework_state
+            .uikit
+            .ui_touch
+            .current_touches
+            .contains_key(finger)
+    });
+    if !moves.is_empty() {
+        handle_touches_move(env, moves);
+    }
+    if map.is_empty() {
+        return;
+    }
     // UIKit creates and drains autorelease pools when handling events.
     let pool: id = msg_class![env; NSAutoreleasePool new];
 
@@ -138,21 +152,9 @@ fn handle_touches_down(env: &mut Environment, map: HashMap<FingerId, Coords>) {
         msg![env; process_info systemUptime]
     };
 
-    let touches: id = msg_class![env; NSMutableSet allocWithZone:(MutVoidPtr::null())];
+    let touches: id = msg_class![env; NSMutableSet set];
 
     for (finger_id, coords) in map {
-        let current_touches = &mut env.framework_state.uikit.ui_touch.current_touches;
-
-        if current_touches.contains_key(&finger_id) {
-            // this seems to happen only on the desktop with a single touch
-            assert_eq!(current_touches.len(), 1);
-            log!(
-                "Warning: New touch {:?} initiated but current touch did not end yet, treating as movement.",
-                finger_id
-            );
-            return handle_touches_move(env, HashMap::from([(finger_id, coords)]));
-        }
-
         log_dbg!("Finger {:?} touch down: {:?}", finger_id, coords);
 
         let location = CGPoint {
@@ -185,7 +187,7 @@ fn handle_touches_down(env: &mut Environment, map: HashMap<FingerId, Coords>) {
         retain(env, new_touch);
     }
 
-    let all_touches: id = msg_class![env; NSMutableSet allocWithZone:(MutVoidPtr::null())];
+    let all_touches: id = msg_class![env; NSMutableSet set];
     for &touch in env
         .framework_state
         .uikit
@@ -223,6 +225,9 @@ fn handle_touches_down(env: &mut Environment, map: HashMap<FingerId, Coords>) {
         // TODO: this may not be correct once we support windowLevel.
         let windows = env.framework_state.uikit.ui_view.ui_window.windows.clone();
         let Some((window, location_in_window)) = windows.into_iter().rev().find_map(|window| {
+            if msg![env; window isHidden] {
+                return None;
+            }
             let location_in_window: CGPoint =
                 msg![env; window convertPoint:location fromWindow:nil];
             if msg![env; window pointInside:location_in_window withEvent:event] {
@@ -289,7 +294,7 @@ fn handle_touches_down(env: &mut Environment, map: HashMap<FingerId, Coords>) {
         // Only create the set after the isMultipleTouchEnabled checks so we
         // won't end up with an empty set.
         if let Entry::Vacant(e) = view_touches.entry(view) {
-            let touches: id = msg_class![env; NSMutableSet allocWithZone:(MutVoidPtr::null())];
+            let touches: id = msg_class![env; NSMutableSet set];
             e.insert(touches);
         }
         let touches: id = *view_touches.get(&view).unwrap();
@@ -324,8 +329,6 @@ fn handle_touches_move(env: &mut Environment, map: HashMap<FingerId, Coords>) {
         let process_info = msg_class![env; NSProcessInfo processInfo];
         msg![env; process_info systemUptime]
     };
-
-    let touches: id = msg_class![env; NSMutableSet allocWithZone:(MutVoidPtr::null())];
 
     // view to set of touches for this view
     let mut view_touches: HashMap<id, id> = HashMap::new();
@@ -365,17 +368,15 @@ fn handle_touches_move(env: &mut Environment, map: HashMap<FingerId, Coords>) {
         assert_eq!(host_object.phase, UITouchPhaseStationary);
         host_object.phase = UITouchPhaseMoved;
 
-        let _: () = msg![env; touches addObject:touch];
-
         if let Entry::Vacant(e) = view_touches.entry(view) {
-            let touches: id = msg_class![env; NSMutableSet allocWithZone:(MutVoidPtr::null())];
+            let touches: id = msg_class![env; NSMutableSet set];
             e.insert(touches);
         }
         let touches: id = *view_touches.get(&view).unwrap();
         let _: () = msg![env; touches addObject:touch];
     }
 
-    let all_touches: id = msg_class![env; NSMutableSet allocWithZone:(MutVoidPtr::null())];
+    let all_touches: id = msg_class![env; NSMutableSet set];
     for &touch in env
         .framework_state
         .uikit
@@ -411,11 +412,9 @@ fn handle_touches_up(env: &mut Environment, map: HashMap<FingerId, Coords>, canc
         msg![env; process_info systemUptime]
     };
 
-    let touches: id = msg_class![env; NSMutableSet allocWithZone:(MutVoidPtr::null())];
-
     // We need to construct all touches set _BEFORE_ removing touches!
     // (as removed one are reported as the part of the event)
-    let all_touches: id = msg_class![env; NSMutableSet allocWithZone:(MutVoidPtr::null())];
+    let all_touches: id = msg_class![env; NSMutableSet set];
     for &touch in env
         .framework_state
         .uikit
@@ -464,10 +463,8 @@ fn handle_touches_up(env: &mut Environment, map: HashMap<FingerId, Coords>, canc
             UITouchPhaseEnded
         };
 
-        let _: () = msg![env; touches addObject:touch];
-
         if let Entry::Vacant(e) = view_touches.entry(view) {
-            let touches: id = msg_class![env; NSMutableSet allocWithZone:(MutVoidPtr::null())];
+            let touches: id = msg_class![env; NSMutableSet set];
             e.insert(touches);
         }
         let touches: id = *view_touches.get(&view).unwrap();
@@ -500,4 +497,97 @@ fn handle_touches_up(env: &mut Environment, map: HashMap<FingerId, Coords>, canc
     }
 
     release(env, pool);
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use crate::{bundle::Bundle, fs::BundleData, options::Options};
+
+    #[test]
+    #[ignore = "requires the compiled ARM fixture in TOUCHHLE_TEST_APP"]
+    fn repeated_input_releases_events_sets_and_views() {
+        let path = std::env::var_os("TOUCHHLE_TEST_APP").expect("fixture path");
+        let data = BundleData::open_any(std::path::Path::new(&path)).unwrap();
+        let (bundle, fs) = Bundle::new_bundle_and_fs_from_host_path(data, true).unwrap();
+        let options = Options {
+            headless: true,
+            ..Default::default()
+        };
+        let env = &mut Environment::new(bundle, fs, options, vec![]).unwrap();
+        // We call host framework methods without entering the guest's crt1.
+        env.cpu.regs_mut()[crate::cpu::Cpu::SP] = 0xfffffff0;
+        let pool: id = msg_class![env; NSAutoreleasePool new];
+        let bounds = CGRect {
+            origin: CGPoint { x: 0.0, y: 0.0 },
+            size: crate::frameworks::core_graphics::CGSize {
+                width: 320.0,
+                height: 480.0,
+            },
+        };
+        let window: id = msg_class![env; UIWindow alloc];
+        let window: id = msg![env; window initWithFrame:bounds];
+        let control: id = msg_class![env; UIControl alloc];
+        let control: id = msg![env; control initWithFrame:bounds];
+        () = msg![env; window addSubview:control];
+        () = msg![env; window makeKeyAndVisible];
+        // A hidden window must not intercept events intended for the visible one.
+        let hidden: id = msg_class![env; UIWindow alloc];
+        let hidden: id = msg![env; hidden initWithFrame:bounds];
+        let baseline: NSUInteger = msg![env; control retainCount];
+        let finger = FingerId::Touch(1);
+        for index in 0..200 {
+            handle_event(
+                env,
+                Event::TouchesDown(HashMap::from([(finger, (32.0, 32.0))])),
+            );
+            let touch = env.framework_state.uikit.ui_touch.current_touches[&finger];
+            assert_eq!(env.objc.borrow::<UITouchHostObject>(touch).view, control);
+            let initial_count: NSUInteger = msg![env; touch retainCount];
+            let event_pool: id = msg_class![env; NSAutoreleasePool new];
+            let set: id = msg_class![env; NSSet setWithObject:touch];
+            let event = ui_event::new_event(env, set);
+            autorelease(env, event);
+            let filtered: id = msg![env; event touchesForView:control];
+            let count: NSUInteger = msg![env; filtered count];
+            assert_eq!(count, 1);
+            release(env, event_pool);
+            assert!(!env.objc.is_live_object(event));
+            let final_count: NSUInteger = msg![env; touch retainCount];
+            assert_eq!(final_count, initial_count);
+            // Duplicate presses and regular moves must have balanced pools too.
+            handle_event(
+                env,
+                Event::TouchesDown(HashMap::from([(finger, (35.0, 32.0))])),
+            );
+            handle_event(
+                env,
+                Event::TouchesMove(HashMap::from([(finger, (40.0, 35.0))])),
+            );
+            let touches = HashMap::from([(finger, (40.0, 35.0))]);
+            handle_event(
+                env,
+                if index % 2 == 0 {
+                    Event::TouchesUp(touches)
+                } else {
+                    Event::TouchesCancel(touches)
+                },
+            );
+            assert!(env
+                .framework_state
+                .uikit
+                .ui_touch
+                .current_touches
+                .is_empty());
+            let count: NSUInteger = msg![env; control retainCount];
+            assert_eq!(
+                count, baseline,
+                "touch retained its view after cycle {index}"
+            );
+        }
+        release(env, hidden);
+        release(env, window);
+        release(env, control);
+        release(env, pool);
+    }
 }

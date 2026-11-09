@@ -338,6 +338,11 @@ impl super::ObjC {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn is_live_object(&self, object: id) -> bool {
+        self.objects.contains_key(&object)
+    }
+
     /// Deallocate an object. Do not call this directly unless you're
     /// implementing `dealloc` and are sure you don't need to do a super-call.
     pub fn dealloc_object(&mut self, object: id, mem: &mut Mem) {

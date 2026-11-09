@@ -283,6 +283,13 @@ jobs:
           $python=(Get-Command python3).Source
           ./tools/build_guest_hle.ps1 -Clang $clang -SDK work/hle-sdk/common-3.0.sdk -BuildDirectory (Join-Path $PWD 'work/hle-guest-package') -Python $python
 
+      - name: Verify repeated input releases event resources
+        working-directory: third_party/touchhle
+        env:
+          TOUCHHLE_TEST_APP: ../../work/hle-smoke/InterpreterSmoke.app
+          ALSOFT_DRIVERS: 'null'
+        run: cargo +stable test --locked --lib ownership_tests::repeated_input -- --ignored --test-threads=1
+
       - name: Preserve the guest launch-guard package
         uses: actions/upload-artifact@v4
         with:

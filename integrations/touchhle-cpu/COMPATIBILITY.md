@@ -164,3 +164,8 @@ unsupported; Cro-Mag Rally's pause menu still needs a device retest.
 Bundle enumeration includes the main bundle and instantiated resource bundles,
 excludes frameworks, and returns an independent array. The ARMv6 resource and
 ownership fixture passes locally; Merriam-Webster still needs other APIs.
+
+Repeated input now releases temporary touch sets and event objects, including
+duplicate presses and cancelled drags. Hidden windows no longer intercept
+touches. A local 200-cycle ownership test checks event destruction and stable
+view reference counts; physical-device sustained-use checks remain pending.
