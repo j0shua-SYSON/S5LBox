@@ -50,13 +50,13 @@ they establish the next failure or a 25-second observation, not functionality.
 | Labyrinth | 1.9.1 | Tilt through a maze, calibrate and restart | Desktop startup: missing UINavigationController setNavigationBarHidden:animated:. |
 | Cro-Mag Rally | 3.0.3 | Complete a race, pause/resume and retain settings | Device build 1f8d4c8e: race renders; pause labels are upright and the paused frame remains visible. Resume works after the delegate lifetime fix; a second pause and End Game return to the main menu. Tilt steering, race completion, sustained play and persistence remain unverified. |
 | R.Thunder | 1.0 | Complete a race; responsive steering and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
-| Enigmo | 4.1 | Solve a level, manipulate tools and reopen saved progress | Toolbar class implemented; desktop startup now reaches missing UIProgressView during NIB loading. Functionality remains unverified. |
+| Enigmo | 4.1 | Solve a level, manipulate tools and reopen saved progress | NIB progress views now decode and draw; ARMv6 state and pixel checks pass. Desktop startup advances to missing UIPickerView dataSource support. Functionality remains unverified. |
 | Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Edge | 1.62 | Complete a level, precise controls and saved progress | Device build 60bd8788: offline install passes; blank display persists beyond three minutes. |
 | Canabalt | 1.7 | Sustained run, jumping, restart and saved high score | Device build b065e116: offline install passes; missing NSOperationQueue prevents launch. |
 | Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Minigore | 7.0 | Movement and firing through sustained combat; restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
-| iCopter | 1.4 | Sustained flight, restart and saved high score | Device build cc5d2bb6: title-screen input now reaches game-start code after fixing passive image-view input. It then fails on missing CATransition setSubtype:. Gameplay and saved scores remain unverified. |
+| iCopter | 1.4 | Sustained flight, restart and saved high score | Device build cf7c00bf: transitions now complete; short flights render and touch holds/releases work. Collisions return to the title normally. Score 122 survives Home and relaunch. Longer play and frame pacing remain unverified. |
 | Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
 | Tap Tap Revenge | 1.7 | Play a bundled song, timing/scoring and restart | Desktop startup: missing NSNetServiceBrowser. |
 | Trism | 1.4 | Complete a puzzle session and retain progress | Desktop startup: missing UIButton setTitleShadowColor:forState:. |
@@ -279,10 +279,18 @@ changes. It releases unused textures after those trees are no longer referenced.
 An ARMv6 desktop visual fixture completes push, move-in, reveal and fade, then
 checks cancellation; completion callbacks remove and replace their own animation.
 Foundation checks also cover copied properties and retained-value ownership.
-iCopter's gameplay retest on the iPhone is still pending.
+iCopter's iPhone retest on cf7c00bf reaches flight and restart; a high score of
+122 survives Home and relaunch. This is short interaction and persistence
+coverage, not a sustained-play or frame-pacing measurement.
 
 Transition visuals are not pixel-identical to Core Animation: translucent
 subtrees use per-layer alpha, arbitrary rotations use rectangular clip bounds,
 and the direct fullscreen OpenGL path does not supply an outgoing cached tree.
 Opaque, compositor-rendered scenes have the outgoing texture available. Custom
 transition filters and keyframe animation rendering remain unsupported.
+
+Progress views now decode their NIB state, clamp progress to the documented
+range, and draw default/bar tracks that update when progress decreases or the
+view resizes. ARMv6 checks cover properties, missing archive keys and actual
+empty/partial/full track pixels. Shading approximates the legacy controls;
+pixel-identical UIKit assets and newer animated progress APIs are not provided.

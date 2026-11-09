@@ -905,6 +905,60 @@ extern void *CGBitmapContextCreate(void *data,unsigned width,unsigned height,uns
 extern void *CGBitmapContextCreateImage(void *context);
 extern void CGContextRelease(void *context);
 extern void CGImageRelease(void *image);
+extern void UIGraphicsPushContext(void *context);
+extern void UIGraphicsPopContext(void);
+@interface UIProgressView : UIView
+- (id)initWithCoder:(id)coder;
+- (BOOL)isHidden;
+- (id)initWithProgressViewStyle:(int)style;
+- (float)progress;
+- (void)setProgress:(float)progress;
+- (int)progressViewStyle;
+- (void)setProgressViewStyle:(int)style;
+- (CGSize)sizeThatFits:(CGSize)size;
+- (void)drawRect:(CGRect)rect;
+@end
+static unsigned progress_view_smoke(void) {
+    unsigned failures=0;
+    UIProgressView *view=[[UIProgressView alloc] initWithFrame:(CGRect){{0,0},{100,9}}];
+    failures += [view progress]!=0 || [view progressViewStyle]!=0 || [view isUserInteractionEnabled];
+    [view setProgress:-0.5f]; failures += [view progress]!=0;
+    [view setProgress:2.0f]; failures += [view progress]!=1;
+    [view setProgress:0.5f]; failures += [view progress]!=0.5f;
+    CGSize size=[view sizeThatFits:(CGSize){210,40}]; failures += size.width!=210 || size.height<=0;
+    // Check actual pixels across an empty, half-filled and full track. Drawing
+    // must replace old progress when moving backwards, and survive resizing.
+    unsigned char pixels[100*9*4];
+    void *space=CGColorSpaceCreateDeviceRGB();
+    void *context=CGBitmapContextCreate(pixels,100,9,8,400,space,1);
+    UIGraphicsPushContext(context);
+    memset(pixels,0,sizeof(pixels));
+    [view drawRect:(CGRect){{0,0},{100,9}}];
+    unsigned char *left=pixels+(4*100+20)*4, *right=pixels+(4*100+80)*4;
+    failures += left[2]<=left[0] || right[0]!=right[2] || left[3]!=255 || right[3]!=255;
+    [view setProgress:1]; [view drawRect:(CGRect){{0,0},{100,9}}];
+    failures += right[2]<=right[0];
+    [view setProgress:0]; [view drawRect:(CGRect){{0,0},{100,9}}];
+    failures += left[0]!=left[2];
+    [view setFrame:(CGRect){{0,0},{50,9}}]; [view setProgress:0.5f];
+    memset(pixels,0,sizeof(pixels)); [view drawRect:(CGRect){{0,0},{50,9}}];
+    failures += left[2]<=left[0] || right[3]!=0;
+    UIGraphicsPopContext(); CGContextRelease(context); CGColorSpaceRelease(space); [view release];
+    view=[[UIProgressView alloc] initWithProgressViewStyle:1];
+    failures += [view progressViewStyle]!=1 || [view progress]!=0;
+    [view release];
+    ToolbarArchive *coder=[[ToolbarArchive alloc] init];
+    coder->values=[NSDictionary dictionaryWithObjectsAndKeys:[NSNumber numberWithFloat:0.75f],@"UIProgress",
+        [NSNumber numberWithInt:1],@"UIProgressViewStyle",[NSNumber numberWithBool:1],@"UIHidden",0];
+    view=[[UIProgressView alloc] initWithCoder:coder];
+    failures += [view progress]!=0.75f || [view progressViewStyle]!=1 || ![view isHidden];
+    [view release];
+    coder->values=[NSDictionary dictionary]; view=[[UIProgressView alloc] initWithCoder:coder];
+    failures += [view progress]!=0 || [view progressViewStyle]!=0;
+    [view release]; [coder release];
+    printf("S5LBOX-HLE-PROGRESS-VIEW %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
 typedef struct {
     unsigned version;
     const void *(*getBytePointer)(void *);
@@ -1547,7 +1601,7 @@ static unsigned foundation_compat_smoke(void) {
     failures += [[basicCopy toValue] longValue]!=2 || [[basicCopy byValue] longValue]!=3;
     failures += ![[basicCopy keyPath] isEqualToString:@"opacity"];
     [basicCopy release]; failures += [from retainCount]!=1; [from release];
-    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke();
+    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke()+progress_view_smoke();
 }
 
 int main(int argc,char **argv) {
