@@ -361,6 +361,11 @@ extern id const NSLocalizedDescriptionKey, NSLocalizedFailureReasonErrorKey;
 - (BOOL)removeItemAtPath:(id)path error:(id *)error;
 - (BOOL)fileExistsAtPath:(id)path;
 @end
+static unsigned ordinaryManagerDeallocations;
+@interface FileManagerProbe : NSFileManager @end
+@implementation FileManagerProbe
+- (void)dealloc { ordinaryManagerDeallocations++; [super dealloc]; }
+@end
 extern id NSTemporaryDirectory(void);
 extern id const NSFilePosixPermissions;
 static unsigned permissions_smoke(BOOL unavailable) {
@@ -1711,6 +1716,25 @@ static unsigned thread_identity_smoke(void) {
     return failures;
 }
 
+static unsigned file_manager_lifetime_smoke(void) {
+    NSFileManager *shared=[NSFileManager defaultManager];
+    unsigned failures=!shared || ![shared fileExistsAtPath:@"/var/mobile"];
+    id pool=[[NSAutoreleasePool alloc] init];
+    failures += [shared retain]!=shared || [shared autorelease]!=shared;
+    [shared release]; [shared release];
+    [pool release];
+    failures += shared!=[NSFileManager defaultManager] || ![shared fileExistsAtPath:@"/var/mobile"];
+    FileManagerProbe *ordinary=[[FileManagerProbe alloc] init];
+    failures += ordinary==shared || [ordinary retainCount]!=1;
+    [ordinary retain]; failures += [ordinary retainCount]!=2;
+    [ordinary release]; failures += [ordinary retainCount]!=1;
+    pool=[[NSAutoreleasePool alloc] init];
+    [ordinary autorelease]; [pool release];
+    failures += ordinaryManagerDeallocations!=1;
+    printf("S5LBOX-HLE-FILEMANAGER-LIFETIME %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
+
 static unsigned thread_dispatch_smoke(void) {
     unsigned failures=0;
     DispatchProbe *main=[[DispatchProbe alloc] init];
@@ -1843,7 +1867,7 @@ static unsigned foundation_compat_smoke(void) {
     failures += [[basicCopy toValue] longValue]!=2 || [[basicCopy byValue] longValue]!=3;
     failures += ![[basicCopy keyPath] isEqualToString:@"opacity"];
     [basicCopy release]; failures += [from retainCount]!=1; [from release];
-    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke()+progress_view_smoke()+cell_background_smoke()+scanner_string_smoke()+thread_identity_smoke()+thread_dispatch_smoke()+png_export_smoke();
+    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke()+progress_view_smoke()+cell_background_smoke()+scanner_string_smoke()+thread_identity_smoke()+thread_dispatch_smoke()+png_export_smoke()+file_manager_lifetime_smoke();
 }
 
 int main(int argc,char **argv) {

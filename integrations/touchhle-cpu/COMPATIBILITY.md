@@ -54,7 +54,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Edge | 1.62 | Complete a level, precise controls and saved progress | Device build 60bd8788: offline install passes; blank display persists beyond three minutes. |
 | Canabalt | 1.7 | Sustained run, jumping, restart and saved high score | Device build b065e116: offline install passes; missing NSOperationQueue prevents launch. |
-| Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Device build cf7c00bf: startup exhausts host memory and iOS terminates S5LBox. Scanner, thread dispatch, PNG export and nil dictionary-key fixes advance desktop startup to a stale default-file-manager reference during resource lookup. Its cause is under investigation. Gameplay and a device retest remain pending. |
+| Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Device build cf7c00bf: startup exhausts host memory and iOS terminates S5LBox. Scanner, thread dispatch, PNG export, nil dictionary-key and shared-file-manager fixes now pass a 30-second desktop startup observation. Six samples across ten seconds stay at 164.7 MiB private memory, unlike the former growth. Gameplay and a device retest remain pending. |
 | Minigore | 7.0 | Movement and firing through sustained combat; restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | iCopter | 1.4 | Sustained flight, restart and saved high score | Device build cf7c00bf: transitions now complete; short flights render and touch holds/releases work. Collisions return to the title normally. Score 122 survives Home and relaunch. Longer play and frame pacing remain unverified. |
 | Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
@@ -330,3 +330,12 @@ NSDictionary valueForKey: now forwards nil keys to objectForKey: without trying
 to convert nil into a host string. ARMv6 tests cover empty, populated and mutable
 dictionaries. Native Foundation on the iOS 15 test device also returns nil for
 the empty and populated cases; that reference is not an iPhone OS 3 measurement.
+
+The default file manager now has a stable shared lifetime, following Apple's
+[archived singleton description](https://developer.apple.com/library/archive/documentation/General/Conceptual/DevPedia-CocoaCore/Singleton.html).
+Fieldrunners releases this shared object while checking its texture-cache
+version; that previously left resource lookup pointing at a freed object.
+ARMv6 checks verify shared identity across retain/release and pool drainage,
+while independently allocated managers retain and deallocate normally. This is
+a legacy singleton compatibility policy, not a measured iPhone OS 3 retain-count
+match; modern Foundation does not necessarily tolerate releasing its default.

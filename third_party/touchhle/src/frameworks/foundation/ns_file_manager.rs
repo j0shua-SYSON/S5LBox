@@ -12,7 +12,7 @@ use crate::frameworks::foundation::ns_string::get_static_str;
 use crate::fs::{FsError, GuestPath, GuestPathBuf};
 use crate::mem::{ConstPtr, MutPtr, Ptr};
 use crate::objc::{
-    autorelease, id, msg, msg_class, nil, objc_classes, release, ClassExports, HostObject,
+    autorelease, id, msg, msg_class, msg_super, nil, objc_classes, release, ClassExports, HostObject,
 };
 use crate::Environment;
 
@@ -163,6 +163,30 @@ pub const CLASSES: ClassExports = objc_classes! {
         let new: id = msg![env; this new];
         env.framework_state.foundation.ns_file_manager.default_manager = Some(new);
         new
+    }
+}
+
+// The shared manager follows the legacy Cocoa singleton lifetime. In
+// particular, callers cannot destroy the process-wide default by releasing it.
+// Independently allocated managers still use normal reference counting.
+// https://developer.apple.com/library/archive/documentation/General/Conceptual/DevPedia-CocoaCore/Singleton.html
+- (id)retain {
+    if env.framework_state.foundation.ns_file_manager.default_manager == Some(this) {
+        this
+    } else {
+        msg_super![env; this retain]
+    }
+}
+- (())release {
+    if env.framework_state.foundation.ns_file_manager.default_manager != Some(this) {
+        () = msg_super![env; this release];
+    }
+}
+- (id)autorelease {
+    if env.framework_state.foundation.ns_file_manager.default_manager == Some(this) {
+        this
+    } else {
+        msg_super![env; this autorelease]
     }
 }
 
