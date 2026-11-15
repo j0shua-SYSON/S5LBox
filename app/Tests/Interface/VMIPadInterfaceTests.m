@@ -14,11 +14,15 @@
         XCUIDevice.sharedDevice.orientation = orientation.integerValue;
         XCUIElement *import = app.buttons[@"s5lbox.setup.import"];
         XCTAssertTrue([import waitForExistenceWithTimeout:15]);
-        XCTAssertTrue(import.hittable);
-        XCTAssertTrue(app.buttons[@"s5lbox.setup.primary"].hittable);
+        // Existence can precede the end of the rotation/presentation animation.
+        XCTNSPredicateExpectation *ready = [[XCTNSPredicateExpectation alloc]
+            initWithPredicate:[NSPredicate predicateWithFormat:@"hittable == YES"] object:import];
+        XCTWaiterResult result = [XCTWaiter waitForExpectations:@[ready] timeout:10];
         XCTAttachment *picture = [XCTAttachment attachmentWithScreenshot:app.screenshot];
         picture.name = [NSString stringWithFormat:@"Setup-%@",orientation];
         picture.lifetime = XCTAttachmentLifetimeKeepAlways; [self addAttachment:picture];
+        XCTAssertEqual(result,XCTWaiterResultCompleted,@"%@",app.debugDescription);
+        XCTAssertTrue(app.buttons[@"s5lbox.setup.primary"].hittable);
     }
     [app.buttons[@"s5lbox.setup.import"] tap];
     XCUIElement *cancel = app.buttons[@"Cancel"].firstMatch;

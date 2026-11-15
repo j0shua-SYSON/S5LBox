@@ -56,7 +56,10 @@
         for (NSValue *value in self.sizes) {
             controller.view.frame = (CGRect){CGPointZero,value.CGSizeValue};
             [controller.view setNeedsLayout]; [controller.view layoutIfNeeded];
-            VMFramebufferView *screen = [controller valueForKey:@"screen"];
+            VMFramebufferView *screen = nil;
+            for (UIView *view in controller.view.subviews)
+                if ([view isKindOfClass:VMFramebufferView.class]) screen = (VMFramebufferView *)view;
+            XCTAssertNotNil(screen);
             XCTAssertTrue(CGRectContainsRect(controller.view.bounds,screen.frame));
             XCTAssertGreaterThan(screen.bounds.size.height,0);
             XCTAssertEqualWithAccuracy(screen.bounds.size.width/screen.bounds.size.height,2.0/3.0,0.02);

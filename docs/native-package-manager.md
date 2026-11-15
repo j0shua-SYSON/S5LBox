@@ -130,9 +130,11 @@ then return to Packages. The host stays awake during the bounded connection wait
 The full-screen workspace has five tabs:
 
 - **Packages:** connection status, all packages, and category browsing.
-- **Sources:** iOS 3 Party and Saurik initially. Open a source to browse its
-  packages; add flat HTTP/HTTPS repositories or explicitly add legacy BigBoss
-  HTTP. Removing a source never uninstalls packages.
+- **Sources:** iOS 3 Party, Saurik and BigBoss initially. Open a source to browse
+  its packages or add a flat HTTPS repository. BigBoss uses its published legacy
+  HTTP endpoint, with a domain-specific network exception. Existing installations
+  receive BigBoss once; removing it afterwards keeps it removed. Removing a
+  source never uninstalls packages.
 - **Changes:** available newer versions of installed, nonprotected packages.
   Choose one to check its dependencies; an update listing alone is not a
   compatibility promise. There is deliberately no automatic update-all.
@@ -171,14 +173,21 @@ implied by a successful installation.
 ## Trust and supported scope
 
 This first version **does not verify OpenPGP repository signatures**. HTTPS
-checks remain enabled; an expired certificate is not bypassed. Legacy HTTP is
-an explicit source choice with an interception warning. SHA-256 and exact size
+checks remain enabled; an expired certificate is not bypassed. BigBoss is the
+only built-in HTTP exception. SHA-256 and exact size
 checks protect against corrupt downloads, not a malicious or intercepted index.
 Older sources such as Saurik publish only MD5. SHA-1/MD5 are accepted solely
 over verified HTTPS, with a warning in the transaction preview, and are described
 as weak corruption checks rather than authenticity guarantees. A present but bad
 SHA-256 never falls back to a weaker digest. Only add trusted sources: packages may execute root scripts inside the guest.
 These privileges do not extend to the host iPhone.
+
+Source refreshes are independent: an unavailable source retains its cached
+records while healthy sources update. Errors identify the affected source.
+Repository records with identifiers unsupported by the guest helper (including
+legacy mixed-case identifiers) are skipped with a count, rather than rejecting
+the entire source. Installed-state parsing remains strict. Malformed fields,
+duplicate fields and invalid compressed indexes still fail validation.
 
 The planner understands Debian epoch/upstream/revision ordering, Depends,
 Pre-Depends, alternatives, unversioned Provides, Conflicts and Breaks. It checks

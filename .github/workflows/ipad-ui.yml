@@ -53,6 +53,12 @@ jobs:
               exit 1
             }
           tail -60 ../iPad-tests.log
+      - name: Export interface screenshots
+        if: always()
+        run: |
+          if [ -d iPad-tests.xcresult ]; then
+            xcrun xcresulttool export attachments --path iPad-tests.xcresult --output-path iPad-screenshots
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -60,4 +66,5 @@ jobs:
           path: |
             iPad-tests.xcresult
             iPad-tests.log
+            iPad-screenshots
           retention-days: 7

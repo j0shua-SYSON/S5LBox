@@ -1,10 +1,10 @@
 # S5LBox
 
-**Classic iPhone OS. On your iPhone.**
+**Classic iPhone OS. On your iPhone or iPad.**
 
 Slide to unlock. Open an old favorite. Make it yours again.
 
-S5LBox brings the iPhone 3G and its original iPhone OS 3.1.3 to your iPhone.
+S5LBox brings the iPhone 3G and its original iPhone OS 3.1.3 to your iPhone or iPad.
 It's the real operating system, running inside an app—not a theme or a recreation.
 Your iPhone doesn't need to be jailbroken.
 
@@ -47,7 +47,7 @@ interface in **Advanced**, alongside the extra options.
 
 ## Get started
 
-You'll need an iPhone running **iOS 13 or later** and several gigabytes
+You'll need an iPhone or iPad running **iOS / iPadOS 13 or later** and several gigabytes
 of free storage.
 
 1. Download **S5LBox.ipa** from [Releases](https://github.com/j0shua-SYSON/S5LBox/releases)
