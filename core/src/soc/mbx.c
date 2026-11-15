@@ -2882,14 +2882,16 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
      * half-texel 0x8e form and Spotlight's measured full-extent 0x0e form.
      * Full-extent modulated dock reflections also use row-major rectangles;
      * distinguish that geometry from the older alternate corner ordering.
-     * No full-extent packet has established alternate-sampler semantics. */
+     * iFile navigation also emits row-major, full-extent alternate-sampler
+     * cells at unity scale. Filtering remains independent: those packets use
+     * the integer crop path and its strict 1:1 UV/coverage checks below. */
     bool row_major_rectangle =
         quad[8] == quad[12] && quad[10] == quad[14] &&
         quad[9] == quad[11] && quad[13] == quad[15];
     bool row_major_corners = half_texel_layout || direct_sampler ||
-        (modulated_sampler && row_major_rectangle);
-    if (!half_texel_layout && scaled_sampler) {
-        if (why) *why = "full-extent alternate sampler is unmeasured";
+        ((modulated_sampler || scaled_sampler) && row_major_rectangle);
+    if (!half_texel_layout && scaled_sampler && !row_major_rectangle) {
+        if (why) *why = "full-extent alternate sampler is not row-major";
         return false;
     }
     const float epsilon = 0.0009765625f;
@@ -2919,7 +2921,8 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
      * checks below still apply, and staging/rasterization retain the reversal.
      * Filtered, compact, X-reversed and arbitrary affine forms are unchanged. */
     bool mirror_y = axis_aligned && row_major_corners &&
-                    !half_texel_layout && !compact_copy && y0 > y1;
+                    !half_texel_layout && !compact_copy &&
+                    !scaled_sampler && y0 > y1;
     if (mirror_y) {
         float temporary = y0;
         y0 = y1;
@@ -3807,6 +3810,47 @@ static enum mbx_ta_parse_result mbx_ta_parse_vertices(
         const uint32_t *words, uint32_t count, uint32_t control,
         uint32_t stride, float origin_x, float origin_y,
         struct mbx_ta_draw *draw, const char **why) {
+    /* iFile's image viewer submits an axis-aligned textured rectangle as
+     * two adjacent triangles: A B C, C D A. Join only this measured form,
+     * with identical attributes on the shared diagonal, so the established
+     * quad sampler covers every pixel once. Scene validation still precedes
+     * all framebuffer writes. */
+    if (stride == 8u && control < count && count - control > 25u &&
+        words[control + 25u] == 3u) {
+        if (count - control < 53u ||
+            words[control + 26u] != 0x48020000u ||
+            words[control + 27u] != 0xf0020044u ||
+            words[control + 52u] != 3u ||
+            memcmp(words + control + 1u, words + control + 44u,
+                   8u * sizeof(uint32_t)) != 0 ||
+            memcmp(words + control + 17u, words + control + 28u,
+                   8u * sizeof(uint32_t)) != 0 ||
+            words[control + 7u] == words[control + 23u] ||
+            words[control + 8u] == words[control + 24u]) {
+            if (why) *why = "TA triangle pair has an unknown shared boundary";
+            return MBX_TA_DRAW_BAD;
+        }
+        uint32_t quad[34];
+        quad[0] = words[control];
+        memcpy(quad + 1u, words + control + 1u, 24u * sizeof(uint32_t));
+        memcpy(quad + 25u, words + control + 36u, 8u * sizeof(uint32_t));
+        quad[33] = 3u;
+        /* Reject malformed vertex tags before recursion: quad[25] must not
+         * be mistaken for another triangle boundary. */
+        if (quad[25] != 0u) {
+            if (why) *why = "TA triangle pair has an unknown vertex layout";
+            return MBX_TA_DRAW_BAD;
+        }
+        enum mbx_ta_parse_result result = mbx_ta_parse_vertices(
+            quad, 34u, 0u, stride, origin_x, origin_y, draw, why);
+        if (result != MBX_TA_DRAW_OK) return result;
+        if (draw->affine || draw->perspective || draw->empty) {
+            if (why) *why = "TA triangle pair is not an axis-aligned rectangle";
+            return MBX_TA_DRAW_BAD;
+        }
+        draw->next_word = control + 53u;
+        return MBX_TA_DRAW_OK;
+    }
     if (control > UINT32_MAX - 1u - 4u * stride) {
         if (why) *why = "TA draw has an unknown vertex boundary";
         return MBX_TA_DRAW_BAD;

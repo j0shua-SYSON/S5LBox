@@ -1104,6 +1104,90 @@ static void test_ta_stream_axis_aligned_atomic_scene(void) {
     s5l8900_free(&m);
 }
 
+/* iFile's image viewer emits a 320x20 strip as two three-vertex draws,
+ * sharing one diagonal, rather than the four-vertex form used elsewhere.
+ * The draw words below are retained from the failing viewer scene. */
+static void test_ta_image_viewer_triangle_pair(void) {
+    const uint32_t table0 = 0x08002000u, table2 = 0x08003000u;
+    const uint32_t object = 0x00100000u, region = 0x00029000u;
+    const uint32_t source = 0x00820000u, target = 0x00921000u;
+    const uint32_t stride = 320u * 4u;
+    uint32_t stream[160] = {0x10000010u};
+    uint32_t next = test_ta_global_transform(stream, 1u, 320u, 480u, 0, 0);
+    next = test_ta_solid_draw(stream, next, 0, 0, 320, 20, 0xff102030u);
+    const uint32_t start = next;
+    static const uint32_t pair[] = {
+        0x10000005u, 0x22620e80u, 0xa6218000u, 0x0e515881u,
+        0xd6087610u, 0x48020000u, 0xf0020044u,
+        0u, 0u, 0u, 0u, 0x3f800000u, 0xffffffffu, 0u, 0u,
+        0u, 0x43a00000u, 0u, 0u, 0x3f800000u, 0xffffffffu, 0x43a00000u, 0u,
+        0u, 0x43a00000u, 0x41a00000u, 0u, 0x3f800000u, 0xffffffffu, 0x43a00000u, 0x41a00000u,
+        3u, 0x48020000u, 0xf0020044u,
+        0u, 0x43a00000u, 0x41a00000u, 0u, 0x3f800000u, 0xffffffffu, 0x43a00000u, 0x41a00000u,
+        0u, 0u, 0x41a00000u, 0u, 0x3f800000u, 0xffffffffu, 0u, 0x41a00000u,
+        0u, 0u, 0u, 0u, 0x3f800000u, 0xffffffffu, 0u, 0u,
+        3u,
+    };
+    memcpy(stream + next, pair, sizeof pair);
+    stream[start + 3u] = 0x0e500000u | (source >> 7);
+    next += (uint32_t)(sizeof pair / sizeof pair[0]);
+    stream[next++] = 0xf0000000u;
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE), "triangle-pair machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART0, table0);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    test_map_gpu_page(&m, table0, object, 0x08010000u);
+    for (uint32_t off = 0u; off < stride * 32u; off += 0x1000u)
+        test_map_gpu_page(&m, table2, source + off, 0x08030000u + off);
+    for (uint32_t off = 0u; off < stride * 480u; off += 0x1000u)
+        test_map_gpu_page(&m, table2, target + off, 0x08060000u + off);
+    for (uint32_t y = 0; y < 32u; y++)
+        for (uint32_t x = 0; x < 320u; x++)
+            test_gpu_write32(&m, source + y * stride + x * 4u,
+                             test_sprite_source_pixel(x, y));
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_DB, object);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_REGION, region);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RGNBASE, region);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_OBJBASE, object);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_PIXSAMP, 0x00020007u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBCTL, 6u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP, 0x013f0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBYCLIP, 0x01df0000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTART, target);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTRIDE, 320u);
+    test_gpu_write32(&m, target + 20u * stride, 0x12345678u);
+    test_ta_run_stream(&m, stream, next);
+    uint32_t mismatches = 0u;
+    for (uint32_t y = 0; y < 20u; y++)
+        for (uint32_t x = 0; x < 320u; x++)
+            mismatches += test_gpu_read32(&m, target + y * stride + x * 4u) !=
+                test_over(0xff102030u, test_sprite_source_pixel(x, y));
+    CHECK(mismatches == 0u, "triangle pair lost or double-blended %u pixels", mismatches);
+    CHECK(test_gpu_read32(&m, target + 20u * stride) == 0x12345678u,
+          "triangle pair wrote outside its rectangle");
+    CHECK(m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.pixels_3d == 12800u &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+          "triangle pair did not complete its complete scene");
+
+    /* Damage the second triangle's shared UV, colour, raster control or
+     * terminator. No earlier solid draw may leak from the rejected scene. */
+    const uint32_t damaged[] = {40u, 39u, 33u, 58u};
+    for (unsigned i = 0; i < sizeof damaged / sizeof damaged[0]; i++) {
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+        test_gpu_write32(&m, target, 0xffabcdefu);
+        stream[start + damaged[i]] ^= 1u;
+        test_ta_run_stream(&m, stream, next);
+        CHECK(test_gpu_read32(&m, target) == 0xffabcdefu &&
+              m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+              "malformed triangle pair %u partially committed", i);
+        stream[start + damaged[i]] ^= 1u;
+    }
+    s5l8900_free(&m);
+}
+
 static void test_ta_stream_orthographic_affine_texture(void) {
     enum {
         WIDTH = 64u,
@@ -5311,7 +5395,10 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
              * the captured integer crop.  Keep both redundant corners in
              * agreement so rejection proves the unfiltered path did not
              * silently invent nearest-neighbour rounding. */
-            bool row_major = form->mirror_y || form->quad[3] == 0xa6884710u;
+            bool row_major = form->quad[8] == form->quad[12] &&
+                             form->quad[10] == form->quad[14] &&
+                             form->quad[9] == form->quad[11] &&
+                             form->quad[13] == form->quad[15];
             uint32_t first_v_word = object + 0x1f0u +
                                     (row_major ? 26u : 31u) * 4u;
             uint32_t second_v_word = object + 0x1f0u +
@@ -5336,21 +5423,19 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
             test_gpu_write32(&m, second_v_word, second_v);
 
             if (form->quad[3] == 0xa6884710u) {
-                /* Corner order does not establish sampling semantics. Keep
-                 * the direct packet's coherent geometry and allocation but
-                 * switch to the alternate sampler pair; no full-extent form
-                 * has measured that operation, so it must remain atomic. */
+                /* A sampler and its companion must still match. The complete
+                 * alternate pair now has a captured unity-copy meaning, but
+                 * changing just one word must not manufacture that pair. */
                 uint32_t sampler_word = object + 0x1f0u + 3u * 4u;
                 uint32_t companion_word = object + 0x1f0u + 6u * 4u;
                 test_gpu_write32(&m, first, 0x89abcdefu);
                 test_gpu_write32(&m, sampler_word, 0xd6887610u);
-                test_gpu_write32(&m, companion_word, 0xa3104620u);
                 m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
                 CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
-                      "%s unmeasured full-extent sampler changed the destination",
+                      "%s mismatched full-extent sampler changed the destination",
                       form->name);
                 CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-                      "%s unmeasured full-extent sampler raised completion",
+                      "%s mismatched full-extent sampler raised completion",
                       form->name);
                 test_gpu_write32(&m, sampler_word, form->quad[3]);
                 test_gpu_write32(&m, companion_word, form->quad[6]);
@@ -5646,6 +5731,47 @@ static const struct mbx_test_status_form navigation_vertical_resample_form = {
         0x3f200000u, 0x3f6e0000u, 0x3ea00000u, 0x3dce0000u,
     },
 };
+
+/* iFile's folder transition uses the alternate sampler with integer UVs,
+ * no half-texel flag, and row-major corners. This retained draw slides a
+ * 287x49 cell left by 217 pixels while fading it to 165/255 opacity.
+ * The clipped rectangle, register values and 44-word record are from the
+ * device; the source pixels are synthetic and check the complete crop. */
+static void test_unfiltered_alternate_navigation(void) {
+    const struct mbx_test_status_form form = {
+        .name = "iFile unfiltered alternate navigation cell",
+        .semantic_sprite = true,
+        .variable_vertex_alpha = true,
+        .boundary_override = true,
+        .xclip = 0x00480000u, .yclip = 0x00900050u,
+        .target = 0x00897000u,
+        .tile_x0 = 0u, .tile_x1 = 8u,
+        .tile_y0 = 5u, .tile_y1 = 8u,
+        .left = 0u, .top = 86u, .width = 70u, .height = 49u,
+        .source = 0x00be6080u, .source_x0 = 217u,
+        .source_stride = 0x480u, .source_control = 0x0e480000u,
+        .source_width = 287u, .source_height = 49u,
+        .expected_covered_pixels = 3430u,
+        .boundary = {
+            0u, 0x43070000u, 0u, 0x42ac0000u,
+            0x428c0000u, 0x43070000u, 0x428c0000u, 0x42ac0000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa6318000u, 0x0e497cc1u, 0xd6887610u,
+            0xa7718000u, 0x0e5112e0u, 0xa3104620u, 0x22250e80u,
+            0xc3590000u, 0x42ac0000u, 0x428c0000u, 0x42ac0000u,
+            0xc3590000u, 0x43070000u, 0x428c0000u, 0x43070000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xa5000000u, 0u, 0u, 0xbe590000u,
+            0x3dac0000u, 0xa5000000u, 0x3f0f8000u, 0u,
+            0x3d8c0000u, 0x3dac0000u, 0xa5000000u, 0u,
+            0x3f440000u, 0xbe590000u, 0x3e070000u, 0xa5000000u,
+            0x3f0f8000u, 0x3f440000u, 0x3d8c0000u, 0x3e070000u,
+        },
+    };
+    test_captured_status_form(&form);
+}
 
 /* Exercise each validated sampler across all combinations of shrinking,
  * unity and growing X/Y. These are generated geometry variants, not captures.
@@ -7414,6 +7540,7 @@ int main(void) {
     test_ta_context_load_handshake();
     test_ta_submission_completion();
     test_ta_stream_axis_aligned_atomic_scene();
+    test_ta_image_viewer_triangle_pair();
     test_ta_stream_orthographic_affine_texture();
     test_ta_stream_voice_memos_near_unity_rotation();
     test_ta_stream_weather_marker2_quads();
@@ -7432,6 +7559,7 @@ int main(void) {
     test_unfiltered_mirrored_sprites();
     test_later_tiled_status_sprites();
     test_filtered_rectangle_scale_matrix();
+    test_unfiltered_alternate_navigation();
     test_captured_status_form(&navigation_vertical_resample_form);
     struct mbx_test_status_form vertical = navigation_vertical_resample_form;
     vertical.name = "relocated navigation vertical magnification";
