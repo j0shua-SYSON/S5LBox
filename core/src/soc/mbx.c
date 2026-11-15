@@ -4442,7 +4442,7 @@ static bool mbx_ta_parse_mask(const uint32_t *words, uint32_t count,
         (void)mbx_3d_word_to_nonnegative_float(
             words[start + 10u + i * 4u], &draw->mask_xy[i][1]);
     }
-    const float (*p)[2] = draw->mask_xy;
+    float (*p)[2] = draw->mask_xy;
     if (draw->mask_vertices == 3u) {
         /* The driver's oversized right triangle, in framebuffer coordinates.
          * Do not apply the colour pipeline's model-view translation. */
