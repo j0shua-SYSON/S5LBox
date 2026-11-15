@@ -243,6 +243,8 @@ static unsigned methods_smoke(void) {
 + (id)scannerWithString:(id)string;
 - (BOOL)scanHexInt:(unsigned *)value;
 - (BOOL)scanHexLongLong:(unsigned long long *)value;
+- (BOOL)scanFloat:(float *)value;
+- (BOOL)scanDouble:(double *)value;
 - (BOOL)scanUpToString:(id)stop intoString:(id *)value;
 - (BOOL)scanString:(id)string intoString:(id *)value;
 - (void)setCharactersToBeSkipped:(id)set;
@@ -1918,6 +1920,51 @@ static unsigned geometry_dictionary_smoke(void) {
     return failures;
 }
 
+static unsigned scanner_numeric_smoke(void) {
+    unsigned failures=0;
+    struct { id text; double value; unsigned end; } cases[]={
+        {@"  -12.5e+2x",-1250,10}, {@".5rest",0.5,2}, {@"1.e2!",100,4},
+        {@"1e+",1,1}, {@"+1.25",1.25,5}, {@"0x1.8p+1",0,1}, {@"1,5",1,1},
+        {@"\u0661\u0662.\u0665x",12.5,4}, {@"\uff11\uff12e\uff12!",1200,4}
+    };
+    for(unsigned i=0;i<sizeof(cases)/sizeof(*cases);i++) {
+        NSScanner *scanner=[NSScanner scannerWithString:cases[i].text];
+        float f=37; double d=37;
+        failures += ![scanner scanFloat:&f] || f!=(float)cases[i].value || [scanner scanLocation]!=cases[i].end;
+        [scanner setScanLocation:0];
+        failures += ![scanner scanDouble:&d] || d!=cases[i].value || [scanner scanLocation]!=cases[i].end;
+    }
+    id invalid[]={@"",@" ",@"  nope",@"  +",@".",@"nan",@"inf",@"  .e2",@"--1",@"\U0001d7d9\U0001d7da"};
+    for(unsigned i=0;i<sizeof(invalid)/sizeof(*invalid);i++) {
+        NSScanner *scanner=[NSScanner scannerWithString:invalid[i]];
+        float f=37; double d=37;
+        failures += [scanner scanFloat:&f] || f!=37 || [scanner scanLocation]!=0;
+        failures += [scanner scanDouble:&d] || d!=37 || [scanner scanLocation]!=0;
+    }
+    NSScanner *scanner=[NSScanner scannerWithString:@"\U0001f34e\u00a0.75x"];
+    [scanner setScanLocation:2]; double d=37;
+    failures += ![scanner scanDouble:&d] || d!=0.75 || [scanner scanLocation]!=6;
+    scanner=[NSScanner scannerWithString:@" 1.5"];
+    [scanner setCharactersToBeSkipped:0];
+    failures += [scanner scanDouble:&d] || d!=0.75 || [scanner scanLocation]!=0;
+    scanner=[NSScanner scannerWithString:@"1.5"];
+    failures += ![scanner scanFloat:NULL] || [scanner scanLocation]!=3;
+    failures += [scanner scanDouble:NULL] || [scanner scanLocation]!=3;
+    scanner=[NSScanner scannerWithString:@"-0"];
+    float f=37; unsigned bits=0;
+    failures += ![scanner scanFloat:&f]; memcpy(&bits,&f,4); failures += bits!=0x80000000U;
+    scanner=[NSScanner scannerWithString:@"1e100"];
+    failures += ![scanner scanFloat:&f] || !__builtin_isinf(f) || [scanner scanLocation]!=5;
+    scanner=[NSScanner scannerWithString:@"1e-100"];
+    failures += ![scanner scanFloat:&f] || f!=0 || [scanner scanLocation]!=6;
+    scanner=[NSScanner scannerWithString:@"-1e9999"];
+    failures += ![scanner scanDouble:&d] || !__builtin_isinf(d) || d>=0 || [scanner scanLocation]!=7;
+    scanner=[NSScanner scannerWithString:@"1e-9999"];
+    failures += ![scanner scanDouble:&d] || d!=0 || [scanner scanLocation]!=7;
+    printf("S5LBOX-HLE-SCANNER-NUMERIC %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
+
 static unsigned scanner_string_smoke(void) {
     unsigned failures=0;
     id sentinel=@"unchanged",part=sentinel;
@@ -1955,7 +2002,7 @@ static unsigned scanner_string_smoke(void) {
     failures += ![scanner scanUpToString:@";" intoString:NULL] || [scanner scanLocation]!=7;
     failures += [scanner scanUpToString:@";" intoString:NULL] || [scanner scanString:@";" intoString:NULL];
     printf("S5LBOX-HLE-SCANNER-STRING %s failures=%u\n",failures?"FAIL":"PASS",failures);
-    return failures;
+    return failures+scanner_numeric_smoke();
 }
 
 extern void *CGImageGetDataProvider(void *image);

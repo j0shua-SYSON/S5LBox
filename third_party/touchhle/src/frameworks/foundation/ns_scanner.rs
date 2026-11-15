@@ -160,6 +160,18 @@ pub const CLASSES: ClassExports = objc_classes! {
     parsed.is_some()
 }
 
+- (bool)scanFloat:(MutPtr<f32>)result {
+    let parsed = scan_decimal(env, this);
+    if let Some(value) = parsed { if !result.is_null() { env.mem.write(result, value as f32); } }
+    parsed.is_some()
+}
+
+- (bool)scanDouble:(MutPtr<f64>)result {
+    let parsed = scan_decimal(env, this);
+    if let Some(value) = parsed { if !result.is_null() { env.mem.write(result, value); } }
+    parsed.is_some()
+}
+
 - (bool)scanUpToString:(id)stop_string // NSString *
             intoString:(MutPtr<id>)result { // NSString **
     skip_characters(env, this);
@@ -265,6 +277,59 @@ pub const CLASSES: ClassExports = objc_classes! {
 @end
 
 };
+
+// Decimal digits in the BMP, expressed as the zero of each ten-character block.
+// NSScanner scans UTF-16 units: native Foundation accepts these decimal digits
+// (including in exponents), but does not combine surrogate pairs into digits.
+const DECIMAL_ZEROES: &[u16] = &[
+    0x0030, 0x0660, 0x06f0, 0x07c0, 0x0966, 0x09e6, 0x0a66, 0x0ae6, 0x0b66, 0x0be6,
+    0x0c66, 0x0ce6, 0x0d66, 0x0de6, 0x0e50, 0x0ed0, 0x0f20, 0x1040, 0x1090, 0x17e0,
+    0x1810, 0x1946, 0x19d0, 0x1a80, 0x1a90, 0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620,
+    0xa8d0, 0xa900, 0xa9d0, 0xa9f0, 0xaa50, 0xabf0, 0xff10,
+];
+
+/// Decimal syntax for a scanner with the default (nil) locale. The result's
+/// length is in UTF-16 units, even when its normalized digits were non-ASCII.
+fn decimal_prefix(text: &str) -> Option<(usize, f64)> {
+    let bytes: Vec<u8> = text.encode_utf16().map_while(|unit| {
+        if matches!(unit, 0x2b | 0x2d | 0x2e | 0x45 | 0x65) { return Some(unit as u8); }
+        DECIMAL_ZEROES.iter().find_map(|&zero| {
+            let digit = unit.wrapping_sub(zero);
+            (digit < 10).then(|| b'0' + digit as u8)
+        })
+    }).collect();
+    let mut end = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+    let mut digits = 0;
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) { end += 1; digits += 1; }
+    if bytes.get(end) == Some(&b'.') {
+        end += 1;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) { end += 1; digits += 1; }
+    }
+    if digits == 0 { return None; }
+    if matches!(bytes.get(end), Some(b'e' | b'E')) {
+        let exponent = end;
+        end += 1;
+        if matches!(bytes.get(end), Some(b'+' | b'-')) { end += 1; }
+        let first_digit = end;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) { end += 1; }
+        if first_digit == end { end = exponent; }
+    }
+    let value = std::str::from_utf8(&bytes[..end]).unwrap().parse().ok()?;
+    Some((end, value))
+}
+
+fn scan_decimal(env: &mut Environment, scanner: id) -> Option<f64> {
+    let original = env.objc.borrow::<NSScannerHostObject>(scanner).pos;
+    skip_characters(env, scanner);
+    let NSScannerHostObject { string, pos, len, .. } = env.objc.borrow::<NSScannerHostObject>(scanner).clone();
+    let parsed = if pos < len {
+        let suffix: id = msg![env; string substringFromIndex:pos];
+        decimal_prefix(&to_rust_string(env, suffix))
+    } else { None };
+    env.objc.borrow_mut::<NSScannerHostObject>(scanner).pos =
+        parsed.map_or(original, |(length, _)| pos + length as NSUInteger);
+    parsed.map(|(_, value)| value)
+}
 
 fn scan_hex(env: &mut Environment, scanner: id, maximum: u64) -> Option<u64> {
     skip_characters(env, scanner);
