@@ -12,8 +12,10 @@ alone is never a pass. Results apply only to the exact version and tested build.
 The initial device baseline uses build `d9052b50`, an iPhone 6s Plus running iOS
 15.8.5, and an offline iPhone OS 3.1.3 profile. The guest OS is not booted.
 Archives and private test logs are not distributed in this repository.
-The desktop startup rows use `23a5d292` with a shared OpenAL library on Windows;
-they establish the next failure or a 25-second observation, not functionality.
+The latest 40-app desktop startup sweep uses `00d5abae` with a shared OpenAL
+library on Windows. Thirteen apps remained running for 25 seconds; the other
+27 encountered a startup failure. These observations identify blockers and do
+not establish functionality. Device results below identify their tested build.
 
 ## Utilities
 
@@ -49,13 +51,13 @@ they establish the next failure or a 25-second observation, not functionality.
 | Rolando | 1.9 | Complete a level using touch and tilt; resume saved progress | Desktop startup: guest CPU memory fault; cause unconfirmed. |
 | Labyrinth | 1.9.1 | Tilt through a maze, calibrate and restart | Desktop startup: missing UINavigationController setNavigationBarHidden:animated:. |
 | Cro-Mag Rally | 3.0.3 | Complete a race, pause/resume and retain settings | Device build 1f8d4c8e: race renders; pause labels are upright and the paused frame remains visible. Resume works after the delegate lifetime fix; a second pause and End Game return to the main menu. Tilt steering, race completion, sustained play and persistence remain unverified. |
-| R.Thunder | 1.0 | Complete a race; responsive steering and pause/resume | Desktop startup: no crash during 25 seconds; functionality unverified. |
+| R.Thunder | 1.0 | Complete a race; responsive steering and pause/resume | Desktop startup: unsupported compressed texture format 0x8c92 in the desktop OpenGL backend. Device behavior remains unverified. |
 | Enigmo | 4.1 | Solve a level, manipulate tools and reopen saved progress | NIB progress views now decode and draw; ARMv6 state and pixel checks pass. Desktop startup advances to missing UIPickerView dataSource support. Functionality remains unverified. |
 | Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Edge | 1.62 | Complete a level, precise controls and saved progress | Device build 60bd8788: offline install passes; blank display persists beyond three minutes. |
 | Canabalt | 1.7 | Sustained run, jumping, restart and saved high score | Device build b065e116: offline install passes; missing NSOperationQueue prevents launch. |
-| Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Device build cf7c00bf: startup exhausts host memory and iOS terminates S5LBox. Scanner, thread dispatch, PNG export, nil dictionary-key and shared-file-manager fixes now pass a 30-second desktop startup observation. Six samples across ten seconds stay at 164.7 MiB private memory, unlike the former growth. Gameplay and a device retest remain pending. |
-| Minigore | 7.0 | Movement and firing through sustained combat; restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
+| Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Device build 00d5abae: the former runaway allocation no longer occurs in the observation; resident memory stays near 120 MiB. A separate splash-screen stall persists for several minutes, and normal Home closure requires Force Close. Gameplay remains blocked. |
+| Minigore | 7.0 | Movement and firing through sustained combat; restart | Desktop startup: CFURL string conversion rejects the requested character encoding. Gameplay remains unverified. |
 | iCopter | 1.4 | Sustained flight, restart and saved high score | Device build cf7c00bf: transitions now complete; short flights render and touch holds/releases work. Collisions return to the title normally. Score 122 survives Home and relaunch. Longer play and frame pacing remain unverified. |
 | Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
 | Tap Tap Revenge | 1.7 | Play a bundled song, timing/scoring and restart | Desktop startup: missing NSNetServiceBrowser. |
@@ -71,7 +73,7 @@ they establish the next failure or a 25-second observation, not functionality.
 | --- | --- | --- |
 | Angry Birds | 1.0 | Build 3322b6fd: one menu load finished within 34 seconds, versus more than 56 seconds on 425e7f36 in the same offline profile. A repeat finished between 30 and 70 seconds. First level completed with score 7830; aiming and pause/resume respond. Relaunch preserves the star and unlocks level 2. Timings are observation bounds, not exact durations or a universal speedup. |
 | Super Monkey Ball Lite | 1.0 | Build 3322b6fd: title reached within 40 seconds; mode selection, level flyover and tilt-calibration screens respond. Physical calibration and stage completion remain unverified. One delayed close recovered without Force Close. This is separate from the full version above. |
-| Beer Pong U | 1.2 | Build 46f9c6f9: the oversized-read crash is fixed on the iPhone; Time Attack and CPU Challenge render, and shot-style, help and quit controls respond. Relaunch works. Build 6fde244b confirms landscape presentation with no local override. Build cf7c00bf again passes Time Attack rendering, advancing timer, Lob selection and quit-to-menu. The game uses physical tilt to throw; throwing, scoring and saved results remain unverified. |
+| Beer Pong U | 1.2 | Build 46f9c6f9: the oversized-read crash is fixed on the iPhone; Time Attack and CPU Challenge render, and shot-style, help and quit controls respond. Relaunch works. Build 6fde244b confirms landscape presentation with no local override. Build 00d5abae again passes Time Attack rendering, advancing timer, Lob selection and quit-to-menu. The game uses physical tilt to throw; throwing, scoring and saved results remain unverified. |
 
 ## Runtime changes under validation
 

@@ -278,7 +278,10 @@ fn cancel_requests(env: &mut Environment, run_loop: id, target: id, filter: Opti
     while let Some(obj) = selector_objects.pop_front() {
         // Only delayed performs can be cancelled. Cross-thread requests must
         // still execute, including synchronous callers waiting for completion.
-        if obj.due_by.is_none() || obj.target != target || filter.is_some_and(|(selector, _)| obj.selector != selector) {
+        if obj.due_by.is_none()
+            || obj.target != target
+            || filter.is_some_and(|(selector, _)| obj.selector != selector)
+        {
             new_selector_objects.push_back(obj);
             continue;
         }
@@ -436,7 +439,9 @@ pub fn run_run_loop(
                     if selector.as_str(&env.mem).ends_with(':') {
                         () = msg_send(env, (target, selector, argument));
                     } else {
-                        assert!(argument.is_null());
+                        // Foundation tolerates an unused object for a selector
+                        // with no parameters. Keep its normal queued lifetime,
+                        // but do not pass it to a zero-argument host method.
                         () = msg_send(env, (target, selector));
                     }
 

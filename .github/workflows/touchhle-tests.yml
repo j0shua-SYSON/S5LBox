@@ -403,6 +403,9 @@ jobs:
           ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/AlertsSmoke.app --headless > ../../work/hle-alerts.log 2>&1
           cat ../../work/hle-alerts.log
           grep -F 'S5LBOX-HLE-ALERTS PASS failures=0' ../../work/hle-alerts.log
+          ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/MainNibSmoke.app --headless > ../../work/hle-main-nib.log 2>&1
+          cat ../../work/hle-main-nib.log
+          grep -F 'S5LBOX-HLE-MAIN-NIB PASS failures=0' ../../work/hle-main-nib.log
 
       - name: Reuse one host process after guest exits and faults
         working-directory: third_party/touchhle
@@ -455,5 +458,6 @@ jobs:
             work/hle-methods.log
             work/hle-foundation-compat.log
             work/hle-alerts.log
+            work/hle-main-nib.log
             work/hle-dylibs.log
           if-no-files-found: ignore

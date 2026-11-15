@@ -30,6 +30,9 @@ pub struct UILabelHostObject {
     font: id,
     /// `UIColor*`
     text_color: id,
+    /// `UIColor*`; nil disables the unblurred text shadow.
+    shadow_color: id,
+    shadow_offset: CGSize,
     text_alignment: UITextAlignment,
     line_break_mode: UILineBreakMode,
     number_of_lines: NSInteger,
@@ -42,6 +45,11 @@ impl Default for UILabelHostObject {
             text: nil,
             font: nil,
             text_color: nil,
+            shadow_color: nil,
+            shadow_offset: CGSize {
+                width: 0.0,
+                height: -1.0,
+            },
             text_alignment: UITextAlignmentLeft,
             line_break_mode: UILineBreakModeTailTruncation,
             number_of_lines: 1,
@@ -109,6 +117,8 @@ pub const CLASSES: ClassExports = objc_classes! {
         text,
         font,
         text_color,
+        shadow_color,
+        shadow_offset: _,
         text_alignment: _,
         line_break_mode: _,
         number_of_lines: _,
@@ -116,6 +126,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     release(env, text);
     release(env, font);
     release(env, text_color);
+    release(env, shadow_color);
     msg_super![env; this dealloc]
 }
 
@@ -202,11 +213,21 @@ pub const CLASSES: ClassExports = objc_classes! {
     msg_super![env; this setBackgroundColor:color]
 }
 
+- (id)shadowColor {
+    env.objc.borrow::<UILabelHostObject>(this).shadow_color
+}
 - (())setShadowColor:(id)color { // UIColor*
-    todo_objc_setter!(this, color);
+    retain(env, color);
+    let old = std::mem::replace(&mut env.objc.borrow_mut::<UILabelHostObject>(this).shadow_color, color);
+    release(env, old);
+    () = msg![env; this setNeedsDisplay];
+}
+- (CGSize)shadowOffset {
+    env.objc.borrow::<UILabelHostObject>(this).shadow_offset
 }
 - (())setShadowOffset:(CGSize)value {
-    todo_objc_setter!(this, value);
+    env.objc.borrow_mut::<UILabelHostObject>(this).shadow_offset = value;
+    () = msg![env; this setNeedsDisplay];
 }
 
 - (())setOpaque:(bool)_opaque {
@@ -253,13 +274,12 @@ pub const CLASSES: ClassExports = objc_classes! {
         text,
         font,
         text_color,
+        shadow_color,
+        shadow_offset,
         text_alignment,
         line_break_mode,
         number_of_lines,
     } = env.objc.borrow_mut(this);
-
-    let (r, g, b, a) = ui_color::get_rgba(&env.objc, text_color);
-    CGContextSetRGBFillColor(env, context, r, g, b, a);
 
     // TODO: handle line counts other than 0 and 1 properly. 0 = unlimited
     // (note the log message in setNumberOfLines:)
@@ -289,25 +309,35 @@ pub const CLASSES: ClassExports = objc_classes! {
         },
     };
 
-    let _size: CGSize = if single_line {
-        let x_offset = match text_alignment {
-            UITextAlignmentLeft => 0.0,
-            UITextAlignmentCenter => 0.5,
-            UITextAlignmentRight => 1.0,
-            _ => unimplemented!(),
+    // Draw the same glyph layout twice: an offset, unblurred shadow behind the
+    // foreground. Both passes use the existing context transform and clipping.
+    for (color, offset) in [(shadow_color, shadow_offset), (text_color, CGSize::default())] {
+        if color == nil { continue; }
+        let (r, g, b, a) = ui_color::get_rgba(&env.objc, color);
+        CGContextSetRGBFillColor(env, context, r, g, b, a);
+        let mut rect = rect;
+        rect.origin.x += offset.width;
+        rect.origin.y += offset.height;
+        let _size: CGSize = if single_line {
+            let x_offset = match text_alignment {
+                UITextAlignmentLeft => 0.0,
+                UITextAlignmentCenter => 0.5,
+                UITextAlignmentRight => 1.0,
+                _ => unimplemented!(),
+            };
+            let point = CGPoint {
+                x: rect.origin.x + x_offset * (bounds.size.width - calculated_size.width),
+                y: rect.origin.y
+            };
+            msg![env; text drawAtPoint:point
+                              withFont:font]
+        } else {
+            msg![env; text drawInRect:rect
+                             withFont:font
+                        lineBreakMode:line_break_mode
+                            alignment:text_alignment]
         };
-        let point = CGPoint {
-            x: rect.origin.x + x_offset * (bounds.size.width - calculated_size.width),
-            y: rect.origin.y
-        };
-        msg![env; text drawAtPoint:point
-                          withFont:font]
-    } else {
-        msg![env; text drawInRect:rect
-                         withFont:font
-                    lineBreakMode:line_break_mode
-                        alignment:text_alignment]
-    };
+    }
 }
 
 @end

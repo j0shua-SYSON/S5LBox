@@ -51,6 +51,16 @@ if ($LASTEXITCODE) { throw 'Startup fixture compile failed' }
     "$outputRoot/startup.o" -lSystem -lobjc -framework Foundation -framework CoreFoundation
 if ($LASTEXITCODE) { throw 'Startup fixture link failed' }
 Copy-Item -LiteralPath "$PSScriptRoot/Info.plist" -Destination "$startup/Info.plist"
+$mainNib=Join-Path $outputRoot 'MainNibSmoke.app'
+$python=if ([Environment]::OSVersion.Platform -eq 'Win32NT') { 'python' } else { 'python3' }
+& $python -B "$PSScriptRoot/main_nib.py" $mainNib
+if ($LASTEXITCODE) { throw 'Main nib fixture archive generation failed' }
+& $compiler @common -marm -c "$PSScriptRoot/main_nib.m" -o "$outputRoot/main_nib.o"
+if ($LASTEXITCODE) { throw 'Main nib fixture compile failed' }
+& $linker -arch armv6 -iphoneos_version_min 3.0 -syslibroot $sdkRoot `
+    -undefined dynamic_lookup -o "$mainNib/InterpreterSmoke" "$sdkRoot/usr/lib/crt1.o" `
+    "$outputRoot/main_nib.o" -lSystem -lobjc -framework Foundation -framework UIKit
+if ($LASTEXITCODE) { throw 'Main nib fixture link failed' }
 $audio=Join-Path $outputRoot 'AudioSmoke.app'
 $arrays=Join-Path $outputRoot 'GLESArrays.app'
 New-Item -ItemType Directory -Force -Path $arrays | Out-Null

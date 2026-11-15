@@ -53,6 +53,8 @@ pub struct UIButtonHostObject {
     titles_for_states: HashMap<UIControlState, id>,
     /// Values are `UIColor*`
     title_colors_for_states: HashMap<UIControlState, id>,
+    /// Values are `UIColor*`; absent states fall back to the normal state.
+    title_shadow_colors_for_states: HashMap<UIControlState, id>,
     /// Values are `UIImage*`
     images_for_states: HashMap<UIControlState, id>,
     /// Values are `UIImage*`
@@ -69,6 +71,7 @@ impl Default for UIButtonHostObject {
             background_image_view: nil,
             titles_for_states: HashMap::new(),
             title_colors_for_states: HashMap::new(),
+            title_shadow_colors_for_states: HashMap::new(),
             images_for_states: HashMap::new(),
             background_images_for_states: HashMap::new(),
         }
@@ -81,6 +84,8 @@ fn update(env: &mut Environment, this: id) {
     () = msg![env; title_label setText:title];
     let title_color: id = msg![env; this currentTitleColor];
     () = msg![env; title_label setTextColor:title_color];
+    let shadow_color: id = msg![env; this currentTitleShadowColor];
+    () = msg![env; title_label setShadowColor:shadow_color];
 
     let image_view: id = msg![env; this imageView];
     let image: id = msg![env; this currentImage];
@@ -263,16 +268,21 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (())dealloc {
     let UIButtonHostObject {
-        superclass: _,
+        superclass,
         type_: _,
         title_label,
         image_view,
         background_image_view,
         titles_for_states,
         title_colors_for_states,
+        title_shadow_colors_for_states,
         images_for_states,
         background_images_for_states
     } = std::mem::take(env.objc.borrow_mut(this));
+
+    // UIView still owns the child views and layer. Preserve that state for
+    // superclass deallocation rather than leaking the subviews' references.
+    env.objc.borrow_mut::<UIButtonHostObject>(this).superclass = superclass;
 
     release(env, title_label);
     release(env, image_view);
@@ -281,6 +291,9 @@ pub const CLASSES: ClassExports = objc_classes! {
         release(env, title);
     }
     for (_state, color) in title_colors_for_states {
+        release(env, color);
+    }
+    for (_state, color) in title_shadow_colors_for_states {
         release(env, color);
     }
     for (_state, image) in images_for_states {
@@ -413,6 +426,31 @@ pub const CLASSES: ClassExports = objc_classes! {
     if let Some(old) = host_obj.title_colors_for_states.insert(state, color) {
         release(env, old);
     }
+    update(env, this);
+}
+
+- (id)currentTitleShadowColor {
+    let state: UIControlState = msg![env; this state];
+    msg![env; this titleShadowColorForState:state]
+}
+// Legacy UIButton accessors, superseded by titleLabel.shadowOffset.
+- (CGSize)titleShadowOffset {
+    let label: id = msg![env; this titleLabel];
+    msg![env; label shadowOffset]
+}
+- (())setTitleShadowOffset:(CGSize)offset {
+    let label: id = msg![env; this titleLabel];
+    () = msg![env; label setShadowOffset:offset];
+}
+- (id)titleShadowColorForState:(UIControlState)state {
+    let colors = &env.objc.borrow::<UIButtonHostObject>(this).title_shadow_colors_for_states;
+    colors.get(&state).or_else(|| colors.get(&UIControlStateNormal)).copied().unwrap_or(nil)
+}
+- (())setTitleShadowColor:(id)color forState:(UIControlState)state {
+    retain(env, color);
+    let colors = &mut env.objc.borrow_mut::<UIButtonHostObject>(this).title_shadow_colors_for_states;
+    let old = if color == nil { colors.remove(&state) } else { colors.insert(state, color) };
+    if let Some(old) = old { release(env, old); }
     update(env, this);
 }
 

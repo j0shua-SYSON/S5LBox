@@ -263,6 +263,7 @@ static unsigned dispatchClassCalls;
 }
 + (void)recordClass:(id)value;
 - (void)record:(id)value;
+- (void)recordWithoutArgument;
 - (void)worker:(id)sender;
 - (void)sendToMain:(id)target;
 @end
@@ -274,6 +275,7 @@ static unsigned dispatchClassCalls;
     failures += [NSThread currentThread]!=expected;
     [order appendString:value]; calls++;
 }
+- (void)recordWithoutArgument { [self record:@"N"]; }
 - (void)worker:(id)sender {
     (void)sender;
     id pool=[[NSAutoreleasePool alloc] init];
@@ -429,6 +431,7 @@ static unsigned permissions_smoke(BOOL unavailable) {
 - (id)initWithFrame:(CGRect)rect;
 - (void)setFrame:(CGRect)rect;
 - (CGRect)frame;
+- (CGRect)bounds;
 - (void)layoutSubviews;
 - (void)setBackgroundColor:(id)color;
 - (void)addSubview:(id)view;
@@ -683,6 +686,12 @@ static unsigned redraw_smoke(void) {
 - (void)setText:(id)text;
 - (void)setTextColor:(id)color;
 - (void)setTextAlignment:(int)alignment;
+- (id)shadowColor;
+- (void)setShadowColor:(id)color;
+- (CGSize)shadowOffset;
+- (void)setShadowOffset:(CGSize)offset;
+- (void)setNumberOfLines:(int)lines;
+- (void)drawRect:(CGRect)rect;
 @end
 @interface NSMutableArray : NSArray
 - (void)sortUsingDescriptors:(id)descriptors;
@@ -803,6 +812,9 @@ static unsigned cell_background_smoke(void) {
 - (BOOL)isTracking;
 - (BOOL)isHighlighted;
 - (BOOL)isEnabled;
+- (void)setEnabled:(BOOL)enabled;
+- (void)setSelected:(BOOL)selected;
+- (void)setHighlighted:(BOOL)highlighted;
 @end
 @interface UIButton : UIControl
 + (id)buttonWithType:(int)type;
@@ -810,7 +822,87 @@ static unsigned cell_background_smoke(void) {
 - (void)setImage:(id)image forState:(unsigned)state;
 - (id)imageView;
 - (id)titleLabel;
+- (void)setTitleShadowColor:(id)color forState:(unsigned)state;
+- (id)titleShadowColorForState:(unsigned)state;
+- (id)currentTitleShadowColor;
+- (CGSize)titleShadowOffset;
+- (void)setTitleShadowOffset:(CGSize)offset;
 @end
+extern void *CGColorSpaceCreateDeviceRGB(void);
+extern void CGColorSpaceRelease(void *space);
+extern void *CGBitmapContextCreate(void *data,unsigned width,unsigned height,unsigned bits,unsigned stride,void *space,unsigned bitmapInfo);
+extern void CGContextRelease(void *context);
+extern void UIGraphicsPushContext(void *context);
+extern void UIGraphicsPopContext(void);
+static unsigned text_shadow_smoke(void) {
+    unsigned failures=0;
+    id pool=[[NSAutoreleasePool alloc] init];
+    id red=[[UIColor colorWithRed:1 green:0 blue:0 alpha:1] retain];
+    id blue=[[UIColor colorWithRed:0 green:0 blue:1 alpha:1] retain];
+    UILabel *label=[[UILabel alloc] initWithFrame:(CGRect){{0,0},{100,50}}];
+    CGSize offset=[label shadowOffset];
+    failures += [label shadowColor]!=0 || offset.width!=0 || offset.height!=-1;
+    [label setText:@"H"]; [label setTextColor:[UIColor whiteColor]];
+    unsigned char plain[100*50*4],shadow[100*50*4];
+    void *space=CGColorSpaceCreateDeviceRGB();
+    void *context=CGBitmapContextCreate(shadow,100,50,8,400,space,1);
+    UIGraphicsPushContext(context);
+    memset(shadow,0,sizeof(shadow)); [label drawRect:[label bounds]];
+    memcpy(plain,shadow,sizeof(plain));
+    [label setShadowColor:red]; [label setShadowOffset:(CGSize){30,0}];
+    unsigned refs=[red retainCount]; [label setShadowColor:red];
+    failures += [red retainCount]!=refs || [label shadowColor]!=red;
+    for(unsigned lines=0;lines<=1;lines++) {
+        [label setNumberOfLines:lines];
+        memset(shadow,0,sizeof(shadow)); [label drawRect:[label bounds]];
+        unsigned foreground=0,cast=0;
+        for(unsigned y=0;y<50;y++) for(unsigned x=0;x<100;x++) {
+            unsigned i=(y*100+x)*4;
+            if(shadow[i+3] && shadow[i]==shadow[i+1] && shadow[i]==shadow[i+2]) foreground++;
+            if(shadow[i]>0 && shadow[i+1]==0 && shadow[i+2]==0) {
+                cast++;
+                failures += x<30;
+                if(x>=30) failures += shadow[i+3]!=plain[i-30*4+3];
+            }
+        }
+        failures += !foreground || !cast;
+    }
+    [label setShadowColor:0];
+    memset(shadow,0,sizeof(shadow)); [label drawRect:[label bounds]];
+    failures += memcmp(shadow,plain,sizeof(plain))!=0;
+    UIGraphicsPopContext(); CGContextRelease(context); CGColorSpaceRelease(space);
+    [label release];
+
+    UIButton *button=[[UIButton alloc] initWithFrame:(CGRect){{0,0},{100,50}}];
+    [button setTitleShadowOffset:(CGSize){2,-3}];
+    offset=[button titleShadowOffset];
+    failures += offset.width!=2 || offset.height!=-3;
+    offset=[[button titleLabel] shadowOffset];
+    failures += offset.width!=2 || offset.height!=-3;
+    failures += [button currentTitleShadowColor]!=0;
+    [button setTitleShadowColor:red forState:0];
+    [button setHighlighted:1];
+    failures += [button currentTitleShadowColor]!=red || [[button titleLabel] shadowColor]!=red;
+    [button setTitleShadowColor:blue forState:1];
+    failures += [button currentTitleShadowColor]!=blue || [[button titleLabel] shadowColor]!=blue;
+    refs=[blue retainCount]; [button setTitleShadowColor:blue forState:1];
+    failures += [blue retainCount]!=refs;
+    [button setTitleShadowColor:0 forState:1];
+    failures += [button currentTitleShadowColor]!=red;
+    [button setHighlighted:0]; [button setSelected:1];
+    [button setTitleShadowColor:blue forState:4];
+    failures += [button currentTitleShadowColor]!=blue;
+    [button setEnabled:0];
+    [button setTitleShadowColor:blue forState:6];
+    failures += [button currentTitleShadowColor]!=blue;
+    [button setTitleShadowColor:0 forState:0];
+    failures += [button titleShadowColorForState:0]!=0;
+    [button release]; [pool release];
+    failures += [red retainCount]!=1 || [blue retainCount]!=1;
+    [red release]; [blue release];
+    printf("S5LBOX-HLE-TEXT-SHADOW %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
 @interface UIImage : NSObject
 + (id)imageWithCGImage:(void *)image;
 + (id)imageWithData:(id)data;
@@ -1011,14 +1103,8 @@ static unsigned toolbar_archive_smoke(void) {
     printf("S5LBOX-HLE-TOOLBAR-ARCHIVE %s failures=%u\n",failures?"FAIL":"PASS",failures);
     return failures;
 }
-extern void *CGColorSpaceCreateDeviceRGB(void);
-extern void CGColorSpaceRelease(void *space);
-extern void *CGBitmapContextCreate(void *data,unsigned width,unsigned height,unsigned bits,unsigned stride,void *space,unsigned bitmapInfo);
 extern void *CGBitmapContextCreateImage(void *context);
-extern void CGContextRelease(void *context);
 extern void CGImageRelease(void *image);
-extern void UIGraphicsPushContext(void *context);
-extern void UIGraphicsPopContext(void);
 @interface UIProgressView : UIView
 - (id)initWithCoder:(id)coder;
 - (BOOL)isHidden;
@@ -1770,6 +1856,20 @@ static unsigned thread_dispatch_smoke(void) {
     background->stop=1;
     for (unsigned i=0;i<1000 && ![worker isFinished];i++) [NSThread sleepForTimeInterval:0.001];
     failures += ![worker isFinished] || [background retainCount]!=1 || [main retainCount]!=1;
+    // Legacy apps sometimes supply an object even for a parameterless selector.
+    // The object must stay alive while queued and be released after delivery.
+    id unused=[[NSObject alloc] init];
+    [main performSelector:@selector(recordWithoutArgument) withObject:unused afterDelay:0];
+    failures += main->calls!=3 || [unused retainCount]!=2 || [main retainCount]!=2;
+    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    failures += main->calls!=4 || [unused retainCount]!=1 || [main retainCount]!=1;
+    [main performSelector:@selector(recordWithoutArgument) onThread:main->expected withObject:unused waitUntilDone:0];
+    failures += main->calls!=4 || [unused retainCount]!=2;
+    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    failures += main->calls!=5 || [unused retainCount]!=1;
+    [main performSelector:@selector(recordWithoutArgument) onThread:main->expected withObject:unused waitUntilDone:1];
+    failures += main->calls!=6 || main->failures || ![main->order isEqualToString:@"ABDNNN"];
+    [unused release];
     [worker release]; [background release]; [main release];
     printf("S5LBOX-HLE-THREAD-DISPATCH %s failures=%u\n",failures?"FAIL":"PASS",failures);
     return failures;
@@ -1867,7 +1967,7 @@ static unsigned foundation_compat_smoke(void) {
     failures += [[basicCopy toValue] longValue]!=2 || [[basicCopy byValue] longValue]!=3;
     failures += ![[basicCopy keyPath] isEqualToString:@"opacity"];
     [basicCopy release]; failures += [from retainCount]!=1; [from release];
-    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke()+progress_view_smoke()+cell_background_smoke()+scanner_string_smoke()+thread_identity_smoke()+thread_dispatch_smoke()+png_export_smoke()+file_manager_lifetime_smoke();
+    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke()+progress_view_smoke()+cell_background_smoke()+scanner_string_smoke()+thread_identity_smoke()+thread_dispatch_smoke()+png_export_smoke()+file_manager_lifetime_smoke()+text_shadow_smoke();
 }
 
 int main(int argc,char **argv) {

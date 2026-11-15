@@ -27,6 +27,9 @@ pub struct State {
 struct UIApplicationHostObject {
     delegate: id,
     delegate_is_retained: bool,
+    /// The application owns the graph loaded from NSMainNibFile for its lifetime.
+    /// Individual nib-loading calls still return autoreleased top-level arrays.
+    main_nib_objects: id,
 }
 impl HostObject for UIApplicationHostObject {}
 
@@ -58,6 +61,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     let host_object = Box::new(UIApplicationHostObject {
         delegate: nil,
         delegate_is_retained: false,
+        main_nib_objects: nil,
     });
     env.objc.alloc_static_object(this, host_object, &mut env.mem)
 }
@@ -301,8 +305,15 @@ pub(super) fn UIApplicationMain(
             if res != nil {
                 let nib: id = msg_class![env; UINib nibWithNibName:ns_main_nib_filename bundle:nil];
                 release(env, ns_main_nib_filename);
-                let _: id = msg![env; nib instantiateWithOwner:ui_application
-                                               options:nil];
+                let objects: id = msg![env; nib instantiateWithOwner:ui_application
+                                                       options:nil];
+                // The launch pool is drained before didFinishLaunching. Keep
+                // the main nib's top-level windows/controllers alive even when
+                // the nib connects them through non-retaining outlets.
+                retain(env, objects);
+                env.objc
+                    .borrow_mut::<UIApplicationHostObject>(ui_application)
+                    .main_nib_objects = objects;
             } else {
                 log!(
                     "Warning: couldn't load main nib file {:?}",
@@ -380,7 +391,9 @@ pub(super) fn UIApplicationMain(
     let views = env.framework_state.uikit.ui_view.views.clone();
     // Layout can recycle/remove other views, including table cells. Keep this
     // snapshot alive until every callback has finished.
-    for view in &views { retain(env, *view); }
+    for view in &views {
+        retain(env, *view);
+    }
     for view in views {
         () = msg![env; view layoutSubviews];
         release(env, view);
