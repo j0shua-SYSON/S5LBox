@@ -140,7 +140,8 @@ pub const CLASSES: ClassExports = objc_classes! {
     } else {
         // Foundation leaves the destination unchanged while encoding, then
         // appends the complete archive. Preserve caller-supplied prefix bytes.
-        () = msg![env; output appendBytes:(guest_buffer.cast_const()) length:len];
+        let bytes: ConstPtr<u8> = guest_buffer.cast_const().cast();
+        () = msg![env; output appendBytes:bytes length:len];
         env.mem.free(guest_buffer);
         env.objc.borrow_mut::<NSKeyedArchiverHostObject>(this).output_data = nil;
         output // Transfer the initializer's retained reference.
