@@ -438,6 +438,10 @@ failed:
     if (!(*name).length || [*name isEqual:@"."] || [*name isEqual:@".."] || [*name isEqual:@"/"] || (*name).length>255) return EINVAL;
     return [self resolve:path.stringByDeletingLastPathComponent root:_root followFinal:YES result:info];
 }
+- (BOOL)hasOpenInode:(uint32_t)inode {
+    for (HLEOfflineHandle *handle in _handles.allValues) if (handle.inode==inode) return YES;
+    return NO;
+}
 - (int32_t)exchange:(const uint8_t *)request length:(uint32_t)length response:(uint8_t *)response capacity:(uint32_t)capacity count:(uint32_t *)count {
     if (count) *count=0;
     if (!_volume || _error || !_home || !request || !response || !count || length<5 || length>65540 ||
@@ -484,6 +488,7 @@ failed:
             // into Documents since it was opened.
             BOOL save=(handle.flags&2) && !hfs_offline_is_app_cache(_volume,_root,handle.inode);
             [_handles removeObjectForKey:@(number)];
+            if (![self hasOpenInode:handle.inode]) hfs_offline_forget_removed(_volume,handle.inode);
             if (save && ![self flush]) e=EIO; break;
         }
         case 4: {
@@ -532,7 +537,7 @@ failed:
             if (!e && ((info.mode&0170000)==0040000)!=(op==15)) e=op==15?ENOTDIR:EISDIR;
             BOOL cache=!e && hfs_offline_is_app_cache(_volume,_root,info.id),opened=NO;
             if (!e) {
-                for (HLEOfflineHandle *other in _handles.allValues) if (other.inode==info.id) { opened=YES; break; }
+                opened=[self hasOpenInode:info.id];
                 e=opened?hfs_offline_remove(_volume,info.id):hfs_offline_remove_closed(_volume,info.id);
             }
             if (!e && !cache && ![self flush]) e=EIO; break;
@@ -546,7 +551,10 @@ failed:
             e=[self parent:destination info:&info name:&name];
             cache=cache && !e && hfs_offline_is_app_cache(_volume,_root,info.id);
             if (!e) { unichar units[255]; [name getCharacters:units range:NSMakeRange(0,name.length)];
-                e=hfs_offline_rename(_volume,id,info.id,units,name.length); }
+                hfs_offline_info replaced={0};
+                BOOL opened=!hfs_offline_lookup(_volume,info.id,units,name.length,&replaced) && [self hasOpenInode:replaced.id];
+                e=opened?hfs_offline_rename(_volume,id,info.id,units,name.length):
+                    hfs_offline_rename_closed_target(_volume,id,info.id,units,name.length); }
             if (!e && !cache && ![self flush]) e=EIO; break;
         }
         case 12: {

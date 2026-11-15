@@ -7246,6 +7246,30 @@ static void test_offline_disposable_cache_batch(void) {
               hfs_offline_remove(v,file)==0,"unlink an open cache handle");
         CHECK(!hfs_offline_is_app_cache(v,FX_BETA,file) && hfs_offline_read(v,file,0,data,4,&got)==0 &&
               got==4 && !memcmp(data,"open",4),"unlinked handles retain bytes without inheriting cache publication policy");
+        hfs_offline_forget_removed(v,file);
+        CHECK(hfs_offline_buffered_bytes(v)==0 && hfs_offline_stat(v,file,&(hfs_offline_info){0})==ENOENT,"last unlinked handle releases its buffer");
+        hfs_offline_forget_removed(v,file);
+        CHECK(hfs_offline_buffered_bytes(v)==0,"forgetting a retired inode twice is harmless");
+        CHECK(hfs_offline_create(v,inner,name,1,0100644,&file)==0 && hfs_offline_write(v,file,0,"old!",4)==0,"old open rename destination");
+        hfs_offline_forget_removed(v,file);
+        CHECK(hfs_offline_read(v,file,0,data,4,&got)==0 && got==4 && !memcmp(data,"old!",4),"forget must never discard a live inode");
+        uint32_t replacement=0,old=file;
+        CHECK(hfs_offline_create(v,inner,away,3,0100644,&replacement)==0 && hfs_offline_write(v,replacement,0,"new!",4)==0 &&
+              hfs_offline_rename(v,replacement,inner,name,1)==0,"replace a destination with an open alias");
+        CHECK(hfs_offline_read(v,old,0,data,4,&got)==0 && !memcmp(data,"old!",4),"open replaced destination still reads old bytes");
+        hfs_offline_forget_removed(v,old);
+        CHECK(hfs_offline_read(v,old,0,data,4,&got)==ENOENT && hfs_offline_buffered_bytes(v)==4,"closing replaced destination preserves only new bytes");
+        file=replacement;
+        for (unsigned iteration=0;iteration<16;iteration++) {
+            old=file;
+            CHECK(hfs_offline_create(v,inner,away,3,0100644,&replacement)==0 && hfs_offline_write(v,replacement,0,"next",4)==0 &&
+                  hfs_offline_rename_closed_target(v,replacement,inner,name,1)==0,"atomically replace a closed cache file");
+            CHECK(hfs_offline_buffered_bytes(v)==4 && hfs_offline_read(v,old,0,data,4,&got)==ENOENT,
+                  "repeated closed replacements do not accumulate retired file buffers");
+            file=replacement;
+        }
+        CHECK(hfs_offline_read(v,file,0,data,4,&got)==0 && got==4 && !memcmp(data,"next",4),"latest replacement data remains readable");
+        CHECK(hfs_offline_remove_closed(v,file)==0 && hfs_offline_buffered_bytes(v)==0,"all closed cache buffers are reclaimed");
         hfs_offline_close(v);
     }
     remove_if_present(source); remove_if_present(clone); free(fx);

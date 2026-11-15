@@ -51,10 +51,16 @@ int hfs_offline_create(hfs_offline *, uint32_t parent, const uint16_t *name,
 int hfs_offline_remove(hfs_offline *, uint32_t id);
 /* Unlink when the caller has verified that no open handles reference this inode. */
 int hfs_offline_remove_closed(hfs_offline *, uint32_t id);
+/* After the last handle closes, discard an unlinked inode's retained bytes.
+ * Live inodes are unchanged. The caller owns the open-handle count. */
+void hfs_offline_forget_removed(hfs_offline *, uint32_t id);
 /* Replacement has POSIX rename semantics. Open, unlinked files retain data
- * until the volume is closed; CNIDs are never reused during a session. */
+ * until explicitly forgotten or the volume closes; CNIDs are never reused. */
 int hfs_offline_rename(hfs_offline *, uint32_t id, uint32_t parent,
                        const uint16_t *name, size_t length);
+/* The destination being replaced has no open handles. The source may be open. */
+int hfs_offline_rename_closed_target(hfs_offline *, uint32_t id, uint32_t parent,
+                                     const uint16_t *name, size_t length);
 /* The clone is flushed before success. On ANY failure discard it and close
  * this volume. A successful commit rebinds reads to the clone's inode; renaming
  * that clone into place does not invalidate open file IDs. */

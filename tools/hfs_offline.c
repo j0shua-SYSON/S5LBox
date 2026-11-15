@@ -434,7 +434,9 @@ static int remove_inode(hfs_offline *v,uint32_t id,bool retain) {
     } else {
         int e=fork_inline(v,r->value+168); if (e) return e;
         if (retain) { e=buffer_file(v,r,r64(r->value+88)); if (e) return e; }
-        else { e=fork_inline(v,r->value+88); if (e) return e; }
+        /* Buffered files can be larger than their not-yet-published extents.
+         * Their data is already validated/owned in RAM, as in buffer_file. */
+        else if (!r->dirty) { e=fork_inline(v,r->value+88); if (e) return e; }
     }
     record *t=thread_for(v,id); if (!t) return EIO;
     for (size_t i=0;i<v->attribute_count;i++) if (r32(v->attributes[i]->key+4)==id) v->attributes[i]->removed=true;
@@ -458,13 +460,16 @@ bool hfs_offline_is_app_cache(hfs_offline *v,uint32_t root,uint32_t id) {
     return false;
 }
 int hfs_offline_remove(hfs_offline *v,uint32_t id) { return remove_inode(v,id,true); }
-int hfs_offline_remove_closed(hfs_offline *v,uint32_t id) {
+void hfs_offline_forget_removed(hfs_offline *v,uint32_t id) {
     record *r=v?by_id(v,id):NULL;
+    if (r && r->removed) { v->dirty_bytes-=r->capacity; free(r->data); r->data=NULL; r->capacity=0; r->forgotten=true; }
+}
+int hfs_offline_remove_closed(hfs_offline *v,uint32_t id) {
     int e=remove_inode(v,id,false);
-    if (!e && r) { v->dirty_bytes-=r->capacity; free(r->data); r->data=NULL; r->capacity=0; r->forgotten=true; }
+    if (!e) hfs_offline_forget_removed(v,id);
     return e;
 }
-int hfs_offline_rename(hfs_offline *v,uint32_t id,uint32_t parent,const uint16_t *name,size_t length) {
+static int rename_inode(hfs_offline *v,uint32_t id,uint32_t parent,const uint16_t *name,size_t length,bool retain_target) {
     int e=valid_parent(v,parent,name,length); if (e) return e;
     record *r=by_id(v,id); if (!r || r->removed) return ENOENT;
     if (id<16) return EINVAL;
@@ -483,12 +488,21 @@ int hfs_offline_rename(hfs_offline *v,uint32_t id,uint32_t parent,const uint16_t
     record *t=thread_for(v,id); if (!t) return EIO;
     uint8_t *key=make_key(parent,name,length),*value=(uint8_t *)calloc(1,10+2*length);
     if (!key || !value) { free(key); free(value); return ENOMEM; }
-    if (replace && (e=hfs_offline_remove(v,dest.id))) { free(key); free(value); return e; }
+    if (replace) {
+        e=retain_target?hfs_offline_remove(v,dest.id):hfs_offline_remove_closed(v,dest.id);
+        if (e) { free(key); free(value); return e; }
+    }
     uint32_t old_parent=r32(r->key+2);
     free(r->key); r->key=key; r->key_length=(uint16_t)(8+2*length);
     w16(value,folder?3:4); w32(value+4,parent); w16(value+8,(uint16_t)length); memcpy(value+10,key+8,2*length);
     free(t->value); t->value=value; t->value_length=(uint16_t)(10+2*length);
     parent_changed(v,old_parent,-1,folder); parent_changed(v,parent,1,folder); changed(v,r); return 0;
+}
+int hfs_offline_rename(hfs_offline *v,uint32_t id,uint32_t parent,const uint16_t *name,size_t length) {
+    return rename_inode(v,id,parent,name,length,true);
+}
+int hfs_offline_rename_closed_target(hfs_offline *v,uint32_t id,uint32_t parent,const uint16_t *name,size_t length) {
+    return rename_inode(v,id,parent,name,length,false);
 }
 
 /* Whole-tree construction. Every index separator is the first key in its
