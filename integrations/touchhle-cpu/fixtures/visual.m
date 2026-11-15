@@ -533,6 +533,19 @@ extern id const kCATransition,kCATransitionFromRight,kCATransitionFromLeft,kCATr
 - (BOOL)allowsKeyedCoding;
 - (id)decodeObject;
 - (id)decodeObjectForKey:(id)key;
+- (void)finishDecoding;
+- (void)setDelegate:(id)delegate;
+@end
+@interface ArchiveFinishProbe : NSObject { @public unsigned phase,failures; BOOL clearDelegate; }
+@end
+@implementation ArchiveFinishProbe
+- (void)unarchiverWillFinish:(NSKeyedUnarchiver *)reader {
+    failures += phase!=0; phase=1;
+    if(clearDelegate) [reader setDelegate:0];
+}
+- (void)unarchiverDidFinish:(NSKeyedUnarchiver *)reader {
+    (void)reader; failures += phase!=1; phase=2;
+}
 @end
 static unsigned archiveNodesReleased;
 @interface ArchiveNode : NSObject { @public id first,second,keyed,selfReference; }
@@ -592,8 +605,24 @@ static unsigned archive_smoke(void) {
     failures += [reader decodeObject]!=0;
     failures += ![[reader decodeObjectForKey:@"$0"] isEqualToString:@"escaped"];
     failures += [reader decodeObjectForKey:@"shared"]!=copy;
+    ArchiveFinishProbe *finish=[[ArchiveFinishProbe alloc] init];
+    [reader setDelegate:finish];
+    unsigned refs=[copy retainCount],delegateRefs=[finish retainCount];
+    [reader finishDecoding]; [reader finishDecoding];
+    failures += finish->phase!=2 || finish->failures || [copy retainCount]!=refs;
+    failures += [finish retainCount]!=delegateRefs;
+    [reader setDelegate:0]; [finish release];
     [reader release]; [data release];
     id rootData=[NSKeyedArchiver archivedDataWithRootObject:parent];
+    reader=[[NSKeyedUnarchiver alloc] initForReadingWithData:rootData];
+    finish=[[ArchiveFinishProbe alloc] init]; finish->clearDelegate=1;
+    [reader setDelegate:finish]; [reader finishDecoding]; [reader finishDecoding];
+    failures += finish->phase!=1 || finish->failures;
+    [reader release]; [finish release];
+    reader=[[NSKeyedUnarchiver alloc] initForReadingWithData:rootData];
+    id plainDelegate=[[NSObject alloc] init];
+    [reader setDelegate:plainDelegate]; [reader finishDecoding];
+    [reader release]; [plainDelegate release];
     ArchiveNode *rootCopy=[[NSKeyedUnarchiver unarchiveObjectWithData:rootData] retain];
     failures += rootCopy->first!=rootCopy->second || rootCopy->selfReference!=rootCopy;
     NSArray *numbers=[NSArray arrayWithObjects:[NSNumber numberWithFloat:1.25f],

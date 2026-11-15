@@ -20,8 +20,8 @@ use crate::frameworks::uikit::ui_geometry::{
 };
 use crate::mem::{ConstPtr, ConstVoidPtr, GuestUSize, MutPtr, MutVoidPtr};
 use crate::objc::{
-    autorelease, id, msg, msg_class, nil, objc_classes, release, retain, ClassExports, HostObject,
-    NSZonePtr,
+    autorelease, id, msg, msg_class, msg_send, nil, objc_classes, release, retain, ClassExports,
+    HostObject, NSZonePtr,
 };
 use crate::Environment;
 use plist::{Dictionary, Uid, Value};
@@ -42,6 +42,7 @@ struct NSKeyedUnarchiverHostObject {
     already_unarchived: Vec<Option<id>>,
     /// Something responding to NSKeyedUnarchiverDelegate
     delegate: id,
+    finished: bool,
     /// Stores the buffers decoded by `decodeBytesForKey:returnedLength:`
     /// Instead of reusing the same buffer, we allocate different ones that get
     /// freed on dealloc. A similar behavior has been observed in real iOS.
@@ -62,6 +63,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         sequential_key: 0,
         already_unarchived: Vec::new(),
         delegate: nil,
+        finished: false,
         temporary_buffers: Vec::new(),
     });
     env.objc.alloc_object(this, unarchiver, &mut env.mem)
@@ -81,6 +83,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     let root_key = get_static_str(env, NSKeyedArchiveRootObjectKey);
     let result: id = msg![env; new decodeObjectForKey:root_key];
     retain(env, result);
+    () = msg![env; new finishDecoding];
     release(env, new);
     autorelease(env, result)
 }
@@ -130,7 +133,24 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.objc.dealloc_object(this, &mut env.mem)
 }
 
-// TODO: implement calls to delegate methods
+- (())finishDecoding {
+    let host = env.objc.borrow_mut::<NSKeyedUnarchiverHostObject>(this);
+    if host.finished { return; }
+    host.finished = true;
+    // Finishing notifies the current delegate without discarding decoded
+    // objects or temporary buffers; those remain owned until deallocation.
+    for name in ["unarchiverWillFinish:", "unarchiverDidFinish:"] {
+        let delegate = env.objc.borrow::<NSKeyedUnarchiverHostObject>(this).delegate;
+        let selector = env.objc.register_host_selector(name.to_string(), &mut env.mem);
+        if delegate != nil && msg![env; delegate respondsToSelector:selector] {
+            retain(env, delegate);
+            () = msg_send(env, (delegate, selector, this));
+            release(env, delegate);
+        }
+    }
+}
+
+// TODO: object replacement and other decoding delegate methods.
 // weak/non-retaining
 - (())setDelegate:(id)delegate { // id<NSKeyedUnarchiverDelegate>
     let host_object = env.objc.borrow_mut::<NSKeyedUnarchiverHostObject>(this);
@@ -277,12 +297,21 @@ fn borrow_host_obj(env: &mut Environment, unarchiver: id) -> &mut NSKeyedUnarchi
 
 fn get_value_to_decode_for_key(env: &mut Environment, unarchiver: id, key: id) -> Option<&Value> {
     let key = to_rust_string(env, key); // TODO: avoid copying string
-    let key = if key.starts_with('$') { format!("${key}") } else { key.to_string() };
+    let key = if key.starts_with('$') {
+        format!("${key}")
+    } else {
+        key.to_string()
+    };
     get_value_to_decode_for_normalized_key(env, unarchiver, &key)
 }
 
-fn get_value_to_decode_for_normalized_key<'a>(env: &'a mut Environment, unarchiver: id, key: &str) -> Option<&'a Value> {
+fn get_value_to_decode_for_normalized_key<'a>(
+    env: &'a mut Environment,
+    unarchiver: id,
+    key: &str,
+) -> Option<&'a Value> {
     let host_obj = borrow_host_obj(env, unarchiver);
+    assert!(!host_obj.finished, "Cannot decode after finishDecoding");
     let scope = match host_obj.current_key {
         Some(current_uid) => {
             &host_obj.plist["$objects"].as_array().unwrap()[current_uid.get() as usize]
@@ -304,7 +333,9 @@ fn get_value_to_decode_for_normalized_key<'a>(env: &'a mut Environment, unarchiv
 /// The object returned is retained only by the archiver. Remember to retain and
 /// possibly autorelease it as appropriate.
 fn unarchive_key(env: &mut Environment, unarchiver: id, key: Uid) -> id {
-    if key.get() == 0 { return nil; }
+    if key.get() == 0 {
+        return nil;
+    }
     let host_obj = borrow_host_obj(env, unarchiver);
     if let Some(existing) = host_obj.already_unarchived[key.get() as usize] {
         return existing;
@@ -345,7 +376,8 @@ fn unarchive_key(env: &mut Environment, unarchiver: id, key: Uid) -> id {
             let old_sequential_key = std::mem::replace(&mut host_obj.sequential_key, 0);
 
             let new_object: id = msg![env; class alloc];
-            borrow_host_obj(env, unarchiver).already_unarchived[key.get() as usize] = Some(new_object);
+            borrow_host_obj(env, unarchiver).already_unarchived[key.get() as usize] =
+                Some(new_object);
             let new_object: id = msg![env; new_object initWithCoder:unarchiver];
 
             let host_obj = borrow_host_obj(env, unarchiver); // reborrow
