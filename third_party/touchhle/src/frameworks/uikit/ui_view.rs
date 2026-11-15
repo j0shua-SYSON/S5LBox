@@ -523,6 +523,9 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())insertSubview:(id)view belowSubview:(id)sibling {
+    assert!(view != nil && view != this && sibling != nil);
+    assert_eq!(env.objc.borrow::<UIViewHostObject>(sibling).superview, this);
+    if view == sibling { return; }
     retain(env, view);
     () = msg![env; view removeFromSuperview];
 
@@ -542,6 +545,24 @@ pub const CLASSES: ClassExports = objc_classes! {
     subviews.insert(idx, view);
 
     () = msg![env; this_layer insertSublayer:subview_layer below:sibling_layer];
+}
+
+- (())insertSubview:(id)view aboveSubview:(id)sibling {
+    assert!(view != nil && view != this && sibling != nil);
+    assert_eq!(env.objc.borrow::<UIViewHostObject>(sibling).superview, this);
+    if view == sibling { return; }
+    retain(env, view);
+    () = msg![env; view removeFromSuperview];
+
+    let subview_obj = env.objc.borrow_mut::<UIViewHostObject>(view);
+    subview_obj.superview = this;
+    let subview_layer = subview_obj.layer;
+    let sibling_layer = env.objc.borrow::<UIViewHostObject>(sibling).layer;
+    let host = env.objc.borrow_mut::<UIViewHostObject>(this);
+    let idx = host.subviews.iter().position(|&child| child == sibling).unwrap();
+    host.subviews.insert(idx + 1, view);
+    let layer = host.layer;
+    () = msg![env; layer insertSublayer:subview_layer above:sibling_layer];
 }
 
 - (())bringSubviewToFront:(id)subview {

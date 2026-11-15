@@ -435,6 +435,8 @@ static unsigned permissions_smoke(BOOL unavailable) {
 - (void)layoutSubviews;
 - (void)setBackgroundColor:(id)color;
 - (void)addSubview:(id)view;
+- (void)insertSubview:(id)view aboveSubview:(id)sibling;
+- (void)insertSubview:(id)view belowSubview:(id)sibling;
 - (id)subviews;
 - (id)superview;
 - (void)removeFromSuperview;
@@ -449,6 +451,11 @@ static unsigned permissions_smoke(BOOL unavailable) {
 - (void)touchesBegan:(id)touches withEvent:(id)event;
 @end
 @interface CALayer : NSObject
+- (id)sublayers;
+- (id)superlayer;
+- (void)addSublayer:(id)layer;
+- (void)insertSublayer:(id)layer above:(id)sibling;
+- (void)insertSublayer:(id)layer below:(id)sibling;
 - (void)displayIfNeeded;
 - (void)setNeedsDisplayInRect:(CGRect)rect;
 - (void)addAnimation:(id)animation forKey:(id)key;
@@ -1237,6 +1244,67 @@ typedef struct { unsigned location,length; } NSRange;
 - (id)text;
 - (BOOL)resignFirstResponder;
 @end
+@interface UISwitch : UIControl @end
+static unsigned view_order_smoke(void) {
+    unsigned failures=0;
+    id pool=[[NSAutoreleasePool alloc] init];
+    CGRect frame={{0,0},{40,40}};
+    UIView *parent=[[UIView alloc] initWithFrame:frame];
+    UIView *other=[[UIView alloc] initWithFrame:frame];
+    UIView *a=[[UIView alloc] initWithFrame:frame];
+    UIView *b=[[UIView alloc] initWithFrame:frame];
+    UIView *c=[[UIView alloc] initWithFrame:frame];
+    [parent addSubview:a]; [parent addSubview:b]; [other addSubview:c];
+    [parent insertSubview:c aboveSubview:a];
+    NSArray *views=[parent subviews],*layers=[[parent layer] sublayers];
+    failures += [views count]!=3 || [views objectAtIndex:1]!=c || [[other subviews] count]!=0;
+    failures += [c superview]!=parent || [[c layer] superlayer]!=[parent layer];
+    failures += [layers count]!=3 || [layers objectAtIndex:1]!=[c layer];
+    [parent insertSubview:a aboveSubview:b]; // Move an earlier sibling to the end.
+    failures += [[parent subviews] objectAtIndex:2]!=a || [[[parent layer] sublayers] objectAtIndex:2]!=[a layer];
+    failures += [parent hitTest:(CGPoint){10,10} withEvent:0]!=a;
+    [parent insertSubview:a belowSubview:c];
+    [parent insertSubview:c aboveSubview:c]; [parent insertSubview:c belowSubview:c];
+    failures += [[parent subviews] objectAtIndex:0]!=a || [[[parent layer] sublayers] objectAtIndex:0]!=[a layer];
+    failures += [parent hitTest:(CGPoint){10,10} withEvent:0]!=b;
+    [parent release]; [other release]; [pool release];
+    failures += [a retainCount]!=1 || [b retainCount]!=1 || [c retainCount]!=1;
+    failures += [a superview]!=0 || [b superview]!=0 || [c superview]!=0;
+    [a release]; [b release]; [c release];
+    pool=[[NSAutoreleasePool alloc] init];
+    CALayer *root=[[CALayer alloc] init],*x=[[CALayer alloc] init],*y=[[CALayer alloc] init];
+    failures += [root sublayers]!=0;
+    [root addSublayer:x]; [root insertSublayer:y above:0];
+    failures += [[root sublayers] objectAtIndex:1]!=y;
+    [root insertSublayer:y below:0];
+    [root insertSublayer:y above:y]; [root insertSublayer:y below:y];
+    failures += [[root sublayers] objectAtIndex:0]!=y;
+    [root release]; [pool release];
+    failures += [x retainCount]!=1 || [y retainCount]!=1 || [x superlayer]!=0 || [y superlayer]!=0;
+    [x release]; [y release];
+    printf("S5LBOX-HLE-VIEW-ORDER %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
+static unsigned control_lifetime_smoke(void) {
+    unsigned failures=0;
+    for(unsigned kind=0;kind<3;kind++) {
+        id pool=[[NSAutoreleasePool alloc] init];
+        Class cls=kind==0?[UIButton class]:(kind==1?[UISwitch class]:[UITextField class]);
+        UIView *control=[[cls alloc] initWithFrame:(CGRect){{0,0},{100,40}}];
+        NSArray *children=[[control subviews] retain];
+        id layer=[[control layer] retain];
+        failures += [children count]==0;
+        [control release]; [pool release];
+        failures += [layer retainCount]!=1;
+        for(unsigned i=0;i<[children count];i++) {
+            id child=[children objectAtIndex:i];
+            failures += [child retainCount]!=1 || [child superview]!=0;
+        }
+        [children release]; [layer release];
+    }
+    printf("S5LBOX-HLE-CONTROL-LIFETIME %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
 @interface UITouch : NSObject @end
 @interface NSTimer : NSObject
 + (id)scheduledTimerWithTimeInterval:(double)interval target:(id)target selector:(SEL)selector userInfo:(id)info repeats:(BOOL)repeats;
@@ -1967,7 +2035,7 @@ static unsigned foundation_compat_smoke(void) {
     failures += [[basicCopy toValue] longValue]!=2 || [[basicCopy byValue] longValue]!=3;
     failures += ![[basicCopy keyPath] isEqualToString:@"opacity"];
     [basicCopy release]; failures += [from retainCount]!=1; [from release];
-    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke()+progress_view_smoke()+cell_background_smoke()+scanner_string_smoke()+thread_identity_smoke()+thread_dispatch_smoke()+png_export_smoke()+file_manager_lifetime_smoke()+text_shadow_smoke();
+    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke()+progress_view_smoke()+cell_background_smoke()+scanner_string_smoke()+thread_identity_smoke()+thread_dispatch_smoke()+png_export_smoke()+file_manager_lifetime_smoke()+text_shadow_smoke()+control_lifetime_smoke()+view_order_smoke();
 }
 
 int main(int argc,char **argv) {

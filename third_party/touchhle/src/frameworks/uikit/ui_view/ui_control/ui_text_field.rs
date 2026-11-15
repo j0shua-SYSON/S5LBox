@@ -110,10 +110,8 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())dealloc {
-    let UITextFieldHostObject {
-        text_label,
-        ..
-    } = std::mem::take(env.objc.borrow_mut(this));
+    let text_label = std::mem::replace(
+        &mut env.objc.borrow_mut::<UITextFieldHostObject>(this).text_label, nil);
 
     release(env, text_label);
     msg_super![env; this dealloc]

@@ -287,13 +287,15 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (())dealloc {
     let UISwitchHostObject {
-        superclass: _,
+        superclass,
         is_on: _,
         back,
         thumb,
         label_on,
         label_off,
     } = std::mem::take(env.objc.borrow_mut(this));
+
+    env.objc.borrow_mut::<UISwitchHostObject>(this).superclass = superclass;
 
     release(env, back);
     release(env, thumb);

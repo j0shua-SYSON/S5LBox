@@ -23,6 +23,7 @@ use crate::frameworks::core_graphics::cg_image::{
     kCGImageAlphaPremultipliedLast, kCGImageByteOrder32Big,
 };
 use crate::frameworks::core_graphics::{CGFloat, CGPoint, CGRect, CGSize};
+use crate::frameworks::foundation::ns_array;
 use crate::frameworks::foundation::ns_string::{self, get_static_str, to_rust_string};
 use crate::mem::{GuestUSize, Ptr};
 use crate::objc::{
@@ -197,7 +198,14 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (id)superlayer {
     env.objc.borrow::<CALayerHostObject>(this).superlayer
 }
-// TODO: sublayers accessors
+- (id)sublayers {
+    let layers = env.objc.borrow::<CALayerHostObject>(this).sublayers.clone();
+    if layers.is_empty() { return nil; }
+    for &layer in &layers { retain(env, layer); }
+    let array = ns_array::from_vec(env, layers);
+    autorelease(env, array)
+}
+// TODO: setSublayers:
 
 - (())addSublayer:(id)layer {
     if env.objc.borrow::<CALayerHostObject>(layer).superlayer == this {
@@ -220,13 +228,36 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())insertSublayer:(id)layer below:(id)sibling {
+    assert!(layer != nil && layer != this);
+    if sibling != nil {
+        assert_eq!(env.objc.borrow::<CALayerHostObject>(sibling).superlayer, this);
+    }
+    if layer == sibling { return; }
     retain(env, layer);
     () = msg![env; layer removeFromSuperlayer];
     env.objc.borrow_mut::<CALayerHostObject>(layer).superlayer = this;
 
     let CALayerHostObject { ref mut sublayers, .. } = env.objc.borrow_mut(this);
-    let idx = sublayers.iter().position(|&sublayer| sublayer == sibling).unwrap();
+    let idx = if sibling == nil { 0 } else {
+        sublayers.iter().position(|&sublayer| sublayer == sibling).unwrap()
+    };
     sublayers.insert(idx, layer);
+}
+
+- (())insertSublayer:(id)layer above:(id)sibling {
+    assert!(layer != nil && layer != this);
+    if sibling != nil {
+        assert_eq!(env.objc.borrow::<CALayerHostObject>(sibling).superlayer, this);
+    }
+    if layer == sibling { return; }
+    retain(env, layer);
+    () = msg![env; layer removeFromSuperlayer];
+    env.objc.borrow_mut::<CALayerHostObject>(layer).superlayer = this;
+    let host = env.objc.borrow_mut::<CALayerHostObject>(this);
+    let idx = if sibling == nil { host.sublayers.len() } else {
+        host.sublayers.iter().position(|&child| child == sibling).unwrap() + 1
+    };
+    host.sublayers.insert(idx, layer);
 }
 
 - (())removeFromSuperlayer {

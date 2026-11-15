@@ -89,7 +89,8 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (id)instantiateWithOwner:(id)owner
                    options:(id)options { // NSDictionary *
-    assert!(owner != nil); // TODO
+    // Ownerless nibs are valid. UIProxyObject requires an owner only when the
+    // archive actually contains a File's Owner proxy.
     assert!(options == nil); // TODO
 
     let bundle = env.objc.borrow::<UINibHostObject>(this).bundle;
