@@ -1258,6 +1258,45 @@ static void test_ta_image_viewer_triangle_pair(void) {
           m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
           "fully masked TA scene must complete without writing pixels");
 
+    /* During toolbar animation the captured point-sampled quad is 479.8529
+     * pixels high while its UV extent remains 480. Exercise that fractional
+     * edge condition, then enlargement and reduction with known texel IDs. */
+    for (uint32_t y = 0; y < 32u; y++)
+        for (uint32_t x = 0; x < 320u; x++)
+            test_gpu_write32(&m, source + y * stride + x * 4u,
+                             0xff000000u | (y * 320u + x));
+    for (unsigned mode = 0u; mode < 3u; mode++) {
+        uint32_t point_stream[64] = {0x10000010u};
+        uint32_t pn = test_ta_global_transform(point_stream, 1u, 320u, 480u, 0, 0);
+        float dw = mode == 2u ? 160.0f : 320.0f;
+        float dh = mode == 0u ? 19.8529f : mode == 1u ? 20.0f : 10.0f;
+        float tw = mode == 1u ? 160.0f : 320.0f;
+        float th = mode == 1u ? 10.0f : 20.0f;
+        const float px[4] = {dw, dw, 0, 0}, py[4] = {0, dh, 0, dh};
+        const float pu[4] = {tw, tw, 0, 0}, pv[4] = {0, th, 0, th};
+        pn = test_ta_textured_draw(point_stream, pn, 0xa6218000u,
+            0x0e500000u | (source >> 7), 0xd6087610u, px, py, pu, pv, 0xffffffffu);
+        point_stream[pn++] = 0xf0000000u;
+        for (uint32_t y = 0; y < 20u; y++)
+            for (uint32_t x = 0; x < 320u; x++)
+                test_gpu_write32(&m, target + y * stride + x * 4u, 0xff102030u);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+        test_ta_run_stream(&m, point_stream, pn);
+        mismatches = 0u;
+        for (uint32_t y = 0; y < 20u; y++)
+            for (uint32_t x = 0; x < 320u; x++) {
+                uint32_t expected = 0xff102030u;
+                if (mode != 2u || (x < 160u && y < 10u)) {
+                    uint32_t sx = mode == 0u ? x : mode == 1u ? x / 2u : x * 2u + 1u;
+                    uint32_t sy = mode == 0u ? y : mode == 1u ? y / 2u : y * 2u + 1u;
+                    expected = 0xff000000u | (sy * 320u + sx);
+                }
+                mismatches += test_gpu_read32(&m, target + y * stride + x * 4u) != expected;
+            }
+        CHECK(!mismatches && m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+              "TA point sampling mode %u mismatched %u pixels", mode, mismatches);
+    }
+
     /* Damage the second triangle's shared UV, colour, raster control or
      * terminator. No earlier solid draw may leak from the rejected scene. */
     const uint32_t damaged[] = {40u, 39u, 33u, 58u, 42u};

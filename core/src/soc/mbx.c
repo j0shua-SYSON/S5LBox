@@ -4493,17 +4493,20 @@ static bool mbx_ta_premultiplied(uint32_t pixel) {
            ((pixel >> 16) & 0xffu) <= alpha;
 }
 
-static bool mbx_ta_near_u32(float value, uint32_t maximum,
-                            uint32_t *rounded) {
-    if (!rounded || value < 0.0f || value > (float)maximum + 0.0009765625f)
-        return false;
-    uint32_t candidate = (uint32_t)(value + 0.5f);
-    if (candidate > maximum) return false;
-    float error = value - (float)candidate;
-    if (error < 0.0f) error = -error;
-    if (error > 0.0009765625f) return false;
-    *rounded = candidate;
-    return true;
+static void mbx_ta_nearest_axis(float t0, float t1, float d0, float d1,
+                                 uint32_t first, uint32_t count,
+                                 uint32_t extent,
+                                 struct mbx_bilinear_axis *axis) {
+    /* Evaluate the point sampler at destination pixel centres, including
+     * fractional animation geometry. Exact 1:1 crops retain their texels. */
+    double scale = ((double)t1 - t0) / ((double)d1 - d0);
+    for (uint32_t i = 0u; i < count; i++) {
+        double sample = t0 + ((double)first + i + 0.5 - d0) * scale;
+        uint32_t texel = sample <= 0.0 ? 0u :
+                         sample >= extent ? extent - 1u : (uint32_t)sample;
+        axis[i].first = axis[i].second = texel;
+        axis[i].weight = 0u;
+    }
 }
 
 static bool mbx_ta_apply_draw(
@@ -4641,44 +4644,14 @@ static bool mbx_ta_apply_draw(
                 source_y1++;
             }
         } else {
-            int32_t destination_x = (int32_t)draw->x0;
-            int32_t destination_y = (int32_t)draw->y0;
-            int32_t destination_right = (int32_t)draw->x1;
-            int32_t destination_bottom = (int32_t)draw->y1;
-            uint32_t texture_x, texture_y, texture_right, texture_bottom;
-            if ((float)destination_x != draw->x0 ||
-                (float)destination_y != draw->y0 ||
-                (float)destination_right != draw->x1 ||
-                (float)destination_bottom != draw->y1 ||
-                !mbx_ta_near_u32(draw->u0, pitch_pixels, &texture_x) ||
-                !mbx_ta_near_u32(draw->v0, draw->texture_height,
-                                 &texture_y) ||
-                !mbx_ta_near_u32(draw->u1, pitch_pixels,
-                                 &texture_right) ||
-                !mbx_ta_near_u32(draw->v1, draw->texture_height,
-                                 &texture_bottom) ||
-                destination_right - destination_x !=
-                    (int32_t)(texture_right - texture_x) ||
-                destination_bottom - destination_y !=
-                    (int32_t)(texture_bottom - texture_y)) {
-                if (why) *why = "TA unfiltered texture is not a measured 1:1 crop";
-                return false;
-            }
-            int64_t first_x = (int64_t)texture_x +
-                              (int64_t)raster_left - destination_x;
-            int64_t first_y = (int64_t)texture_y +
-                              (int64_t)raster_top - destination_y;
-            if (first_x < 0 || first_y < 0 ||
-                (uint64_t)first_x + width > pitch_pixels ||
-                (uint64_t)first_x + width > draw->texture_width ||
-                (uint64_t)first_y + height > draw->texture_height) {
-                if (why) *why = "TA unfiltered crop leaves its texture";
-                return false;
-            }
-            source_x0 = (uint32_t)first_x;
-            source_y0 = (uint32_t)first_y;
-            source_x1 = source_x0 + width;
-            source_y1 = source_y0 + height;
+            mbx_ta_nearest_axis(draw->u0, draw->u1, draw->x0, draw->x1,
+                                 left, width, pitch_pixels, x_axis);
+            mbx_ta_nearest_axis(draw->v0, draw->v1, draw->y0, draw->y1,
+                                 top, height, draw->texture_height, y_axis);
+            source_x0 = x_axis[0].first;
+            source_y0 = y_axis[0].first;
+            source_x1 = x_axis[width - 1u].first + 1u;
+            source_y1 = y_axis[height - 1u].first + 1u;
         }
 
         uint32_t source_width = source_x1 - source_x0;
@@ -4796,7 +4769,8 @@ static bool mbx_ta_apply_draw(
                             sample_x->weight);
                 } else {
                     source_pixel = mbx_load_le32(source_pixels +
-                        y * source_row_bytes + x * 4u);
+                        (y_axis[y].first - source_y0) * source_row_bytes +
+                        (x_axis[x].first - source_x0) * 4u);
                 }
                 source_pixel = mbx_modulate_vertex_colour(
                     source_pixel, draw->colour);
