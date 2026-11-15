@@ -1202,6 +1202,62 @@ static void test_ta_image_viewer_triangle_pair(void) {
     }
     stream[start + 1u] = 0x22620e80u;
 
+    /* iFile pans a texture beyond a scissored viewport. The driver's mask
+     * packets must constrain both solid and textured draws, persist through
+     * the triangle continuation, and restore coverage for later UI chrome. */
+    uint32_t masked[256];
+    memcpy(masked, stream, background_start * sizeof(uint32_t));
+    uint32_t masked_next = test_ta_auxiliary_block(
+        masked, background_start, 0x22206f80u, 3u);
+    uint32_t mask_rect = masked_next;
+    masked_next = test_ta_auxiliary_block(masked, masked_next, 0x22207f80u, 4u);
+    const float viewport[4][2] = {{13, 5}, {13, 15}, {240, 5}, {240, 15}};
+    for (uint32_t v = 0; v < 4; v++) {
+        masked[mask_rect + 9u + v * 4u] = test_float_word(viewport[v][0]);
+        masked[mask_rect + 10u + v * 4u] = test_float_word(viewport[v][1]);
+    }
+    memcpy(masked + masked_next, stream + background_start,
+           (next - background_start - 1u) * sizeof(uint32_t));
+    masked_next += next - background_start - 1u;
+    masked_next = test_ta_auxiliary_block(masked, masked_next, 0x22207f80u, 3u);
+    masked_next = test_ta_solid_draw(masked, masked_next, 0, 0, 1, 1, 0xffabcdefu);
+    masked_next = test_ta_auxiliary_block(masked, masked_next, 0x22206f80u, 3u);
+    masked_next = test_ta_solid_draw(masked, masked_next, 0, 0, 320, 20, 0xffffffffu);
+    masked[masked_next++] = 0xf0000000u;
+    for (uint32_t y = 0; y < 20u; y++)
+        for (uint32_t x = 0; x < 320u; x++)
+            test_gpu_write32(&m, target + y * stride + x * 4u, 0xff765432u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    test_ta_run_stream(&m, masked, masked_next);
+    mismatches = 0u;
+    for (uint32_t y = 0; y < 20u; y++)
+        for (uint32_t x = 0; x < 320u; x++) {
+            uint32_t expected = x >= 13u && x < 240u && y >= 5u && y < 15u
+                ? ((x + y) % 2u ? test_sprite_source_pixel(x, y) : 0u)
+                : 0xff765432u;
+            if (!x && !y) expected = 0xffabcdefu;
+            mismatches += test_gpu_read32(&m, target + y * stride + x * 4u) != expected;
+        }
+    CHECK(!mismatches && m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+          "TA viewport mask leaked, lost coverage, or failed to restore (%u pixels)", mismatches);
+
+    /* A malformed initial mask must fail before any framebuffer write. */
+    masked[mask_rect + 17u] = test_float_word(239.0f); // non-rectangular right edge
+    test_gpu_write32(&m, target, 0xff123456u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    test_ta_run_stream(&m, masked, masked_next);
+    CHECK(test_gpu_read32(&m, target) == 0xff123456u &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "malformed initial TA mask committed part of the scene");
+    uint32_t empty_scene[64] = {0x10000010u};
+    uint32_t empty_next = test_ta_auxiliary_block(empty_scene, 1u, 0x22206f80u, 3u);
+    empty_next = test_ta_solid_draw(empty_scene, empty_next, 0, 0, 320, 20, 0xffffffffu);
+    empty_scene[empty_next++] = 0xf0000000u;
+    test_ta_run_stream(&m, empty_scene, empty_next);
+    CHECK(test_gpu_read32(&m, target) == 0xff123456u &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+          "fully masked TA scene must complete without writing pixels");
+
     /* Damage the second triangle's shared UV, colour, raster control or
      * terminator. No earlier solid draw may leak from the rejected scene. */
     const uint32_t damaged[] = {40u, 39u, 33u, 58u, 42u};

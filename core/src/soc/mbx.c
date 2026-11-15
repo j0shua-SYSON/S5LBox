@@ -3738,6 +3738,10 @@ struct mbx_ta_draw {
     bool empty;
     bool blend_state;
     bool replace;
+    bool mask_draw;
+    bool mask_set;
+    uint32_t mask_vertices;
+    float mask_xy[4][2];
     uint32_t source;
     uint32_t source_stride;
     uint32_t texture_width;
@@ -4383,12 +4387,10 @@ static bool mbx_ta_state_block(const uint32_t *words, uint32_t count,
            first <= 1.0f && second <= 1.0f;
 }
 
-/* Weather submits measured non-colour primitives between ordinary textured
- * draws. The same packet family also occurs in the pre-draw region, where the
- * TA parser already treats it as setup rather than framebuffer work. The
- * 0x22207f80 control has been captured with both three and four vertices;
- * 0x22206f80 has only been captured with three. Recognize only those bounded
- * finite forms when they occur between draws. */
+/* MBXGLEngine's SendDrawMaskRect (0x215b4) implements scissoring by clearing
+ * a coverage mask with a full-surface triangle, then setting a rectangle.
+ * Bit 12 selects set versus clear. A set triangle restores full coverage.
+ * These commands occur both before and between colour draws. */
 static uint32_t mbx_ta_auxiliary_block(const uint32_t *words,
                                        uint32_t count, uint32_t start) {
     if (start > count || count - start < 21u ||
@@ -4424,6 +4426,66 @@ static uint32_t mbx_ta_auxiliary_block(const uint32_t *words,
     return length;
 }
 
+static bool mbx_ta_parse_mask(const uint32_t *words, uint32_t count,
+                              uint32_t start, struct mbx_ta_draw *draw) {
+    uint32_t length = mbx_ta_auxiliary_block(words, count, start);
+    if (!length) return false;
+    memset(draw, 0, sizeof *draw);
+    draw->start_word = start;
+    draw->next_word = start + length;
+    draw->mask_draw = true;
+    draw->mask_set = (words[start + 1u] & 0x1000u) != 0u;
+    draw->mask_vertices = (length - 9u) / 4u;
+    for (uint32_t i = 0u; i < draw->mask_vertices; i++) {
+        (void)mbx_3d_word_to_nonnegative_float(
+            words[start + 9u + i * 4u], &draw->mask_xy[i][0]);
+        (void)mbx_3d_word_to_nonnegative_float(
+            words[start + 10u + i * 4u], &draw->mask_xy[i][1]);
+    }
+    const float (*p)[2] = draw->mask_xy;
+    if (draw->mask_vertices == 3u) {
+        /* The driver's oversized right triangle, in framebuffer coordinates.
+         * Do not apply the colour pipeline's model-view translation. */
+        return p[0][0] == 0.0f && p[0][1] == 0.0f &&
+               p[1][0] > 0.0f && p[1][1] == 0.0f &&
+               p[2][0] == 0.0f && p[2][1] > 0.0f;
+    }
+    return p[0][0] == p[1][0] && p[2][0] == p[3][0] &&
+           p[0][1] == p[2][1] && p[1][1] == p[3][1] &&
+           p[0][0] <= p[2][0] && p[0][1] <= p[1][1];
+}
+
+static void mbx_ta_apply_mask(const struct mbx_ta_draw *draw,
+                              uint32_t width, uint32_t height,
+                              uint8_t *coverage) {
+    const float (*p)[2] = draw->mask_xy;
+    if (draw->mask_vertices == 4u) {
+        uint32_t left = (uint32_t)mbx_3d_ceil_to_i32(p[0][0] - 0.5f);
+        uint32_t top = (uint32_t)mbx_3d_ceil_to_i32(p[0][1] - 0.5f);
+        uint32_t right = (uint32_t)mbx_3d_ceil_to_i32(p[2][0] - 0.5f);
+        uint32_t bottom = (uint32_t)mbx_3d_ceil_to_i32(p[1][1] - 0.5f);
+        if (right > width) right = width;
+        if (bottom > height) bottom = height;
+        if (left >= right || top >= bottom) return;
+        for (uint32_t y = top; y < bottom; y++)
+            memset(coverage + y * width + left, draw->mask_set, right - left);
+        return;
+    }
+    if (((float)width - 0.5f) * p[2][1] +
+        ((float)height - 0.5f) * p[1][0] < p[1][0] * p[2][1]) {
+        memset(coverage, draw->mask_set, width * height);
+        return;
+    }
+    for (uint32_t y = 0u; y < height; y++) {
+        float py = (float)y + 0.5f;
+        for (uint32_t x = 0u; x < width; x++) {
+            float px = (float)x + 0.5f;
+            bool covered = px * p[2][1] + py * p[1][0] < p[1][0] * p[2][1];
+            if (covered) coverage[y * width + x] = draw->mask_set;
+        }
+    }
+}
+
 static bool mbx_ta_premultiplied(uint32_t pixel) {
     uint32_t alpha = pixel >> 24;
     return (pixel & 0xffu) <= alpha &&
@@ -4451,7 +4513,7 @@ static bool mbx_ta_apply_draw(
         uint32_t target_bytes,
         uint32_t clip_left, uint32_t clip_top,
         uint32_t clip_right, uint32_t clip_bottom,
-        uint8_t *target_pixels,
+        uint8_t *target_pixels, const uint8_t *coverage,
         uint32_t *dirty_left, uint32_t *dirty_top,
         uint32_t *dirty_right, uint32_t *dirty_bottom,
         uint64_t *pixels_blended, const char **why) {
@@ -4497,6 +4559,7 @@ static bool mbx_ta_apply_draw(
         }
         for (uint32_t y = top; y < bottom; y++) {
             for (uint32_t x = left; x < right; x++) {
+                if (coverage && !coverage[y * target_width + x]) continue;
                 uint8_t *pixel = target_pixels +
                     (y * target_width + x) * 4u;
                 uint32_t output = draw->replace ? draw->colour :
@@ -4505,9 +4568,9 @@ static bool mbx_ta_apply_draw(
                 pixel[1] = (uint8_t)(output >> 8);
                 pixel[2] = (uint8_t)(output >> 16);
                 pixel[3] = (uint8_t)(output >> 24);
+                draw_pixels++;
             }
         }
-        draw_pixels = (uint64_t)width * height;
     } else {
         uint32_t pitch_pixels = draw->source_stride / 4u;
         if (!pitch_pixels || draw->u1 > (float)pitch_pixels ||
@@ -4656,6 +4719,8 @@ static bool mbx_ta_apply_draw(
         }
         for (uint32_t y = 0u; y < height && ok; y++) {
             for (uint32_t x = 0u; x < width; x++) {
+                if (coverage && !coverage[(top + y) * target_width + left + x])
+                    continue;
                 uint32_t source_pixel;
                 if (draw->filtered) {
                     struct mbx_bilinear_axis affine_x, affine_y;
@@ -4748,7 +4813,7 @@ static bool mbx_ta_apply_draw(
         }
         free(source_pixels);
         if (!ok) return false;
-        if (draw->affine && !draw_pixels) {
+        if (draw->affine && !draw_pixels && !coverage) {
             if (why) *why = "TA affine draw covers no destination pixel centres";
             return false;
         }
@@ -4851,9 +4916,24 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
     uint32_t cursor = 1u;
     uint32_t first_draw = UINT32_MAX;
     uint32_t draw_count = 0u;
+    bool has_mask = false;
     for (; cursor < count - 1u; cursor++) {
+        if (words[cursor] == 0x10000073u &&
+            (words[cursor + 1u] == 0x22206f80u ||
+             words[cursor + 1u] == 0x22207f80u)) {
+            if (!mbx_ta_parse_mask(words, count, cursor, &draws[draw_count])) {
+                mbx_ta_rejection_at(diagnostic, cursor);
+                free(words);
+                free(draws);
+                if (why) *why = "TA initial draw mask is malformed";
+                return false;
+            }
+            has_mask = true;
+            cursor = draws[draw_count++].next_word - 1u;
+            continue;
+        }
         enum mbx_ta_parse_result parsed = mbx_ta_parse_draw(
-            words, count, cursor, 0.0f, 0.0f, &draws[0], why);
+            words, count, cursor, 0.0f, 0.0f, &draws[draw_count], why);
         if (parsed == MBX_TA_DRAW_BAD) {
             mbx_ta_rejection_at(diagnostic, cursor);
             free(words);
@@ -4883,14 +4963,14 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
     }
     if (mbx_ta_parse_draw(words, count, first_draw,
                           transform.origin_x, transform.origin_y,
-                          &draws[0], why) != MBX_TA_DRAW_OK) {
+                          &draws[draw_count], why) != MBX_TA_DRAW_OK) {
         mbx_ta_rejection_at(diagnostic, first_draw);
         free(words);
         free(draws);
         return false;
     }
-    draw_count = 1u;
-    cursor = draws[0].next_word;
+    uint32_t previous_colour = draw_count++;
+    cursor = draws[previous_colour].next_word;
 
     while (cursor != count - 1u) {
         if (cursor >= count - 1u || draw_count >= count) {
@@ -4902,6 +4982,14 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
         uint32_t auxiliary_words =
             mbx_ta_auxiliary_block(words, count, cursor);
         if (auxiliary_words) {
+            if (!mbx_ta_parse_mask(words, count, cursor, &draws[draw_count])) {
+                ok = false;
+                mbx_ta_rejection_at(diagnostic, cursor);
+                if (why) *why = "TA draw mask geometry is unsupported";
+                break;
+            }
+            has_mask = true;
+            draw_count++;
             cursor += auxiliary_words;
             continue;
         }
@@ -4909,7 +4997,7 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
             mbx_ta_parse_primitive_continuation(
                 words, count, cursor,
                 transform.origin_x, transform.origin_y,
-                &draws[draw_count - 1u], &draws[draw_count], why);
+                &draws[previous_colour], &draws[draw_count], why);
         if (parsed == MBX_TA_NOT_DRAW) {
             parsed = mbx_ta_parse_draw(
                 words, count, cursor, transform.origin_x, transform.origin_y,
@@ -4926,7 +5014,7 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
                 parsed = mbx_ta_parse_continuation(
                     words, count, cursor,
                     transform.origin_x, transform.origin_y,
-                    &draws[draw_count - 1u], &draws[draw_count], why);
+                    &draws[previous_colour], &draws[draw_count], why);
             }
         }
         if (parsed != MBX_TA_DRAW_OK) {
@@ -4947,8 +5035,9 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
             break;
         }
         if (!draws[draw_count].blend_state)
-            draws[draw_count].replace = draws[draw_count - 1u].replace;
+            draws[draw_count].replace = draws[previous_colour].replace;
         cursor = draws[draw_count].next_word;
+        previous_colour = draw_count;
         draw_count++;
     }
     free(words);
@@ -4957,26 +5046,35 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
         return false;
     }
     uint8_t *target_pixels = malloc(target_bytes);
-    if (!target_pixels) {
+    uint8_t *coverage = has_mask ? malloc(target_width * target_height) : NULL;
+    if (!target_pixels || (has_mask && !coverage)) {
         free(draws);
+        free(target_pixels);
+        free(coverage);
         if (why) *why = "host allocation for staged TA target failed";
         return false;
     }
+    if (coverage) memset(coverage, 1, target_width * target_height);
     ok = mbx_gart_read(m, bus, target, target_pixels, target_bytes, why);
     uint32_t dirty_left = target_width, dirty_top = target_height;
     uint32_t dirty_right = 0u, dirty_bottom = 0u;
     uint64_t total_pixels = 0u;
     for (uint32_t i = 0u; i < draw_count && ok; i++) {
+        if (draws[i].mask_draw) {
+            mbx_ta_apply_mask(&draws[i], target_width, target_height, coverage);
+            continue;
+        }
         ok = mbx_ta_apply_draw(
             m, bus, &draws[i], target, target_width, target_height,
             target_bytes,
             clip_left, clip_top, clip_right, clip_bottom,
-            target_pixels, &dirty_left, &dirty_top,
+            target_pixels, coverage, &dirty_left, &dirty_top,
             &dirty_right, &dirty_bottom, &total_pixels, why);
         if (!ok) mbx_ta_rejection_at(diagnostic, draws[i].start_word);
     }
+    free(coverage);
     free(draws);
-    if (ok && (!total_pixels || total_pixels > UINT32_MAX)) {
+    if (ok && ((!total_pixels && !has_mask) || total_pixels > UINT32_MAX)) {
         if (why) *why = "TA scene covers no pixels or exceeds telemetry bounds";
         ok = false;
     }
