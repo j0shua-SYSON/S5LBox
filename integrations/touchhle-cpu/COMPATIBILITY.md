@@ -56,14 +56,14 @@ not establish functionality. Device results below identify their tested build.
 | Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Edge | 1.62 | Complete a level, precise controls and saved progress | Device build 60bd8788: offline install passes; blank display persists beyond three minutes. |
 | Canabalt | 1.7 | Sustained run, jumping, restart and saved high score | Device build b065e116: offline install passes; missing NSOperationQueue prevents launch. |
-| Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Device build 106a36be reaches applicationDidBecomeActive after the main-NIB ownership fix, but remains on its splash screen for several minutes; normal Home closure still requires Force Close. Desktop guest debugging confirms that the first frame callback resamples the game's image assets and advances through the directory. Completion and gameplay remain unverified. |
+| Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Device build 6c8c452d finishes the interrupted image-cache rebuild and displays its promotion within 29 seconds; reopening with that cache reaches the same screen within 24 seconds, and normal Home closure works. The previous build was still preparing assets after over 13 minutes. This is not a clean-install comparison. Dismissing the promotion fails on missing NSDate encoding; gameplay remains unverified. |
 | Minigore | 7.0 | Movement and firing through sustained combat; restart | Desktop startup: CFURL string conversion rejects the requested character encoding. Gameplay remains unverified. |
 | iCopter | 1.4 | Sustained flight, restart and saved high score | Device build cf7c00bf: transitions now complete; short flights render and touch holds/releases work. Collisions return to the title normally. Score 122 survives Home and relaunch. Longer play and frame pacing remain unverified. |
 | Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
 | Tap Tap Revenge | 1.7 | Play a bundled song, timing/scoring and restart | Desktop startup: missing NSNetServiceBrowser. |
 | Trism | 1.4 | Complete a puzzle session and retain progress | Desktop build 106a36be passes title shadows, parameterless delayed selectors and relative view insertion; startup now reaches missing NSNumberFormatter. |
 | Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Device build b6082ad3: category and level menus work; touch-tutorial scenes respond to swipes, and a drawing tutorial displays water drawn with a sustained stroke. The material picker opens but clips some labels. Level completion, saved progress, sustained frame pacing and audio remain unverified. |
-| Chopper | 1.3.1 | Complete a mission, steer/fire and pause/resume | Device build 3de6bf45: main menu, New Game and Normal difficulty selection respond. Mission loading passes finishDecoding, then fails on missing NSCopyObject. Gameplay remains blocked. |
+| Chopper | 1.3.1 | Complete a mission, steer/fire and pause/resume | Device build c5d38a66 reaches the first mission and renders its world after the finishDecoding and NSCopyObject fixes. Pause and save-slot selection respond; saving then fails on missing initForWritingWithMutableData:. Steering, mission completion and successful save/reload remain unverified. |
 | SPACE DEADBEEF | 1.01 | Sustained gameplay, firing, pause/resume and restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build 23a5d292: orientation corrected, first two levels completed, platform drawing and jumping work. First-level completion time survives relaunch and app reinstall; longer play remains untested. |
 
@@ -341,3 +341,13 @@ ARMv6 checks verify shared identity across retain/release and pool drainage,
 while independently allocated managers retain and deallocate normally. This is
 a legacy singleton compatibility policy, not a measured iPhone OS 3 retain-count
 match; modern Foundation does not necessarily tolerate releasing its default.
+
+Offline disposable app-cache writes now share bounded transactions instead of
+rebuilding and publishing the whole HFS catalog for each file. Read-only closes
+do not flush unrelated pending changes. Ordinary writable-file closes, explicit
+fsync, session close and the 16 MiB buffer threshold still publish pending data;
+renaming a file across the cache boundary also publishes it. Real inode ancestry
+determines cache eligibility, including open files moved into Documents.
+The filesystem suite passes 1,481 checks, and both core and touchHLE CI pass on
+6c8c452d. The Fieldrunners observations above verify a real loading improvement,
+but do not measure a completely empty cache or establish gameplay compatibility.

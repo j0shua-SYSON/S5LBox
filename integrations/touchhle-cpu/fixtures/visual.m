@@ -234,6 +234,8 @@ static unsigned methods_smoke(void) {
 + (id)null;
 @end
 @interface NSDate : NSObject
++ (id)dateWithTimeIntervalSinceReferenceDate:(double)seconds;
+- (double)timeIntervalSinceReferenceDate;
 + (id)date;
 + (id)dateWithTimeIntervalSinceNow:(double)seconds;
 @end
@@ -376,6 +378,9 @@ extern id CFUUIDCreate(void *allocator);
 + (id)dataWithContentsOfFile:(id)path options:(unsigned)options error:(id *)error;
 - (unsigned)length;
 - (const void *)bytes;
+@end
+@interface NSMutableData : NSData
+- (void)appendBytes:(const void *)bytes length:(unsigned)length;
 @end
 @interface NSError : NSObject
 + (id)errorWithDomain:(id)domain code:(int)code userInfo:(id)info;
@@ -553,6 +558,7 @@ extern id const kCATransition,kCATransitionFromRight,kCATransitionFromLeft,kCATr
 @end
 @interface NSKeyedArchiver : NSObject
 + (id)archivedDataWithRootObject:(id)object;
+- (id)initForWritingWithMutableData:(id)data;
 - (BOOL)allowsKeyedCoding;
 - (void)encodeObject:(id)object;
 - (void)encodeObject:(id)object forKey:(id)key;
@@ -674,6 +680,49 @@ static unsigned archive_smoke(void) {
     failures += [[decoded objectAtIndex:6] unsignedLongLongValue]!=65535;
     failures += [[decoded objectAtIndex:7] longLongValue]!=-100;
     failures += [[decoded objectAtIndex:8] unsignedLongLongValue]!=0xfedcba98U;
+    id date=[NSDate dateWithTimeIntervalSinceReferenceDate:-12.75];
+    NSArray *dates=[NSArray arrayWithObjects:date,date,
+        [NSDate dateWithTimeIntervalSinceReferenceDate:0],
+        [NSDate dateWithTimeIntervalSinceReferenceDate:1234567890.125],0];
+    NSArray *dateCopies=[NSKeyedUnarchiver unarchiveObjectWithData:[NSKeyedArchiver archivedDataWithRootObject:dates]];
+    failures += [dateCopies count]!=4 || [dateCopies objectAtIndex:0]!=[dateCopies objectAtIndex:1];
+    failures += [[dateCopies objectAtIndex:0] timeIntervalSinceReferenceDate]!=-12.75;
+    failures += [[dateCopies objectAtIndex:2] timeIntervalSinceReferenceDate]!=0;
+    failures += [[dateCopies objectAtIndex:3] timeIntervalSinceReferenceDate]!=1234567890.125;
+    // Games also supply their own destination and archive several top-level
+    // values before writing that same buffer to a save slot.
+    NSMutableData *destination=[[NSMutableData alloc] init];
+    coder=[[NSKeyedArchiver alloc] initForWritingWithMutableData:destination];
+    failures += [destination retainCount]!=2 || [destination length]!=0;
+    [coder encodeObject:@"save-slot" forKey:@"name"];
+    [coder encodeObject:numbers forKey:@"values"];
+    [coder encodeObject:@"sequential"];
+    failures += [destination length]!=0;
+    [coder finishEncoding];
+    unsigned savedLength=[destination length];
+    failures += savedLength<8 || memcmp([destination bytes],"bplist00",8)!=0;
+    [coder finishEncoding];
+    failures += [destination length]!=savedLength || [coder encodedData]!=destination;
+    [coder release];
+    failures += [destination retainCount]!=1;
+    reader=[[NSKeyedUnarchiver alloc] initForReadingWithData:destination];
+    failures += ![[reader decodeObjectForKey:@"name"] isEqualToString:@"save-slot"];
+    failures += [[[reader decodeObjectForKey:@"values"] objectAtIndex:4] unsignedLongLongValue]!=0xfedcba9876543210ULL;
+    failures += ![[reader decodeObject] isEqualToString:@"sequential"];
+    [reader finishDecoding]; [reader release]; [destination release];
+    destination=[[NSMutableData alloc] init];
+    [destination appendBytes:"prefix" length:6];
+    coder=[[NSKeyedArchiver alloc] initForWritingWithMutableData:destination];
+    [coder encodeObject:@"value" forKey:@"key"];
+    failures += [destination length]!=6;
+    [coder finishEncoding]; [coder finishEncoding];
+    failures += [destination length]<14 || memcmp([destination bytes],"prefixbplist00",14)!=0;
+    [coder release]; [destination release];
+    destination=[[NSMutableData alloc] init];
+    coder=[[NSKeyedArchiver alloc] initForWritingWithMutableData:destination];
+    [coder release]; // An unfinished archive must release its destination too.
+    failures += [destination retainCount]!=1 || [destination length]!=0;
+    [destination release];
     [parent release]; [child release]; [pool release];
     // Decoded objects retained by the caller must survive the reader and pool.
     failures += ![copy->keyed isEqualToString:@"parent-keyed"];

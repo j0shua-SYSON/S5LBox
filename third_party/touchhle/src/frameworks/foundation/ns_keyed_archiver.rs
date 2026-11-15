@@ -28,6 +28,7 @@ use crate::Environment;
 struct NSKeyedArchiverHostObject {
     plist: Dictionary,
     encoded_data: id, // NSData *
+    output_data: id,  // Retained NSMutableData until finishEncoding transfers it.
     current_key: Option<Uid>,
     sequential_key: u64,
     /// map of id => Uid
@@ -55,6 +56,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.objc.alloc_object(this, Box::new(NSKeyedArchiverHostObject {
         plist,
         encoded_data: nil,
+        output_data: nil,
         current_key: None,
         sequential_key: 0,
         already_archived
@@ -79,6 +81,16 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (bool)allowsKeyedCoding { true }
+
+- (id)initForWritingWithMutableData:(id)data {
+    assert_ne!(data, nil, "An archive requires mutable output data");
+    let state = env.objc.borrow::<NSKeyedArchiverHostObject>(this);
+    assert_eq!(state.encoded_data, nil);
+    assert_eq!(state.output_data, nil);
+    retain(env, data);
+    env.objc.borrow_mut::<NSKeyedArchiverHostObject>(this).output_data = data;
+    this
+}
 
 - (())encodeObject:(id)object {
     let state = env.objc.borrow_mut::<NSKeyedArchiverHostObject>(this);
@@ -112,16 +124,28 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())finishEncoding {
-    let plist = &env.objc.borrow::<NSKeyedArchiverHostObject>(this).plist;
+    let state = env.objc.borrow::<NSKeyedArchiverHostObject>(this);
+    if state.encoded_data != nil { return; }
+    let output = state.output_data;
+    let plist = &state.plist;
     let mut buffer = Vec::new();
     let cursor = Cursor::new(&mut buffer);
     to_writer_binary(cursor, plist).unwrap();
     let len = buffer.len() as GuestUSize;
     let guest_buffer = env.mem.alloc(len);
     env.mem.bytes_at_mut(guest_buffer.cast(), len).copy_from_slice(&buffer[..]);
-    let encoded_data: id = msg_class![env; NSData dataWithBytesNoCopy:guest_buffer length:len];
+    let encoded_data = if output == nil {
+        let data: id = msg_class![env; NSData dataWithBytesNoCopy:guest_buffer length:len];
+        retain(env, data)
+    } else {
+        // Foundation leaves the destination unchanged while encoding, then
+        // appends the complete archive. Preserve caller-supplied prefix bytes.
+        () = msg![env; output appendBytes:(guest_buffer.cast_const()) length:len];
+        env.mem.free(guest_buffer);
+        env.objc.borrow_mut::<NSKeyedArchiverHostObject>(this).output_data = nil;
+        output // Transfer the initializer's retained reference.
+    };
     env.objc.borrow_mut::<NSKeyedArchiverHostObject>(this).encoded_data = encoded_data;
-    retain(env, encoded_data);
 }
 
 - (id)encodedData {
@@ -132,8 +156,9 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())dealloc {
-    let NSKeyedArchiverHostObject { encoded_data, .. } = *env.objc.borrow::<NSKeyedArchiverHostObject>(this);
+    let NSKeyedArchiverHostObject { encoded_data, output_data, .. } = *env.objc.borrow::<NSKeyedArchiverHostObject>(this);
     release(env, encoded_data);
+    release(env, output_data);
     env.objc.dealloc_object(this, &mut env.mem);
 }
 
@@ -144,7 +169,11 @@ pub const CLASSES: ClassExports = objc_classes! {
 fn normalize_key(env: &mut Environment, key: id) -> String {
     assert_ne!(key, nil);
     let key = to_rust_string(env, key);
-    if key.starts_with('$') { format!("${key}") } else { key.to_string() }
+    if key.starts_with('$') {
+        format!("${key}")
+    } else {
+        key.to_string()
+    }
 }
 
 pub fn set_value_to_encode_for_current_key(env: &mut Environment, archiver: id, value: Value) {
@@ -250,7 +279,10 @@ pub fn encode_object(env: &mut Environment, archiver: id, object: id) -> Uid {
                 .current_key
                 .replace(new_uid);
             let previous_sequential_key = std::mem::replace(
-                &mut env.objc.borrow_mut::<NSKeyedArchiverHostObject>(archiver).sequential_key,
+                &mut env
+                    .objc
+                    .borrow_mut::<NSKeyedArchiverHostObject>(archiver)
+                    .sequential_key,
                 0,
             );
             let class: id = msg![env; object class];
@@ -263,7 +295,9 @@ pub fn encode_object(env: &mut Environment, archiver: id, object: id) -> Uid {
             env.objc
                 .borrow_mut::<NSKeyedArchiverHostObject>(archiver)
                 .current_key = previous_key;
-            env.objc.borrow_mut::<NSKeyedArchiverHostObject>(archiver).sequential_key = previous_sequential_key;
+            env.objc
+                .borrow_mut::<NSKeyedArchiverHostObject>(archiver)
+                .sequential_key = previous_sequential_key;
         }
         let host_object = env.objc.borrow_mut::<NSKeyedArchiverHostObject>(archiver);
         host_object.already_archived.insert(object, new_uid);

@@ -5,6 +5,7 @@
  */
 //! `NSDate`.
 
+use super::ns_keyed_archiver::get_value_to_encode_for_current_key;
 use super::ns_string::{from_rust_ordering, from_rust_string};
 use super::{NSComparisonResult, NSTimeInterval};
 use crate::frameworks::core_foundation::time::{
@@ -146,6 +147,12 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 // NSCoding implementation
+- (())encodeWithCoder:(id)coder {
+    let interval: NSTimeInterval = msg![env; this timeIntervalSinceReferenceDate];
+    get_value_to_encode_for_current_key(env, coder)
+        .insert("NS.time".into(), plist::Value::Real(interval));
+}
+
 - (id)initWithCoder:(id)coder {
     release(env, this);
     // Note: Assuming NSKeyedUnarchiver as coder here
