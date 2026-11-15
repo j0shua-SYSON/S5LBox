@@ -478,7 +478,14 @@ failed:
             handle=[HLEOfflineHandle new]; handle.inode=info.id; handle.flags=flags; handle.directory=directory;
             number=_nextHandle++; _handles[@(number)]=handle; Put32(payload,number); break;
         }
-        case 3: [_handles removeObjectForKey:@(number)]; if (![self flush]) e=EIO; break;
+        case 3: {
+            // Read-only closes must not publish unrelated pending cache data.
+            // Recheck ancestry now: an open cache file may have been renamed
+            // into Documents since it was opened.
+            BOOL save=(handle.flags&2) && !hfs_offline_is_app_cache(_volume,_root,handle.inode);
+            [_handles removeObjectForKey:@(number)];
+            if (save && ![self flush]) e=EIO; break;
+        }
         case 4: {
             if (end-p!=4 || handle.directory || !(handle.flags&1)) { e=handle.directory?EISDIR:EBADF; break; }
             uint32_t requested=Read32(p); p+=4;
@@ -519,21 +526,28 @@ failed:
             if (!e) e=hfs_offline_chmod(_volume,info.id,mode);
             if (!e && ![self flush]) e=EIO; break;
         }
-        case 10: case 15:
+        case 10: case 15: {
             e=[self resolve:path root:_root followFinal:NO result:&info];
             if (!e && info.id==_root) e=EACCES;
             if (!e && ((info.mode&0170000)==0040000)!=(op==15)) e=op==15?ENOTDIR:EISDIR;
-            if (!e) e=hfs_offline_remove(_volume,info.id);
-            if (!e && ![self flush]) e=EIO; break;
+            BOOL cache=!e && hfs_offline_is_app_cache(_volume,_root,info.id),opened=NO;
+            if (!e) {
+                for (HLEOfflineHandle *other in _handles.allValues) if (other.inode==info.id) { opened=YES; break; }
+                e=opened?hfs_offline_remove(_volume,info.id):hfs_offline_remove_closed(_volume,info.id);
+            }
+            if (!e && !cache && ![self flush]) e=EIO; break;
+        }
         case 11: {
             NSString *destination=[self pathAt:&p end:end],*name=nil;
             if (!destination) { e=EINVAL; break; }
             e=[self resolve:path root:_root followFinal:NO result:&info]; if (e) break;
             if (info.id==_root) { e=EACCES; break; }
-            uint32_t id=info.id; e=[self parent:destination info:&info name:&name];
+            uint32_t id=info.id; BOOL cache=hfs_offline_is_app_cache(_volume,_root,id);
+            e=[self parent:destination info:&info name:&name];
+            cache=cache && !e && hfs_offline_is_app_cache(_volume,_root,info.id);
             if (!e) { unichar units[255]; [name getCharacters:units range:NSMakeRange(0,name.length)];
                 e=hfs_offline_rename(_volume,id,info.id,units,name.length); }
-            if (!e && ![self flush]) e=EIO; break;
+            if (!e && !cache && ![self flush]) e=EIO; break;
         }
         case 12: {
             if (!handle.directory) { e=ENOTDIR; break; }
@@ -563,6 +577,10 @@ failed:
         default: e=ENOSYS; break;
     }
     if (p!=end && !e) e=EINVAL;
+    // A cache rebuild can write hundreds of small files. Bound its memory
+    // without rebuilding and publishing the entire HFS catalog per file.
+    // fsync (op 7), ordinary data boundaries and session close still flush.
+    if (!e && hfs_offline_buffered_bytes(_volume)>=16u*1024u*1024u && ![self flush]) e=EIO;
     if (e) payload.length=0;
     if (payload.length+8>capacity) return -1;
     NSMutableData *reply=[NSMutableData data]; Put32(reply,(uint32_t)payload.length+4); Put32(reply,(uint32_t)e); [reply appendData:payload];

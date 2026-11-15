@@ -27,6 +27,12 @@ int hfs_offline_open_private(const char *unpublished_clone, hfs_offline **out);
 int hfs_offline_checkpoint_private(hfs_offline *);
 void hfs_offline_close(hfs_offline *volume);
 bool hfs_offline_dirty(const hfs_offline *volume);
+size_t hfs_offline_buffered_bytes(const hfs_offline *volume);
+/* True only for a resolved inode in this application's real Library/Caches
+ * directory. Library/Caches symlinks, missing paths and outside nodes return false.
+ * Callers may coalesce these disposable cache writes; explicit sync and
+ * session close must still commit. Recheck after renaming an open file. */
+bool hfs_offline_is_app_cache(hfs_offline *, uint32_t application_root, uint32_t inode);
 int hfs_offline_stat(hfs_offline *, uint32_t id, hfs_offline_info *);
 int hfs_offline_lookup(hfs_offline *, uint32_t parent, const uint16_t *name,
                        size_t length, hfs_offline_info *);
@@ -43,7 +49,7 @@ int hfs_offline_chmod(hfs_offline *, uint32_t id, uint32_t permissions);
 int hfs_offline_create(hfs_offline *, uint32_t parent, const uint16_t *name,
                        size_t length, uint32_t mode, uint32_t *id);
 int hfs_offline_remove(hfs_offline *, uint32_t id);
-/* Installer-only unlink when the caller has no open handles to this inode. */
+/* Unlink when the caller has verified that no open handles reference this inode. */
 int hfs_offline_remove_closed(hfs_offline *, uint32_t id);
 /* Replacement has POSIX rename semantics. Open, unlinked files retain data
  * until the volume is closed; CNIDs are never reused during a session. */

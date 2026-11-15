@@ -7202,6 +7202,55 @@ static void test_offline_shared_filesystem(void) {
     remove_if_present(source); remove_if_present(clone); free(fx);
 }
 
+static void test_offline_disposable_cache_batch(void) {
+    fixture_t *fx=fx_create(4); char source[1024],clone[1024];
+    CHECK(fx && make_path(source,sizeof source,"offline-cache-source") && make_path(clone,sizeof clone,"offline-cache-stage"),"cache fixture");
+    if (!fx) return;
+    CHECK(write_file(source,fx->image,FX_SIZE) && write_file(clone,fx->image,FX_SIZE),"cache images");
+    hfs_offline *v=NULL; CHECK(hfs_offline_open(source,&v)==0,"open cache source");
+    if (!v) { remove_if_present(source); remove_if_present(clone); free(fx); return; }
+    const uint16_t library[]={'L','i','b','r','a','r','y'},caches[]={'C','a','c','h','e','s'},name[]={'x'},away[]={'o','l','d'};
+    uint32_t lib=0,cache=0,inner=0,file=0;
+    CHECK(!hfs_offline_is_app_cache(v,FX_BETA,FX_NOTE) && !hfs_offline_is_app_cache(NULL,FX_BETA,FX_NOTE),"ordinary files are not caches");
+    CHECK(hfs_offline_create(v,FX_BETA,library,7,0040755,&lib)==0 &&
+          hfs_offline_create(v,lib,caches,6,0040755,&cache)==0 &&
+          hfs_offline_create(v,cache,name,1,0040755,&inner)==0 &&
+          hfs_offline_create(v,inner,name,1,0100644,&file)==0,"nested cache tree");
+    CHECK(hfs_offline_is_app_cache(v,FX_BETA,file) && hfs_offline_is_app_cache(v,FX_BETA,cache),"resolved cache ancestry");
+    CHECK(!hfs_offline_is_app_cache(v,FX_ALPHA,file) && !hfs_offline_is_app_cache(v,FX_BETA,UINT32_MAX),"other containers and unknown IDs are not caches");
+    CHECK(hfs_offline_rename(v,file,FX_BETA,name,1)==0 && !hfs_offline_is_app_cache(v,FX_BETA,file),"renamed open cache must become ordinary saved data");
+    CHECK(hfs_offline_rename(v,file,inner,name,1)==0,"restore cache inode");
+    CHECK(hfs_offline_rename(v,lib,FX_BETA,away,3)==0 && !hfs_offline_is_app_cache(v,FX_BETA,file),"renamed Library no longer qualifies");
+    CHECK(hfs_offline_rename(v,lib,FX_BETA,library,7)==0 && hfs_offline_is_app_cache(v,FX_BETA,file),"restore real Library/Caches");
+    CHECK(hfs_offline_buffered_bytes(v)==0,"metadata does not consume file buffer budget");
+    const size_t large=17u*1024u*1024u; uint8_t *bytes=(uint8_t *)malloc(large);
+    CHECK(bytes!=NULL,"cache pressure allocation");
+    if (bytes) {
+        memset(bytes,0x5a,large);
+        CHECK(hfs_offline_write(v,file,0,bytes,large)==0 && hfs_offline_buffered_bytes(v)>=large,"cache pressure includes buffered capacity");
+        free(bytes);
+        CHECK(hfs_offline_truncate(v,file,4)==0,"small final cache for fixture disk");
+    }
+    size_t size=0; uint8_t *original=read_file(source,&size);
+    CHECK(original && size==FX_SIZE && !memcmp(original,fx->image,FX_SIZE),"unpublished cache writes leave source untouched"); free(original);
+    CHECK(hfs_offline_commit(v,clone)==0 && !hfs_offline_dirty(v) && hfs_offline_buffered_bytes(v)==0,"explicit sync commits and frees cache buffers");
+    hfs_offline_close(v); v=NULL;
+    CHECK(hfs_offline_open(clone,&v)==0,"reopen committed cache batch");
+    if (v) {
+        uint8_t data[4]={0}; size_t got=0;
+        CHECK(hfs_offline_is_app_cache(v,FX_BETA,file) && hfs_offline_read(v,file,0,data,4,&got)==0 && got==4 && data[0]==0x5a,"cache bytes survive reopen");
+        CHECK(hfs_offline_write(v,file,0,"next",4)==0 && hfs_offline_buffered_bytes(v)>0,"dirty next cache generation");
+        CHECK(hfs_offline_remove_closed(v,file)==0 && hfs_offline_buffered_bytes(v)==0,"closed cache deletion frees buffered bytes");
+        CHECK(!hfs_offline_is_app_cache(v,FX_BETA,file),"removed cache inode is no longer eligible");
+        CHECK(hfs_offline_create(v,inner,name,1,0100644,&file)==0 && hfs_offline_write(v,file,0,"open",4)==0 &&
+              hfs_offline_remove(v,file)==0,"unlink an open cache handle");
+        CHECK(!hfs_offline_is_app_cache(v,FX_BETA,file) && hfs_offline_read(v,file,0,data,4,&got)==0 &&
+              got==4 && !memcmp(data,"open",4),"unlinked handles retain bytes without inheriting cache publication policy");
+        hfs_offline_close(v);
+    }
+    remove_if_present(source); remove_if_present(clone); free(fx);
+}
+
 static void test_offline_private_install_batch(void) {
     fixture_t *fx=fx_create(4); char source[1024],clone[1024];
     CHECK(fx && make_path(source,sizeof source,"offline-batch-source") && make_path(clone,sizeof clone,"offline-batch-stage"),"batch fixture");
@@ -7229,6 +7278,7 @@ int main(void) {
     printf("HFS+ catalog provisioning tests\n");
     test_status_and_stage_names();
     test_offline_shared_filesystem();
+    test_offline_disposable_cache_batch();
     test_offline_allocation_and_attributes();
     test_offline_fragmented_allocation();
     test_offline_private_install_batch();

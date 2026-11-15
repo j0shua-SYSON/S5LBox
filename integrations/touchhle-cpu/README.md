@@ -39,11 +39,17 @@ inside the unpublished clone to bound memory; individual files currently have
 a 64 MiB limit. Booting iPhone OS subsequently uses that same disk and registry.
 
 Offline changes use an exclusive machine-storage lease and an unpublished
-filesystem clone. File sync, close, rename and deletion publish a flushed disk
-through the existing recovery transaction, invalidating stale CPU/RAM restore
+filesystem clone. File sync, ordinary writable-file close, rename and deletion
+publish a flushed disk through the existing recovery transaction, invalidating stale CPU/RAM restore
 state. A durable image-identity witness permits later offline sessions; starting
 iPhone OS revokes it before opening the disk. Documents and preferences remain
 in the guest's original app containers. There is no second installed-app mirror.
+
+Disposable files under the app's real `Library/Caches` are batched until explicit
+sync, app exit, an ordinary save boundary, or 16 MiB of buffered file data. A host
+crash may discard those pending cache changes. Classification uses resolved inode
+ancestry, so moving a file out of the cache restores ordinary save behavior.
+Read-only file closure does not trigger publication of unrelated cached data.
 
 The offline backend is bounded: binary-order, nonjournaled HFSX; at most 64 MiB
 of simultaneously modified file contents; and eight inline allocation extents

@@ -440,6 +440,23 @@ static int remove_inode(hfs_offline *v,uint32_t id,bool retain) {
     for (size_t i=0;i<v->attribute_count;i++) if (r32(v->attributes[i]->key+4)==id) v->attributes[i]->removed=true;
     r->removed=t->removed=true; parent_changed(v,r32(r->key+2),-1,folder); v->dirty=true; return 0;
 }
+size_t hfs_offline_buffered_bytes(const hfs_offline *v) { return v?v->dirty_bytes:0; }
+bool hfs_offline_is_app_cache(hfs_offline *v,uint32_t root,uint32_t id) {
+    const uint16_t library[]={'L','i','b','r','a','r','y'},caches[]={'C','a','c','h','e','s'};
+    hfs_offline_info info;
+    if (!v || v->failed || hfs_offline_lookup(v,root,library,7,&info) ||
+        (info.mode&TYPE_MODE)!=DIR_MODE || hfs_offline_lookup(v,info.id,caches,6,&info) ||
+        (info.mode&TYPE_MODE)!=DIR_MODE) return false;
+    uint32_t cache=info.id;
+    for (size_t steps=0;steps<v->count;steps++) {
+        record *r=by_id(v,id); if (!r || r->removed) return false;
+        info.parent=r32(r->key+2);
+        if (id==cache) return true;
+        if (id==root || id==2 || info.parent==id) return false;
+        id=info.parent;
+    }
+    return false;
+}
 int hfs_offline_remove(hfs_offline *v,uint32_t id) { return remove_inode(v,id,true); }
 int hfs_offline_remove_closed(hfs_offline *v,uint32_t id) {
     record *r=v?by_id(v,id):NULL;
