@@ -1114,6 +1114,7 @@ static void test_ta_image_viewer_triangle_pair(void) {
     const uint32_t stride = 320u * 4u;
     uint32_t stream[160] = {0x10000010u};
     uint32_t next = test_ta_global_transform(stream, 1u, 320u, 480u, 0, 0);
+    const uint32_t background_start = next;
     next = test_ta_solid_draw(stream, next, 0, 0, 320, 20, 0xff102030u);
     const uint32_t start = next;
     static const uint32_t pair[] = {
@@ -1146,7 +1147,7 @@ static void test_ta_image_viewer_triangle_pair(void) {
     for (uint32_t y = 0; y < 32u; y++)
         for (uint32_t x = 0; x < 320u; x++)
             test_gpu_write32(&m, source + y * stride + x * 4u,
-                             test_sprite_source_pixel(x, y));
+                             (x + y) % 2u ? test_sprite_source_pixel(x, y) : 0u);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_DB, object);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_TA_REGION, region);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_RGNBASE, region);
@@ -1163,7 +1164,7 @@ static void test_ta_image_viewer_triangle_pair(void) {
     for (uint32_t y = 0; y < 20u; y++)
         for (uint32_t x = 0; x < 320u; x++)
             mismatches += test_gpu_read32(&m, target + y * stride + x * 4u) !=
-                test_over(0xff102030u, test_sprite_source_pixel(x, y));
+                ((x + y) % 2u ? test_sprite_source_pixel(x, y) : 0u);
     CHECK(mismatches == 0u, "triangle pair lost or double-blended %u pixels", mismatches);
     CHECK(test_gpu_read32(&m, target + 20u * stride) == 0x12345678u,
           "triangle pair wrote outside its rectangle");
@@ -1172,9 +1173,38 @@ static void test_ta_image_viewer_triangle_pair(void) {
           m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
           "triangle pair did not complete its complete scene");
 
+    /* The captured 0x22620e80 requests ONE,ZERO replacement. Changing only
+     * the blend factors to ONE,ONE_MINUS_SRC_ALPHA must retain the background
+     * through zero-alpha texels instead. The same pipeline must carry into
+     * a new texture-only draw that omits the state word. */
+    uint32_t inherited[160];
+    memcpy(inherited, stream, (start + 1u) * sizeof(uint32_t));
+    inherited[start] = 0x10000004u;
+    memcpy(inherited + start + 1u, stream + start + 2u,
+           (next - start - 2u) * sizeof(uint32_t));
+    for (unsigned mode = 0u; mode < 3u; mode++) {
+        const bool blend = mode != 1u;
+        stream[start + 1u] = 0x36622e80u;
+        /* The preceding solid draw supplies state for the inherited cases. */
+        inherited[background_start + 1u] = blend ? 0x36602e80u : 0x22600e80u;
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+        test_ta_run_stream(&m, mode == 0u ? stream : inherited,
+                           mode == 0u ? next : next - 1u);
+        mismatches = 0u;
+        for (uint32_t y = 0; y < 20u; y++)
+            for (uint32_t x = 0; x < 320u; x++) {
+                uint32_t pixel = (x + y) % 2u ? test_sprite_source_pixel(x, y) : 0u;
+                uint32_t expected = blend ? test_over(0xff102030u, pixel) : pixel;
+                mismatches += test_gpu_read32(&m, target + y * stride + x * 4u) != expected;
+            }
+        CHECK(!mismatches && m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+              "triangle blend-state mode %u mismatched %u pixels", mode, mismatches);
+    }
+    stream[start + 1u] = 0x22620e80u;
+
     /* Damage the second triangle's shared UV, colour, raster control or
      * terminator. No earlier solid draw may leak from the rejected scene. */
-    const uint32_t damaged[] = {40u, 39u, 33u, 58u};
+    const uint32_t damaged[] = {40u, 39u, 33u, 58u, 42u};
     for (unsigned i = 0; i < sizeof damaged / sizeof damaged[0]; i++) {
         m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
         test_gpu_write32(&m, target, 0xffabcdefu);
@@ -1184,6 +1214,18 @@ static void test_ta_image_viewer_triangle_pair(void) {
               m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
               "malformed triangle pair %u partially committed", i);
         stream[start + damaged[i]] ^= 1u;
+    }
+    stream[start + 1u] |= 8u; // an unsupported subtract equation must fail atomically
+    test_ta_run_stream(&m, stream, next);
+    CHECK(test_gpu_read32(&m, target) == 0xffabcdefu &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "unsupported blend equation partially committed");
+    stream[start + 1u] &= ~8u;
+    for (uint32_t end = start + 31u; end < start + 59u; end++) {
+        test_ta_run_stream(&m, stream, end);
+        CHECK(test_gpu_read32(&m, target) == 0xffabcdefu &&
+              m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+              "truncated triangle pair committed at word %u", end - start);
     }
     s5l8900_free(&m);
 }

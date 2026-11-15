@@ -3736,6 +3736,8 @@ struct mbx_ta_draw {
     bool affine;
     bool perspective;
     bool empty;
+    bool blend_state;
+    bool replace;
     uint32_t source;
     uint32_t source_stride;
     uint32_t texture_width;
@@ -4211,6 +4213,22 @@ static enum mbx_ta_parse_result mbx_ta_parse_draw(
     memset(draw, 0, sizeof *draw);
     draw->start_word = start;
     draw->textured = stride == 8u;
+    if (words[start] & 1u) {
+        /* MBXGLEngine glBlendFunc_Exec (0x20810) encodes source ONE in
+         * bits 31:29 and destination ZERO / ONE_MINUS_SRC_ALPHA in 28:26.
+         * glBlendEquationOES_Exec (0x20990) uses bits 4:3; bit 5 selects
+         * source-alpha saturation. A header with bit 0 carries this state;
+         * otherwise the immediately preceding draw's state stays active.
+         * In particular, copying transparent pixels must erase old contents,
+         * not source-over them: UIKit uses this for opaque layer backdrops. */
+        uint32_t blend = words[start + 1u] & 0xfc000038u;
+        if (blend != 0x20000000u && blend != 0x34000000u) {
+            if (why) *why = "TA draw uses an unsupported blend equation";
+            return MBX_TA_DRAW_BAD;
+        }
+        draw->blend_state = true;
+        draw->replace = blend == 0x20000000u;
+    }
     if (draw->textured &&
         !mbx_ta_texture_state(words, start, control, draw)) {
         if (why) *why = "TA draw has no unique measured BGRA8 texture state";
@@ -4244,6 +4262,7 @@ static enum mbx_ta_parse_result mbx_ta_parse_continuation(
     memset(draw, 0, sizeof *draw);
     draw->start_word = start;
     draw->textured = previous->textured;
+    draw->replace = previous->replace;
     if (draw->textured) {
         draw->filtered = previous->filtered;
         draw->source = previous->source;
@@ -4275,6 +4294,7 @@ static enum mbx_ta_parse_result mbx_ta_parse_primitive_continuation(
     memset(draw, 0, sizeof *draw);
     draw->start_word = start;
     draw->textured = previous->textured;
+    draw->replace = previous->replace;
     if (draw->textured) {
         draw->filtered = previous->filtered;
         draw->source = previous->source;
@@ -4479,8 +4499,8 @@ static bool mbx_ta_apply_draw(
             for (uint32_t x = left; x < right; x++) {
                 uint8_t *pixel = target_pixels +
                     (y * target_width + x) * 4u;
-                uint32_t output = mbx_source_over_clamped(
-                    mbx_load_le32(pixel), draw->colour);
+                uint32_t output = draw->replace ? draw->colour :
+                    mbx_source_over_clamped(mbx_load_le32(pixel), draw->colour);
                 pixel[0] = (uint8_t)output;
                 pixel[1] = (uint8_t)(output >> 8);
                 pixel[2] = (uint8_t)(output >> 16);
@@ -4717,8 +4737,8 @@ static bool mbx_ta_apply_draw(
                     source_pixel, draw->colour);
                 uint8_t *destination = target_pixels +
                     ((top + y) * target_width + left + x) * 4u;
-                uint32_t output = mbx_source_over_clamped(
-                    mbx_load_le32(destination), source_pixel);
+                uint32_t output = draw->replace ? source_pixel :
+                    mbx_source_over_clamped(mbx_load_le32(destination), source_pixel);
                 destination[0] = (uint8_t)output;
                 destination[1] = (uint8_t)(output >> 8);
                 destination[2] = (uint8_t)(output >> 16);
@@ -4926,6 +4946,8 @@ static bool mbx_execute_ta_stream(s5l_mbx_t *m, const arm_bus_t *bus,
             }
             break;
         }
+        if (!draws[draw_count].blend_state)
+            draws[draw_count].replace = draws[draw_count - 1u].replace;
         cursor = draws[draw_count].next_word;
         draw_count++;
     }
