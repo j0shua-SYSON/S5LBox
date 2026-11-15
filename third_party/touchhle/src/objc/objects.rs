@@ -413,7 +413,8 @@ mod copy_tests {
     fn shallow_copy_preserves_extra_bytes_with_independent_ownership() {
         let mut mem = Mem::new();
         mem.set_null_segment_size(4096);
-        let mut objc = super::super::ObjC::new();
+        let mut objc = ObjC::new();
+        objc.register_host_selectors(&mut mem);
         let class = objc.lookup_class("NSObject", &mut mem).unwrap();
         let size = objc.borrow::<ClassHostObject>(class).instance_size;
         let source = objc.alloc_object_inner(
