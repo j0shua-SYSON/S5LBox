@@ -108,6 +108,10 @@ static BOOL IsInstalled(NSDictionary *p) { return [p[@"Status"] isEqual:@"instal
 }
 - (instancetype)init { self = [super init]; if (self) { _packages = @[]; _installed = @[]; } return self; }
 + (NSArray<NSDictionary *> *)parse:(NSData *)data error:(NSError **)error {
+    return [self parseRepository:data skipped:NULL error:error];
+}
++ (NSArray<NSDictionary *> *)parseRepository:(NSData *)data skipped:(NSUInteger *)skipped error:(NSError **)error {
+    if (skipped) *skipped = 0;
     if (!data || data.length > 32u*1024u*1024u) {
         if (error) *error = VMPackageError(@"Repository index exceeds the 32 MB limit."); return nil;
     }
@@ -129,8 +133,16 @@ static BOOL IsInstalled(NSDictionary *p) { return [p[@"Status"] isEqual:@"instal
                 BOOL tombstone = state.count == 3 &&
                     [@[@"unknown",@"install",@"hold",@"deinstall",@"purge"] containsObject:state[0]] &&
                     [state[1] isEqual:@"ok"] && [state[2] isEqual:@"not-installed"];
-                if (!VMPackageIdentifierValid(record[@"Package"]) ||
-                    (![record[@"Version"] length] && !tombstone) || result.count >= 100000) {
+                BOOL identityValid = VMPackageIdentifierValid(record[@"Package"]) &&
+                    ([record[@"Version"] length] || tombstone);
+                if (!identityValid && skipped) {
+                    // Some legacy sources contain identifiers the guest helper cannot
+                    // safely manage. Quarantine those records, not the whole source.
+                    (*skipped)++;
+                    [record removeAllObjects]; last = nil;
+                    continue;
+                }
+                if (!identityValid || result.count >= 100000) {
                     if (error) *error = VMPackageError(@"Invalid package identity or too many package records."); return nil;
                 }
                 [result addObject:[record copy]]; [record removeAllObjects]; last = nil;

@@ -12,6 +12,34 @@
     dispatch_semaphore_t _finished;
     BOOL _allowHTTP;
 }
++ (NSDictionary *)bigBossSource {
+    NSString *base = @"http://apt.thebigboss.org/repofiles/cydia/";
+    return @{@"name":@"BigBoss", @"base":base,
+        @"index":[base stringByAppendingString:@"dists/stable/main/binary-iphoneos-arm/"], @"allowHTTP":@YES};
+}
++ (NSArray<NSDictionary *> *)sourcesForDefaults:(NSUserDefaults *)defaults {
+    NSMutableArray *sources = [[defaults arrayForKey:@"PackageManagerSources-v1"] mutableCopy];
+    if (!sources) sources = [@[
+        @{@"name":@"iOS 3 Party", @"base":@"https://ios3.party/", @"index":@"https://ios3.party/"},
+        @{@"name":@"Saurik", @"base":@"https://apt.saurik.com/cydia/", @"index":@"https://apt.saurik.com/cydia/"}
+    ] mutableCopy];
+    if (![defaults boolForKey:@"PackageManagerBigBossDefault-v1"]) {
+        BOOL found = NO;
+        for (NSUInteger i = 0; i < sources.count; i++) {
+            NSURL *base = [NSURL URLWithString:sources[i][@"base"]];
+            if ([base.host.lowercaseString isEqual:@"apt.thebigboss.org"] &&
+                [@[@"/repofiles/cydia", @"/repofiles/cydia/"] containsObject:base.path] &&
+                !base.user && !base.password && !base.port && !base.query && !base.fragment) {
+                sources[i] = [self bigBossSource]; found = YES;
+            }
+        }
+        if (!found) [sources addObject:[self bigBossSource]];
+        [defaults setObject:sources forKey:@"PackageManagerSources-v1"];
+        // A later user removal is permanent, including an intentionally empty list.
+        [defaults setBool:YES forKey:@"PackageManagerBigBossDefault-v1"];
+    }
+    return sources;
+}
 + (NSURL *)directory {
     NSURL *base = [NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
     NSURL *url = [base URLByAppendingPathComponent:@"PackageManager" isDirectory:YES];
@@ -110,6 +138,8 @@
 }
 - (NSArray<NSDictionary *> *)refresh:(NSArray<NSDictionary *> *)sources error:(NSError **)error {
     NSMutableArray *all = [NSMutableArray array];
+    NSMutableArray *warnings = [NSMutableArray array];
+    NSArray *previous = [NSArray arrayWithContentsOfURL:[[self.class directory] URLByAppendingPathComponent:@"catalog.plist"]];
     for (NSDictionary *source in sources) {
         _allowHTTP=[source[@"allowHTTP"] boolValue];
         if (self.progress) self.progress([NSString stringWithFormat:@"Loading %@",source[@"name"]]);
@@ -120,8 +150,19 @@
             if (raw) data = [self expand:raw suffix:suffix error:&failure];
             if (data || self.canceled) break;
         }
-        if (!data) { if (error) *error = failure; return nil; }
-        NSArray *records = [VMPackageCatalog parse:data error:error]; if (!records) return nil;
+        if (self.canceled) { if (error) *error = VMPackageError(@"Canceled."); return nil; }
+        NSUInteger skipped = 0;
+        NSArray *records = data ? [VMPackageCatalog parseRepository:data skipped:&skipped error:&failure] : nil;
+        if (!records) {
+            // One unavailable source must not prevent every other source from updating.
+            // Keep only this source's last usable records, and report the failure.
+            for (NSDictionary *p in previous) if ([p[@"_base"] isEqual:source[@"base"]]) [all addObject:p];
+            [warnings addObject:[NSString stringWithFormat:@"%@: %@", source[@"name"],
+                failure.localizedDescription ?: @"Could not load the repository."]];
+            continue;
+        }
+        if (skipped) [warnings addObject:[NSString stringWithFormat:@"%@: skipped %lu unsupported package entries.",
+            source[@"name"], (unsigned long)skipped]];
         for (NSDictionary *record in records) {
             // A versionless dpkg tombstone is valid installed-state metadata,
             // never an installable repository release.
@@ -131,9 +172,10 @@
             [all addObject:p];
         }
     }
-    // Atomic replacement: a failed source never erases the last usable index.
+    // Atomic replacement, with each failed source retaining its previous index.
     NSData *cache = [NSPropertyListSerialization dataWithPropertyList:all format:NSPropertyListBinaryFormat_v1_0 options:0 error:error];
     if (!cache || ![cache writeToURL:[[self.class directory] URLByAppendingPathComponent:@"catalog.plist"] options:NSDataWritingAtomic error:error]) return nil;
+    if (warnings.count && error) *error = VMPackageError([warnings componentsJoinedByString:@"\n"]);
     return all;
 }
 - (NSURL *)download:(NSDictionary *)p error:(NSError **)error {

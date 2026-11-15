@@ -18,6 +18,7 @@ targets:
     platform: iOS
     sources:
       - path: Sources
+      - path: Resources/LaunchScreen.storyboard
       # The app icon. A single 1024x1024 RGB image; Xcode derives every other
       # size from it. It must have NO alpha channel -- the source art was RGBA
       # and was composited onto black before being placed here, because iOS

@@ -1,0 +1,63 @@
+name: ipad-ui
+on:
+  push:
+    paths: ['app/**', '.github/workflows/ipad-ui.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ipad:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare Xcode and project
+        run: |
+          set -euo pipefail
+          latest=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$latest"
+          curl -fsSL -o /tmp/xcodegen.zip https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+          unzip -q /tmp/xcodegen.zip -d /tmp/xcodegen
+          sudo /tmp/xcodegen/xcodegen/install.sh
+          mkdir -p app/Generated
+          python3 tools/gen_a64_static.py app/Generated/a64_static_handlers.S
+          cd app
+          xcodegen generate --spec project-tests.yml
+      - name: Select iPad simulator
+        id: simulator
+        run: |
+          xcrun simctl list devices available --json > /tmp/devices.json
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          devices = json.load(open('/tmp/devices.json'))['devices']
+          for runtime, entries in sorted(devices.items(), reverse=True):
+              matches = [d for d in entries if d['name'].startswith('iPad') and d.get('isAvailable')]
+              if matches:
+                  print('id=' + matches[0]['udid'])
+                  break
+          else:
+              raise SystemExit('No available iPad simulator')
+          PY
+      - name: Test iPad setup, layouts and rotation
+        working-directory: app
+        run: |
+          set -euo pipefail
+          xcodebuild -project S5LBox.xcodeproj -scheme S5LBox-iPad \
+            -configuration Debug -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,id=${{ steps.simulator.outputs.id }}' \
+            -resultBundlePath "$PWD/../iPad-tests.xcresult" \
+            -parallel-testing-enabled NO -jobs 2 \
+            CODE_SIGNING_ALLOWED=NO LLVM_LTO=NO GCC_OPTIMIZATION_LEVEL=0 \
+            COMPILER_INDEX_STORE_ENABLE=NO test > ../iPad-tests.log 2>&1 || {
+              tail -150 ../iPad-tests.log
+              exit 1
+            }
+          tail -60 ../iPad-tests.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: iPad-test-results
+          path: |
+            iPad-tests.xcresult
+            iPad-tests.log
+          retention-days: 7

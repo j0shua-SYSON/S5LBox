@@ -1,0 +1,40 @@
+include: project.yml
+targets:
+  S5LBoxLayoutTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: Tests/Layout
+    dependencies:
+      - target: S5LBox
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.j0shua.S5LBox.LayoutTests
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/Sources", "$(SRCROOT)/../core/include"]
+        CLANG_ENABLE_OBJC_ARC: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/S5LBox.app/S5LBox"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+  S5LBoxInterfaceTests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: Tests/Interface
+    dependencies:
+      - target: S5LBox
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.j0shua.S5LBox.InterfaceTests
+        CLANG_ENABLE_OBJC_ARC: YES
+        TEST_TARGET_NAME: S5LBox
+schemes:
+  S5LBox-iPad:
+    build:
+      targets:
+        S5LBox: all
+    test:
+      targets:
+        - S5LBoxLayoutTests
+        - S5LBoxInterfaceTests
+      commandLineArguments:
+        "-VMGuestMicrophoneEnabled": true
+        "NO": true

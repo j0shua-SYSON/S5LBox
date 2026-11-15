@@ -59,6 +59,7 @@ static void vm_fb_release_data(void *info, const void *data, size_t size) {
      * view's header states and a contract deserves assertions. This file is
      * then only the UIKit half: read the point, map it, feed the tracker. */
     vm_touch_tracker_t _tracker;
+    CGSize _touchBounds;
 }
 
 @synthesize touchDelegate = _touchDelegate;
@@ -213,6 +214,7 @@ static void vm_fb_release_data(void *info, const void *data, size_t size) {
     }
 
     const CGSize size = self.bounds.size;
+    _touchBounds = size;
     const CGPoint point = [touch locationInView:self];
     const vm_touch_point_t guest =
         vm_touch_map((double)size.width, (double)size.height,
@@ -223,6 +225,17 @@ static void vm_fb_release_data(void *info, const void *data, size_t size) {
     if (!vm_touch_track(&_tracker, phase, guest, &x, &y)) return;
 
     [delegate framebufferView:self touchAtGuestX:x guestY:y phase:phase];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    // Rotation and live window resizing must not move a held guest touch to
+    // a new coordinate system or leave the guest believing it is still down.
+    if (_tracker.active && !CGSizeEqualToSize(_touchBounds, self.bounds.size)) {
+        int x = _tracker.x, y = _tracker.y;
+        vm_touch_tracker_reset(&_tracker);
+        [self.touchDelegate framebufferView:self touchAtGuestX:x guestY:y phase:VM_TOUCH_CANCELLED];
+    }
 }
 
 @end

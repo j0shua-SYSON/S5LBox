@@ -10,6 +10,7 @@ BOOL VMPackageIdentifierValid(NSString *name);
 @property (nonatomic, copy) NSArray<NSDictionary *> *packages;
 @property (nonatomic, copy) NSArray<NSDictionary *> *installed;
 + (NSArray<NSDictionary *> *)parse:(NSData *)data error:(NSError **)error;
++ (NSArray<NSDictionary *> *)parseRepository:(NSData *)data skipped:(NSUInteger *)skipped error:(NSError **)error;
 + (BOOL)protectedPackage:(NSDictionary *)package;
 + (BOOL)requiresRespring:(NSArray<NSDictionary *> *)changes;
 // Dependency-first order. No removals, downgrades, essential changes, or forced

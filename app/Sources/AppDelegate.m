@@ -140,7 +140,23 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
     // Initialization performs local cleanup only; downloads always require a tap.
     [VMFirmwareDownloader sharedDownloader];
 
-    (void)launchOptions;
+    (void)launchOptions; (void)application;
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(firmwareImportChanged)
+        name:VMFirmwareImportDidChangeNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(firmwareImportChanged)
+        name:VMFirmwareDownloadDidChangeNotification object:nil];
+    return YES;
+}
+
+- (void)connectWindowScene:(UIWindowScene *)scene {
+    // Keep one machine owner if the system reconnects the app's single scene.
+    if (self.window) {
+        self.window.windowScene = scene;
+        [self.window makeKeyAndVisible];
+        return;
+    }
+    UIApplication *application = UIApplication.sharedApplication;
+    VMSettings *settings = VMSettings.sharedSettings;
     BOOL launchAutomationRequested = VMLaunchRequestsFirstMachine();
     BOOL touchAutomationRequested =
         settings.developerMode && [VMDeviceAutomation hasPendingTouchPlan];
@@ -152,7 +168,7 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
      * ordinary launches keep the user's normal Auto-Lock setting. */
     if (automationRequested) application.idleTimerDisabled = YES;
 
-    self.window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
+    self.window = [[UIWindow alloc] initWithWindowScene:scene];
     /* Keep the shell native rather than painting a second design system over
      * UIKit.  One explicit accent and large navigation titles are enough to
      * make the app read like a current iOS utility, while semantic system
@@ -164,10 +180,6 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
     VMInstanceListViewController *machines =
         [[VMInstanceListViewController alloc] init];
     machines.showsSetupWhenNeeded = !automationRequested;
-    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(firmwareImportChanged)
-        name:VMFirmwareImportDidChangeNotification object:nil];
-    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(firmwareImportChanged)
-        name:VMFirmwareDownloadDidChangeNotification object:nil];
     UINavigationController *nav = [[VMNavigationController alloc]
         initWithRootViewController:machines];
     nav.navigationBar.prefersLargeTitles = YES;
@@ -227,7 +239,6 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
             [self.deviceAutomation start];
         });
     }
-    return YES;
 }
 
 - (void)firmwareImportChanged {

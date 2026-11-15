@@ -9,7 +9,71 @@ static NSDictionary *Pkg(NSString *name,NSString *version,NSString *depends) {
     return @{@"Package":name,@"Version":version,@"Depends":depends,@"Architecture":@"iphoneos-arm"};
 }
 static NSDictionary *Installed(NSDictionary *p) { NSMutableDictionary *v=[p mutableCopy]; v[@"Status"]=@"install ok installed"; return v; }
+
+static NSURL *repositoryDirectory;
+@interface RepositoryFixture : VMPackageRepository
+@property(nonatomic, copy) NSDictionary<NSString *, NSData *> *responses;
+@end
+@implementation RepositoryFixture
++ (NSURL *)directory { return repositoryDirectory; }
+- (NSData *)fetch:(NSURL *)url limit:(NSUInteger)limit error:(NSError **)error {
+    NSData *data = self.responses[url.absoluteString];
+    if (!data || data.length > limit) {
+        if (error) *error = VMPackageError(@"Fixture source unavailable.");
+        return nil;
+    }
+    return data;
+}
+@end
+
+static void TestSources(void) {
+    NSString *suite = [@"com.example.package-tests." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    NSArray *sources = [VMPackageRepository sourcesForDefaults:defaults];
+    CHECK(sources.count == 3);
+    CHECK([sources.lastObject isEqual:[VMPackageRepository bigBossSource]]);
+    CHECK([VMPackageRepository sourcesForDefaults:defaults].count == 3);
+    [defaults setObject:@[] forKey:@"PackageManagerSources-v1"];
+    CHECK([VMPackageRepository sourcesForDefaults:defaults].count == 0); // removal stays removed
+    [defaults removePersistentDomainForName:suite];
+    NSDictionary *custom = @{@"name":@"Custom", @"base":@"https://example.org/", @"index":@"https://example.org/"};
+    [defaults setObject:@[custom] forKey:@"PackageManagerSources-v1"];
+    sources = [VMPackageRepository sourcesForDefaults:defaults];
+    CHECK(sources.count == 2 && [sources.firstObject isEqual:custom]);
+    [defaults removePersistentDomainForName:suite];
+    [defaults setObject:@[[VMPackageRepository bigBossSource]] forKey:@"PackageManagerSources-v1"];
+    CHECK([VMPackageRepository sourcesForDefaults:defaults].count == 1);
+    [defaults removePersistentDomainForName:suite];
+
+    repositoryDirectory = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES]
+        URLByAppendingPathComponent:NSUUID.UUID.UUIDString isDirectory:YES];
+    [NSFileManager.defaultManager createDirectoryAtURL:repositoryDirectory withIntermediateDirectories:YES attributes:nil error:NULL];
+    NSDictionary *bigboss = [VMPackageRepository bigBossSource];
+    NSString *index = [bigboss[@"index"] stringByAppendingString:@"Packages"];
+    NSData *legacy = [@"Package: legacy.MixedCase\nVersion: 1\nArchitecture: iphoneos-arm\n\nPackage: valid-package\nVersion: 1\nArchitecture: iphoneos-arm\n\n" dataUsingEncoding:NSUTF8StringEncoding];
+    NSUInteger skipped = 0; NSError *error = nil;
+    CHECK(![VMPackageCatalog parse:legacy error:&error]); // installed state remains strict
+    NSArray *records = [VMPackageCatalog parseRepository:legacy skipped:&skipped error:&error];
+    CHECK(records.count == 1 && skipped == 1);
+    RepositoryFixture *repo = [RepositoryFixture new]; repo.responses = @{index:legacy};
+    error = nil;
+    records = [repo refresh:@[bigboss,custom] error:&error];
+    CHECK(records.count == 1 && error != nil);
+    CHECK([records.firstObject[@"Package"] isEqual:@"valid-package"]);
+    CHECK([records.firstObject[@"_allowHTTP"] boolValue]);
+    repo.responses = @{@"https://example.org/Packages":[@"Package: custom-package\nVersion: 2\nArchitecture: all\n\n" dataUsingEncoding:NSUTF8StringEncoding]};
+    error = nil;
+    records = [repo refresh:@[bigboss,custom] error:&error];
+    CHECK(records.count == 2 && error != nil); // retain failed BigBoss; update the healthy source
+    records = [repo refresh:@[custom] error:&error];
+    CHECK(records.count == 1 && [records.firstObject[@"Package"] isEqual:@"custom-package"]);
+    repo.canceled = YES;
+    CHECK(![repo refresh:@[bigboss] error:&error]);
+    CHECK([NSArray arrayWithContentsOfURL:[repositoryDirectory URLByAppendingPathComponent:@"catalog.plist"]].count == 1);
+    [NSFileManager.defaultManager removeItemAtURL:repositoryDirectory error:NULL];
+}
 int main(void) { @autoreleasepool {
+    TestSources();
     for (NSArray *pair in @[@[@"1",@"2"],@[@"1.9",@"1.10"],@[@"1.0~rc1",@"1.0"],@[@"1.0",@"1.0-1"],
         @[@"9.9",@"1:1.0"],@[@"1.0a",@"1.0+"],@[@"1.0-1",@"1.0-2"],@[@"1.0~~",@"1.0~"],@[@"1.00",@"1.0a"]]) {
         CHECK(VMPackageVersionCompare(pair[0],pair[1])<0); CHECK(VMPackageVersionCompare(pair[1],pair[0])>0);

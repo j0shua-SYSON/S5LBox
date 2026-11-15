@@ -184,9 +184,7 @@ static UIImage *Tile(NSString *symbol) {
     _instanceID=[identifier copy];
     _queue=dispatch_queue_create("com.j0shua.S5LBox.packages",DISPATCH_QUEUE_SERIAL);
     _background=UIBackgroundTaskInvalid;
-    _sources=[[NSUserDefaults.standardUserDefaults arrayForKey:@"PackageManagerSources-v1"] mutableCopy];
-    if (!_sources) _sources=[@[@{@"name":@"iOS 3 Party",@"base":@"https://ios3.party/",@"index":@"https://ios3.party/"},
-        @{@"name":@"Saurik",@"base":@"https://apt.saurik.com/cydia/",@"index":@"https://apt.saurik.com/cydia/"}] mutableCopy];
+    _sources=[[VMPackageRepository sourcesForDefaults:NSUserDefaults.standardUserDefaults] mutableCopy];
     NSArray *cached=[NSArray arrayWithContentsOfURL:[[VMPackageRepository directory] URLByAppendingPathComponent:@"catalog.plist"]];
     NSMutableArray *active=[NSMutableArray array];
     for (NSDictionary *p in cached) for (NSDictionary *source in _sources)
@@ -398,7 +396,10 @@ static UIImage *Tile(NSString *symbol) {
             row[@"source"]=source; [rows addObject:row];
         }
         [sections addObject:Section(@"Repositories",rows.count ? rows : @[Row(@"No sources yet",@"Tap + to add a repository.",@"tray",nil)],nil)];
-        [sections addObject:Section(@"More sources",@[Row(@"BigBoss",@"Legacy HTTP repository",@"globe",@"bigboss")],
+        BOOL hasBigBoss = NO;
+        for (NSDictionary *source in _sources)
+            if ([source[@"index"] isEqual:[VMPackageRepository bigBossSource][@"index"]]) hasBigBoss = YES;
+        if (!hasBigBoss) [sections addObject:Section(@"More sources",@[Row(@"BigBoss",@"Legacy HTTP repository",@"globe",@"bigboss")],
             @"Only add sources you trust. Repository signatures are not verified; HTTP sources can be altered in transit.")];
         [sections addObject:Section(nil,@[Row(_busy ? @"Refreshing sources" : @"Last refresh",_message,nil,nil)],nil)];
     } else if ([kind isEqual:@"categories"]) {
@@ -631,9 +632,16 @@ static UIImage *Tile(NSString *symbol) {
         NSURL *url=[NSURL URLWithString:base];
         if (![@[@"https",@"http"] containsObject:url.scheme.lowercaseString ?: @""] || !url.host.length || url.user || url.password || url.query || url.fragment) { [self alert:@"Invalid source" message:@"Enter an HTTP or HTTPS repository directory URL."]; return; }
         if (![base hasSuffix:@"/"]) base=[base stringByAppendingString:@"/"];
-        NSString *index=bigboss ? [base stringByAppendingString:@"dists/stable/main/binary-iphoneos-arm/"] : base;
+        BOOL isBigBoss = bigboss || ([url.host.lowercaseString isEqual:@"apt.thebigboss.org"] &&
+            [@[@"/repofiles/cydia",@"/repofiles/cydia/"] containsObject:url.path] && !url.port);
+        if (!isBigBoss && ![url.scheme.lowercaseString isEqual:@"https"]) {
+            [self alert:@"HTTPS required" message:@"Use this source's HTTPS address. BigBoss has a separate exception for its legacy HTTP repository."]; return;
+        }
+        NSDictionary *source = isBigBoss ? [VMPackageRepository bigBossSource] :
+            @{@"name":url.host,@"base":base,@"index":base};
+        NSString *index=source[@"index"];
         for (NSDictionary *old in self->_sources) if ([old[@"index"] isEqual:index]) return;
-        [self->_sources addObject:@{@"name":bigboss ? @"BigBoss (HTTP)" : url.host,@"base":base,@"index":index,@"allowHTTP":@([url.scheme.lowercaseString isEqual:@"http"])}];
+        [self->_sources addObject:source];
         [NSUserDefaults.standardUserDefaults setObject:self->_sources forKey:@"PackageManagerSources-v1"]; [self refresh];
     }]];
     [self.activeNavigation.topViewController presentViewController:alert animated:YES completion:nil];

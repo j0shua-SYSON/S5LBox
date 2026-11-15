@@ -1,6 +1,7 @@
 // Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 #import "VMDeviceControlsViewController.h"
 #import "VMHardwareButton.h"
+#import "VMAdaptiveLayout.h"
 
 @implementation VMDeviceControlsViewController {
     NSMutableArray<VMHardwareButton *> *_hardware;
@@ -72,11 +73,9 @@ static UILabel *ControlLabel(NSString *text, UIFontTextStyle style) {
         [scroll.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor],
         [scroll.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor],
         [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:16],
-        [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-28],
-        [stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:20],
-        [stack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-20],
-        [stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-40]
+        [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-28]
     ]];
+    VMConstrainReadableColumn(stack, scroll, 540);
     VMHardwareButton *power = [self hardwareButton:VMButtonPower title:@"Sleep / Wake" symbol:@"power"];
     power.accessibilityHint = @"Press and hold to show the guest power menu.";
     [stack addArrangedSubview:power];

@@ -28,6 +28,7 @@
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //
 #import "EmulatorViewController.h"
+#import "VMAdaptiveLayout.h"
 #import "VMButtonBar.h"
 #import "VMHardwareButton.h"
 #import "VMDeviceControlsViewController.h"
@@ -1405,6 +1406,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     VMDeviceControlsViewController *controls = [VMDeviceControlsViewController new];
     controls.controlDelegate = self;
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:controls];
+    nav.preferredContentSize = CGSizeMake(540, 640);
     nav.modalPresentationStyle = UIModalPresentationPageSheet;
     if (@available(iOS 15.0, *)) {
         nav.sheetPresentationController.detents = @[UISheetPresentationControllerDetent.largeDetent];
@@ -1414,38 +1416,30 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 }
 
 - (void)layoutModernInterface {
-    CGRect area = UIEdgeInsetsInsetRect(self.view.bounds, self.view.safeAreaInsets);
-    area = CGRectInset(area, 12, 8);
-    BOOL landscape = area.size.width > area.size.height;
-    if (landscape) {
-        CGFloat height = MIN(236, area.size.height);
-        _dock.frame = CGRectMake(CGRectGetMaxX(area) - 76, CGRectGetMidY(area) - height / 2, 76, height);
+    BOOL inlineConsole = _sessionInlineConsole && VMSettings.sharedSettings.developerMode &&
+        (!_homeOnlyInterface || _controlsRevealed);
+    VMEmulatorLayout layout = VMLayoutEmulator(self.view.bounds, self.view.safeAreaInsets, inlineConsole);
+    _dock.frame = layout.dock;
+    if (layout.verticalDock) {
+        CGFloat height = layout.dock.size.height;
         _homeButton.frame = CGRectMake(6, (height - 64) / 2, 64, 64);
         _settingsButton.frame = CGRectMake(14, 10, 48, 48);
         _deviceControlsButton.frame = CGRectMake(14, height - 58, 48, 48);
-        area.size.width = MAX(0, area.size.width - 92);
     } else {
-        CGFloat width = MIN(300, area.size.width);
-        _dock.frame = CGRectMake(CGRectGetMidX(area) - width / 2, CGRectGetMaxY(area) - 76, width, 76);
+        CGFloat width = layout.dock.size.width;
         _homeButton.frame = CGRectMake((width - 64) / 2, 6, 64, 64);
         _settingsButton.frame = CGRectMake(14, 14, 48, 48);
         _deviceControlsButton.frame = CGRectMake(width - 62, 14, 48, 48);
-        area.size.height = MAX(0, area.size.height - 88);
     }
     _homeButton.layer.borderColor = UIColor.systemBlueColor.CGColor;
     _screen.layer.borderColor = UIColor.separatorColor.CGColor;
-    BOOL inlineConsole = _sessionInlineConsole && VMSettings.sharedSettings.developerMode &&
-        (!_homeOnlyInterface || _controlsRevealed);
-    CGFloat band = inlineConsole ? floor(area.size.height * 0.62) : area.size.height;
-    CGFloat scale = MAX(0, MIN(area.size.width / VM_FB_WIDTH, band / VM_FB_HEIGHT));
-    CGFloat width = VM_FB_WIDTH * scale, height = VM_FB_HEIGHT * scale;
-    _screen.frame = CGRectMake(CGRectGetMidX(area) - width / 2, area.origin.y + (band - height) / 2, width, height);
+    CGFloat width = layout.screen.size.width, height = layout.screen.size.height;
+    _screen.frame = layout.screen;
     _prepareScrim.frame = _screen.frame;
     _prepareLabel.frame = CGRectMake(width * .1, height / 2 - 50, width * .8, 86);
     _prepareBar.frame = CGRectMake(width * .1, height / 2 + 44, width * .8, 4);
     _console.hidden = !inlineConsole;
-    _console.frame = inlineConsole ? CGRectMake(area.origin.x, area.origin.y + band + 6,
-        area.size.width, MAX(0, area.size.height - band - 6)) : CGRectZero;
+    _console.frame = layout.console;
 }
 
 /*
@@ -1509,6 +1503,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
     CGRect b = self.view.bounds;
     UIEdgeInsets safe = self.view.safeAreaInsets;
+    CGFloat availableWidth = MAX(0, b.size.width - safe.left - safe.right);
 
     // The run controls sit on the bottom edge, above the home indicator.
     const CGFloat toolbarH = 44.0;
@@ -1547,11 +1542,11 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
                          [[VMSettings sharedSettings] developerMode];
     CGFloat band = inlineConsole ? floor(freeSpace * 0.62) : freeSpace;
     if (band < 60.0) band = fmin(60.0, freeSpace);
-    CGFloat scale = fmin(b.size.width / (CGFloat)VM_FB_WIDTH,
+    CGFloat scale = fmin(availableWidth / (CGFloat)VM_FB_WIDTH,
                          band / (CGFloat)VM_FB_HEIGHT);
     CGFloat w = floor((CGFloat)VM_FB_WIDTH  * scale);
     CGFloat h = floor((CGFloat)VM_FB_HEIGHT * scale);
-    _screen.frame = CGRectMake(floor((b.size.width - w) * 0.5),
+    _screen.frame = CGRectMake(safe.left + floor((availableWidth - w) * 0.5),
                                top + floor((band - h) * 0.5), w, h);
 
     /* Exactly over the picture, so it reads as "this machine is busy" rather
@@ -1564,16 +1559,17 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     _prepareBar.frame   = CGRectMake(px, pcy + 4.0,  pw, 4.0);
 
     CGFloat y = top + band + 6.0;
-    _keys.frame = CGRectMake(0.0, y, b.size.width, keysH);
+    CGFloat keysWidth = MIN(600, availableWidth);
+    _keys.frame = CGRectMake(safe.left + (availableWidth - keysWidth) / 2, y, keysWidth, keysH);
     y += keysH + 6.0;
 
-    _stats.frame = CGRectMake(14.0, y, b.size.width - 28.0, statsH);
+    _stats.frame = CGRectMake(safe.left + 14.0, y, MAX(0, availableWidth - 28.0), statsH);
     y += statsH + 4.0;
 
     if (inlineConsole) {
         CGFloat consoleH = toolbarY - y;
         if (consoleH < 0.0) consoleH = 0.0;
-        _console.frame = CGRectMake(0.0, y, b.size.width, consoleH);
+        _console.frame = CGRectMake(safe.left, y, availableWidth, consoleH);
         _console.hidden = NO;
     } else {
         _console.hidden = YES;

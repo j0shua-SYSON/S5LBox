@@ -1,5 +1,6 @@
 // Native, guest-filtered browsing. Downloads never install themselves.
 #import "VMLegacyStoreViewController.h"
+#import "VMAdaptiveLayout.h"
 #import "VMLegacyStoreDownload.h"
 #import "VMIPALibrary.h"
 #import "VMIPAPackage.h"
@@ -162,13 +163,11 @@ static UIImage *StoreIcon(NSData *data) {
     [NSLayoutConstraint activateConstraints:@[
         [scroll.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
         [scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-        [scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor], [scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [scroll.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor], [scroll.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor],
         [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:24],
-        [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-32],
-        [stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:20],
-        [stack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-20],
-        [stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-40]
+        [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-32]
     ]];
+    VMConstrainReadableColumn(stack, scroll, 640);
     UIImageView *icon = [[UIImageView alloc] initWithImage:self.artwork ?: [UIImage systemImageNamed:@"app"]];
     icon.contentMode = UIViewContentModeScaleAspectFit; icon.clipsToBounds = YES; icon.layer.cornerRadius = 20;
     icon.tintColor = UIColor.tertiaryLabelColor; icon.isAccessibilityElement = NO;
