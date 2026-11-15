@@ -2978,6 +2978,22 @@ static void test_premultiplied_2d_clock_form(void) {
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
           "unknown 2D blend equation raised completion");
 
+    /* RGB values above alpha are valid operands for this hardware equation.
+     * Do not discard a scrolling batch because a source violates the usual
+     * premultiplication convention; saturate each resulting channel. */
+    packet[6] ^= 1u;
+    test_gpu_write32(&m, source + 4u, 0x00ff4000u);
+    test_gpu_write32(&m, source + 8u, 0x80ffffffu);
+    test_gpu_write32(&m, first, 0xff102030u);
+    test_gpu_write32(&m, first + 4u, 0xff405060u);
+    write_packet(&m, RING + 0xd0u, packet, 18u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, first) == 0xffff6030u &&
+          test_gpu_read32(&m, first + 4u) == 0xffffffffu,
+          "2D source-over rejected raw channels or failed to saturate");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
+          "valid non-premultiplied operands did not complete their batch");
+
     s5l8900_free(&m);
 }
 

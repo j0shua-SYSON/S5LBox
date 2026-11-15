@@ -988,14 +988,10 @@ static bool mbx_stage_premultiplied_copy(s5l_mbx_t *m,
     }
     for (uint32_t i = 0; i < total && ok; i += 4u) {
         uint32_t src = mbx_load_le32(source + i);
-        uint32_t alpha = src >> 24;
-        if (!opaque_global &&
-            ((src & 0xffu) > alpha || ((src >> 8) & 0xffu) > alpha ||
-             ((src >> 16) & 0xffu) > alpha)) {
-            if (why) *why = "2D source is not premultiplied BGRA8";
-            ok = false;
-            break;
-        }
+        /* ONE,ONE_MINUS_SRC_ALPHA is a channel equation, not a promise that
+         * RGB <= A in every source texel. Activator's scrolling surfaces can
+         * violate that convention. Execute the decoded equation with channel
+         * saturation instead of dropping the entire otherwise-valid batch. */
         if (opaque_global) {
             src |= 0xff000000u;
             src = mbx_modulate_vertex_alpha(
