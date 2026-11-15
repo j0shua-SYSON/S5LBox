@@ -22,11 +22,19 @@
         XCTNSPredicateExpectation *ready = [[XCTNSPredicateExpectation alloc]
             initWithPredicate:[NSPredicate predicateWithFormat:@"hittable == YES"] object:import];
         XCTWaiterResult result = [XCTWaiter waitForExpectations:@[ready] timeout:10];
-        XCTAttachment *picture = [XCTAttachment attachmentWithScreenshot:app.screenshot];
+        XCTAttachment *picture = [XCTAttachment attachmentWithScreenshot:XCUIScreen.mainScreen.screenshot];
         picture.name = [NSString stringWithFormat:@"Setup-%@",orientation];
         picture.lifetime = XCTAttachmentLifetimeKeepAlways; [self addAttachment:picture];
         XCTAssertEqual(result,XCTWaiterResultCompleted,@"%@",app.debugDescription);
         XCTAssertTrue(app.buttons[@"s5lbox.setup.primary"].hittable);
+        CGRect window = app.windows.firstMatch.frame;
+        BOOL landscape = orientation.integerValue == UIDeviceOrientationLandscapeLeft ||
+                         orientation.integerValue == UIDeviceOrientationLandscapeRight;
+        XCTAssertEqual(window.size.width > window.size.height,landscape);
+        XCTAssertTrue(CGRectContainsRect(window,import.frame));
+        XCTAssertTrue(CGRectContainsRect(window,app.buttons[@"s5lbox.setup.primary"].frame));
+        XCTAssertTrue(app.buttons[@"Later"].hittable);
+        XCTAssertTrue(app.buttons[@"Settings"].hittable);
     }
     [app.buttons[@"s5lbox.setup.import"] tap];
     XCUIElement *cancel = app.buttons[@"Cancel"].firstMatch;
@@ -40,7 +48,7 @@
     if (!advanced.hittable) [app.tables.firstMatch swipeUp];
     XCTAssertTrue(advanced.hittable); [advanced tap];
     XCTAssertTrue([app.navigationBars[@"Advanced"] waitForExistenceWithTimeout:10]);
-    XCTAttachment *picture = [XCTAttachment attachmentWithScreenshot:app.screenshot];
+    XCTAttachment *picture = [XCTAttachment attachmentWithScreenshot:XCUIScreen.mainScreen.screenshot];
     picture.name = @"iPad-advanced-settings";
     picture.lifetime = XCTAttachmentLifetimeKeepAlways; [self addAttachment:picture];
     // Returning from the background must preserve the current navigation stack.
