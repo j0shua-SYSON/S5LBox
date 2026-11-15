@@ -1427,7 +1427,7 @@ static bool mbx_bilinear_axis(float origin, float span,
                               float texel_origin, float texel_span,
                               uint32_t pixel, uint32_t dimension,
                               struct mbx_bilinear_axis *axis) {
-    if (!axis || !dimension || dimension > 512u || span <= 0.0f ||
+    if (!axis || !dimension || dimension > 512u || span == 0.0f ||
         texel_origin < 0.0f || texel_span <= 0.0f)
         return false;
 
@@ -2914,14 +2914,21 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     unsigned p11 = row_major_corners ? 3u : 2u;
     float x0 = destination_x[p00], y0 = destination_y[p00];
     float x1 = destination_x[p11], y1 = destination_y[p11];
-    /* The full-extent perspective-copy producer reflects dock textures by
-     * reversing destination Y while leaving its row-major UVs increasing.
-     * Canonicalize only the coverage bounds here. The strict 1:1 integer UV
-     * checks below still apply, and staging/rasterization retain the reversal.
-     * Filtered, compact, X-reversed and arbitrary affine forms are unchanged. */
+    /* Corner order also carries texture orientation. Safari's filtered
+     * title-bar strip reverses both axes; dock reflections reverse Y in the
+     * full-extent form. Canonicalize coverage only. Filtered sampling retains
+     * the signed destination spans, including when the scissor clips a draw.
+     * Keep compact and full-extent X-reversed forms outside this family. */
+    bool mirror_x = axis_aligned && row_major_corners &&
+                    half_texel_layout && !compact_copy && x0 > x1;
     bool mirror_y = axis_aligned && row_major_corners &&
-                    !half_texel_layout && !compact_copy &&
-                    !scaled_sampler && y0 > y1;
+                    !compact_copy && (half_texel_layout || !scaled_sampler) &&
+                    y0 > y1;
+    if (mirror_x) {
+        float temporary = x0;
+        x0 = x1;
+        x1 = temporary;
+    }
     if (mirror_y) {
         float temporary = y0;
         y0 = y1;
@@ -3481,7 +3488,9 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
         uint32_t maximum_x = 0u, maximum_y = 0u;
         if (!affine_sprite) {
             for (uint32_t x = 0; x < width; x++) {
-                if (!mbx_bilinear_axis(x0, dx, u_texel_start, u_texel_span,
+                if (!mbx_bilinear_axis(mirror_x ? x1 : x0,
+                                       mirror_x ? -dx : dx,
+                                       u_texel_start, u_texel_span,
                                        left + x, source_pitch_pixels,
                                        &x_axis[x])) {
                     if (why) *why =
@@ -3492,7 +3501,9 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                 if (x_axis[x].second > maximum_x) maximum_x = x_axis[x].second;
             }
             for (uint32_t y = 0; y < height; y++) {
-                if (!mbx_bilinear_axis(y0, dy, v_texel_start, v_texel_span,
+                if (!mbx_bilinear_axis(mirror_y ? y1 : y0,
+                                       mirror_y ? -dy : dy,
+                                       v_texel_start, v_texel_span,
                                        top + y, header_texture_height,
                                        &y_axis[y])) {
                     if (why) *why =

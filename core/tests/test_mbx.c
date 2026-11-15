@@ -583,7 +583,7 @@ static bool test_bilinear_axis(float origin, float span,
                                float texel_origin, float texel_span,
                                uint32_t pixel, uint32_t dimension,
                                struct test_bilinear_axis *axis) {
-    if (!axis || !dimension || span <= 0.0f) return false;
+    if (!axis || !dimension || span == 0.0f) return false;
     float coordinate = texel_origin +
                        ((float)pixel + 0.5f - origin) *
                        (texel_span / span);
@@ -5565,7 +5565,8 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
                 changed[2] = form->source_control | (form->source >> 7);
                 changed[5] = 0x0e500000u | (target >> 7);
                 if (variant == 0u) {
-                    changed[2] |= 0x80000000u; /* unmeasured filtered reflection */
+                    changed[9] = changed[11] = changed[13] = changed[15];
+                    /* Degenerate height, even with coherent duplicate words. */
                 } else if (variant == 1u) {
                     changed[8] = changed[12] = form->quad[10];
                     changed[10] = changed[14] = form->quad[8];
@@ -6016,6 +6017,66 @@ static void test_unfiltered_alternate_navigation(void) {
         },
     };
     test_captured_status_form(&form);
+}
+
+/* Safari reverses both axes of this filtered title-bar strip while scrolling.
+ * The quad and clip registers are captured. The integer boundary is a
+ * reconstructed scissor within that clip; pixels are synthetic. */
+static void test_filtered_mirrored_sprites(void) {
+    struct mbx_test_status_form form = {
+        .name = "Safari reversed filtered title-bar strip",
+        .semantic_sprite = true, .boundary_override = true,
+        .arbitrary_bgra_probe = true,
+        .xclip = 0x01400000u, .yclip = 0x00200010u,
+        .tile_x0 = 0u, .tile_x1 = 39u, .tile_y0 = 1u, .tile_y1 = 1u,
+        .left = 0u, .top = 20u, .width = 320u, .height = 10u,
+        .source = 0x0082b000u,
+        .source_stride = 0x20u, .source_control = 0x8e000000u,
+        .source_width = 1u, .source_height = 30u,
+        .expected_covered_pixels = 3200u,
+        .boundary = {
+            0u, 0x41f00000u, 0u, 0x41a00000u,
+            0x43a00000u, 0x41f00000u, 0x43a00000u, 0x41a00000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa0218001u, 0x8e010560u, 0xa6884710u,
+            0xa7718000u, 0x0e5145a0u, 0xae504ea0u, 0x22250e80u,
+            0x43a00000u, 0x42480000u, 0u, 0x42480000u,
+            0x43a00000u, 0x41a00000u, 0u, 0x41a00000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xff000000u, 0u, 0u, 0x3ea00000u, 0x3d480000u,
+            0xff000000u, 0x3d800000u, 0u, 0u, 0x3d480000u,
+            0xff000000u, 0u, 0x3f700000u, 0x3ea00000u, 0x3ca00000u,
+            0xff000000u, 0x3d800000u, 0x3f700000u, 0u, 0x3ca00000u,
+        },
+    };
+    test_captured_status_form(&form);
+
+    /* The captured half-column cannot distinguish horizontal reversal by
+     * itself. Widen the synthetic texture, exercise each axis independently,
+     * and include the full height so both ends of the gradient are checked. */
+    form.name = "filtered reversed axes with a multicolour texture";
+    form.source_width = 8u;
+    form.quad[30] = form.quad[40] = test_float_word(7.5f / 8.0f);
+    form.height = 30u;
+    form.expected_covered_pixels = 9600u;
+    form.boundary[1] = form.boundary[5] = test_float_word(50.0f);
+    form.yclip = 0x00400010u;
+    form.tile_y1 = 3u;
+    for (unsigned axes = 1u; axes <= 3u; axes++) {
+        for (unsigned vertex = 0u; vertex < 4u; vertex++) {
+            float x = ((vertex & 1u) != 0u) != ((axes & 1u) != 0u)
+                ? 320.0f : 0.0f;
+            float y = ((vertex & 2u) != 0u) != ((axes & 2u) != 0u)
+                ? 50.0f : 20.0f;
+            form.quad[8u + vertex * 2u] = test_float_word(x);
+            form.quad[9u + vertex * 2u] = test_float_word(y);
+            form.quad[27u + vertex * 5u] = test_float_word(x / 1024.0f);
+            form.quad[28u + vertex * 5u] = test_float_word(y / 1024.0f);
+        }
+        test_captured_status_form(&form);
+    }
 }
 
 /* Exercise each validated sampler across all combinations of shrinking,
@@ -7803,6 +7864,7 @@ int main(void) {
     test_compact_clipped_zero_coverage();
     test_pointer_selected_solid_quad();
     test_unfiltered_mirrored_sprites();
+    test_filtered_mirrored_sprites();
     test_later_tiled_status_sprites();
     test_filtered_rectangle_scale_matrix();
     test_unfiltered_alternate_navigation();
