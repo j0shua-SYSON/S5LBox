@@ -4,6 +4,25 @@
 @interface VMIPadInterfaceTests : XCTestCase
 @end
 @implementation VMIPadInterfaceTests
+- (void)dismissMicrophonePrompt:(XCUIApplication *)system timeout:(NSTimeInterval)timeout {
+    // Match this permission specifically: another system alert may also have
+    // an Allow button. A synthesized tap can finish before dismissal does.
+    XCUIElement *prompt = [system.alerts containingPredicate:[NSPredicate
+        predicateWithFormat:@"label CONTAINS[c] %@ AND label CONTAINS[c] %@",
+        @"S5LBox", @"microphone"]].firstMatch;
+    if (![prompt waitForExistenceWithTimeout:timeout]) return;
+    for (NSUInteger attempt = 0; attempt < 3 && prompt.exists; attempt++) {
+        XCUIElement *allow = prompt.buttons[@"Allow"];
+        XCTNSPredicateExpectation *ready = [[XCTNSPredicateExpectation alloc]
+            initWithPredicate:[NSPredicate predicateWithFormat:@"hittable == YES"] object:allow];
+        XCTAssertEqual([XCTWaiter waitForExpectations:@[ready] timeout:10], XCTWaiterResultCompleted);
+        [allow tap];
+        XCTNSPredicateExpectation *dismissed = [[XCTNSPredicateExpectation alloc]
+            initWithPredicate:[NSPredicate predicateWithFormat:@"exists == NO"] object:prompt];
+        if ([XCTWaiter waitForExpectations:@[dismissed] timeout:5] == XCTWaiterResultCompleted) return;
+    }
+    XCTAssertFalse(prompt.exists, @"Microphone permission must be resolved before testing the app layout.");
+}
 - (void)testSetupRotationImportAndSettings {
     self.continueAfterFailure = NO;
     XCUIApplication *app = [XCUIApplication new];
@@ -11,11 +30,12 @@
     // Exercise the real first-run permission prompt instead of trying to
     // override a typed NSNumber preference with an NSString launch argument.
     XCUIApplication *system = [[XCUIApplication alloc] initWithBundleIdentifier:@"com.apple.springboard"];
-    XCUIElement *allow = system.alerts.buttons[@"Allow"].firstMatch;
-    if ([allow waitForExistenceWithTimeout:10]) [allow tap];
+    [self dismissMicrophonePrompt:system timeout:10];
     for (NSNumber *orientation in @[@(UIDeviceOrientationPortrait),@(UIDeviceOrientationLandscapeLeft),
                                     @(UIDeviceOrientationPortraitUpsideDown),@(UIDeviceOrientationLandscapeRight)]) {
         XCUIDevice.sharedDevice.orientation = orientation.integerValue;
+        // Permission presentation may arrive after the initial launch wait.
+        [self dismissMicrophonePrompt:system timeout:1];
         XCUIElement *import = app.buttons[@"s5lbox.setup.import"];
         XCTAssertTrue([import waitForExistenceWithTimeout:15]);
         // Existence can precede the end of the rotation/presentation animation.
