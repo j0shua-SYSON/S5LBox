@@ -17,6 +17,10 @@
     return @{@"name":@"BigBoss", @"base":base,
         @"index":[base stringByAppendingString:@"dists/stable/main/binary-iphoneos-arm/"], @"allowHTTP":@YES};
 }
++ (NSDictionary *)invoxiPlayGamesSource {
+    NSString *base = @"https://cydia.invoxiplaygames.uk/";
+    return @{@"name":@"InvoxiPlayGames", @"base":base, @"index":base};
+}
 + (NSArray<NSDictionary *> *)sourcesForDefaults:(NSUserDefaults *)defaults {
     NSMutableArray *sources = [[defaults arrayForKey:@"PackageManagerSources-v1"] mutableCopy];
     if (!sources) sources = [@[
@@ -37,6 +41,22 @@
         [defaults setObject:sources forKey:@"PackageManagerSources-v1"];
         // A later user removal is permanent, including an intentionally empty list.
         [defaults setBool:YES forKey:@"PackageManagerBigBossDefault-v1"];
+    }
+    if (![defaults boolForKey:@"PackageManagerInvoxiPlayGamesDefault-v1"]) {
+        BOOL found = NO;
+        for (NSDictionary *source in sources) {
+            NSURL *base = [NSURL URLWithString:source[@"base"]];
+            if ([base.host.lowercaseString isEqual:@"cydia.invoxiplaygames.uk"] &&
+                [@[@"http", @"https"] containsObject:base.scheme.lowercaseString] &&
+                (!base.path.length || [base.path isEqual:@"/"]) &&
+                !base.user && !base.password && !base.port && !base.query && !base.fragment) {
+                found = YES;
+                break;
+            }
+        }
+        if (!found) [sources addObject:[self invoxiPlayGamesSource]];
+        [defaults setObject:sources forKey:@"PackageManagerSources-v1"];
+        [defaults setBool:YES forKey:@"PackageManagerInvoxiPlayGamesDefault-v1"];
     }
     return sources;
 }

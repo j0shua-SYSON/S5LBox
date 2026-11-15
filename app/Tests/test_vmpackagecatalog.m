@@ -30,19 +30,45 @@ static void TestSources(void) {
     NSString *suite = [@"com.example.package-tests." stringByAppendingString:NSUUID.UUID.UUIDString];
     NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
     NSArray *sources = [VMPackageRepository sourcesForDefaults:defaults];
-    CHECK(sources.count == 3);
-    CHECK([sources.lastObject isEqual:[VMPackageRepository bigBossSource]]);
-    CHECK([VMPackageRepository sourcesForDefaults:defaults].count == 3);
+    CHECK(sources.count == 4);
+    CHECK([sources containsObject:[VMPackageRepository bigBossSource]]);
+    CHECK([sources.lastObject isEqual:[VMPackageRepository invoxiPlayGamesSource]]);
+    CHECK([VMPackageRepository sourcesForDefaults:defaults].count == 4);
     [defaults setObject:@[] forKey:@"PackageManagerSources-v1"];
     CHECK([VMPackageRepository sourcesForDefaults:defaults].count == 0); // removal stays removed
     [defaults removePersistentDomainForName:suite];
     NSDictionary *custom = @{@"name":@"Custom", @"base":@"https://example.org/", @"index":@"https://example.org/"};
     [defaults setObject:@[custom] forKey:@"PackageManagerSources-v1"];
     sources = [VMPackageRepository sourcesForDefaults:defaults];
-    CHECK(sources.count == 2 && [sources.firstObject isEqual:custom]);
+    CHECK(sources.count == 3 && [sources.firstObject isEqual:custom]);
     [defaults removePersistentDomainForName:suite];
     [defaults setObject:@[[VMPackageRepository bigBossSource]] forKey:@"PackageManagerSources-v1"];
-    CHECK([VMPackageRepository sourcesForDefaults:defaults].count == 1);
+    CHECK([VMPackageRepository sourcesForDefaults:defaults].count == 2);
+    [defaults removePersistentDomainForName:suite];
+    // Migrate an existing installation once, without restoring a removed BigBoss.
+    [defaults setBool:YES forKey:@"PackageManagerBigBossDefault-v1"];
+    [defaults setObject:@[custom] forKey:@"PackageManagerSources-v1"];
+    sources = [VMPackageRepository sourcesForDefaults:defaults];
+    CHECK(sources.count == 2 && [sources.firstObject isEqual:custom]);
+    CHECK([sources.lastObject isEqual:[VMPackageRepository invoxiPlayGamesSource]]);
+    [defaults setObject:@[custom] forKey:@"PackageManagerSources-v1"];
+    CHECK([[VMPackageRepository sourcesForDefaults:defaults] isEqual:@[custom]]);
+    // Existing root URLs are retained verbatim, including HTTP and custom names.
+    for (NSString *url in @[@"http://cydia.invoxiplaygames.uk", @"https://cydia.invoxiplaygames.uk/"]) {
+        [defaults removePersistentDomainForName:suite];
+        NSDictionary *existing = @{@"name":@"My Source", @"base":url, @"index":url};
+        [defaults setBool:YES forKey:@"PackageManagerBigBossDefault-v1"];
+        [defaults setObject:@[existing] forKey:@"PackageManagerSources-v1"];
+        CHECK([[VMPackageRepository sourcesForDefaults:defaults] isEqual:@[existing]]);
+    }
+    // The separate beta feed is not the stable default.
+    [defaults removePersistentDomainForName:suite];
+    NSDictionary *beta = @{@"name":@"Beta", @"base":@"https://cydia.invoxiplaygames.uk/beta/",
+        @"index":@"https://cydia.invoxiplaygames.uk/beta/"};
+    [defaults setBool:YES forKey:@"PackageManagerBigBossDefault-v1"];
+    [defaults setObject:@[beta] forKey:@"PackageManagerSources-v1"];
+    sources = [VMPackageRepository sourcesForDefaults:defaults];
+    CHECK(sources.count == 2 && [sources.firstObject isEqual:beta]);
     [defaults removePersistentDomainForName:suite];
 
     repositoryDirectory = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES]

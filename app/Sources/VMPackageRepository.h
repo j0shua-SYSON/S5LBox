@@ -7,6 +7,7 @@
 + (NSString *)checksumField:(NSDictionary *)package;
 + (BOOL)verify:(NSData *)data package:(NSDictionary *)package;
 + (NSDictionary *)bigBossSource;
++ (NSDictionary *)invoxiPlayGamesSource;
 + (NSArray<NSDictionary *> *)sourcesForDefaults:(NSUserDefaults *)defaults;
 // HTTPS by default; BigBoss explicitly uses its published HTTP endpoint.
 - (NSArray<NSDictionary *> *)refresh:(NSArray<NSDictionary *> *)sources error:(NSError **)error;
