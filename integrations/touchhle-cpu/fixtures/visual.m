@@ -239,6 +239,80 @@ static unsigned methods_smoke(void) {
 + (id)date;
 + (id)dateWithTimeIntervalSinceNow:(double)seconds;
 @end
+@interface NSDateFormatter : NSObject
+- (void)setDateStyle:(unsigned)style;
+- (void)setTimeStyle:(unsigned)style;
+- (unsigned)dateStyle;
+- (unsigned)timeStyle;
+- (void)setDateFormat:(id)format;
+- (id)dateFormat;
+- (void)setTimeZone:(id)zone;
+- (id)timeZone;
+- (id)stringFromDate:(id)date;
+@end
+static unsigned formatterZonesReleased;
+// A fixed offset isolates ownership and formatting from the host's timezone.
+@interface FormatterZone : NSObject @end
+@implementation FormatterZone
+- (int)secondsFromGMT { return -5400; }
+- (id)abbreviation { return @"Fixture"; }
+- (void)dealloc { formatterZonesReleased++; [super dealloc]; }
+@end
+static unsigned date_formatter_smoke(void) {
+    unsigned failures=0;
+    NSDateFormatter *f=[[NSDateFormatter alloc] init];
+    id date=[NSDate dateWithTimeIntervalSinceReferenceDate:0];
+    failures += [f dateStyle]!=0 || [f timeStyle]!=0 || ![[f stringFromDate:date] isEqualToString:@""];
+    failures += [f stringFromDate:0]!=0;
+    id dates[]={@"",@"1/1/01",@"Jan 1, 2001",@"January 1, 2001",@"Monday, January 1, 2001"};
+    id times[]={@"",@"12:00 AM",@"12:00:00 AM",@"12:00:00 AM GMT",@"12:00:00 AM Greenwich Mean Time"};
+    for(unsigned i=0;i<5;i++) {
+        [f setTimeStyle:0]; [f setDateStyle:i];
+        failures += [f dateStyle]!=i || ![[f stringFromDate:date] isEqualToString:dates[i]];
+        [f setDateStyle:0]; [f setTimeStyle:i];
+        failures += [f timeStyle]!=i || ![[f stringFromDate:date] isEqualToString:times[i]];
+    }
+    [f setDateStyle:1]; [f setTimeStyle:1];
+    failures += ![[f stringFromDate:date] isEqualToString:@"1/1/01, 12:00 AM"];
+    [f setDateStyle:2];
+    failures += ![[f stringFromDate:date] isEqualToString:@"Jan 1, 2001 at 12:00 AM"];
+    NSMutableString *format=[@"yyyy-MM-dd 'at' HH:mm:ss.SSSSSS Z" mutableCopy];
+    [f setDateFormat:format];
+    [format setString:@"'changed'"]; [format release];
+    failures += ![[f dateFormat] isEqualToString:@"yyyy-MM-dd 'at' HH:mm:ss.SSSSSS Z"];
+    struct { double reference; id text; } fixed[]={
+        {0.125,@"2001-01-01 at 00:00:00.125000 +0000"},
+        {-0.125,@"2000-12-31 at 23:59:59.875000 +0000"},
+        {-978307200.25,@"1969-12-31 at 23:59:59.750000 +0000"},
+        {0.9996,@"2001-01-01 at 00:00:01.000000 +0000"},
+        {-0.0004,@"2001-01-01 at 00:00:00.000000 +0000"},
+        {1169176448.0,@"2038-01-19 at 03:14:08.000000 +0000"},
+        {3129235200.0,@"2100-03-01 at 00:00:00.000000 +0000"}
+    };
+    for(unsigned i=0;i<sizeof(fixed)/sizeof(*fixed);i++)
+        failures += ![[f stringFromDate:[NSDate dateWithTimeIntervalSinceReferenceDate:fixed[i].reference]] isEqualToString:fixed[i].text];
+    [f setDateFormat:@"EEE EEEE M MM MMM MMMM MMMMM LLLL h hh H HH a 'o''clock' ''"];
+    failures += ![[f stringFromDate:date] isEqualToString:@"Mon Monday 1 01 Jan January J January 12 12 0 00 AM o'clock '"];
+    [f setDateFormat:@"h:mm a"];
+    failures += ![[f stringFromDate:[NSDate dateWithTimeIntervalSinceReferenceDate:46800]] isEqualToString:@"1:00 PM"];
+    // Changing either style discards a custom format; nil restores the styles.
+    [f setTimeStyle:1]; [f setDateStyle:1];
+    failures += ![[f stringFromDate:date] isEqualToString:@"1/1/01, 12:00 AM"];
+    [f setDateFormat:@"'literal'"]; [f setDateFormat:0];
+    failures += ![[f stringFromDate:date] isEqualToString:@"1/1/01, 12:00 AM"];
+    FormatterZone *zone=[[FormatterZone alloc] init];
+    [f setTimeZone:zone]; [f setTimeZone:zone]; [zone release];
+    failures += formatterZonesReleased!=0 || [f timeZone]!=zone;
+    [f setDateFormat:@"yyyy-MM-dd HH:mm Z z"];
+    failures += ![[f stringFromDate:date] isEqualToString:@"2000-12-31 22:30 -0130 Fixture"];
+    [f setTimeZone:0];
+    failures += formatterZonesReleased!=1 || ![f timeZone];
+    failures += ![[f stringFromDate:date] isEqualToString:@"2001-01-01 00:00 +0000 GMT"];
+    zone=[[FormatterZone alloc] init]; [f setTimeZone:zone]; [zone release];
+    [f release]; failures += formatterZonesReleased!=2;
+    printf("S5LBOX-HLE-DATE-FORMATTER %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
 @interface NSScanner : NSObject
 + (id)scannerWithString:(id)string;
 - (BOOL)scanHexInt:(unsigned *)value;
@@ -2002,7 +2076,7 @@ static unsigned scanner_string_smoke(void) {
     failures += ![scanner scanUpToString:@";" intoString:NULL] || [scanner scanLocation]!=7;
     failures += [scanner scanUpToString:@";" intoString:NULL] || [scanner scanString:@";" intoString:NULL];
     printf("S5LBOX-HLE-SCANNER-STRING %s failures=%u\n",failures?"FAIL":"PASS",failures);
-    return failures+scanner_numeric_smoke();
+    return failures+scanner_numeric_smoke()+date_formatter_smoke();
 }
 
 extern void *CGImageGetDataProvider(void *image);

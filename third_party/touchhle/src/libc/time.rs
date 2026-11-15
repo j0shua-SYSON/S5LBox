@@ -92,6 +92,9 @@ pub struct tm {
 unsafe impl SafeRead for tm {}
 
 impl tm {
+    pub(crate) fn weekday(&self) -> i32 {
+        self.tm_wday
+    }
     /// A helper function to create a `struct tm` from components.
     /// Right now is used to convert from `DateTime` of `zip` crate.
     ///
@@ -160,7 +163,12 @@ const fn calc_month_to_day(leap_year: bool) -> [i32; 12] {
     table
 }
 pub fn timestamp_to_calendar_date(timestamp: time_t) -> tm {
-    let seconds_since_unix_epoch: i32 = timestamp;
+    timestamp_to_calendar_date_wide(timestamp.into())
+}
+
+/// Foundation dates use a wider range than the guest's 32-bit POSIX time_t.
+pub(crate) fn timestamp_to_calendar_date_wide(timestamp: i64) -> tm {
+    let seconds_since_unix_epoch = timestamp;
 
     // The easy bit: seconds, minutes, hours and days don't vary in length in
     // UNIX time.
@@ -168,9 +176,9 @@ pub fn timestamp_to_calendar_date(timestamp: time_t) -> tm {
     let days_since_unix_epoch = seconds_since_unix_epoch.div_euclid(DAY_SECONDS);
     let second_in_day = seconds_since_unix_epoch.rem_euclid(DAY_SECONDS);
 
-    const MINUTE_SECONDS: i32 = 60;
-    const HOUR_SECONDS: i32 = MINUTE_SECONDS * 60;
-    const DAY_SECONDS: i32 = HOUR_SECONDS * 24;
+    const MINUTE_SECONDS: i64 = 60;
+    const HOUR_SECONDS: i64 = MINUTE_SECONDS * 60;
+    const DAY_SECONDS: i64 = HOUR_SECONDS * 24;
     let tm_sec = second_in_day % MINUTE_SECONDS;
     let tm_min = (second_in_day % HOUR_SECONDS) / MINUTE_SECONDS;
     let tm_hour = second_in_day / HOUR_SECONDS;
@@ -181,11 +189,13 @@ pub fn timestamp_to_calendar_date(timestamp: time_t) -> tm {
     // in the Gregorian calendar resets when the year is a multiple of 400, e.g.
     // the year 2000, so let's adjust the epoch to make things easier.
     let days_since_y2k = days_since_unix_epoch - 10957;
-    let cycles_since_y2k = days_since_y2k.div_euclid(CYCLE_DAYS);
-    let day_in_cycle = days_since_y2k.rem_euclid(CYCLE_DAYS);
+    let cycles_since_y2k = days_since_y2k.div_euclid(CYCLE_DAYS.into());
+    let day_in_cycle = days_since_y2k.rem_euclid(CYCLE_DAYS.into()) as i32;
 
     let year_in_cycle: i32 = (YEAR_TO_DAY.partition_point(|&day| day <= day_in_cycle) - 1) as _;
-    let year = 2000 + cycles_since_y2k * CYCLE_YEARS + year_in_cycle;
+    let year: i32 = (2000 + cycles_since_y2k * i64::from(CYCLE_YEARS) + i64::from(year_in_cycle))
+        .try_into()
+        .expect("Calendar year is out of range");
     let day_in_year = day_in_cycle - YEAR_TO_DAY[usize::try_from(year_in_cycle).unwrap()];
     let is_leap_year = is_leap_year(year_in_cycle);
     assert!(day_in_year < (365 + is_leap_year as i32));
@@ -203,13 +213,13 @@ pub fn timestamp_to_calendar_date(timestamp: time_t) -> tm {
     let day_of_the_week = (4 + days_since_unix_epoch).rem_euclid(7);
 
     tm {
-        tm_sec,
-        tm_min,
-        tm_hour,
+        tm_sec: tm_sec as i32,
+        tm_min: tm_min as i32,
+        tm_hour: tm_hour as i32,
         tm_mday: day_in_month + 1,
         tm_mon: month_in_year,
         tm_year: year - 1900,
-        tm_wday: day_of_the_week,
+        tm_wday: day_of_the_week as i32,
         tm_yday: day_in_year,
         // This function always returns UTC
         tm_isdst: 0,

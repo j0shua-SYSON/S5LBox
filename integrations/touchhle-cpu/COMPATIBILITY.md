@@ -56,14 +56,14 @@ not establish functionality. Device results below identify their tested build.
 | Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Edge | 1.62 | Complete a level, precise controls and saved progress | Device build 60bd8788: offline install passes; blank display persists beyond three minutes. |
 | Canabalt | 1.7 | Sustained run, jumping, restart and saved high score | Device build b065e116: offline install passes; missing NSOperationQueue prevents launch. |
-| Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Device build 6c8c452d finishes the interrupted image-cache rebuild and displays its promotion within 29 seconds; reopening with that cache reaches the same screen within 24 seconds, and normal Home closure works. The previous build was still preparing assets after over 13 minutes. This is not a clean-install comparison. Dismissing the promotion fails on missing NSDate encoding; gameplay remains unverified. |
+| Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Device build 6c8c452d finishes the interrupted image-cache rebuild and displays its promotion within 29 seconds; reopening with that cache reaches the same screen within 24 seconds. The previous build was still preparing assets after over 13 minutes. This is not a clean-install comparison. Build d9a8cebb dismisses the promotion, opens the menu and selects Grasslands, but starting it fails on missing scanFloat:. Map-list artwork is also missing. Gameplay remains unverified. |
 | Minigore | 7.0 | Movement and firing through sustained combat; restart | Desktop startup: CFURL string conversion rejects the requested character encoding. Gameplay remains unverified. |
 | iCopter | 1.4 | Sustained flight, restart and saved high score | Device build cf7c00bf: transitions now complete; short flights render and touch holds/releases work. Collisions return to the title normally. Score 122 survives Home and relaunch. Longer play and frame pacing remain unverified. |
 | Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
 | Tap Tap Revenge | 1.7 | Play a bundled song, timing/scoring and restart | Desktop startup: missing NSNetServiceBrowser. |
 | Trism | 1.4 | Complete a puzzle session and retain progress | Desktop build 106a36be passes title shadows, parameterless delayed selectors and relative view insertion; startup now reaches missing NSNumberFormatter. |
 | Aqua Forest | 1.1.3 | Draw and interact with a physics scene; complete a level | Device build b6082ad3: category and level menus work; touch-tutorial scenes respond to swipes, and a drawing tutorial displays water drawn with a sustained stroke. The material picker opens but clips some labels. Level completion, saved progress, sustained frame pacing and audio remain unverified. |
-| Chopper | 1.3.1 | Complete a mission, steer/fire and pause/resume | Device build c5d38a66 reaches the first mission and renders its world after the finishDecoding and NSCopyObject fixes. Pause and save-slot selection respond; saving then fails on missing initForWritingWithMutableData:. Steering, mission completion and successful save/reload remain unverified. |
+| Chopper | 1.3.1 | Complete a mission, steer/fire and pause/resume | Device build ad3bdfa0 reaches the first mission and renders its world. Pause responds and save serialization progresses beyond the mutable-data and primitive-encoding failures. Displaying save slots now fails on missing NSDateFormatter setDateStyle:. Steering, mission completion and successful save/reload remain unverified. |
 | SPACE DEADBEEF | 1.01 | Sustained gameplay, firing, pause/resume and restart | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Trace | 1.3 | Draw paths, complete a stage and retain progress | Device build 23a5d292: orientation corrected, first two levels completed, platform drawing and jumping work. First-level completion time survives relaunch and app reinstall; longer play remains untested. |
 
@@ -71,7 +71,7 @@ not establish functionality. Device results below identify their tested build.
 
 | App | Version | Latest device result |
 | --- | --- | --- |
-| Angry Birds | 1.0 | Build 3322b6fd: one menu load finished within 34 seconds, versus more than 56 seconds on 425e7f36 in the same offline profile. A repeat finished between 30 and 70 seconds. First level completed with score 7830; aiming and pause/resume respond. Build 106a36be again reaches the title and level selection, retaining the star and unlocked level 2. Timings are observation bounds, not exact durations or a universal speedup. |
+| Angry Birds | 1.0 | Build 3322b6fd: one menu load finished within 34 seconds, versus more than 56 seconds on 425e7f36 in the same offline profile. A repeat finished between 30 and 70 seconds. First level completed with score 7830; aiming and pause/resume respond. Build 6c8c452d completes level 2 with score 43670; its star and unlocked level 3 persist after normal Home closure and relaunch. Timings are observation bounds, not exact durations or a universal speedup. |
 | Super Monkey Ball Lite | 1.0 | Build 3322b6fd: title reached within 40 seconds; mode selection, level flyover and tilt-calibration screens respond. Build 3de6bf45 again reaches the title, mode selection and calibration screens, and Home closes normally. Physical calibration and stage completion remain unverified. This is separate from the full version above. |
 | Beer Pong U | 1.2 | Build 46f9c6f9: the oversized-read crash is fixed on the iPhone; Time Attack and CPU Challenge render, and shot-style, help and quit controls respond. Relaunch works. Build 6fde244b confirms landscape presentation with no local override. Build 106a36be again passes Time Attack rendering, advancing timer, Lob selection, quit-to-menu and normal Home closure. The game uses physical tilt to throw; throwing, scoring and saved results remain unverified. |
 
@@ -351,3 +351,18 @@ determines cache eligibility, including open files moved into Documents.
 The filesystem suite passes 1,481 checks, and both core and touchHLE CI pass on
 6c8c452d. The Fieldrunners observations above verify a real loading improvement,
 but do not measure a completely empty cache or establish gameplay compatibility.
+
+The follow-up file-lifetime fix releases unlinked or replaced buffers after their
+last open handle closes. Replacing a file with no open handles no longer retains
+its old contents until the app exits. New tests also cover deleting freshly
+buffered files before their data forks are published. The filesystem suite passes
+1,522 checks, with core and touchHLE CI passing on 1d72f4b5. Device retesting of
+this follow-up is pending.
+
+Keyed archivers now accept caller-owned mutable output, preserve its existing
+prefix, and finish idempotently. NSDate values and primitive boolean, floating
+point and signed integer fields round-trip through binary archives. ARMv6 checks
+cover ownership, shared objects, negative dates, exact 64-bit integers and repeated
+finish calls; touchHLE CI passes on ad3bdfa0. These changes advance Fieldrunners
+and Chopper to the later failures listed above; they do not establish complete
+save-game compatibility.
