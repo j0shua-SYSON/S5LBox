@@ -562,6 +562,12 @@ extern id const kCATransition,kCATransitionFromRight,kCATransitionFromLeft,kCATr
 - (BOOL)allowsKeyedCoding;
 - (void)encodeObject:(id)object;
 - (void)encodeObject:(id)object forKey:(id)key;
+- (void)encodeBool:(BOOL)value forKey:(id)key;
+- (void)encodeFloat:(float)value forKey:(id)key;
+- (void)encodeDouble:(double)value forKey:(id)key;
+- (void)encodeInteger:(int)value forKey:(id)key;
+- (void)encodeInt32:(int)value forKey:(id)key;
+- (void)encodeInt64:(long long)value forKey:(id)key;
 - (void)finishEncoding;
 - (id)encodedData;
 @end
@@ -571,6 +577,12 @@ extern id const kCATransition,kCATransitionFromRight,kCATransitionFromLeft,kCATr
 - (BOOL)allowsKeyedCoding;
 - (id)decodeObject;
 - (id)decodeObjectForKey:(id)key;
+- (BOOL)decodeBoolForKey:(id)key;
+- (float)decodeFloatForKey:(id)key;
+- (double)decodeDoubleForKey:(id)key;
+- (int)decodeIntegerForKey:(id)key;
+- (int)decodeInt32ForKey:(id)key;
+- (long long)decodeInt64ForKey:(id)key;
 - (void)finishDecoding;
 - (void)setDelegate:(id)delegate;
 @end
@@ -697,6 +709,13 @@ static unsigned archive_smoke(void) {
     [coder encodeObject:@"save-slot" forKey:@"name"];
     [coder encodeObject:numbers forKey:@"values"];
     [coder encodeObject:@"sequential"];
+    [coder encodeBool:1 forKey:@"$flag"];
+    [coder encodeBool:0 forKey:@"false"];
+    [coder encodeFloat:-1.25f forKey:@"float"];
+    [coder encodeDouble:1e100 forKey:@"double"];
+    [coder encodeInteger:-123456 forKey:@"integer"];
+    [coder encodeInt32:(-2147483647-1) forKey:@"int32"];
+    [coder encodeInt64:9223372036854775807LL forKey:@"int64"];
     failures += [destination length]!=0;
     [coder finishEncoding];
     unsigned savedLength=[destination length];
@@ -709,6 +728,14 @@ static unsigned archive_smoke(void) {
     failures += ![[reader decodeObjectForKey:@"name"] isEqualToString:@"save-slot"];
     failures += [[[reader decodeObjectForKey:@"values"] objectAtIndex:4] unsignedLongLongValue]!=0xfedcba9876543210ULL;
     failures += ![[reader decodeObject] isEqualToString:@"sequential"];
+    failures += ![reader decodeBoolForKey:@"$flag"] || [reader decodeBoolForKey:@"false"];
+    failures += [reader decodeFloatForKey:@"float"]!=-1.25f;
+    failures += [reader decodeDoubleForKey:@"double"]!=1e100;
+    failures += [reader decodeIntegerForKey:@"integer"]!=-123456;
+    failures += [reader decodeInt32ForKey:@"int32"]!=(-2147483647-1);
+    failures += [reader decodeInt64ForKey:@"int64"]!=9223372036854775807LL;
+    failures += [reader decodeBoolForKey:@"missing"] || [reader decodeFloatForKey:@"missing"]!=0;
+    failures += [reader decodeInt64ForKey:@"missing"]!=0;
     [reader finishDecoding]; [reader release]; [destination release];
     destination=[[NSMutableData alloc] init];
     [destination appendBytes:"prefix" length:6];
