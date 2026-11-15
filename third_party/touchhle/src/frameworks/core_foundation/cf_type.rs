@@ -57,6 +57,7 @@ type_ids! {
     (CFBundleGetTypeID, "NSBundle", 16),
     (CFUUIDGetTypeID, "_touchHLE_CFUUID", 17),
     (CFErrorGetTypeID, "NSError", 18),
+    (CFBinaryHeapGetTypeID, "_touchHLE_CFBinaryHeap", 19),
 }
 
 fn CFGetTypeID(env: &mut Environment, object: CFTypeRef) -> CFTypeID {

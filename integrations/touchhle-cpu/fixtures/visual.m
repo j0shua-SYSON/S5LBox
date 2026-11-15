@@ -2201,6 +2201,114 @@ static unsigned thread_dispatch_smoke(void) {
     return failures;
 }
 
+typedef struct {
+    int version;
+    const void *(*retain)(const void *,const void *);
+    void (*release)(const void *,const void *);
+    id (*copyDescription)(const void *);
+    int (*compare)(const void *,const void *,void *);
+} HeapCallbacks;
+typedef struct {
+    int version; void *info;
+    const void *(*retain)(const void *);
+    void (*release)(const void *);
+    id (*copyDescription)(const void *);
+} HeapContext;
+extern id CFBinaryHeapCreate(const void *,int,const HeapCallbacks *,const HeapContext *);
+extern id CFBinaryHeapCreateCopy(const void *,int,id);
+extern int CFBinaryHeapGetCount(id),CFBinaryHeapGetCountOfValue(id,const void *);
+extern unsigned CFBinaryHeapGetTypeID(void);
+extern unsigned char CFBinaryHeapContainsValue(id,const void *);
+extern const void *CFBinaryHeapGetMinimum(id);
+extern unsigned char CFBinaryHeapGetMinimumIfPresent(id,const void **);
+extern void CFBinaryHeapGetValues(id,const void **);
+extern void CFBinaryHeapApplyFunction(id,void (*)(const void *,void *),void *);
+extern void CFBinaryHeapAddValue(id,const void *),CFBinaryHeapRemoveMinimumValue(id),CFBinaryHeapRemoveAllValues(id);
+extern const HeapCallbacks kCFStringBinaryHeapCallBacks;
+extern id CFRetain(id);
+extern void CFRelease(id);
+static unsigned heapRetains,heapReleases,heapContextCallbacks,heapComparisons;
+static id heapForCallbackQuery;
+static const void *heap_retain(const void *allocator,const void *value) {
+    (void)allocator; heapRetains++;
+    // Returning a replacement is legal; round odd pointer values up to even.
+    return (const void *)(((unsigned)value+1)&~1U);
+}
+static void heap_release(const void *allocator,const void *value) {
+    (void)allocator; (void)value; heapReleases++;
+}
+static const void *heap_context_retain(const void *value) { heapContextCallbacks++; return value; }
+static void heap_context_release(const void *value) { (void)value; heapContextCallbacks++; }
+static int heap_compare(const void *a,const void *b,void *context) {
+    heapComparisons++;
+    if(heapForCallbackQuery) (void)CFBinaryHeapGetCount(heapForCallbackQuery);
+    unsigned x=(unsigned)a,y=(unsigned)b;
+    return ((x>y)-(x<y))**(int *)context;
+}
+static void heap_sum(const void *value,void *context) { *(unsigned *)context+=(unsigned)value; }
+static unsigned binary_heap_smoke(void) {
+    unsigned failures=0;
+    id heap=CFBinaryHeapCreate(NULL,1,NULL,NULL);
+    failures += CFGetTypeID(heap)!=CFBinaryHeapGetTypeID() || CFBinaryHeapGetTypeID()==CFArrayGetTypeID();
+    const void *minimum=(void *)99;
+    failures += CFBinaryHeapGetMinimum(heap)!=NULL || CFBinaryHeapGetMinimumIfPresent(heap,&minimum);
+    CFBinaryHeapRemoveMinimumValue(heap); // Empty removal is harmless.
+    unsigned input[]={9,1,5,1,0};
+    for(unsigned i=0;i<5;i++) CFBinaryHeapAddValue(heap,(void *)input[i]);
+    failures += CFBinaryHeapGetCount(heap)!=5 || CFBinaryHeapGetCountOfValue(heap,(void *)1)!=2;
+    failures += !CFBinaryHeapContainsValue(heap,(void *)5) || CFBinaryHeapContainsValue(heap,(void *)7);
+    failures += !CFBinaryHeapGetMinimumIfPresent(heap,&minimum) || minimum!=NULL;
+    const void *values[5]; CFBinaryHeapGetValues(heap,values);
+    unsigned ordered[]={0,1,1,5,9};
+    for(unsigned i=0;i<5;i++) failures += (unsigned)values[i]!=ordered[i];
+    CFBinaryHeapRemoveAllValues(heap);
+    for(unsigned i=0;i<512;i++) CFBinaryHeapAddValue(heap,(void *)((i*73)%257));
+    unsigned previous=0;
+    for(unsigned i=0;i<512;i++) {
+        unsigned current=(unsigned)CFBinaryHeapGetMinimum(heap);
+        failures += current<previous || CFBinaryHeapGetCount(heap)!=(int)(512-i);
+        previous=current; CFBinaryHeapRemoveMinimumValue(heap);
+    }
+    failures += CFBinaryHeapGetCount(heap)!=0;
+    failures += CFRetain(heap)!=heap; CFRelease(heap); CFRelease(heap);
+
+    int descending=-1;
+    HeapCallbacks callbacks={0,heap_retain,heap_release,NULL,heap_compare};
+    HeapContext context={0,&descending,heap_context_retain,heap_context_release,NULL};
+    heap=CFBinaryHeapCreate(NULL,0,&callbacks,&context); heapForCallbackQuery=heap;
+    callbacks.compare=NULL; context.info=NULL; // The structs must be copied.
+    unsigned objects[]={9,3,5,3};
+    for(unsigned i=0;i<4;i++) CFBinaryHeapAddValue(heap,(void *)objects[i]);
+    failures += heapRetains!=4 || (unsigned)CFBinaryHeapGetMinimum(heap)!=10;
+    failures += CFBinaryHeapGetCountOfValue(heap,(void *)4)!=2;
+    unsigned sum=0; CFBinaryHeapApplyFunction(heap,heap_sum,&sum); failures += sum!=24;
+    id copy=CFBinaryHeapCreateCopy(NULL,0,heap);
+    failures += heapRetains!=8 || CFBinaryHeapGetCount(copy)!=4;
+    CFBinaryHeapGetValues(copy,values);
+    unsigned descendingValues[]={10,6,4,4};
+    for(unsigned i=0;i<4;i++) failures += (unsigned)values[i]!=descendingValues[i];
+    CFBinaryHeapRemoveMinimumValue(heap);
+    failures += heapReleases!=1 || (unsigned)CFBinaryHeapGetMinimum(heap)!=6;
+    failures += (unsigned)CFBinaryHeapGetMinimum(copy)!=10;
+    CFBinaryHeapRemoveAllValues(heap); CFBinaryHeapRemoveAllValues(heap);
+    failures += heapReleases!=4;
+    heapForCallbackQuery=0; CFRelease(heap); CFRelease(copy);
+    // Native CF copies context.info without calling its ownership callbacks.
+    failures += heapReleases!=8 || heapContextCallbacks!=0 || heapComparisons==0;
+
+    heap=CFBinaryHeapCreate(NULL,0,&kCFStringBinaryHeapCallBacks,NULL);
+    id z=[@"zebra" mutableCopy],a=[@"apple" mutableCopy];
+    CFBinaryHeapAddValue(heap,z); CFBinaryHeapAddValue(heap,a);
+    failures += [z retainCount]!=2 || [a retainCount]!=2;
+    [z release]; [a release];
+    failures += ![(id)CFBinaryHeapGetMinimum(heap) isEqualToString:@"apple"];
+    CFBinaryHeapRemoveMinimumValue(heap);
+    failures += ![(id)CFBinaryHeapGetMinimum(heap) isEqualToString:@"zebra"];
+    CFRelease(heap);
+    printf("S5LBOX-HLE-BINARY-HEAP %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
+
 static unsigned foundation_compat_smoke(void) {
     UIScreen *screen=[UIScreen mainScreen];
     UIScreenMode *mode=[screen currentMode];
@@ -2293,7 +2401,7 @@ static unsigned foundation_compat_smoke(void) {
     failures += [[basicCopy toValue] longValue]!=2 || [[basicCopy byValue] longValue]!=3;
     failures += ![[basicCopy keyPath] isEqualToString:@"opacity"];
     [basicCopy release]; failures += [from retainCount]!=1; [from release];
-    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke()+progress_view_smoke()+cell_background_smoke()+scanner_string_smoke()+thread_identity_smoke()+thread_dispatch_smoke()+png_export_smoke()+file_manager_lifetime_smoke()+text_shadow_smoke()+control_lifetime_smoke()+view_order_smoke();
+    return failures+screenFailures+kvc_smoke()+sort_smoke()+toolbar_smoke()+redraw_smoke()+transaction_smoke()+archive_smoke()+passive_view_smoke()+toolbar_archive_smoke()+geometry_dictionary_smoke()+progress_view_smoke()+cell_background_smoke()+scanner_string_smoke()+binary_heap_smoke()+thread_identity_smoke()+thread_dispatch_smoke()+png_export_smoke()+file_manager_lifetime_smoke()+text_shadow_smoke()+control_lifetime_smoke()+view_order_smoke();
 }
 
 int main(int argc,char **argv) {

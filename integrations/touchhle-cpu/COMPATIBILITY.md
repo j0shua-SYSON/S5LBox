@@ -56,7 +56,7 @@ not establish functionality. Device results below identify their tested build.
 | Touchgrind | 1.4.1 | Multitouch tricks, scoring, pause/resume and score persistence | Desktop startup: no crash during 25 seconds; functionality unverified. |
 | Edge | 1.62 | Complete a level, precise controls and saved progress | Device build 60bd8788: offline install passes; blank display persists beyond three minutes. |
 | Canabalt | 1.7 | Sustained run, jumping, restart and saved high score | Device build b065e116: offline install passes; missing NSOperationQueue prevents launch. |
-| Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Device build 6c8c452d finishes the interrupted image-cache rebuild and displays its promotion within 29 seconds; reopening with that cache reaches the same screen within 24 seconds. The previous build was still preparing assets after over 13 minutes. This is not a clean-install comparison. Build d9a8cebb dismisses the promotion, opens the menu and selects Grasslands, but starting it fails on missing scanFloat:. Map-list artwork is also missing. Gameplay remains unverified. |
+| Fieldrunners | 1.6.2 | Build and upgrade towers through several waves; resume | Device build 6c8c452d finishes the interrupted image-cache rebuild and displays its promotion within 29 seconds; reopening with that cache reaches the same screen within 24 seconds. The previous build was still preparing assets after over 13 minutes. This is not a clean-install comparison. Build 4e3ec07d reaches the menu within 12 seconds, selects Grasslands and passes scanFloat:, then fails during map loading on missing CFBinaryHeapCreate. Map-list artwork is also missing. Gameplay remains unverified. |
 | Minigore | 7.0 | Movement and firing through sustained combat; restart | Desktop startup: CFURL string conversion rejects the requested character encoding. Gameplay remains unverified. |
 | iCopter | 1.4 | Sustained flight, restart and saved high score | Device build cf7c00bf: transitions now complete; short flights render and touch holds/releases work. Collisions return to the title normally. Score 122 survives Home and relaunch. Longer play and frame pacing remain unverified. |
 | Flight Control | 1.9.2 | Draw landing paths through a session; saved score | Desktop startup: missing glRenderbufferStorageMultisampleAPPLE. |
@@ -356,8 +356,9 @@ The follow-up file-lifetime fix releases unlinked or replaced buffers after thei
 last open handle closes. Replacing a file with no open handles no longer retains
 its old contents until the app exits. New tests also cover deleting freshly
 buffered files before their data forks are published. The filesystem suite passes
-1,522 checks, with core and touchHLE CI passing on 1d72f4b5. Device retesting of
-this follow-up is pending.
+1,522 checks, with core and touchHLE CI passing on 1d72f4b5. Device build 4e3ec07d
+includes this fix and completes Fieldrunners' warm startup and normal Home closure;
+the repeated-replacement memory bound is verified by the filesystem tests.
 
 Keyed archivers now accept caller-owned mutable output, preserve its existing
 prefix, and finish idempotently. NSDate values and primitive boolean, floating
@@ -366,3 +367,15 @@ cover ownership, shared objects, negative dates, exact 64-bit integers and repea
 finish calls; touchHLE CI passes on ad3bdfa0. These changes advance Fieldrunners
 and Chopper to the later failures listed above; they do not establish complete
 save-game compatibility.
+
+NSScanner now parses decimal floating-point values, including signs, exponents
+and BMP Unicode decimal digits. Failed scans preserve the output and original
+UTF-16 position. ARMv6 checks cover rollback, overflow, underflow and null outputs;
+both CI workflows pass on 4e3ec07d. Fieldrunners progresses past this API on device.
+
+NSDateFormatter now provides English Gregorian date/time styles and common
+explicit format fields, owns copied formats and retained timezones, and handles
+dates outside the 32-bit POSIX timestamp range. The local ARMv6 Foundation suite
+passes on 101c3562, including style changes, quoted literals, millisecond rollover
+and timezone ownership. Configurable locales/calendars and general timezone data
+remain outside this change. Chopper save/reload verification is pending.
