@@ -35,6 +35,3 @@ schemes:
       targets:
         - S5LBoxLayoutTests
         - S5LBoxInterfaceTests
-      commandLineArguments:
-        "-VMGuestMicrophoneEnabled": true
-        "NO": true

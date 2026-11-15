@@ -7,8 +7,12 @@
 - (void)testSetupRotationImportAndSettings {
     self.continueAfterFailure = NO;
     XCUIApplication *app = [XCUIApplication new];
-    app.launchArguments = @[@"-VMGuestMicrophoneEnabled",@"NO"];
     [app launch];
+    // Exercise the real first-run permission prompt instead of trying to
+    // override a typed NSNumber preference with an NSString launch argument.
+    XCUIApplication *system = [[XCUIApplication alloc] initWithBundleIdentifier:@"com.apple.springboard"];
+    XCUIElement *allow = system.alerts.buttons[@"Allow"].firstMatch;
+    if ([allow waitForExistenceWithTimeout:10]) [allow tap];
     for (NSNumber *orientation in @[@(UIDeviceOrientationPortrait),@(UIDeviceOrientationLandscapeLeft),
                                     @(UIDeviceOrientationPortraitUpsideDown),@(UIDeviceOrientationLandscapeRight)]) {
         XCUIDevice.sharedDevice.orientation = orientation.integerValue;
