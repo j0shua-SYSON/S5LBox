@@ -2556,6 +2556,98 @@ static void test_safari_tabs_bounded_source_stride_copy(void) {
     s5l8900_free(&m);
 }
 
+/* Cydia's iFile description scrolls a 320x512 WebKit tile. The captured
+ * copy starts at source row 146 and ends at 512 while drawing only rows
+ * 64..430 of the screen. Source storage is not limited to panel height. */
+static void test_web_tile_tall_source_copy(void) {
+    enum { STRIDE = 0x500u, SOURCE_HEIGHT = 512u, TOP = 64u, HEIGHT = 366u };
+    const uint32_t table2 = 0x08003000u, table3 = 0x08002000u;
+    const uint32_t target = 0x00997000u, target_pa = 0x08040000u;
+    const uint32_t source = 0x00d8d080u, source_page = 0x00d8d000u;
+    const uint32_t source_pa = 0x08100000u;
+    uint32_t packet[16] = {
+        0xa0060500u, target, 0x94060500u, source,
+        0x30000092u, 0x60800200u, 0x8000ccccu, 0xffffffffu,
+        0x00000040u, 0x014001aeu, 0x70000000u, 0x70000000u,
+        0x70000000u, 0x70000000u, 0x70000000u, 0x70000000u,
+    };
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE), "web tile init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART3, table3);
+    for (uint32_t page = 0; page < STRIDE * 480u; page += 0x1000u)
+        test_map_gpu_page(&m, table2, target + page, target_pa + page);
+    for (uint32_t page = 0;
+         page < 0x80u + STRIDE * SOURCE_HEIGHT; page += 0x1000u)
+        test_map_gpu_page(&m, table3, source_page + page, source_pa + page);
+    test_gpu_write32(&m, source + 146u * STRIDE, 0xff112233u);
+    test_gpu_write32(&m, source + 480u * STRIDE, 0xff445566u);
+    test_gpu_write32(&m, source + 511u * STRIDE + 319u * 4u, 0xff778899u);
+    test_gpu_write32(&m, target + TOP * STRIDE - 4u, 0xffabcdefu);
+    test_gpu_write32(&m, target + (TOP + HEIGHT) * STRIDE, 0xfffedcbau);
+    write_packet(&m, RING + 0x4720u, packet, 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, target + TOP * STRIDE) == 0xff112233u &&
+          test_gpu_read32(&m, target + (TOP + 334u) * STRIDE) == 0xff445566u &&
+          test_gpu_read32(&m, target + (TOP + HEIGHT - 1u) * STRIDE +
+                          319u * 4u) == 0xff778899u,
+          "web tile did not copy through source row 511");
+    CHECK(test_gpu_read32(&m, target + TOP * STRIDE - 4u) == 0xffabcdefu &&
+          test_gpu_read32(&m, target + (TOP + HEIGHT) * STRIDE) == 0xfffedcbau,
+          "web tile changed pixels outside its screen rectangle");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u &&
+          m.mbx_telemetry.completed_2d == 1u &&
+          m.mbx_telemetry.rejected_2d == 0u &&
+          m.mbx_telemetry.bytes_2d == (uint64_t)STRIDE * HEIGHT,
+          "web tile copy did not complete with the correct byte count");
+
+    /* Starting below row 480 is valid too, with the same bounded destination. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
+    packet[4] = 0x300001e0u;
+    packet[9] = 0x01400060u;
+    write_packet(&m, RING + 0x4800u, packet, 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, target + TOP * STRIDE) == 0xff445566u &&
+          test_gpu_read32(&m, target + 95u * STRIDE + 319u * 4u) == 0xff778899u &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
+          "copy starting at source row 480 failed");
+
+    /* A late missing source PTE must still reject the whole batch, including
+     * the earlier fill. Removing the panel-height assumption is not permission
+     * to read unmapped storage or partially commit a frame. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
+    test_gpu_write32(&m, target, 0xffabcdefu);
+    test_gpu_write32(&m, target + TOP * STRIDE, 0xfffedcbau);
+    uint32_t fill[16];
+    memcpy(fill, packet, sizeof fill);
+    fill[3] = 0u;
+    fill[4] = 0x30000000u;
+    fill[6] = 0x8000f0f0u;
+    fill[7] = 0xff102030u;
+    fill[8] = 0u;
+    fill[9] = 0x00010001u;
+    test_map_gpu_page(&m, table3, source_page + 0xa0000u, 0u);
+    write_packet(&m, RING + 0x4900u, fill, 16u);
+    write_packet(&m, RING + 0x4940u, packet, 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, target) == 0xffabcdefu &&
+          test_gpu_read32(&m, target + TOP * STRIDE) == 0xfffedcbau &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "unmapped tall source partially committed a batch");
+
+    test_map_gpu_page(&m, table3, source_page + 0xa0000u, source_pa + 0xa0000u);
+    packet[8] = 0x000001dfu;
+    packet[9] = 0x014001e1u;
+    write_packet(&m, RING + 0x4a00u, packet, 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u &&
+          m.mbx_telemetry.completed_2d == 2u &&
+          m.mbx_telemetry.rejected_2d == 3u,
+          "tall source support relaxed the destination bounds");
+    s5l8900_free(&m);
+}
+
 static void test_split_lower_surface_black_fill(void) {
     enum { STRIDE = 0x500u, WIDTH = 320u, HEIGHT = 480u, TOP = 20u };
     const uint32_t table2 = 0x08003000u;
@@ -7684,6 +7776,7 @@ int main(void) {
     test_full_lower_surface_opaque_fill();
     test_safari_tabs_opaque_fill_batch();
     test_safari_tabs_bounded_source_stride_copy();
+    test_web_tile_tall_source_copy();
     test_split_lower_surface_black_fill();
     test_settings_transition_transparent_clear_batch();
     test_springboard_settings_black_fill_batch();

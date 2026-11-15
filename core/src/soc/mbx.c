@@ -681,12 +681,15 @@ static bool mbx_stage_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
     uint32_t width = dst_x1 - dst_x;
     uint32_t height = dst_y1 - dst_y;
     uint32_t source_pixels_per_row = source_stride / source_pixel_bytes;
+    /* The panel bounds the destination, not the source allocation. WebKit
+     * scrolls 512-row tiles (for example source y=146, height=366) through
+     * this same copy form. There is no source-height field here: validate
+     * its encoded pitch and every addressed GART row below instead. */
     if (dst_x1 > MBX_2D_WIDTH || dst_y1 > MBX_2D_HEIGHT ||
         src_x > source_pixels_per_row ||
-        width > source_pixels_per_row - src_x ||
-        src_y > MBX_2D_HEIGHT || height > MBX_2D_HEIGHT - src_y) {
+        width > source_pixels_per_row - src_x) {
         if (why) *why =
-            "copy rectangle exceeds its decoded source or 320x480 destination";
+            "copy rectangle exceeds its source pitch or 320x480 destination";
         return false;
     }
 
