@@ -1,9 +1,9 @@
 //! Things from `NSObjCRuntime.h`.
 
-use super::ns_string;
+use super::{ns_string, NSUInteger};
 use crate::abi::GuestArg;
 use crate::dyld::{export_c_func, FunctionExports};
-use crate::objc::{id, nil, Class, SEL};
+use crate::objc::{id, nil, Class, NSZonePtr, SEL};
 use crate::Environment;
 
 fn NSStringFromSelector(env: &mut Environment, selector: SEL) -> id {
@@ -43,7 +43,17 @@ fn NSClassFromString(env: &mut Environment, string: id) -> Class {
     env.objc.lookup_class(&string, &mut env.mem).unwrap_or(nil)
 }
 
+fn NSCopyObject(
+    env: &mut Environment,
+    object: id,
+    extra_bytes: NSUInteger,
+    _zone: NSZonePtr,
+) -> id {
+    env.objc.copy_object(object, extra_bytes, &mut env.mem)
+}
+
 pub const FUNCTIONS: FunctionExports = &[
+    export_c_func!(NSCopyObject(_, _, _)),
     export_c_func!(NSStringFromSelector(_)),
     export_c_func!(NSSelectorFromString(_)),
     export_c_func!(NSClassFromString(_)),

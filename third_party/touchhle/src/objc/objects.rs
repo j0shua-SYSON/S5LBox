@@ -200,6 +200,34 @@ impl super::ObjC {
         )
     }
 
+    /// Shallow MRC copy of an object whose state resides in guest memory.
+    /// NSCopyObject bypasses alloc/init/copyWithZone: and starts a new retain
+    /// count; pointer ivars are copied without retaining their referents.
+    pub fn copy_object(&mut self, object: id, extra_bytes: GuestUSize, mem: &mut Mem) -> id {
+        if object == nil {
+            return nil;
+        }
+        assert!(
+            self.get_host_object(object)
+                .is_some_and(|host| host.as_any().is::<TrivialHostObject>()),
+            "NSCopyObject cannot shallow-copy host-backed object state"
+        );
+        let isa = Self::read_isa(object, mem);
+        let instance_size = self.borrow::<ClassHostObject>(isa).instance_size;
+        let size = instance_size
+            .checked_add(extra_bytes)
+            .expect("Object copy size overflow");
+        let copy = self.alloc_object_inner(
+            isa,
+            size,
+            Box::new(TrivialHostObject),
+            mem,
+            Some(NonZeroU32::new(1).unwrap()),
+        );
+        mem.memmove(copy.cast(), object.cast().cast_const(), size);
+        copy
+    }
+
     /// Allocate a static-lifetime (guest) object (for example, a class) and
     /// associate it with its host object.
     ///
@@ -373,5 +401,45 @@ pub(super) fn object_getClass(env: &mut Environment, obj: id) -> Class {
         nil
     } else {
         super::ObjC::read_isa(obj, &env.mem)
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+    use crate::objc::ObjC;
+
+    #[test]
+    fn shallow_copy_preserves_extra_bytes_with_independent_ownership() {
+        let mut mem = Mem::new();
+        mem.set_null_segment_size(4096);
+        let mut objc = super::super::ObjC::new();
+        let class = objc.lookup_class("NSObject", &mut mem).unwrap();
+        let size = objc.borrow::<ClassHostObject>(class).instance_size;
+        let source = objc.alloc_object_inner(
+            class,
+            size + 16,
+            Box::new(TrivialHostObject),
+            &mut mem,
+            Some(NonZeroU32::new(3).unwrap()),
+        );
+        for index in 0..16 {
+            mem.write(source.cast::<u8>() + size + index, (index + 1) as u8);
+        }
+        let copy = objc.copy_object(source, 16, &mut mem);
+        assert_ne!(copy, source);
+        assert_eq!(ObjC::read_isa(copy, &mem), class);
+        assert_eq!(
+            mem.bytes_at(copy.cast(), size + 16),
+            mem.bytes_at(source.cast(), size + 16)
+        );
+        assert_eq!(objc.objects[&source].refcount.unwrap().get(), 3);
+        assert_eq!(objc.objects[&copy].refcount.unwrap().get(), 1);
+        mem.write(copy.cast::<u8>() + size, 99u8);
+        assert_eq!(mem.read(source.cast::<u8>() + size), 1);
+        assert!(objc.decrement_refcount(copy));
+        objc.dealloc_object(copy, &mut mem);
+        assert!(objc.is_live_object(source));
+        assert_eq!(objc.copy_object(nil, u32::MAX, &mut mem), nil);
     }
 }

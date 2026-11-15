@@ -26,6 +26,7 @@ extern const char *ivar_getTypeEncoding(Ivar);
 extern int ivar_getOffset(Ivar);
 extern id object_getIvar(id,Ivar);
 extern void object_setIvar(id,Ivar,id);
+extern id NSCopyObject(id,unsigned,void *);
 typedef struct CGPoint { float x,y; } CGPoint;
 typedef struct CGSize { float width,height; } CGSize;
 typedef struct CGRect { CGPoint origin; CGSize size; } CGRect;
@@ -88,6 +89,37 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 @end
 @interface RuntimeChild : RuntimeBase { @public unsigned short flag; } @end
 @implementation RuntimeChild @end
+static unsigned rawCopyAllocations,rawCopyInitializations,rawCopyDeallocations;
+@interface RawCopyProbe : RuntimeChild { @public double fraction; unsigned char bytes[9]; }
+@end
+@implementation RawCopyProbe
++ (id)alloc { rawCopyAllocations++; return [super alloc]; }
+- (id)init { rawCopyInitializations++; return [super init]; }
+- (void)dealloc { rawCopyDeallocations++; [super dealloc]; }
+@end
+static unsigned object_copy_smoke(void) {
+    unsigned failures=0;
+    RawCopyProbe *source=[[RawCopyProbe alloc] init];
+    id token=[[NSObject alloc] init];
+    source->count=-57; source->object=token; source->flag=0x1234; source->fraction=1.25;
+    for (unsigned i=0;i<sizeof(source->bytes);i++) source->bytes[i]=(unsigned char)(7+i);
+    [source retain];
+    RawCopyProbe *copy=NSCopyObject(source,0,NULL);
+    failures += !copy || source==copy || rawCopyAllocations!=1 || rawCopyInitializations!=1;
+    failures += [copy first]!=11 || copy->count!=-57 || copy->object!=token || copy->flag!=0x1234;
+    failures += copy->fraction!=1.25 || memcmp(copy->bytes,source->bytes,sizeof(copy->bytes))!=0;
+    failures += [copy retainCount]!=1 || [source retainCount]!=2 || [token retainCount]!=1;
+    copy->count=99; copy->bytes[0]=0;
+    failures += source->count!=-57 || source->bytes[0]!=7;
+    [source release]; [source release];
+    failures += rawCopyDeallocations!=1 || [copy first]!=11 || copy->object!=token;
+    [copy release];
+    failures += rawCopyDeallocations!=2 || [token retainCount]!=1;
+    [token release];
+    failures += NSCopyObject(0,0,NULL)!=0;
+    printf("S5LBOX-HLE-OBJECT-COPY %s failures=%u\n",failures?"FAIL":"PASS",failures);
+    return failures;
+}
 static int replacementMethod(id self,SEL selector) { (void)self; (void)selector; return 77; }
 
 #if __has_warning("-Wcast-function-type-mismatch")
@@ -1980,7 +2012,7 @@ static unsigned foundation_compat_smoke(void) {
         bounds.size.width!=size.width || bounds.size.height!=size.height || [mode pixelAspectRatio]!=1;
     [screen setCurrentMode:mode];
     screenFailures += [screen currentMode]!=mode || [[screen availableModes] count]!=1;
-    unsigned failures=0;
+    unsigned failures=object_copy_smoke();
     id domain=kCFPreferencesCurrentApplication,key=@"CompatibilityValue";
     unsigned char valid=9;
     CFPreferencesSetAppValue(key,0,domain);
