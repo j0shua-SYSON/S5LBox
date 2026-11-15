@@ -43,7 +43,7 @@
         XCTAssertGreaterThan(layout.screen.size.height,0);
         XCTAssertEqualWithAccuracy(layout.screen.size.width / layout.screen.size.height,2.0/3.0,0.00001);
         vm_touch_point_t point = vm_touch_map(layout.screen.size.width,layout.screen.size.height,
-            320,480,layout.screen.size.width/2,layout.screen.size.height/2);
+            320,480,layout.screen.size.width*(160.5/320),layout.screen.size.height*(240.5/480));
         XCTAssertTrue(point.inside); XCTAssertEqual(point.x,160); XCTAssertEqual(point.y,240);
     }
 }
