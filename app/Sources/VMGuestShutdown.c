@@ -102,7 +102,7 @@ static bool dark(const uint8_t *p) {
 }
 
 static bool flat_cancel(const uint8_t *p, unsigned stride) {
-    /* UI7Kit can replace the Cancel button with centered blue text over a
+    /* Whited00r can replace the Cancel button with centered blue text over a
      * dimmed screen. Require ink in all three parts of the word and dark
      * surroundings; an isolated blue icon or a blue toolbar is insufficient. */
     unsigned ink[3] = {0u, 0u, 0u};

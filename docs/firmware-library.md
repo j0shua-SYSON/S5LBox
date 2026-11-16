@@ -71,3 +71,18 @@ filesystem-table rewriting, and production disk preparation. Native tests cover
 publication, source pinning, default changes, duplication, damaged records,
 staging visibility, and removal protection. Full IPSW import and guest boot
 checks use private firmware and are separate from synthetic public CI fixtures.
+
+Physical-device testing of the Whited00r Normal profile covered strict import,
+an 8 GB machine reaching SpringBoard, touch navigation, Settings, guest unlock,
+and an automatic Restart returning to a usable guest. The restart test confirmed
+guest power-off before saving, followed by a fresh boot. Both observed variants
+of Whited00r's themed power-off screen are recognized; stock shutdown detection
+remains covered separately.
+
+The same test installation retained three stock machines. Changing the default
+did not change their firmware pins; duplicating a stock machine while Whited00r
+was the default retained its stock source. Removal of firmware used by machines
+was disabled. PPP negotiation, guest USB enumeration and clock synchronization
+also completed, and guest Safari loaded an HTTP page after the restart. These
+checks do not establish compatibility for every bundled
+app or tweak, or validate Packages and live IPA installation on Whited00r.
