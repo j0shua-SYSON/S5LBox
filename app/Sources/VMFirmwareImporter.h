@@ -84,7 +84,8 @@ FOUNDATION_EXPORT NSNotificationName const VMFirmwareImportDidChangeNotification
 /* Safe from any thread. */
 - (BOOL)isRunning;
 + (BOOL)hasConfiguredFirmware;
-/* Main queue. Fixed for a configured firmware set; ignored during an import. */
+/* Main queue. Preference for the next import; fixed during an active import.
+ * Changing it does not alter the policy of already prepared firmware. */
 @property (nonatomic) BOOL skipStockChecksums;
 @property (nonatomic, readonly) BOOL canChangeChecksumVerification;
 @property (nonatomic, readonly, nullable) NSURL *selectedURL;

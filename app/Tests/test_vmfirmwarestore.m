@@ -46,12 +46,17 @@ static void makeSet(NSString *path) {
     self.usedSkip = self.skipStockChecksums;
     report->manifest_read = report->reference_build = true;
     report->stock_checksums_skipped = self.usedSkip;
+    const uint64_t stock[] = {7942144, 40544, 433274880};
+    if (!self.usedSkip) makeSet(directory);
     for (unsigned i = 0; i < VM_FW_ARTEFACT_COUNT; i++) {
         NSString *name = [NSString stringWithUTF8String:vm_fw_artefact_filename((vm_fw_artefact_t)i)];
-        assert([[NSMutableData dataWithLength:512] writeToFile:[directory stringByAppendingPathComponent:name] atomically:NO]);
-        report->artefacts[i].state = VM_FW_STATE_EXTRACTED;
+        if (self.usedSkip)
+            assert([[NSMutableData dataWithLength:512] writeToFile:[directory stringByAppendingPathComponent:name] atomically:NO]);
+        report->artefacts[i].state = self.usedSkip ? VM_FW_STATE_EXTRACTED : VM_FW_STATE_VERIFIED;
         report->artefacts[i].sha256_valid = true;
-        report->artefacts[i].produced = 512;
+        report->artefacts[i].reference_known = !self.usedSkip;
+        report->artefacts[i].matches_reference = !self.usedSkip;
+        report->artefacts[i].produced = self.usedSkip ? 512 : stock[i];
     }
     return VM_FW_OK;
 }
@@ -83,9 +88,9 @@ int main(int argc, const char *argv[]) {
         assert([TestImporter new].skipStockChecksums);
         choice.skipStockChecksums = NO;
         makeSet(testRoot);
-        assert(!choice.canChangeChecksumVerification && !choice.skipStockChecksums);
+        assert(choice.canChangeChecksumVerification && !choice.skipStockChecksums);
         choice.skipStockChecksums = YES;
-        assert(!choice.skipStockChecksums && !VMSettings.sharedSettings.skipFirmwareChecksums);
+        assert(choice.skipStockChecksums && [TestImporter new].skipStockChecksums);
         assert([VMFirmwareStore hasPreparedFilesInDirectory:testRoot]);
         assert([[VMFirmwareStore activeDirectoryInRoot:testRoot] isEqual:testRoot]);
         NSString *first = [VMFirmwareStore createStagingDirectoryInRoot:testRoot error:NULL];
@@ -96,10 +101,12 @@ int main(int argc, const char *argv[]) {
         assert(vm_fw_policy_write(first.fileSystemRepresentation, &custom));
         assert([VMFirmwareStore publishDirectory:first inRoot:testRoot error:NULL]);
         assert([[VMFirmwareStore activeDirectoryInRoot:testRoot] isEqual:first]);
-        assert(!choice.canChangeChecksumVerification && choice.skipStockChecksums);
+        assert(choice.canChangeChecksumVerification && choice.skipStockChecksums);
         choice.skipStockChecksums = NO;
+        assert(!choice.skipStockChecksums && ![TestImporter new].skipStockChecksums);
         [VMSettings.sharedSettings resetToDefaults];
-        assert(choice.skipStockChecksums && [TestImporter new].skipStockChecksums);
+        assert(!choice.skipStockChecksums && ![TestImporter new].skipStockChecksums);
+        assert(vm_fw_policy_read(first.fileSystemRepresentation, &custom) == 1 && custom.skip_stock_checksums);
         NSString *pointer = [testRoot stringByAppendingPathComponent:@"current-firmware.txt"];
         NSData *before = [NSData dataWithContentsOfFile:pointer];
         NSString *second = [VMFirmwareStore createStagingDirectoryInRoot:testRoot error:NULL];
@@ -183,22 +190,37 @@ int main(int argc, const char *argv[]) {
         [prepared importIPSWAtURL:url];
         waitForImport(prepared);
         assert(prepared.completions == 1 && prepared.usedSkip);
-        assert(!prepared.canChangeChecksumVerification && [TestImporter new].skipStockChecksums);
+        assert(prepared.canChangeChecksumVerification && [TestImporter new].skipStockChecksums);
         NSString *active = [VMFirmwareStore activeDirectoryInRoot:testRoot];
         vm_fw_policy_t policy;
         assert(vm_fw_policy_read(active.fileSystemRepresentation, &policy) == 1 && policy.skip_stock_checksums);
         assert(policy.sizes[0] == 512 && [VMFirmwareStore hasPreparedFilesInDirectory:active]);
         [VMSettings.sharedSettings resetToDefaults];
         prepared.skipStockChecksums = NO;
+        assert(!prepared.skipStockChecksums && ![TestImporter new].skipStockChecksums);
+        // Changing the next import does not invalidate the current custom set.
+        assert(vm_fw_policy_read(active.fileSystemRepresentation, &policy) == 1 && policy.skip_stock_checksums);
+        assert([VMFirmwareStore hasPreparedFilesInDirectory:active]);
         [prepared importIPSWAtURL:url];
         waitForImport(prepared);
-        assert(prepared.completions == 2 && prepared.usedSkip && prepared.skipStockChecksums);
+        assert(prepared.completions == 2 && !prepared.usedSkip && !prepared.skipStockChecksums);
         assert(![fm fileExistsAtPath:active]); // Successful replacement reclaims only old generation.
         active = [VMFirmwareStore activeDirectoryInRoot:testRoot];
+        assert(vm_fw_policy_read(active.fileSystemRepresentation, &policy) == 1 && !policy.skip_stock_checksums);
+        assert(policy.sizes[0] == 7942144 && [VMFirmwareStore hasPreparedFilesInDirectory:active]);
+        prepared.skipStockChecksums = YES;
+        [prepared importIPSWAtURL:url];
+        waitForImport(prepared);
+        assert(prepared.completions == 3 && prepared.usedSkip && prepared.skipStockChecksums);
+        assert(![fm fileExistsAtPath:active]);
+        active = [VMFirmwareStore activeDirectoryInRoot:testRoot];
+        assert(vm_fw_policy_read(active.fileSystemRepresentation, &policy) == 1 && policy.skip_stock_checksums);
         policy.skip_stock_checksums = false;
         assert(vm_fw_policy_write(active.fileSystemRepresentation, &policy));
         assert(![VMFirmwareStore hasPreparedFilesInDirectory:active]); // Non-stock sizes require explicit policy.
-        assert(!prepared.canChangeChecksumVerification); // A damaged set does not unlock the switch.
+        assert(prepared.canChangeChecksumVerification); // Damaged firmware can be replaced with either policy.
+        prepared.skipStockChecksums = NO;
+        assert(![VMFirmwareStore hasPreparedFilesInDirectory:active]);
         testRoot = fixtureRoot;
         assert([fm removeItemAtPath:testRoot error:NULL]); // Only this test's UUID root.
         puts("firmware store: publication, rollback, legacy paths, cancellation and retained importer state passed");
