@@ -4,6 +4,22 @@
 @interface VMIPadInterfaceTests : XCTestCase
 @end
 @implementation VMIPadInterfaceTests
+- (void)chooseFixture:(NSString *)name inApp:(XCUIApplication *)app {
+    XCUIElement *browse = app.buttons[@"Browse"].firstMatch;
+    if ([browse waitForExistenceWithTimeout:5] && browse.hittable) [browse tap];
+    for (NSString *folder in @[@"On My iPad", @"S5LBox", @"PickerFixtures"]) {
+        XCUIElement *item = app.staticTexts[folder].firstMatch;
+        XCTAssertTrue([item waitForExistenceWithTimeout:30], @"%@", app.debugDescription);
+        [item tap];
+    }
+    // Files may hide a known extension in its visible title.
+    XCUIElement *file = [app.staticTexts matchingPredicate:[NSPredicate
+        predicateWithFormat:@"label == %@ OR label == %@", name, name.stringByDeletingPathExtension]].firstMatch;
+    XCTAssertTrue([file waitForExistenceWithTimeout:30], @"%@", app.debugDescription);
+    [file tap];
+    XCUIElement *open = app.buttons[@"Open"].firstMatch;
+    if ([open waitForExistenceWithTimeout:2] && open.hittable) [open tap];
+}
 - (void)dismissMicrophonePrompt:(XCUIApplication *)system timeout:(NSTimeInterval)timeout {
     // Match this permission specifically: another system alert may also have
     // an Allow button. A synthesized tap can finish before dismissal does.
@@ -58,7 +74,18 @@
     }
     [app.buttons[@"s5lbox.setup.import"] tap];
     XCUIElement *cancel = app.buttons[@"Cancel"].firstMatch;
-    XCTAssertTrue([cancel waitForExistenceWithTimeout:10]); [cancel tap];
+    XCTAssertTrue([cancel waitForExistenceWithTimeout:30]);
+    XCTNSPredicateExpectation *cancelReady = [[XCTNSPredicateExpectation alloc]
+        initWithPredicate:[NSPredicate predicateWithFormat:@"hittable == YES"] object:cancel];
+    XCTAssertEqual([XCTWaiter waitForExpectations:@[cancelReady] timeout:10], XCTWaiterResultCompleted);
+    [cancel tap];
+    [app.buttons[@"s5lbox.setup.import"] tap];
+    [self chooseFixture:@"Picker-firmware.ipsw" inApp:app];
+    XCUIElement *status = app.staticTexts[@"s5lbox.setup.status"];
+    XCTNSPredicateExpectation *failed = [[XCTNSPredicateExpectation alloc]
+        initWithPredicate:[NSPredicate predicateWithFormat:@"label CONTAINS %@", @"prepare firmware"] object:status];
+    XCTAssertEqual([XCTWaiter waitForExpectations:@[failed] timeout:30], XCTWaiterResultCompleted,
+        @"Picking the malformed fixture must dismiss Files and reach firmware validation. %@", app.debugDescription);
     [app.buttons[@"Later"] tap];
     XCUIElement *settings = app.buttons[@"s5lbox.machines.settings"];
     XCTAssertTrue([settings waitForExistenceWithTimeout:10]); [settings tap];

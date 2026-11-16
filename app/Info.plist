@@ -54,10 +54,9 @@
          so a replaced or truncated input is refused by name instead of being
          booted. The gate existed before this key did.
 
-         LSSupportsOpeningDocumentsInPlace lets the importer read an archive
-         where it sits rather than copying it into the container first, which
-         on a 64 GB phone is the difference between needing 239 MB free and
-         needing 478 MB. -->
+         Files can open documents in this container. In-app file pickers use
+         import-copy mode; their temporary files are owned separately from
+         the originals that users place in Documents. -->
     <key>UIFileSharingEnabled</key>
     <true/>
     <key>LSSupportsOpeningDocumentsInPlace</key>

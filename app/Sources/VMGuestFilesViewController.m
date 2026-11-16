@@ -1,6 +1,8 @@
 // Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 #import "VMGuestFilesViewController.h"
 #import "VMGuestFiles.h"
+#import "VMDocumentPicker.h"
+#import "VMImportedDocument.h"
 #import "VMUSBAFC.h"
 #import <QuickLook/QuickLook.h>
 
@@ -185,7 +187,7 @@
     if (_busy) return;
     UIAlertController *menu = [UIAlertController alertControllerWithTitle:nil message:nil preferredStyle:UIAlertControllerStyleActionSheet];
     [menu addAction:[UIAlertAction actionWithTitle:@"Import File" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
-        UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.data", @"public.content"] inMode:UIDocumentPickerModeOpen];
+        UIDocumentPickerViewController *picker = VMCreateImportPicker();
         picker.delegate = self; picker.allowsMultipleSelection = NO; [self presentViewController:picker animated:YES completion:nil];
     }]];
     [menu addAction:[UIAlertAction actionWithTitle:@"New Folder" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
@@ -199,8 +201,15 @@
     [self presentViewController:menu animated:YES completion:nil];
 }
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
-    (void)controller; NSURL *url = urls.firstObject; if (!url || _busy) return; NSString *path = _path;
-    [self run:^id(VMGuestFiles *files, NSError **error) { return @([files upload:url directory:path error:error]); } completion:^(id result) { [self changed:result]; }];
+    NSURL *url = urls.firstObject; if (!url || _busy) return; NSString *path = _path;
+    VMImportedDocument *document = [[VMImportedDocument alloc] initWithPickerURL:url];
+    [controller dismissViewControllerAnimated:YES completion:nil];
+    [self run:^id(VMGuestFiles *files, NSError **error) {
+        return @([files upload:document.url directory:path error:error]);
+    } completion:^(id result) { [self changed:result]; }];
+}
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentAtURL:(NSURL *)url {
+    [self documentPicker:controller didPickDocumentsAtURLs:url ? @[url] : @[]];
 }
 - (UIContextMenuConfiguration *)tableView:(UITableView *)tableView contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)index point:(CGPoint)point {
     (void)tableView; (void)point; if (_busy || !_items.count) return nil; VMGuestFile *file = _items[index.row];

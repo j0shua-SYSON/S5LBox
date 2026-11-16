@@ -4,6 +4,7 @@
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //
 #import "VMFirmwareImporter.h"
+#import "VMImportedDocument.h"
 
 #import "VMSettings.h"
 #import "VMFirmwareKeys.h"
@@ -27,6 +28,7 @@ NSNotificationName const VMFirmwareImportDidChangeNotification = @"VMFirmwareImp
 
 // Declared up front so every call below is checked against a prototype.
 @interface VMFirmwareImporter ()
+- (void)startImportOfURL:(NSURL *)url pickerCopy:(VMImportedDocument *)copy;
 - (void)deliverStage:(vm_fw_stage_t)stage
             artefact:(vm_fw_artefact_t)which
                 done:(uint64_t)done
@@ -308,6 +310,7 @@ static void vmfw_strip_trailing_slash(char *path) {
 }
 
 @implementation VMFirmwareImporter {
+    VMImportedDocument *_pickerCopy;
     dispatch_queue_t  _queue;
     vmfw_run_state_t *_state;
 
@@ -396,6 +399,16 @@ static void vmfw_strip_trailing_slash(char *path) {
 }
 
 - (void)importIPSWAtURL:(NSURL *)url {
+    [self startImportOfURL:url pickerCopy:[_selectedURL isEqual:url] ? _pickerCopy : nil];
+}
+
+- (void)importPickedIPSWAtURL:(NSURL *)url {
+    if (!url || self.isRunning) return;
+    VMImportedDocument *copy = [_selectedURL isEqual:url] ? _pickerCopy : nil;
+    [self startImportOfURL:url pickerCopy:copy ?: [[VMImportedDocument alloc] initWithPickerURL:url]];
+}
+
+- (void)startImportOfURL:(NSURL *)url pickerCopy:(VMImportedDocument *)copy {
     if (!url || !_state) return;
     const BOOL skip = self.skipStockChecksums;
 
@@ -405,6 +418,7 @@ static void vmfw_strip_trailing_slash(char *path) {
     if (!atomic_compare_exchange_strong(&_state->running, &idle, true)) return;
     _skipChecksumsForRun = skip;
     atomic_store(&_state->cancel, false);
+    _pickerCopy = copy;
     _selectedURL = url;
     _haveReport = NO;
     _stage = VM_FW_STAGE_OPENING;
@@ -676,6 +690,10 @@ static void vmfw_strip_trailing_slash(char *path) {
 
 - (void)finishWithStatus:(vm_fw_status_t)status
                   report:(const vm_fw_report_t *)report {
+    if (status == VM_FW_OK && report && vm_fw_report_is_prepared(report) && _pickerCopy) {
+        _pickerCopy = nil;
+        _selectedURL = nil;
+    }
     /* Cleared here rather than on the import queue, so -isRunning stays YES
      * until the delegate has actually been told the run is over. */
     if (_state) atomic_store(&_state->running, false);
@@ -700,7 +718,10 @@ static void vmfw_strip_trailing_slash(char *path) {
 
 - (void)forgetSelectedURL:(NSURL *)url {
     NSAssert(NSThread.isMainThread, @"Archive selection belongs on main");
-    if (!self.isRunning && [_selectedURL isEqual:url]) _selectedURL = nil;
+    if (!self.isRunning && [_selectedURL isEqual:url]) {
+        _selectedURL = nil;
+        _pickerCopy = nil;
+    }
 }
 
 - (void)replayStateToDelegate {

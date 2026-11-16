@@ -208,10 +208,38 @@ int main(int argc, const char *argv[]) {
         active = [VMFirmwareStore activeDirectoryInRoot:testRoot];
         assert(vm_fw_policy_read(active.fileSystemRepresentation, &policy) == 1 && !policy.skip_stock_checksums);
         assert(policy.sizes[0] == 7942144 && [VMFirmwareStore hasPreparedFilesInDirectory:active]);
+        // Picker copies survive failure/cancellation for retry, but not a
+        // replacement selection or successful preparation. Originals survive.
+        NSString *pickerDirectory = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+        assert([fm createDirectoryAtPath:pickerDirectory withIntermediateDirectories:YES attributes:nil error:NULL]);
+        NSURL *picked = [NSURL fileURLWithPath:[pickerDirectory stringByAppendingPathComponent:@"picked.ipsw"]];
+        NSURL *replacement = [NSURL fileURLWithPath:[pickerDirectory stringByAppendingPathComponent:@"replacement.ipsw"]];
+        NSData *invalid = [@"not an IPSW" dataUsingEncoding:NSUTF8StringEncoding];
+        assert([invalid writeToURL:picked atomically:NO] && [invalid writeToURL:replacement atomically:NO]);
+        [importer importPickedIPSWAtURL:picked];
+        [importer importPickedIPSWAtURL:picked]; // Duplicate delivery keeps the active copy.
+        waitForImport(importer);
+        assert([fm fileExistsAtPath:picked.path]);
+        [importer importIPSWAtURL:picked]; // Retry through Settings retains ownership.
+        [importer cancelImport];
+        waitForImport(importer);
+        assert([fm fileExistsAtPath:picked.path]);
+        [importer importPickedIPSWAtURL:replacement];
+        waitForImport(importer);
+        assert(![fm fileExistsAtPath:picked.path] && [fm fileExistsAtPath:replacement.path]);
+        [importer forgetSelectedURL:replacement];
+        assert(![fm fileExistsAtPath:replacement.path] && [fm fileExistsAtPath:archive]);
+        assert([invalid writeToURL:picked atomically:NO]);
+        [prepared importPickedIPSWAtURL:picked];
+        waitForImport(prepared);
+        assert(![fm fileExistsAtPath:picked.path] && !prepared.selectedURL);
+        assert([fm fileExistsAtPath:archive]);
+        assert([fm removeItemAtPath:pickerDirectory error:NULL]);
+        active = [VMFirmwareStore activeDirectoryInRoot:testRoot];
         prepared.skipStockChecksums = YES;
         [prepared importIPSWAtURL:url];
         waitForImport(prepared);
-        assert(prepared.completions == 3 && prepared.usedSkip && prepared.skipStockChecksums);
+        assert(prepared.completions == 4 && prepared.usedSkip && prepared.skipStockChecksums);
         assert(![fm fileExistsAtPath:active]);
         active = [VMFirmwareStore activeDirectoryInRoot:testRoot];
         assert(vm_fw_policy_read(active.fileSystemRepresentation, &policy) == 1 && policy.skip_stock_checksums);
