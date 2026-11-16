@@ -73,8 +73,11 @@
         XCTAssertTrue(app.buttons[@"Settings"].hittable);
     }
     [app.buttons[@"s5lbox.setup.import"] tap];
-    XCUIElement *cancel = app.buttons[@"Cancel"].firstMatch;
-    XCTAssertTrue([cancel waitForExistenceWithTimeout:30]);
+    // Current iPadOS presents a close icon; older versions call it Cancel.
+    // Files also starts its provider service on the simulator's first use.
+    XCUIElement *cancel = [app.buttons matchingPredicate:[NSPredicate
+        predicateWithFormat:@"label == 'Cancel' OR label == 'Close'"]].firstMatch;
+    XCTAssertTrue([cancel waitForExistenceWithTimeout:60], @"%@", app.debugDescription);
     XCTNSPredicateExpectation *cancelReady = [[XCTNSPredicateExpectation alloc]
         initWithPredicate:[NSPredicate predicateWithFormat:@"hittable == YES"] object:cancel];
     XCTAssertEqual([XCTWaiter waitForExpectations:@[cancelReady] timeout:10], XCTWaiterResultCompleted);
