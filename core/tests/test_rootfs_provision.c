@@ -2925,6 +2925,60 @@ static void test_stashed_file_metadata_repair(void) {
     free(fx);
 }
 
+static void test_catalog_fstab_rewrite(void) {
+    static const char custom[] =
+        "/dev/disk0s1 / hfs rw 0 1\n/dev/disk0s2 /private/var hfs rw 0 2\n";
+    fixture_t *fx = fx_create_depth2(0);
+    rootfs_work_entry_t entries[4];
+    run_t first = {0}, second = {0}, missing = {0};
+    if (!fx) { CHECK(0, "fstab fixture allocation failed"); return; }
+    entry_directory(&entries[0], "/private", 0755u);
+    entry_directory(&entries[1], "/private/etc", 0755u);
+    entry_file(&entries[2], "/private/etc/fstab", custom, sizeof custom - 1u, 0644u);
+    entry_symlink(&entries[3], "/etc", "private/etc", 0755u);
+    if (!run_provision_existing_image(&first, fx->image, FX_SIZE, "fstabbase",
+                                      entries, 4u, 0u)) {
+        CHECK(0, "fstab base setup failed"); free(fx); return;
+    }
+    expect_success(&first, "fstab base");
+    if (first.output && make_path(second.destination, sizeof second.destination, "fstabactive")) {
+        second.options.resolve_fstab_path = true;
+        second.options.fstab_line = ROOTFS_WORK_DEFAULT_FSTAB;
+        second.status = rootfs_work_create(first.destination, second.destination,
+                                            &second.options, &second.result);
+        if (second.status == ROOTFS_WORK_OK)
+            second.output = read_file(second.destination, &second.output_size);
+        expect_success(&second, "catalog fstab rewrite");
+        if (second.output && second.output_size == first.output_size) {
+            uint64_t offset = second.result.fstab_offset;
+            const char desired[] = ROOTFS_WORK_DEFAULT_FSTAB "\n";
+            CHECK(offset != FX_FSTAB_OFFSET && offset + sizeof custom - 1u <= second.output_size,
+                  "fstab resolved stale stock bytes instead of the active file");
+            CHECK(!memcmp(second.output + FX_FSTAB_OFFSET, FX_FSTAB_STOCK, sizeof FX_FSTAB_STOCK - 1u),
+                  "fstab rewrite changed the obsolete stock copy");
+            if (offset + sizeof custom - 1u <= second.output_size) {
+                CHECK(!memcmp(second.output + offset, desired, sizeof desired - 1u),
+                      "active fstab does not use the emulated root disk");
+                CHECK(!memcmp(first.output, second.output, (size_t)offset) &&
+                      !memcmp(first.output + offset + sizeof custom - 1u,
+                              second.output + offset + sizeof custom - 1u,
+                              first.output_size - (size_t)offset - sizeof custom + 1u),
+                      "fstab rewrite changed bytes outside the active file");
+            }
+        }
+    }
+    if (make_path(missing.source, sizeof missing.source, "fstabmissing") &&
+        make_path(missing.destination, sizeof missing.destination, "fstabrefused") &&
+        write_file(missing.source, fx->image, FX_SIZE)) {
+        missing.options.resolve_fstab_path = true;
+        missing.status = rootfs_work_create(missing.source, missing.destination,
+                                             &missing.options, &missing.result);
+        CHECK(missing.status != ROOTFS_WORK_OK && !path_exists(missing.destination),
+              "missing active fstab fell back to an unrelated stock byte pattern");
+    }
+    run_release(&missing); run_release(&second); run_release(&first); free(fx);
+}
+
 static void test_exact_file_content_rewrite(void) {
     static const char legacy[] = "fixture configuration generation one\n";
     static const char desired[] =
@@ -7096,6 +7150,7 @@ int main(void) {
     test_exact_file_metadata_repair();
     test_stashed_file_metadata_repair();
     test_exact_file_content_rewrite();
+    test_catalog_fstab_rewrite();
     test_full_leaf_is_refused_not_split();
     test_out_of_space_is_refused();
     test_broken_catalog_is_never_absence();

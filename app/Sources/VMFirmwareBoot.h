@@ -158,11 +158,11 @@ extern "C" {
  * the data_ark.plist inside it. Asserted against the library at provision
  * time rather than trusted, because a short array silently fills nothing. */
 #define VM_FW_BOOT_ACTIVATION_ENTRIES 2u
-/* The PPP options, resolver fallback, SystemConfiguration directory/service
+/* The PPP daemon, options, resolver fallback, SystemConfiguration directory/service
  * plist, and race-independent Setup publisher are an all-or-nothing image-time
  * payload. Keep this asserted against the helper at runtime so another catalog
  * entry cannot silently truncate phone images. */
-#define VM_FW_BOOT_PPP_ENTRIES 6u
+#define VM_FW_BOOT_PPP_ENTRIES 7u
 #define VM_FW_BOOT_PROVISION_ENTRIES \
     (VM_FW_BOOT_ACTIVATION_ENTRIES + VM_FW_BOOT_PPP_ENTRIES)
 

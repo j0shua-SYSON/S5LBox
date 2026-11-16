@@ -2081,6 +2081,7 @@ bool vm_firmware_boot_provision_cancellable(const vm_firmware_boot_paths_t *path
     /* The stock image names /dev/disk0s1, which is NAND this machine does not
      * model; without this line launchd fails fsck and halts. */
     options.fstab_line = ROOTFS_WORK_DEFAULT_FSTAB;
+    options.resolve_fstab_path = true;
     options.growth_bytes = VM_FW_BOOT_GROWTH_BYTES;
     options.minimum_volume_bytes = disk_capacity;
     /*
@@ -2092,7 +2093,9 @@ bool vm_firmware_boot_provision_cancellable(const vm_firmware_boot_paths_t *path
      * is where that is said to the user.
      */
     options.ca_software_render = wanted.ca_software_render;
-    options.ppp_launchd_job = wanted.ppp;
+    // Custom firmware may have removed the stock pilotfish job. New disks get
+    // a dedicated PPP job in the active launch directory below.
+    options.ppp_launchd_job = false;
 
     /*
      * ACTIVATION, which the app used to describe as unimplemented while the
@@ -2109,8 +2112,9 @@ bool vm_firmware_boot_provision_cancellable(const vm_firmware_boot_paths_t *path
      * not touched.
      */
     rootfs_work_entry_t provision[VM_FW_BOOT_PROVISION_ENTRIES];
-    size_t provision_count = rootfs_work_standard_entries(
+    size_t standard_count = rootfs_work_standard_entries(
         wanted.activate, wanted.ppp, NULL, 0u);
+    size_t provision_count = standard_count + (wanted.ppp ? 1u : 0u);
     memset(provision, 0, sizeof provision);
     /*
      * The phone used to set only ppp_launchd_job. That made pppd appear and
@@ -2123,12 +2127,13 @@ bool vm_firmware_boot_provision_cancellable(const vm_firmware_boot_paths_t *path
     if (provision_count > sizeof provision / sizeof provision[0] ||
         rootfs_work_standard_entries(wanted.activate, wanted.ppp, provision,
                                      sizeof provision / sizeof provision[0]) !=
-            provision_count) {
+            standard_count) {
         set_detail(detail, detail_capacity,
                    "The standard provisioning table no longer fits; refusing "
                    "a partial work image.");
         return false;
     }
+    if (wanted.ppp) rootfs_work_ppp_daemon_entry(&provision[standard_count]);
     options.entries = provision_count ? provision : NULL;
     options.entry_count = provision_count;
 

@@ -384,6 +384,11 @@ typedef struct rootfs_work_options {
      */
     bool preserve_fstab;
 
+    /* Resolve /etc/fstab through the HFS catalog (including parent symlinks).
+     * Required for custom images: raw stock bytes may be an obsolete copy in
+     * free space. Legacy harness callers retain the exact-pattern path. */
+    bool resolve_fstab_path;
+
     /*
      * Opt-in, OFF by default: rewrite the stock SpringBoard LaunchDaemon plist
      * in place so launchd exports CA_ENABLE_MBX2D=0 to SpringBoard, which is
@@ -931,6 +936,9 @@ size_t rootfs_work_ppp_entries(rootfs_work_entry_t *entries, size_t capacity);
 size_t rootfs_work_standard_entries(bool activate, bool ppp,
                                     rootfs_work_entry_t *entries,
                                     size_t capacity);
+/* Dedicated PPP job for new app disks; does not depend on an inert stock job
+ * still being present in /System/Library/LaunchDaemons on custom firmware. */
+void rootfs_work_ppp_daemon_entry(rootfs_work_entry_t *entry);
 
 #ifdef __cplusplus
 }

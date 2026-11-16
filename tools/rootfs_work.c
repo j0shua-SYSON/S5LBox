@@ -8708,6 +8708,65 @@ static bool catalog_open(catalog_ctx_t *ctx, host_file_t *file,
     return catalog_alloc_fork_io(ctx, false, stage, result);
 }
 
+static bool fstab_rewrite_catalog(host_file_t *file, uint64_t file_size,
+                                  const hfs_volume_t *volume, const char *line,
+                                  rootfs_work_result_t *result) {
+    catalog_ctx_t ctx = {0};
+    uint8_t replacement[4096], digest[IOS3_SHA256_DIGEST_SIZE];
+    uint8_t *data = NULL;
+    uint32_t leaf = 0u;
+    uint16_t position = 0u;
+    bool found = false, okay = false;
+    size_t line_size = 0u;
+    uint64_t logical, written = 0u;
+    const rootfs_work_stage_t stage = ROOTFS_WORK_STAGE_FSTAB_WRITE;
+
+    if (line) while (line_size < sizeof replacement && line[line_size] &&
+                    line[line_size] != '\n' && line[line_size] != '\r') line_size++;
+    if (!line || !line_size || line_size >= sizeof replacement - 1u || line[line_size]) {
+        result_fail(result, ROOTFS_WORK_FSTAB_LINE_INVALID, stage, 0,
+                    "fstab replacement must be one bounded line");
+        return false;
+    }
+    if (!catalog_open(&ctx, file, file_size, volume, 0u, result) ||
+        !catalog_find_path_record(&ctx, "/etc/fstab", true, &leaf, &position,
+                                  &found, &data, stage, result)) goto done;
+    if (!found || read_be16(data) != HFS_CAT_FILE_RECORD ||
+        (read_be16(data + 42u) & HFS_MODE_IFMT) != HFS_MODE_IFREG) {
+        result_fail(result, ROOTFS_WORK_FSTAB_LINE_INVALID, stage, 0,
+                    "/etc/fstab is missing or is not a regular file");
+        goto done;
+    }
+    logical = read_be64(data + 88u);
+    if (logical < line_size + 1u || logical > sizeof replacement) {
+        result_fail(result, ROOTFS_WORK_FSTAB_LINE_INVALID, stage, 0,
+                    "/etc/fstab has an unsupported size");
+        goto done;
+    }
+    // Validate every inline extent before writing any of them. The active
+    // file keeps its logical size, extents, permissions and catalog record.
+    if (!catalog_regular_file_digest(&ctx, data, logical, digest, stage, result)) goto done;
+    memset(replacement, '#', (size_t)logical);
+    memcpy(replacement, line, line_size);
+    replacement[line_size] = '\n';
+    replacement[logical - 1u] = '\n';
+    for (unsigned extent = 0u; extent < 8u && written < logical; extent++) {
+        uint64_t offset = (uint64_t)read_be32(data + 104u + extent * 8u) * ctx.block_size;
+        uint64_t take = (uint64_t)read_be32(data + 108u + extent * 8u) * ctx.block_size;
+        if (take > logical - written) take = logical - written;
+        if (take && !checked_write(file, file_size, offset, replacement + written,
+                                    (size_t)take, stage, result)) goto done;
+        if (!written) result->fstab_offset = offset;
+        written += take;
+    }
+    okay = written == logical;
+    if (!okay) result_fail(result, ROOTFS_WORK_FSTAB_LINE_INVALID, stage, 0,
+                           "/etc/fstab data extents are incomplete");
+done:
+    catalog_close(&ctx);
+    return okay;
+}
+
 /*
  * Create the requested catalog objects in the already-grown work image.
  *
@@ -9258,6 +9317,26 @@ static const char PPP_SETUP_LAUNCHD_JOB[] =
     "\t<key>StandardOutPath</key><string>/dev/null</string>\n"
     "</dict>\n"
     "</plist>\n";
+
+void rootfs_work_ppp_daemon_entry(rootfs_work_entry_t *entry) {
+    static const uint8_t job[] =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<plist version=\"1.0\"><dict>"
+        "<key>Label</key><string>com.s5lbox.ppp</string>"
+        "<key>RunAtLoad</key><true/>"
+        "<key>StandardOutPath</key><string>/dev/console</string>"
+        "<key>ProgramArguments</key><array>"
+        "<string>/usr/sbin/pppd</string><string>/dev/tty.debug</string>"
+        "<string>local</string><string>nocrtscts</string><string>nodetach</string>"
+        "</array></dict></plist>\n";
+    if (!entry) return;
+    memset(entry, 0, sizeof *entry);
+    entry->kind = ROOTFS_WORK_ENTRY_FILE;
+    entry->path = "/System/Library/LaunchDaemons/com.s5lbox.ppp.plist";
+    entry->content = job;
+    entry->content_size = sizeof job - 1u;
+    entry->permissions = 0644u;
+}
 
 size_t rootfs_work_ppp_entries(rootfs_work_entry_t *entries, size_t capacity) {
     /* All six catalog entries describe one service. Never publish a partial
@@ -10305,10 +10384,14 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
                           ROOTFS_WORK_STAGE_PROVISION_WRITE, result))
             goto done;
     }
-    if (!selected.preserve_fstab &&
-        !fstab_rewrite(&temporary, work_size, selected.fstab_line, buffer,
-                       selected.io_buffer_bytes, result))
-        goto done;
+    if (!selected.preserve_fstab) {
+        bool rewritten = selected.resolve_fstab_path
+            ? fstab_rewrite_catalog(&temporary, work_size, &copied_volume,
+                                     selected.fstab_line, result)
+            : fstab_rewrite(&temporary, work_size, selected.fstab_line, buffer,
+                            selected.io_buffer_bytes, result);
+        if (!rewritten) goto done;
+    }
     /* Opt-in and off by default: a stock image is left with Apple's own
      * renderer selection, so the flag is the only thing that changes it. */
     if (selected.ca_software_render &&
