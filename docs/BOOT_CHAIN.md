@@ -94,20 +94,27 @@ in `firmware/`.
 The app bundles the public keys for **iPhone1,2 / 3.1.3 / 7E18** in the separate
 `VMFirmwareKeys.c` catalog, transcribed from [The Apple Wiki's published key
 record](https://theapplewiki.com/index.php?title=Keys:SUNorthstarTwo_7E18_(iPhone1,2)&oldid=206002).
-No Apple firmware is bundled or downloaded. Keys resolve only after all five
+No Apple firmware is bundled. Setup can download the stock IPSW from Apple's
+servers, or import a user-selected archive. Keys resolve only after all five
 manifest identity fields match: product, version, build, board and platform.
 Unknown builds are refused by the app before any component output is opened.
-Session-only manual overrides remain in Settings; they cannot bypass size or
-SHA-256 authentication. The rootfs key is an AES+HMAC blob; the DMG decoder
+Session-only manual key overrides remain in Settings. The separate advanced
+checksum preference applies to the next import and is captured in that
+generation's policy. It does not disable manifest, decoder, filesystem, or
+kernel-layout validation. The rootfs key is an AES+HMAC blob; the DMG decoder
 derives per-block IVs rather than using a fixed rootfs IV.
 
-New imports stream into a private generation directory. Only a fully verified
-three-file set is activated by atomically writing `current-firmware.txt`.
+New imports stream into a private generation directory. Only a complete
+three-file set that passes its import policy is activated by atomically writing
+`current-firmware.txt`.
 Failure/cancellation removes that attempt, leaving active firmware unchanged.
-The previous app-owned generation is reclaimed after successful publication;
-legacy loose files and the user's IPSW are never deleted. A process kill before
-publication can leave an unused generation, but cannot activate a partial set.
-Existing loose-file installations remain supported without migration.
+Prior generations remain in the firmware library. Each machine records its
+original source in `firmware-source.txt`; changing the library default affects
+new machines. Legacy loose files remain supported. An `import-in-progress`
+marker excludes incomplete generations from selection after a process kill.
+The library refuses removal of the default firmware or firmware used by a
+machine. See [Firmware library](firmware-library.md) for the storage model and
+custom-firmware boundaries.
 
 First launch presents native setup when the three prepared files are absent.
 Picker selection starts immediately; a Files-app drop is detected when setup

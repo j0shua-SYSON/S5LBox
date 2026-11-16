@@ -58,7 +58,14 @@
     }
     [app.buttons[@"s5lbox.setup.import"] tap];
     XCUIElement *cancel = app.buttons[@"Cancel"].firstMatch;
-    XCTAssertTrue([cancel waitForExistenceWithTimeout:10]); [cancel tap];
+    // Files starts in a separate process. On a cold simulator its remote
+    // accessibility tree can arrive well after the picker is presented.
+    XCTAssertTrue([cancel waitForExistenceWithTimeout:30], @"%@", app.debugDescription);
+    XCTNSPredicateExpectation *pickerReady = [[XCTNSPredicateExpectation alloc]
+        initWithPredicate:[NSPredicate predicateWithFormat:@"hittable == YES"] object:cancel];
+    XCTAssertEqual([XCTWaiter waitForExpectations:@[pickerReady] timeout:10], XCTWaiterResultCompleted);
+    [cancel tap];
+    XCTAssertTrue([app.buttons[@"Later"] waitForExistenceWithTimeout:10]);
     [app.buttons[@"Later"] tap];
     XCUIElement *settings = app.buttons[@"s5lbox.machines.settings"];
     XCTAssertTrue([settings waitForExistenceWithTimeout:10]); [settings tap];
