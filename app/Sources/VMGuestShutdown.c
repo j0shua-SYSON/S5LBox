@@ -95,6 +95,10 @@ static bool gray(const uint8_t *p) {
     return low > 100u && high - low < 25u;
 }
 
+static bool dark(const uint8_t *p) {
+    return p[0] <= 95u && p[1] <= 95u && p[2] <= 95u;
+}
+
 bool vm_guest_shutdown_power_slider(const uint8_t *p, size_t size,
                                      unsigned w, unsigned h, unsigned stride) {
     if (!p || w != 320u || h != 480u || stride < 1280u ||
@@ -112,10 +116,22 @@ bool vm_guest_shutdown_power_slider(const uint8_t *p, size_t size,
         if (!gray(p + (size_t)420u * stride + x * 4u) ||
             !gray(p + (size_t)448u * stride + x * 4u)) return false;
     }
-    /* The track beside the red thumb is dark; a red navigation bar is not it. */
+    /* The stock track beside the red thumb is dark. Whited00r uses a flat
+     * red track instead: require its full height, inset black edges and the
+     * black gap underneath as well as the separate Cancel button above.
+     * A single red navigation-bar row must never trigger a swipe. */
+    bool stock_track = true, flat_track = true;
     for (unsigned x = 105u; x <= 280u; x += 25u) {
         const uint8_t *q = p + (size_t)48u * stride + x * 4u;
-        if (q[0] > 95u || q[1] > 95u || q[2] > 95u) return false;
+        if (!dark(q)) stock_track = false;
+        if (!red(q) || !red(p + (size_t)84u * stride + x * 4u)) flat_track = false;
     }
+    if (stock_track) return true;
+    if (!flat_track) return false;
+    for (unsigned y = 48u; y <= 84u; y += 12u)
+        if (!dark(p + (size_t)y * stride) ||
+            !dark(p + (size_t)y * stride + 319u * 4u)) return false;
+    for (unsigned x = 35u; x <= 285u; x += 25u)
+        if (!dark(p + (size_t)108u * stride + x * 4u)) return false;
     return true;
 }

@@ -35,6 +35,20 @@ int main(void) {
     rectangle(28u, 48u, 84u, 84u, 190u, 190u, 190u);
     CHECK(!slider()); /* neutral unlock slider */
 
+    memset(pixels, 0, sizeof pixels);
+    rectangle(8u, 38u, 312u, 100u, 25u, 35u, 220u);
+    CHECK(!slider()); /* flat red track without Cancel */
+    rectangle(24u, 412u, 296u, 456u, 230u, 230u, 230u);
+    CHECK(slider()); /* Whited00r flat power slider */
+    rectangle(8u, 38u, 312u, 100u, 220u, 160u, 40u);
+    CHECK(!slider()); /* coloured unlock/action bar */
+    rectangle(0u, 38u, 319u, 100u, 25u, 35u, 220u);
+    CHECK(!slider()); /* full-width red navigation bar */
+    rectangle(0u, 38u, 0u, 100u, 0u, 0u, 0u);
+    rectangle(319u, 38u, 319u, 100u, 0u, 0u, 0u);
+    rectangle(35u, 108u, 285u, 108u, 230u, 230u, 230u);
+    CHECK(!slider()); /* bright content directly below a red header */
+
     vm_guest_shutdown_t s;
     vm_guest_shutdown_init(&s, 100u);
     CHECK(vm_guest_shutdown_step(&s, 100u, false, false, false, false) == VM_SHUTDOWN_NONE);
