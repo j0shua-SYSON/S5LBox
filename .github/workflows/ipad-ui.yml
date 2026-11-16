@@ -78,19 +78,24 @@ jobs:
             -resultBundlePath "$PWD/../iPad-tests.xcresult" \
             -parallel-testing-enabled NO -jobs 2 \
             CODE_SIGNING_ALLOWED=NO LLVM_LTO=NO GCC_OPTIMIZATION_LEVEL=0 \
-            COMPILER_INDEX_STORE_ENABLE=NO test-without-building > ../iPad-tests.log 2>&1 || {
-              tail -150 ../iPad-tests.log
-              exit 1
-            }
-          tail -60 ../iPad-tests.log
+            COMPILER_INDEX_STORE_ENABLE=NO test-without-building 2>&1 | tee ../iPad-tests.log
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iPad-test-logs
+          path: |
+            iPad-tests.log
+            iPad-build.log
+          retention-days: 7
       - name: Export interface screenshots
         if: always()
         run: |
-          if [ -d iPad-tests.xcresult ]; then
+          if [ -f iPad-tests.xcresult/Info.plist ]; then
             xcrun xcresulttool export attachments --path iPad-tests.xcresult --output-path iPad-screenshots
           fi
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && hashFiles('iPad-tests.xcresult/Info.plist') != ''
         with:
           name: iPad-test-results
           path: |
