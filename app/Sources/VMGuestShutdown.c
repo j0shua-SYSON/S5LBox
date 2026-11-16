@@ -101,6 +101,27 @@ static bool dark(const uint8_t *p) {
     return p[0] <= 95u && p[1] <= 95u && p[2] <= 95u;
 }
 
+static bool flat_cancel(const uint8_t *p, unsigned stride) {
+    /* UI7Kit can replace the Cancel button with centered blue text over a
+     * dimmed screen. Require ink in all three parts of the word and dark
+     * surroundings; an isolated blue icon or a blue toolbar is insufficient. */
+    unsigned ink[3] = {0u, 0u, 0u};
+    for (unsigned y = 424u; y <= 446u; y += 2u)
+        for (unsigned x = 120u; x <= 200u; x += 2u) {
+            const uint8_t *q = p + (size_t)y * stride + x * 4u;
+            if (q[0] > 110u && q[1] > 50u &&
+                q[0] > (unsigned)q[2] + 50u && q[0] > (unsigned)q[1] + 20u)
+                ink[(x - 120u) / 28u]++;
+        }
+    if (ink[0] < 6u || ink[1] < 6u || ink[2] < 6u) return false;
+    for (unsigned x = 35u; x <= 285u; x += 25u) {
+        if (x >= 110u && x <= 210u) continue;
+        if (!dark(p + (size_t)420u * stride + x * 4u) ||
+            !dark(p + (size_t)448u * stride + x * 4u)) return false;
+    }
+    return true;
+}
+
 bool vm_guest_shutdown_power_slider(const uint8_t *p, size_t size,
                                      unsigned w, unsigned h, unsigned stride) {
     if (!p || w != 320u || h != 480u || stride < 1280u ||
@@ -114,9 +135,10 @@ bool vm_guest_shutdown_power_slider(const uint8_t *p, size_t size,
         }
     if (red_count * 100u < red_samples * 55u) return false;
     /* Cancel is a wide neutral button at the bottom, not the unlock thumb. */
+    bool neutral_cancel = true;
     for (unsigned x = 35u; x <= 285u; x += 25u) {
         if (!gray(p + (size_t)420u * stride + x * 4u) ||
-            !gray(p + (size_t)448u * stride + x * 4u)) return false;
+            !gray(p + (size_t)448u * stride + x * 4u)) neutral_cancel = false;
     }
     /* The stock track beside the red thumb is dark. Whited00r uses a flat
      * red track instead: require its full height, inset black edges and the
@@ -128,12 +150,12 @@ bool vm_guest_shutdown_power_slider(const uint8_t *p, size_t size,
         if (!dark(q)) stock_track = false;
         if (!red(q) || !red(p + (size_t)84u * stride + x * 4u)) flat_track = false;
     }
-    if (stock_track) return true;
+    if (stock_track) return neutral_cancel;
     if (!flat_track) return false;
     for (unsigned y = 48u; y <= 84u; y += 12u)
         if (!dark(p + (size_t)y * stride) ||
             !dark(p + (size_t)y * stride + 319u * 4u)) return false;
     for (unsigned x = 35u; x <= 285u; x += 25u)
         if (!dark(p + (size_t)108u * stride + x * 4u)) return false;
-    return true;
+    return neutral_cancel || flat_cancel(p, stride);
 }

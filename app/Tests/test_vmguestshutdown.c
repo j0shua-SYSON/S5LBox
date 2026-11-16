@@ -49,6 +49,16 @@ int main(void) {
     rectangle(35u, 108u, 285u, 108u, 230u, 230u, 230u);
     CHECK(!slider()); /* bright content directly below a red header */
 
+    memset(pixels, 0, sizeof pixels);
+    rectangle(8u, 38u, 312u, 100u, 25u, 35u, 220u);
+    rectangle(156u, 428u, 162u, 442u, 240u, 120u, 10u);
+    CHECK(!slider()); /* one blue footer icon is not Cancel */
+    rectangle(128u, 428u, 134u, 442u, 240u, 120u, 10u);
+    rectangle(184u, 428u, 190u, 442u, 240u, 120u, 10u);
+    CHECK(slider()); /* flat power slider with centered blue Cancel text */
+    rectangle(35u, 420u, 285u, 448u, 240u, 120u, 10u);
+    CHECK(!slider()); /* blue toolbar instead of text on a dimmed background */
+
     vm_guest_shutdown_t s;
     vm_guest_shutdown_init(&s, 100u);
     CHECK(vm_guest_shutdown_step(&s, 100u, false, false, false, false) == VM_SHUTDOWN_NONE);
