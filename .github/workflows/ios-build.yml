@@ -57,7 +57,7 @@ on:
 jobs:
   build:
     name: build ad-hoc-signed .ipa
-    runs-on: macos-15
+    runs-on: macos-26
     env:
       EXPERIMENTAL_HLE: ${{ github.event_name == 'workflow_dispatch' && inputs.experimental_hle && 'true' || 'false' }}
       EXPERIMENTAL_MBX: ${{ github.event_name == 'workflow_dispatch' && inputs.experimental_mbx && 'true' || 'false' }}
