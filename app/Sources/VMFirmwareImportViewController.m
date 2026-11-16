@@ -412,7 +412,7 @@ titleForFooterInSection:(NSInteger)section {
     switch ((VMImportSection)[self sectionAt:section]) {
         case VMImportSectionChoose:
             return @"Choose an IPSW from Files, or place it in S5LBox > firmware. "
-                    "Allow about 700 MB of free space for preparation. Keep the app open.";
+                    "Allow at least 1 GB of free space for preparation. Keep the app open.";
 
         case VMImportSectionProgress:
             return @"Cancel discards this attempt. Previously prepared firmware is kept.";

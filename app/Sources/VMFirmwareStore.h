@@ -8,6 +8,7 @@ NS_ASSUME_NONNULL_BEGIN
 + (BOOL)hasPreparedFilesInDirectory:(NSString *)directory;
 + (nullable NSString *)createStagingDirectoryInRoot:(NSString *)root error:(NSError **)error;
 + (BOOL)publishDirectory:(NSString *)directory inRoot:(NSString *)root error:(NSError **)error;
++ (BOOL)writeMetadata:(NSDictionary<NSString *, id> *)metadata inDirectory:(NSString *)directory error:(NSError **)error;
 /* Imported generations are retained as a library. Identifiers are relative
  * names, never host paths. Existing machines keep a durable source record. */
 + (NSArray<NSDictionary<NSString *, id> *> *)firmwaresInRoot:(NSString *)root;

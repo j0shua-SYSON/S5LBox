@@ -567,6 +567,17 @@ static NSString *VMGraphicsRecordText(BOOL mbxEnabled,
             userInfo:@{NSLocalizedDescriptionKey:@"The source machine's disk-size record is invalid or unreadable."}];
         return nil;
     }
+    NSString *firmwareRoot = [[[self containerDirectory] stringByDeletingLastPathComponent]
+        stringByAppendingPathComponent:@"firmware"];
+    NSString *sourceDirectory = [self directoryForInstanceWithID:source[@"id"]];
+    NSString *firmwareIdentifier = nil;
+    if ([NSFileManager.defaultManager fileExistsAtPath:
+            [sourceDirectory stringByAppendingPathComponent:@"firmware-source.txt"]] ||
+        [VMFirmwareStore hasPreparedFilesInDirectory:[VMFirmwareStore activeDirectoryInRoot:firmwareRoot]]) {
+        NSString *firmware = [VMFirmwareStore firmwareForMachine:sourceDirectory inRoot:firmwareRoot error:error];
+        if (!firmware) return nil;
+        firmwareIdentifier = [firmware isEqual:firmwareRoot] ? @"legacy" : firmware.lastPathComponent;
+    }
     NSString *identifier = [self freshIdentifier];
     if (!identifier) {
         if (error) *error = [self errorFor:VM_INSTANCE_ERR_ID_TAKEN];
@@ -649,6 +660,14 @@ static NSString *VMGraphicsRecordText(BOOL mbxEnabled,
             stringByAppendingPathComponent:identifier];
         (void)[[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
         if (error) *error = graphicsError;
+        return nil;
+    }
+    if (firmwareIdentifier && ![VMFirmwareStore pinFirmware:firmwareIdentifier
+        forMachine:[[self containerDirectory] stringByAppendingPathComponent:identifier]
+        inRoot:firmwareRoot error:error]) {
+        (void)vm_instance_remove(&_list, added);
+        [NSFileManager.defaultManager removeItemAtPath:
+            [[self containerDirectory] stringByAppendingPathComponent:identifier] error:NULL];
         return nil;
     }
     if (![self saveReportingError:error]) {

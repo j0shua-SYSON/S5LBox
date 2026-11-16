@@ -2,6 +2,8 @@
 // Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 #import "VMInstanceStore.h"
 #import "VMSettings.h"
+#import "VMFirmwareStore.h"
+#import "VMFirmwarePolicy.h"
 #include "VMDiskSize.h"
 #include <assert.h>
 
@@ -315,6 +317,43 @@ static void testDiskCreationDefaults(void) {
     puts("machine creation: automatic 8 GiB, Advanced choices, immutable records and legacy fallback passed");
 }
 
+static void testFirmwareSelection(void) {
+    NSString *previousRoot = testRoot;
+    NSString *library = [testRoot stringByAppendingPathComponent:@"firmware-library/firmware"];
+    testRoot = [testRoot stringByAppendingPathComponent:@"firmware-library/Machines"];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    assert([fm createDirectoryAtPath:testRoot withIntermediateDirectories:YES attributes:nil error:NULL]);
+    NSString *first = [VMFirmwareStore createStagingDirectoryInRoot:library error:NULL];
+    NSString *second = [VMFirmwareStore createStagingDirectoryInRoot:library error:NULL];
+    vm_fw_policy_t policy = {true, {512, 512, 512}};
+    for (NSString *directory in @[first, second]) {
+        for (NSString *name in @[@"kernel.macho", @"devicetree.bin", @"rootfs.img"])
+            assert([[NSMutableData dataWithLength:512] writeToFile:[directory stringByAppendingPathComponent:name] atomically:NO]);
+        assert(vm_fw_policy_write(directory.fileSystemRepresentation, &policy));
+    }
+    assert([VMFirmwareStore publishDirectory:first inRoot:library error:NULL]);
+    TestInstanceStore *store = [TestInstanceStore new];
+    NSString *original = [store createInstanceNamed:@"First" error:NULL];
+    assert(original);
+    assert([VMFirmwareStore publishDirectory:second inRoot:library error:NULL]);
+    NSString *duplicate = [store duplicateInstanceAtIndex:0 error:NULL];
+    assert(duplicate);
+    for (NSString *identifier in @[original, duplicate])
+        assert([[VMFirmwareStore firmwareForMachine:[store directoryForInstanceWithID:identifier]
+            inRoot:library error:NULL] isEqual:first]);
+    NSString *other = [store createInstanceNamed:@"Second" firmwareIdentifier:second.lastPathComponent diskSizeGiB:8 error:NULL];
+    assert(other);
+    assert([VMFirmwareStore selectFirmware:first.lastPathComponent inRoot:library error:NULL]);
+    assert([[VMFirmwareStore firmwareForMachine:[store directoryForInstanceWithID:other]
+        inRoot:library error:NULL] isEqual:second]);
+    assert(![VMFirmwareStore removeFirmware:second.lastPathComponent inRoot:library error:NULL]);
+    NSString *record = [[store directoryForInstanceWithID:original] stringByAppendingPathComponent:@"firmware-source.txt"];
+    assert([@"../outside" writeToFile:record atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    assert(![store duplicateInstanceAtIndex:0 error:NULL] && store.count == 3);
+    testRoot = previousRoot;
+    puts("machine firmware: explicit selection, default changes, duplication and damaged-source refusal passed");
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         testInterfaceChoice();
@@ -387,6 +426,7 @@ int main(int argc, const char *argv[]) {
         assert(![fm fileExistsAtPath:disk] && store.count == 5 && notifications == 8);
         assert([rows(store) isEqual:rows([TestInstanceStore new])]);
         [NSNotificationCenter.defaultCenter removeObserver:observer];
+        testFirmwareSelection();
         // Only this process's UUID fixture, never the user's machine directory.
         assert([fm removeItemAtPath:testRoot error:NULL]);
         puts("instance store: 2/4/8 GiB persistence, duplication, write-failure rollback and deletion ordering passed");

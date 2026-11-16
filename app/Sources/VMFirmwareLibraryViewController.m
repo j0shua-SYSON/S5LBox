@@ -83,7 +83,7 @@
     contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point {
     (void)tableView; (void)point;
     NSDictionary *entry = _firmwares[indexPath.row];
-    __weak typeof(self) weakSelf = self;
+    __weak VMFirmwareLibraryViewController *weakSelf = self;
     return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil
         actionProvider:^UIMenu *(NSArray<UIMenuElement *> *suggested) {
         (void)suggested;

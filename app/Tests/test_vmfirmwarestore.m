@@ -45,6 +45,10 @@ static void makeSet(NSString *path) {
     memset(report, 0, sizeof *report);
     self.usedSkip = self.skipStockChecksums;
     report->manifest_read = report->reference_build = true;
+    snprintf(report->product_type, sizeof report->product_type, "iPhone1,2");
+    snprintf(report->product_version, sizeof report->product_version, "3.1.3");
+    snprintf(report->build, sizeof report->build, "7E18");
+    if (!self.usedSkip) snprintf(report->firmware_name, sizeof report->firmware_name, "iPhone OS 3.1.3");
     report->stock_checksums_skipped = self.usedSkip;
     const uint64_t stock[] = {7942144, 40544, 433274880};
     if (!self.usedSkip) makeSet(directory);
@@ -238,6 +242,8 @@ int main(int argc, const char *argv[]) {
         int rootFD = open([whited stringByAppendingPathComponent:@"rootfs.img"].fileSystemRepresentation, O_RDWR);
         assert(rootFD >= 0 && ftruncate(rootFD, 567279616) == 0 && close(rootFD) == 0);
         assert(vm_fw_policy_write(whited.fileSystemRepresentation, &whitedPolicy));
+        assert([VMFirmwareStore firmwaresInRoot:library].count == 1); // Complete but unpublished.
+        assert(![VMFirmwareStore selectFirmware:whited.lastPathComponent inRoot:library error:NULL]);
         assert([VMFirmwareStore publishDirectory:whited inRoot:library error:NULL]);
         assert([[VMFirmwareStore firmwareForMachine:machineA inRoot:library error:NULL] isEqual:stock]);
         assert([[VMFirmwareStore activeDirectoryInRoot:library] isEqual:whited]);
@@ -256,6 +262,10 @@ int main(int argc, const char *argv[]) {
         assert([@"../outside" writeToFile:record atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
         assert(![VMFirmwareStore firmwareForMachine:machineB inRoot:library error:NULL]);
         assert(![VMFirmwareStore removeFirmware:whited.lastPathComponent inRoot:library error:NULL]);
+        // One damaged machine does not prevent selecting firmware for others.
+        assert([VMFirmwareStore selectFirmware:whited.lastPathComponent inRoot:library error:NULL]);
+        assert([[NSString stringWithContentsOfFile:record encoding:NSUTF8StringEncoding error:NULL] isEqual:@"../outside"]);
+        assert([VMFirmwareStore selectFirmware:stock.lastPathComponent inRoot:library error:NULL]);
         assert([whited.lastPathComponent writeToFile:record atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
         assert([fm removeItemAtPath:machineB error:NULL]);
         assert([VMFirmwareStore removeFirmware:whited.lastPathComponent inRoot:library error:NULL]);

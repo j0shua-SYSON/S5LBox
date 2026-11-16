@@ -6,6 +6,8 @@
 static NSString *const pointerName = @"current-firmware.txt";
 static NSString *const generationPrefix = @"prepared-";
 static NSString *const machineSourceName = @"firmware-source.txt";
+static NSString *const stagingName = @"import-in-progress";
+static NSString *const metadataName = @"firmware-info.plist";
 
 static BOOL firmwareError(NSError **error, NSString *message) {
     if (error) *error = [NSError errorWithDomain:@"S5LBox.Firmware" code:2
@@ -22,6 +24,23 @@ static BOOL validMachine(NSString *name) {
 static BOOL regularDirectory(NSString *path) {
     return [[NSFileManager.defaultManager attributesOfItemAtPath:path error:NULL][NSFileType]
         isEqual:NSFileTypeDirectory];
+}
+
+static BOOL isStaging(NSString *path) {
+    return [NSFileManager.defaultManager fileExistsAtPath:[path stringByAppendingPathComponent:stagingName]];
+}
+
+static NSDictionary *metadataInDirectory(NSString *directory) {
+    NSString *path = [directory stringByAppendingPathComponent:metadataName];
+    NSDictionary *info = [NSFileManager.defaultManager attributesOfItemAtPath:path error:NULL];
+    if (![info[NSFileType] isEqual:NSFileTypeRegular] || [info[NSFileSize] unsignedLongLongValue] > 16384)
+        return nil;
+    NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:path];
+    if (![metadata[@"schema"] isEqual:@1]) return nil;
+    for (NSString *key in @[@"name", @"product", @"version", @"build"])
+        if (![metadata[key] isKindOfClass:NSString.class] || ![metadata[key] length] ||
+            [metadata[key] length] > 255) return nil;
+    return metadata;
 }
 
 static NSString *machineSource(NSString *machine, NSError **error) {
@@ -77,7 +96,7 @@ static NSString *selectedGeneration(NSString *root) {
     if (selected) {
         NSString *directory = [root stringByAppendingPathComponent:selected];
         NSDictionary *info = [NSFileManager.defaultManager attributesOfItemAtPath:directory error:NULL];
-        if ([info[NSFileType] isEqual:NSFileTypeDirectory] &&
+        if ([info[NSFileType] isEqual:NSFileTypeDirectory] && !isStaging(directory) &&
             [self hasPreparedFilesInDirectory:directory]) return directory;
     }
     return root; // Existing manually prepared installations need no migration.
@@ -88,6 +107,11 @@ static NSString *selectedGeneration(NSString *root) {
     NSString *path = [root stringByAppendingPathComponent:name];
     if (![NSFileManager.defaultManager createDirectoryAtPath:path
         withIntermediateDirectories:YES attributes:nil error:error]) return nil;
+    if (![@"1" writeToFile:[path stringByAppendingPathComponent:stagingName]
+        atomically:YES encoding:NSUTF8StringEncoding error:error]) {
+        [NSFileManager.defaultManager removeItemAtPath:path error:NULL];
+        return nil;
+    }
     return path;
 }
 
@@ -97,7 +121,7 @@ static NSString *selectedGeneration(NSString *root) {
     if ([identifier isEqual:@"legacy"]) return root;
     if (!validGeneration(identifier)) return nil;
     NSString *directory = [root stringByAppendingPathComponent:identifier];
-    return regularDirectory(directory) ? directory : nil;
+    return regularDirectory(directory) && !isStaging(directory) ? directory : nil;
 }
 
 + (BOOL)pinFirmware:(NSString *)identifier forMachine:(NSString *)machine
@@ -163,8 +187,13 @@ static NSString *selectedGeneration(NSString *root) {
         // is harmless: the old default stays active if any write fails.
         NSArray *machines = [self machineDirectoriesInRoot:root error:error];
         if (!machines) return NO;
-        for (NSString *machine in machines)
+        for (NSString *machine in machines) {
+            // An existing record must never be repointed, even if its firmware
+            // was removed in Files. That machine's boot reports the problem;
+            // it must not prevent other firmware from being imported.
+            if (machineSource(machine, NULL)) continue;
             if (![self pinFirmware:nil forMachine:machine inRoot:root error:error]) return NO;
+        }
         return [identifier writeToFile:[root stringByAppendingPathComponent:pointerName]
             atomically:YES encoding:NSUTF8StringEncoding error:error];
     }
@@ -176,11 +205,27 @@ static NSString *selectedGeneration(NSString *root) {
             !validGeneration(directory.lastPathComponent) || !regularDirectory(directory) ||
             ![self hasPreparedFilesInDirectory:directory])
             return firmwareError(error, @"The prepared firmware set is incomplete. Import the IPSW again.");
-        return [self selectFirmware:directory.lastPathComponent inRoot:root error:error];
+        NSString *marker = [directory stringByAppendingPathComponent:stagingName];
+        BOOL staging = isStaging(directory);
+        if (staging && ![NSFileManager.defaultManager removeItemAtPath:marker error:error]) return NO;
+        BOOL selected = [self selectFirmware:directory.lastPathComponent inRoot:root error:error];
+        if (!selected && staging)
+            [@"1" writeToFile:marker atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        return selected;
     }
 }
 
++ (BOOL)writeMetadata:(NSDictionary<NSString *, id> *)metadata inDirectory:(NSString *)directory error:(NSError **)error {
+    // Display metadata is not an authenticity or boot-policy decision.
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:metadata
+        format:NSPropertyListBinaryFormat_v1_0 options:0 error:error];
+    return data && [data writeToFile:[directory stringByAppendingPathComponent:metadataName]
+        options:NSDataWritingAtomic error:error];
+}
+
 + (NSString *)displayNameInDirectory:(NSString *)directory {
+    NSDictionary *metadata = metadataInDirectory(directory);
+    if (metadata) return metadata[@"name"];
     vm_fw_policy_t policy;
     int recorded = vm_fw_policy_read(directory.fileSystemRepresentation, &policy);
     if (recorded == 0) return @"iPhone OS 3.1.3";
@@ -207,8 +252,11 @@ static NSString *selectedGeneration(NSString *root) {
                 NSString *source = machineSource(machine, NULL);
                 if ([source isEqual:name] || (!source && [directory isEqual:active])) used++;
             }
+            NSDictionary *metadata = metadataInDirectory(directory);
+            NSString *product = metadata[@"product"] ?: @"iPhone1,2";
             [entries addObject:@{@"id":name, @"name":[self displayNameInDirectory:directory],
-                @"device":@"iPhone 3G", @"version":@"3.1.3", @"build":@"7E18",
+                @"device":[product isEqual:@"iPhone1,2"] ? @"iPhone 3G" : product,
+                @"version":metadata[@"version"] ?: @"3.1.3", @"build":metadata[@"build"] ?: @"7E18",
                 @"default":@([directory isEqual:active]), @"machines":@(used),
                 @"removable":@(!used && ![directory isEqual:active] && validGeneration(name))}];
         }

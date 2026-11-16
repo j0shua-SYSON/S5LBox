@@ -515,7 +515,15 @@ static void vmfw_strip_trailing_slash(char *path) {
         vm_fw_policy_t policy = {.skip_stock_checksums = _skipChecksumsForRun};
         for (unsigned i = 0; i < VM_FW_ARTEFACT_COUNT; i++)
             policy.sizes[i] = report->artefacts[i].produced;
-        if (vm_fw_policy_write(staging.fileSystemRepresentation, &policy))
+        NSString *name = report->firmware_name[0]
+            ? [NSString stringWithUTF8String:report->firmware_name]
+            : url.lastPathComponent.stringByDeletingPathExtension;
+        NSDictionary *metadata = @{@"schema":@1, @"name":name.length ? name : @"Custom firmware",
+            @"product":[NSString stringWithUTF8String:report->product_type],
+            @"version":[NSString stringWithUTF8String:report->product_version],
+            @"build":[NSString stringWithUTF8String:report->build]};
+        if (vm_fw_policy_write(staging.fileSystemRepresentation, &policy) &&
+            [VMFirmwareStore writeMetadata:metadata inDirectory:staging error:&error])
             published = [VMFirmwareStore publishDirectory:staging inRoot:root error:&error];
         if (!published) {
             status = VM_FW_ERR_OUTPUT_REFUSED;
