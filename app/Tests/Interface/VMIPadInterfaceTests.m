@@ -4,19 +4,28 @@
 @interface VMIPadInterfaceTests : XCTestCase
 @end
 @implementation VMIPadInterfaceTests
+- (void)tapFileItem:(XCUIElement *)label inApp:(XCUIApplication *)app {
+    // In Files' icon view the title is not the icon's activation target.
+    XCUIElement *cell = [app.cells containingType:XCUIElementTypeStaticText
+        identifier:label.label].firstMatch;
+    XCUIElement *icon = cell.images.firstMatch;
+    if (icon.exists && icon.hittable) [icon tap];
+    else if (cell.exists && cell.hittable) [cell tap];
+    else [label tap];
+}
 - (void)chooseFixture:(NSString *)name inApp:(XCUIApplication *)app {
     XCUIElement *browse = app.buttons[@"Browse"].firstMatch;
     if ([browse waitForExistenceWithTimeout:5] && browse.hittable) [browse tap];
     for (NSString *folder in @[@"On My iPad", @"S5LBox", @"PickerFixtures"]) {
         XCUIElement *item = app.staticTexts[folder].firstMatch;
         XCTAssertTrue([item waitForExistenceWithTimeout:30], @"%@", app.debugDescription);
-        [item tap];
+        [self tapFileItem:item inApp:app];
     }
     // Files may hide a known extension in its visible title.
     XCUIElement *file = [app.staticTexts matchingPredicate:[NSPredicate
         predicateWithFormat:@"label == %@ OR label == %@", name, name.stringByDeletingPathExtension]].firstMatch;
     XCTAssertTrue([file waitForExistenceWithTimeout:30], @"%@", app.debugDescription);
-    [file tap];
+    [self tapFileItem:file inApp:app];
     XCUIElement *open = app.buttons[@"Open"].firstMatch;
     if ([open waitForExistenceWithTimeout:2] && open.hittable) [open tap];
 }
