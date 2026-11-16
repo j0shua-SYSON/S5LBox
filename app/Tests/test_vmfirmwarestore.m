@@ -224,6 +224,13 @@ int main(int argc, const char *argv[]) {
         [importer importPickedIPSWAtURL:picked]; // Duplicate delivery keeps the active copy.
         waitForImport(importer);
         assert([fm fileExistsAtPath:picked.path]);
+        NSString *savedRoot = testRoot;
+        testRoot = [fixtureRoot stringByAppendingPathComponent:@"picker-retry"];
+        assert([fm createDirectoryAtPath:testRoot withIntermediateDirectories:YES attributes:nil error:NULL]);
+        importer.archives = @[archive];
+        assert(![importer importDetectedIPSWIfNeeded]);
+        assert([importer.selectedURL isEqual:picked]);
+        testRoot = savedRoot;
         [importer importIPSWAtURL:picked]; // Retry through Settings retains ownership.
         [importer cancelImport];
         waitForImport(importer);
