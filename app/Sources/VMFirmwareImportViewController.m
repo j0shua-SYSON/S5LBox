@@ -7,6 +7,7 @@
 
 #import "VMFirmwareImport.h"
 #import "VMFirmwareImporter.h"
+#import "VMFirmwareStore.h"
 #import "VMFirmwareBoot.h"
 #import "VMSettings.h"
 
@@ -324,6 +325,9 @@ static BOOL VMProbeFirmware(vm_firmware_boot_state_t *out) {
 #pragma mark - Table shape
 
 - (void)refresh {
+    _intro.text = [VMFirmwareImporter hasConfiguredFirmware]
+        ? [VMFirmwareStore displayNameInDirectory:VMSettings.sharedSettings.firmwareDirectory]
+        : @"iPhone OS 3.1.3 or Whited00r 7.1 for iPhone 3G";
     [self rebuildSections];
     [self.tableView reloadData];
 }

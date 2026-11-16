@@ -6,6 +6,7 @@
 #import "VMInstanceStore.h"
 
 #import "VMFirmwareBoot.h"
+#import "VMFirmwareStore.h"
 #import "VMOptions.h"
 #import "VMSettings.h"
 #include "VMDiskSize.h"
@@ -460,6 +461,11 @@ static NSString *VMGraphicsRecordText(BOOL mbxEnabled,
 }
 
 - (NSString *)createInstanceNamed:(NSString *)name diskSizeGiB:(NSUInteger)gib error:(NSError **)error {
+    return [self createInstanceNamed:name firmwareIdentifier:nil diskSizeGiB:gib error:error];
+}
+
+- (NSString *)createInstanceNamed:(NSString *)name firmwareIdentifier:(NSString *)firmwareIdentifier
+                      diskSizeGiB:(NSUInteger)gib error:(NSError **)error {
     NSString *identifier = [self freshIdentifier];
     if (!identifier) {
         if (error) *error = [self errorFor:VM_INSTANCE_ERR_ID_TAKEN];
@@ -503,6 +509,18 @@ static NSString *VMGraphicsRecordText(BOOL mbxEnabled,
     }
 
     if (![self writeDiskSize:gib forInstance:identifier error:error]) {
+        (void)vm_instance_remove(&_list, added);
+        [NSFileManager.defaultManager removeItemAtPath:
+            [[self containerDirectory] stringByAppendingPathComponent:identifier] error:nil];
+        return nil;
+    }
+    NSString *firmwareRoot = [[[self containerDirectory] stringByDeletingLastPathComponent]
+        stringByAppendingPathComponent:@"firmware"];
+    if ((firmwareIdentifier || [VMFirmwareStore hasPreparedFilesInDirectory:
+            [VMFirmwareStore activeDirectoryInRoot:firmwareRoot]]) &&
+        ![VMFirmwareStore pinFirmware:firmwareIdentifier
+            forMachine:[[self containerDirectory] stringByAppendingPathComponent:identifier]
+            inRoot:firmwareRoot error:error]) {
         (void)vm_instance_remove(&_list, added);
         [NSFileManager.defaultManager removeItemAtPath:
             [[self containerDirectory] stringByAppendingPathComponent:identifier] error:nil];

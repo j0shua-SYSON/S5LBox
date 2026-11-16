@@ -18,6 +18,7 @@
 #import "VMSettings.h"
 #import "VMSettingsViewController.h"
 #import "VMFirmwareImporter.h"
+#import "VMFirmwareStore.h"
 #import "VMSetupViewController.h"
 #include <math.h>
 
@@ -205,15 +206,33 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
 
 #pragma mark - Actions
 
-- (void)addTapped {
+- (void)createWithFirmware:(NSDictionary *)firmware {
     [self promptWithTitle:@"New Machine"
-                     text:@""
+                     text:firmware[@"name"] ?: @""
                    accept:@"Create"
                   handler:^(NSString *name) {
         NSError *err = nil;
-        if (![[VMInstanceStore sharedStore] createInstanceNamed:name error:&err])
+        if (![VMInstanceStore.sharedStore createInstanceNamed:name firmwareIdentifier:firmware[@"id"]
+            diskSizeGiB:VMSettings.sharedSettings.newMachineDiskSizeGiB error:&err])
             [self showError:err doing:@"Could not create the machine"];
     }];
+}
+
+- (void)addTapped {
+    NSString *root = [VMSettings.sharedSettings.documentsDirectory stringByAppendingPathComponent:@"firmware"];
+    NSArray *firmwares = [VMFirmwareStore firmwaresInRoot:root];
+    if (firmwares.count < 2) { [self createWithFirmware:firmwares.firstObject]; return; }
+    UIAlertController *picker = [UIAlertController alertControllerWithTitle:@"Choose Firmware"
+        message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSDictionary *entry in firmwares) {
+        [picker addAction:[UIAlertAction actionWithTitle:entry[@"name"] style:UIAlertActionStyleDefault
+            handler:^(__unused UIAlertAction *action) {
+            [picker dismissViewControllerAnimated:YES completion:^{ [self createWithFirmware:entry]; }];
+        }]];
+    }
+    [picker addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    picker.popoverPresentationController.barButtonItem = self.navigationItem.rightBarButtonItem;
+    [self presentViewController:picker animated:YES completion:nil];
 }
 
 - (void)beginGuestInstallForID:(NSString *)identifier name:(NSString *)name packagesOnly:(BOOL)packagesOnly {

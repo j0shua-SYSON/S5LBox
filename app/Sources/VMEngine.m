@@ -40,6 +40,7 @@
 #import "VMFirmwareBoot.h"
 #import "VMInstancePaths.h"
 #import "VMInstanceStore.h"
+#import "VMFirmwareStore.h"
 #import "VMSettings.h"
 #import "VMUSBTransport.h"
 #import "VMUSBClockSync.h"
@@ -702,6 +703,15 @@ static double vm_engine_now_seconds(void) {
     if (!mine.length) {
         if (note) *note = @"This machine has nowhere on disk to keep its root "
                           @"filesystem.";
+        return NO;
+    }
+
+    NSError *firmwareError = nil;
+    NSString *firmwareRoot = [VMSettings.sharedSettings.documentsDirectory
+        stringByAppendingPathComponent:@"firmware"];
+    firmware = [VMFirmwareStore firmwareForMachine:mine inRoot:firmwareRoot error:&firmwareError];
+    if (!firmware.length) {
+        if (note) *note = firmwareError.localizedDescription ?: @"This machine's firmware is unavailable.";
         return NO;
     }
 

@@ -4,6 +4,8 @@
 #import "VMFirmwareImporter.h"
 #import "VMFirmwareDownloader.h"
 #import "VMSettingsViewController.h"
+#import "VMSettings.h"
+#import "VMFirmwareStore.h"
 #include <math.h>
 
 @interface VMSetupViewController () <UIDocumentPickerDelegate, VMFirmwareImporterDelegate>
@@ -326,7 +328,7 @@ static NSString *SetupFailureDetail(const vm_fw_report_t *report) {
         _status.text = @"Firmware ready";
         _statusIcon.image = [UIImage systemImageNamed:@"checkmark.circle.fill"];
         _statusIcon.tintColor = UIColor.systemGreenColor;
-        _detail.text = @"iPhone OS 3.1.3 for iPhone 3G";
+        _detail.text = [VMFirmwareStore displayNameInDirectory:VMSettings.sharedSettings.firmwareDirectory];
     } else {
         _status.text = @"Firmware";
         _statusIcon.image = [UIImage systemImageNamed:@"square.and.arrow.down"];

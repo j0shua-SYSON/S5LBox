@@ -293,6 +293,7 @@ typedef struct {
     char     build[16];             /* "7E18"       */
     char     board[16];             /* "n82ap"      */
     char     platform[16];          /* "s5l8900x"   */
+    char     firmware_name[64];     /* Nonempty only after full verification. */
 
     /* True when this build is one we hold reference hashes for, so a VERIFIED
      * state is possible at all. Everything still works without it; the

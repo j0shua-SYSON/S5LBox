@@ -227,7 +227,7 @@ vm_fw_status_t vm_fw_keys_set_root(vm_fw_keys_t *keys, const char *key_hex) {
 /* Known-good references                                                     */
 /* ------------------------------------------------------------------------ */
 /*
- * The only build this project has ever verified end to end. Hashes are of the
+ * Supported firmware profiles share the 7E18 base build. Hashes are of the
  * FINAL artefacts, not of any IPSW member, so they identify what the emulator
  * accepts rather than what Apple shipped -- and they contain no Apple data.
  *
@@ -235,33 +235,9 @@ vm_fw_status_t vm_fw_keys_set_root(vm_fw_keys_t *keys, const char *key_hex) {
  * VERIFIED, and the report says why. Claiming a verification we cannot perform
  * would be worse than not performing it.
  */
-typedef struct {
-    const char *product_type;
-    const char *build;
-    uint64_t    size[VM_FW_ARTEFACT_COUNT];
-    uint8_t     sha256[VM_FW_ARTEFACT_COUNT][VM_FW_SHA256_LEN];
-} vm_fw_reference_t;
-
-static const vm_fw_reference_t k_references[] = {
-    {
-        "iPhone1,2", "7E18",
-        { 7942144u, 40544u, 433274880u },
-        {
-            /* kernel.macho */
-            { 0x0d,0x8c,0xdb,0x33,0x9d,0x37,0xcf,0x37,0xa1,0xdb,0x26,0x38,
-              0xff,0xf7,0x92,0x72,0xec,0xd6,0x3a,0x17,0x76,0x4b,0xf7,0x66,
-              0x6e,0xfa,0x16,0x18,0x72,0x5d,0xf7,0x0c },
-            /* devicetree.bin */
-            { 0x48,0x67,0xc9,0x5f,0xed,0xf5,0x44,0xbd,0xa2,0xec,0xaa,0x26,
-              0x26,0xae,0x14,0xc0,0x1a,0x60,0xd7,0x77,0x1d,0xc5,0x3f,0xfe,
-              0x6f,0xd3,0xa6,0xaa,0xc8,0xb8,0xba,0x57 },
-            /* rootfs.img */
-            { 0xc3,0x25,0x1e,0x7f,0x09,0x2c,0x93,0x9d,0x58,0x18,0xe9,0x20,
-              0x86,0xcb,0x47,0x68,0x09,0x81,0xcf,0xb0,0x37,0x31,0xde,0x7b,
-              0x55,0xd2,0x38,0xc9,0x42,0xeb,0x5e,0x82 }
-        }
-    }
-};
+#include "ios3_firmware_profiles.h"
+typedef ios3_firmware_profile_t vm_fw_reference_t;
+#define k_references ios3_firmware_profiles
 
 static const vm_fw_reference_t *find_reference(const char *product_type,
                                                const char *build) {
@@ -580,11 +556,30 @@ bool vm_fw_reference_matches(uint64_t produced_size,
     return memcmp(produced_sha256, reference_sha256, VM_FW_SHA256_LEN) == 0;
 }
 
-static void finish_hash(const run_t *r, vm_fw_artefact_report_t *ar,
+static void finish_hash(run_t *r, vm_fw_artefact_report_t *ar,
                         out_sink_t *o, vm_fw_artefact_t which) {
     if (!ios3_sha256_final(&o->sha, ar->sha256)) return;
     ar->sha256_valid = true;
     ar->produced = o->total;
+
+    if (r->ref) {
+        // Variants can share a kernel. Narrow by every component already
+        // decoded so a later root filesystem can select the right variant,
+        // while a mixture of two profiles cannot become a verified set.
+        for (size_t i = 0; i < IOS3_FIRMWARE_PROFILE_COUNT; i++) {
+            const vm_fw_reference_t *profile = &k_references[i];
+            if (strcmp(profile->product_type, r->rep->product_type) ||
+                strcmp(profile->build, r->rep->build)) continue;
+            bool matches = true;
+            for (unsigned j = 0; j <= (unsigned)which; j++) {
+                const vm_fw_artefact_report_t *component = &r->rep->artefacts[j];
+                if (component->sha256_valid &&
+                    !vm_fw_reference_matches(component->produced, component->sha256,
+                        profile->size[j], profile->sha256[j])) matches = false;
+            }
+            if (matches) { r->ref = profile; break; }
+        }
+    }
 
     if (!r->ref || r->cfg->skip_stock_checksums) {
         ar->state = VM_FW_STATE_EXTRACTED;
@@ -1329,6 +1324,8 @@ vm_fw_status_t vm_fw_import_run(const vm_fw_import_t *cfg,
              verified, waiting, failed);
 
     report->status = VM_FW_OK;
+    if (r.ref && vm_fw_report_is_verified(report))
+        snprintf(report->firmware_name, sizeof report->firmware_name, "%s", r.ref->name);
     if (report->stock_checksums_skipped && vm_fw_report_is_prepared(report))
         snprintf(report->detail, sizeof report->detail,
                  "%s %s: prepared without stock checksum verification.",

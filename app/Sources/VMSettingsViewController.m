@@ -8,6 +8,7 @@
 #import "VMBootOptions.h"       /* what each switch actually does, per row */
 #import "VMJitProbe.h"          /* the explicit, recoverable execution test */
 #import "VMFirmwareImportViewController.h"
+#import "VMFirmwareLibraryViewController.h"
 #import "VMFirmwareImporter.h"
 #import "VMGuestInstall.h"
 #import "VMInstanceStore.h"
@@ -828,7 +829,7 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     if (general) {
         VMGeneralRow row = (VMGeneralRow)general[(NSUInteger)indexPath.row].integerValue;
         if (row == VMGeneralRowFirmware) {
-            [self.navigationController pushViewController:[[VMFirmwareImportViewController alloc] init] animated:YES];
+            [self.navigationController pushViewController:[VMFirmwareLibraryViewController new] animated:YES];
         } else if (row == VMGeneralRowAdvanced) {
             VMSettingsViewController *advanced = [[VMSettingsViewController alloc] init];
             advanced->_advanced = YES;

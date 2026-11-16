@@ -115,7 +115,7 @@ int main(int argc, const char *argv[]) {
         makeSet(second);
         assert([VMFirmwareStore publishDirectory:second inRoot:testRoot error:NULL]);
         assert([[VMFirmwareStore activeDirectoryInRoot:testRoot] isEqual:second]);
-        assert(![fm fileExistsAtPath:first] && [VMFirmwareStore hasPreparedFilesInDirectory:testRoot]);
+        assert([fm fileExistsAtPath:first] && [VMFirmwareStore hasPreparedFilesInDirectory:testRoot]);
         // Pointer traversal cannot redirect the boot source or cleanup target.
         assert([@"../outside" writeToFile:pointer atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
         assert([[VMFirmwareStore activeDirectoryInRoot:testRoot] isEqual:testRoot]);
@@ -204,7 +204,7 @@ int main(int argc, const char *argv[]) {
         [prepared importIPSWAtURL:url];
         waitForImport(prepared);
         assert(prepared.completions == 2 && !prepared.usedSkip && !prepared.skipStockChecksums);
-        assert(![fm fileExistsAtPath:active]); // Successful replacement reclaims only old generation.
+        assert([fm fileExistsAtPath:active]); // Imported generations remain in the library.
         active = [VMFirmwareStore activeDirectoryInRoot:testRoot];
         assert(vm_fw_policy_read(active.fileSystemRepresentation, &policy) == 1 && !policy.skip_stock_checksums);
         assert(policy.sizes[0] == 7942144 && [VMFirmwareStore hasPreparedFilesInDirectory:active]);
@@ -212,7 +212,7 @@ int main(int argc, const char *argv[]) {
         [prepared importIPSWAtURL:url];
         waitForImport(prepared);
         assert(prepared.completions == 3 && prepared.usedSkip && prepared.skipStockChecksums);
-        assert(![fm fileExistsAtPath:active]);
+        assert([fm fileExistsAtPath:active]);
         active = [VMFirmwareStore activeDirectoryInRoot:testRoot];
         assert(vm_fw_policy_read(active.fileSystemRepresentation, &policy) == 1 && policy.skip_stock_checksums);
         policy.skip_stock_checksums = false;
@@ -221,6 +221,46 @@ int main(int argc, const char *argv[]) {
         assert(prepared.canChangeChecksumVerification); // Damaged firmware can be replaced with either policy.
         prepared.skipStockChecksums = NO;
         assert(![VMFirmwareStore hasPreparedFilesInDirectory:active]);
+        // A machine must retain its own firmware when the library default changes.
+        NSString *library = [fixtureRoot stringByAppendingPathComponent:@"library/firmware"];
+        NSString *machines = [fixtureRoot stringByAppendingPathComponent:@"library/Machines"];
+        assert([fm createDirectoryAtPath:library withIntermediateDirectories:YES attributes:nil error:NULL]);
+        assert([fm createDirectoryAtPath:machines withIntermediateDirectories:YES attributes:nil error:NULL]);
+        NSString *stock = [VMFirmwareStore createStagingDirectoryInRoot:library error:NULL];
+        makeSet(stock);
+        assert([VMFirmwareStore publishDirectory:stock inRoot:library error:NULL]);
+        NSString *machineA = [machines stringByAppendingPathComponent:@"1111111111111111"];
+        assert([fm createDirectoryAtPath:machineA withIntermediateDirectories:NO attributes:nil error:NULL]);
+        // Leave this legacy machine unpinned until the next import migrates it.
+        NSString *whited = [VMFirmwareStore createStagingDirectoryInRoot:library error:NULL];
+        makeSet(whited);
+        vm_fw_policy_t whitedPolicy = {false, {7942144, 40544, 567279616}};
+        int rootFD = open([whited stringByAppendingPathComponent:@"rootfs.img"].fileSystemRepresentation, O_RDWR);
+        assert(rootFD >= 0 && ftruncate(rootFD, 567279616) == 0 && close(rootFD) == 0);
+        assert(vm_fw_policy_write(whited.fileSystemRepresentation, &whitedPolicy));
+        assert([VMFirmwareStore publishDirectory:whited inRoot:library error:NULL]);
+        assert([[VMFirmwareStore firmwareForMachine:machineA inRoot:library error:NULL] isEqual:stock]);
+        assert([[VMFirmwareStore activeDirectoryInRoot:library] isEqual:whited]);
+        assert([VMFirmwareStore firmwaresInRoot:library].count == 2);
+        assert([[VMFirmwareStore displayNameInDirectory:whited] isEqual:@"Whited00r 7.1"]);
+        NSString *machineB = [machines stringByAppendingPathComponent:@"2222222222222222"];
+        assert([fm createDirectoryAtPath:machineB withIntermediateDirectories:NO attributes:nil error:NULL]);
+        assert([VMFirmwareStore pinFirmware:whited.lastPathComponent forMachine:machineB inRoot:library error:NULL]);
+        assert(![VMFirmwareStore pinFirmware:stock.lastPathComponent forMachine:machineB inRoot:library error:NULL]);
+        assert(![VMFirmwareStore removeFirmware:stock.lastPathComponent inRoot:library error:NULL]);
+        assert([VMFirmwareStore selectFirmware:stock.lastPathComponent inRoot:library error:NULL]);
+        assert([[VMFirmwareStore firmwareForMachine:machineB inRoot:library error:NULL] isEqual:whited]);
+        assert(![VMFirmwareStore removeFirmware:whited.lastPathComponent inRoot:library error:NULL]);
+        // A malformed source must refuse rather than silently boot the default.
+        NSString *record = [machineB stringByAppendingPathComponent:@"firmware-source.txt"];
+        assert([@"../outside" writeToFile:record atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        assert(![VMFirmwareStore firmwareForMachine:machineB inRoot:library error:NULL]);
+        assert(![VMFirmwareStore removeFirmware:whited.lastPathComponent inRoot:library error:NULL]);
+        assert([whited.lastPathComponent writeToFile:record atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        assert([fm removeItemAtPath:machineB error:NULL]);
+        assert([VMFirmwareStore removeFirmware:whited.lastPathComponent inRoot:library error:NULL]);
+        assert([VMFirmwareStore firmwaresInRoot:library].count == 1 && [fm fileExistsAtPath:stock]);
+        assert(![VMFirmwareStore removeFirmware:@"../outside" inRoot:library error:NULL]);
         testRoot = fixtureRoot;
         assert([fm removeItemAtPath:testRoot error:NULL]); // Only this test's UUID root.
         puts("firmware store: publication, rollback, legacy paths, cancellation and retained importer state passed");

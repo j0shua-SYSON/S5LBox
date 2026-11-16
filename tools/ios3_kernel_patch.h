@@ -1,8 +1,8 @@
 /*
  * S5LBox -- fail-closed iPhone OS 3.1.3 (7E18) kernel compatibility gate.
  *
- * The compatibility patches in this interface are valid for one exact
- * decrypted kernel build. They are deliberately host policy rather than a
+ * The compatibility patches in this interface are valid for the pinned
+ * stock and Whited00r 7.1 Normal kernel profiles. They are host policy rather than a
  * generic ARM-core feature: a different kernel fails before any guest byte is
  * changed.
  *
@@ -55,7 +55,7 @@
 #define IOS3_KERNEL_PATCH_NO_BYTE UINT32_MAX
 #define IOS3_KERNEL_PATCH_NO_ADDRESS UINT64_MAX
 
-/* Exact identity of the supported decrypted kernel bytes. */
+/* Original stock identity, also used by the exact-stock regression fixtures. */
 extern const uint8_t ios3_kernel_patch_expected_sha256[
     IOS3_KERNEL_PATCH_SHA256_LENGTH];
 extern const uint8_t ios3_kernel_patch_expected_uuid[

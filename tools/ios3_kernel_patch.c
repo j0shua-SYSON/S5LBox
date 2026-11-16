@@ -5,6 +5,7 @@
  */
 #include "ios3_kernel_patch.h"
 #include "sha256.h"
+#include "ios3_firmware_profiles.h"
 
 #include <string.h>
 
@@ -631,7 +632,9 @@ ios3_kernel_patch_status_t ios3_kernel_patch_apply(
                                   IOS3_KERNEL_PATCH_STATUS_INVALID_ARGUMENT,
                                   0u, 0u);
         }
-        for (byte_index = 0u; byte_index < IOS3_KERNEL_PATCH_SHA256_LENGTH;
+        bool known_kernel = ios3_firmware_profile_for_kernel(saved_request.kernel_file_size, digest) != NULL;
+        for (byte_index = 0u; !known_kernel &&
+             byte_index < IOS3_KERNEL_PATCH_SHA256_LENGTH;
              byte_index++) {
             if (digest[byte_index] !=
                 ios3_kernel_patch_expected_sha256[byte_index]) {
