@@ -180,7 +180,7 @@ foreach(required "[rows addObject:@(VMGeneralRowDiskSize)]"
     endif()
 endforeach()
 string(FIND "${machines}" "alertControllerWithTitle:@\"Disk Size\"" old_disk_picker)
-string(FIND "${machines}" "createInstanceNamed:name error:&err" default_creation)
+string(FIND "${machines}" "diskSizeGiB:VMSettings.sharedSettings.newMachineDiskSizeGiB error:&err" default_creation)
 string(FIND "${store}" "diskSizeGiB:[VMSettings sharedSettings].newMachineDiskSizeGiB error:error" recorded_default)
 if(NOT old_disk_picker EQUAL -1 OR default_creation EQUAL -1 OR recorded_default EQUAL -1)
     message(FATAL_ERROR "New Machine must record the storage default without a size picker")
