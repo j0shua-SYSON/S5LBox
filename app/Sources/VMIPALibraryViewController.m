@@ -1,6 +1,8 @@
 // Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 #import "VMIPALibraryViewController.h"
 #import "VMIPALibrary.h"
+#import "VMDocumentPicker.h"
+#import "VMImportedDocument.h"
 #import "VMIPAIcon.h"
 #import "VMLegacyStoreViewController.h"
 #import <ImageIO/ImageIO.h>
@@ -204,18 +206,18 @@ static UIImage *LibraryIconThumbnail(NSArray<NSData *> *candidates, CGFloat scal
 }
 - (void)importTapped {
     if (_importing) return;
-    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc]
-        initWithDocumentTypes:@[@"public.data"] inMode:UIDocumentPickerModeOpen];
+    UIDocumentPickerViewController *picker = VMCreateImportPicker();
     picker.allowsMultipleSelection = NO;
     picker.delegate = self;
     [self presentViewController:picker animated:YES completion:nil];
 }
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentAtURL:(NSURL *)url {
-    [self documentPicker:controller didPickDocumentsAtURLs:@[url]];
+    [self documentPicker:controller didPickDocumentsAtURLs:url ? @[url] : @[]];
 }
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     NSURL *url = urls.firstObject;
     if (!url || _importing) return;
+    VMImportedDocument *document = [[VMImportedDocument alloc] initWithPickerURL:url];
     BOOL scoped = [url startAccessingSecurityScopedResource];
     _importing = YES;
     _status = [@"Importing " stringByAppendingString:url.lastPathComponent];
@@ -224,7 +226,7 @@ static UIImage *LibraryIconThumbnail(NSArray<NSData *> *candidates, CGFloat scal
     [controller dismissViewControllerAnimated:YES completion:nil];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *error = nil;
-        NSURL *saved = [VMIPALibrary importURL:url error:&error];
+        NSURL *saved = [VMIPALibrary importURL:document.url error:&error];
         if (scoped) [url stopAccessingSecurityScopedResource];
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_importing = NO;

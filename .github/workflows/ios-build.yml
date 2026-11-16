@@ -99,6 +99,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p work/firmware-tests
+          export TMPDIR="$GITHUB_WORKSPACE/work/firmware-tests/tmp"
+          mkdir -p "$TMPDIR"
           for source in app/Sources/VMFirmwareImport.c app/Sources/VMFirmwareKeys.c app/Sources/VMFirmwarePolicy.c \
             app/Sources/VMFirmwareZip.c app/Sources/VMFirmwarePlist.c \
             app/Sources/VMFirmwareInflate.c app/Sources/VMFirmwareDigest.c app/Sources/VMFirmwareDMG.c \
@@ -109,12 +111,12 @@ jobs:
           done
           xcrun clang -fobjc-arc -Wall -Wextra -Werror -framework Foundation \
             -I app/Sources -I core/include -I tools \
-            app/Sources/VMFirmwareImporter.m app/Sources/VMFirmwareStore.m app/Sources/VMSettings.m \
+            app/Sources/VMFirmwareImporter.m app/Sources/VMImportedDocument.m app/Sources/VMFirmwareStore.m app/Sources/VMSettings.m \
             app/Tests/test_vmfirmwarestore.m work/firmware-tests/*.o -o work/firmware-tests/test_firmware
           work/firmware-tests/test_firmware "$GITHUB_WORKSPACE/work/firmware-tests"
           xcrun clang -fobjc-arc -Wall -Wextra -Werror -framework Foundation \
             -I app/Sources -I core/include -I tools \
-            app/Sources/VMFirmwareDownloader.m app/Sources/VMFirmwareImporter.m \
+            app/Sources/VMFirmwareDownloader.m app/Sources/VMFirmwareImporter.m app/Sources/VMImportedDocument.m \
             app/Sources/VMFirmwareStore.m app/Sources/VMSettings.m \
             app/Tests/test_vmfirmwaredownload.m work/firmware-tests/*.o -o work/firmware-tests/test_download
           work/firmware-tests/test_download "$GITHUB_WORKSPACE/work/firmware-tests"
@@ -278,8 +280,9 @@ jobs:
             app/Sources/VMSetupViewController.m app/Sources/VMFirmwareImportViewController.m \
             app/Sources/VMFirmwareLibraryViewController.m \
             app/Sources/VMGuestInstallViewController.m \
-            app/Sources/VMFirmwareImporter.m app/Sources/VMFirmwareStore.m \
+            app/Sources/VMFirmwareImporter.m app/Sources/VMImportedDocument.m app/Sources/VMFirmwareStore.m \
             app/Sources/VMFirmwareDownloader.m \
+            app/Sources/VMDocumentPicker.m \
             app/Sources/VMIPALibraryViewController.m app/Sources/VMLegacyStoreViewController.m \
             app/Sources/VMLegacyStore.m app/Sources/VMLegacyStoreDownload.m
 

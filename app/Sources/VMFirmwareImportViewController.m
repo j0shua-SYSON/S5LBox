@@ -8,6 +8,7 @@
 #import "VMFirmwareImport.h"
 #import "VMFirmwareImporter.h"
 #import "VMFirmwareStore.h"
+#import "VMDocumentPicker.h"
 #import "VMFirmwareBoot.h"
 #import "VMSettings.h"
 
@@ -165,6 +166,7 @@ static UIColor *VMImportStateColor(vm_fw_state_t state) {
 - (void)configureProgressCell:(VMImportProgressCell *)cell;
 - (void)presentPicker;
 - (void)startImportOfURL:(NSURL *)url;
+- (void)startImportOfURL:(NSURL *)url pickerCopy:(BOOL)pickerCopy;
 - (void)revealImportState;
 - (void)presentKeyAlertForArtefact:(vm_fw_artefact_t)which;
 - (void)applyKeyText:(NSString *)keyText
@@ -808,31 +810,8 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
 #pragma mark - Choosing a file
 
 - (void)presentPicker {
-    /*
-     * WHY THE DEPRECATED INITIALISER, DELIBERATELY.
-     *
-     * -initForOpeningContentTypes: is the iOS 14 replacement and it takes
-     * UTType objects, which live in UniformTypeIdentifiers.framework. That
-     * framework is not in this target's dependency list and this file is not
-     * allowed to add it, so reaching for the modern call would fail to link
-     * rather than fail to compile. The deployment target is iOS 13, where the
-     * modern call does not exist at all, so the string-based initialiser is the
-     * only one that both exists and links here. The warning is silenced at this
-     * one call site rather than for the file.
-     *
-     * MODE, also deliberately: Open, not Import. Import copies the chosen file
-     * into the app's container first, which for a 430 MB IPSW means writing
-     * half a gigabyte before any work starts and needing room for two copies.
-     * Open hands back a security-scoped URL to the file where it already is,
-     * which is exactly what a read-only pass over an archive wants.
-     */
-    UIDocumentPickerViewController *picker;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    picker = [[UIDocumentPickerViewController alloc]
-                 initWithDocumentTypes:@[ @"public.data" ]
-                                inMode:UIDocumentPickerModeOpen];
-#pragma clang diagnostic pop
+    if (_running || _importer.isRunning || self.presentedViewController) return;
+    UIDocumentPickerViewController *picker = VMCreateImportPicker();
 
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;
@@ -847,7 +826,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (!url) return;
     _pickedURL = url;
     _importer.delegate = self;
-    [self startImportOfURL:url];
+    [self startImportOfURL:url pickerCopy:YES];
     [controller dismissViewControllerAnimated:YES completion:^{
         [self revealImportState];
     }];
@@ -873,6 +852,10 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 }
 
 - (void)startImportOfURL:(NSURL *)url {
+    [self startImportOfURL:url pickerCopy:NO];
+}
+
+- (void)startImportOfURL:(NSURL *)url pickerCopy:(BOOL)pickerCopy {
     if (!url || _running || [_importer isRunning]) return;
 
     _running = YES;
@@ -886,7 +869,8 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     _fraction = -1.0;
 
     [self refresh];
-    [_importer importIPSWAtURL:url];
+    if (pickerCopy) [_importer importPickedIPSWAtURL:url];
+    else [_importer importIPSWAtURL:url];
     [self revealImportState];
 }
 
@@ -1078,6 +1062,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         _haveReport = YES;
     }
     _running = NO;
+    _pickedURL = importer.selectedURL;
     _cancelRequested = NO;
     _copiedReport = NO;
     _fraction = -1.0;

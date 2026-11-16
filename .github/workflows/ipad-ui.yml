@@ -38,17 +38,47 @@ jobs:
           else:
               raise SystemExit('No available iPad simulator')
           PY
-      - name: Test iPad setup, layouts and rotation
+      - name: Build iPad tests and seed file-picker fixtures
         working-directory: app
         run: |
           set -euo pipefail
           xcodebuild -project S5LBox.xcodeproj -scheme S5LBox-iPad \
             -configuration Debug -sdk iphonesimulator \
             -destination 'platform=iOS Simulator,id=${{ steps.simulator.outputs.id }}' \
+            -derivedDataPath "$PWD/../work/ipad-build" \
+            -parallel-testing-enabled NO -jobs 2 \
+            CODE_SIGNING_ALLOWED=NO LLVM_LTO=NO GCC_OPTIMIZATION_LEVEL=0 \
+            COMPILER_INDEX_STORE_ENABLE=NO build-for-testing > ../iPad-build.log 2>&1 || {
+              tail -150 ../iPad-build.log; exit 1;
+            }
+          simulator='${{ steps.simulator.outputs.id }}'
+          xcrun simctl boot "$simulator" || true
+          xcrun simctl bootstatus "$simulator" -b
+          xcrun simctl install "$simulator" "$PWD/../work/ipad-build/Build/Products/Debug-iphonesimulator/S5LBox.app"
+          container=$(xcrun simctl get_app_container "$simulator" com.j0shua.S5LBox data)
+          python3 - "$container" <<'PY'
+          import pathlib, plistlib, sys, zipfile
+          fixtures = pathlib.Path(sys.argv[1]) / 'Documents' / 'PickerFixtures'
+          fixtures.mkdir(parents=True, exist_ok=True)
+          (fixtures / 'Picker-firmware.ipsw').write_bytes(b'not an IPSW archive')
+          with zipfile.ZipFile(fixtures / 'Picker-app.ipa', 'w') as archive:
+              archive.writestr('Payload/Fixture.app/Info.plist', plistlib.dumps({
+                  'CFBundleIdentifier': 'org.example.picker-fixture',
+                  'CFBundleName': 'Picker Fixture', 'CFBundleExecutable': 'Fixture',
+                  'CFBundleVersion': '1', 'MinimumOSVersion': '3.0'}))
+          PY
+      - name: Test iPad setup, file selection, layouts and rotation
+        working-directory: app
+        run: |
+          set -euo pipefail
+          xcodebuild -project S5LBox.xcodeproj -scheme S5LBox-iPad \
+            -configuration Debug -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,id=${{ steps.simulator.outputs.id }}' \
+            -derivedDataPath "$PWD/../work/ipad-build" \
             -resultBundlePath "$PWD/../iPad-tests.xcresult" \
             -parallel-testing-enabled NO -jobs 2 \
             CODE_SIGNING_ALLOWED=NO LLVM_LTO=NO GCC_OPTIMIZATION_LEVEL=0 \
-            COMPILER_INDEX_STORE_ENABLE=NO test > ../iPad-tests.log 2>&1 || {
+            COMPILER_INDEX_STORE_ENABLE=NO test-without-building > ../iPad-tests.log 2>&1 || {
               tail -150 ../iPad-tests.log
               exit 1
             }
@@ -66,5 +96,6 @@ jobs:
           path: |
             iPad-tests.xcresult
             iPad-tests.log
+            iPad-build.log
             iPad-screenshots
           retention-days: 7

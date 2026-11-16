@@ -106,11 +106,13 @@ FOUNDATION_EXPORT NSNotificationName const VMFirmwareImportDidChangeNotification
  * Start. Does nothing at all -- no callback, no delegate message -- if a run is
  * already in flight, so a double tap cannot start two.
  *
- * `url` is expected to be what UIDocumentPickerViewController hands back in
- * open mode: a security-scoped file URL. Access is taken here and released when
- * the run ends.
+ * Local files and external security-scoped URLs are supported. Originals are
+ * never removed. Access is held until the run ends.
  */
 - (void)importIPSWAtURL:(NSURL *)url;
+/* Import-mode picker copy: retain on failure/cancellation for key entry and
+ * retry; remove after success or replacement by another selection. */
+- (void)importPickedIPSWAtURL:(NSURL *)url;
 
 /* Ask the run to stop. It ends with VM_FW_ERR_CANCELLED and every partly
  * written output deleted by the core's own close(keep=false). Harmless when

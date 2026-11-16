@@ -6,6 +6,7 @@
 #import "VMSettingsViewController.h"
 #import "VMSettings.h"
 #import "VMFirmwareStore.h"
+#import "VMDocumentPicker.h"
 #include <math.h>
 
 @interface VMSetupViewController () <UIDocumentPickerDelegate, VMFirmwareImporterDelegate>
@@ -356,11 +357,7 @@ static NSString *SetupFailureDetail(const vm_fw_report_t *report) {
 }
 - (void)presentPicker {
     if (_importer.isRunning || _downloader.running || self.presentedViewController) return;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc]
-        initWithDocumentTypes:@[@"public.data"] inMode:UIDocumentPickerModeOpen];
-#pragma clang diagnostic pop
+    UIDocumentPickerViewController *picker = VMCreateImportPicker();
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;
     [self presentViewController:picker animated:YES completion:nil];
@@ -369,7 +366,7 @@ static NSString *SetupFailureDetail(const vm_fw_report_t *report) {
     if (!urls.firstObject || _importer.isRunning || _downloader.running) return;
     _manualAttempt = YES;
     _importer.delegate = self;
-    [_importer importIPSWAtURL:urls.firstObject]; // Take security scope before dismissal.
+    [_importer importPickedIPSWAtURL:urls.firstObject];
     [controller dismissViewControllerAnimated:YES completion:^{ [self refresh]; }];
 }
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentAtURL:(NSURL *)url {
