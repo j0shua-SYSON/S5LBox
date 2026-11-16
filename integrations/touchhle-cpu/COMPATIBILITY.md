@@ -379,3 +379,12 @@ dates outside the 32-bit POSIX timestamp range. The local ARMv6 Foundation suite
 passes on 101c3562, including style changes, quoted literals, millisecond rollover
 and timezone ownership. Configurable locales/calendars and general timezone data
 remain outside this change. Chopper save/reload verification is pending.
+
+Image loading now preserves whether the source has an alpha channel. Opaque
+JPEGs and RGB/RGBX images report padding rather than premultiplied alpha;
+copies, crops and PNG exports retain that distinction. RGBX snapshots normalize
+unused bytes to opaque pixels without changing the caller's buffer. The change
+includes Rust decoding tests and an ARMv6 fixture for image metadata, copying,
+cropping, export and padding. Build and device verification are pending; this
+addresses Fieldrunners' image-format selection, not a complete compatibility
+claim.

@@ -25,6 +25,9 @@ use touchHLE_stb_image_wrapper::*;
 pub struct Image {
     pixels: PixelStore,
     dimensions: (u32, u32),
+    // Storage is always RGBA, but an opaque source has a padding byte, not
+    // an alpha channel. Callers use this distinction to load separate masks.
+    has_alpha: bool,
 }
 
 enum PixelStore {
@@ -40,7 +43,7 @@ impl Image {
 
         let mut x: c_int = 0;
         let mut y: c_int = 0;
-        let mut _channels_in_file: c_int = 0;
+        let mut channels_in_file: c_int = 0;
 
         // TODO: we're currently assuming this is sRGB, can we check somehow?
 
@@ -59,7 +62,7 @@ impl Image {
                 len,
                 &mut x,
                 &mut y,
-                &mut _channels_in_file,
+                &mut channels_in_file,
                 4,
             )
         };
@@ -88,17 +91,38 @@ impl Image {
         Ok(Image {
             pixels: PixelStore::StbImage(pixels),
             dimensions: (width, height),
+            has_alpha: matches!(channels_in_file, 2 | 4),
         })
     }
 
     /// TODO: This shouldn't really exist, it's a workaround for `CGImage`
     /// relying on this type and should be removed once it can be refactored.
     pub fn from_pixel_vec(pixels: Vec<u8>, dimensions: (u32, u32)) -> Image {
+        Self::from_pixel_vec_with_alpha(pixels, dimensions, true)
+    }
+
+    pub fn from_pixel_vec_with_alpha(
+        mut pixels: Vec<u8>,
+        dimensions: (u32, u32),
+        has_alpha: bool,
+    ) -> Image {
         assert!(dimensions.0 as usize * 4 * dimensions.1 as usize == pixels.len());
+        if !has_alpha {
+            // RGBX contexts need not initialize their unused component. Our
+            // renderer consumes RGBA, so normalize padding to opaque alpha.
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel[3] = 255;
+            }
+        }
         Image {
             pixels: PixelStore::Vec(pixels),
             dimensions,
+            has_alpha,
         }
+    }
+
+    pub fn has_alpha(&self) -> bool {
+        self.has_alpha
     }
 
     pub fn dimensions(&self) -> (u32, u32) {
@@ -121,11 +145,23 @@ impl Image {
         }
         let mut bytes = Vec::new();
         let mut encoder = png::Encoder::new(&mut bytes, self.dimensions.0, self.dimensions.1);
-        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_color(if self.has_alpha {
+            png::ColorType::Rgba
+        } else {
+            png::ColorType::Rgb
+        });
         encoder.set_depth(png::BitDepth::Eight);
         encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
         let mut writer = encoder.write_header()?;
-        writer.write_image_data(&rgba)?;
+        if self.has_alpha {
+            writer.write_image_data(&rgba)?;
+        } else {
+            let rgb: Vec<u8> = rgba
+                .chunks_exact(4)
+                .flat_map(|pixel| pixel[..3].iter().copied())
+                .collect();
+            writer.write_image_data(&rgb)?;
+        }
         writer.finish()?;
         Ok(bytes)
     }
@@ -183,6 +219,7 @@ impl Image {
     /// Modify the image to mask it with one to four anti-aliased rounded
     /// corners, and add sheen if desired.
     pub fn round_corners(&mut self, radius: f32, four_corners: bool, add_sheen: bool) {
+        self.has_alpha = true;
         let (width, height) = self.dimensions();
         let (w_usize, h_usize) = (width as usize, height as usize);
         let (w, h) = (width as f32, height as f32);
@@ -247,7 +284,7 @@ impl Clone for Image {
     fn clone(&self) -> Image {
         // Note: implicitly converts pixel storage from StbImage to Vec
         // (if needed)
-        Image::from_pixel_vec(self.pixels().to_vec(), self.dimensions)
+        Image::from_pixel_vec_with_alpha(self.pixels().to_vec(), self.dimensions, self.has_alpha)
     }
 }
 
@@ -270,12 +307,17 @@ mod tests {
         let image = Image::from_pixel_vec(pixels.clone(), (2, 2));
         let bytes = image.to_png().unwrap();
         assert_eq!(image.pixels(), pixels);
-        let mut reader = png::Decoder::new(std::io::Cursor::new(&bytes)).read_info().unwrap();
+        let mut reader = png::Decoder::new(std::io::Cursor::new(&bytes))
+            .read_info()
+            .unwrap();
         let mut decoded = vec![0; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(&mut decoded).unwrap();
         assert_eq!((info.width, info.height), (2, 2));
         assert_eq!(info.color_type, png::ColorType::Rgba);
-        assert_eq!(decoded, [255, 0, 0, 255, 128, 64, 0, 128, 0, 0, 0, 0, 255, 255, 255, 1]);
+        assert_eq!(
+            decoded,
+            [255, 0, 0, 255, 128, 64, 0, 128, 0, 0, 0, 0, 255, 255, 255, 1]
+        );
         // Also decode through the independent stb path used by guest apps.
         let loaded = Image::from_bytes(&bytes).unwrap();
         assert_eq!(loaded.dimensions(), (2, 2));
@@ -285,6 +327,65 @@ mod tests {
     #[test]
     fn png_rejects_empty_image() {
         assert!(Image::from_pixel_vec(Vec::new(), (0, 0)).to_png().is_err());
+    }
+
+    #[test]
+    fn opaque_images_keep_padding_and_alpha_images_keep_channels() {
+        let source = [24, 48, 96, 0, 12, 30, 60, 17];
+        let image = Image::from_pixel_vec_with_alpha(source.to_vec(), (2, 1), false);
+        assert_eq!(image.pixels(), [24, 48, 96, 255, 12, 30, 60, 255]);
+        assert!(!image.has_alpha());
+        assert!(!image.clone().has_alpha());
+        let png = image.to_png().unwrap();
+        let reader = png::Decoder::new(std::io::Cursor::new(&png))
+            .read_info()
+            .unwrap();
+        assert_eq!(reader.info().color_type, png::ColorType::Rgb);
+        let loaded = Image::from_bytes(&png).unwrap();
+        assert!(!loaded.has_alpha());
+        assert_eq!(loaded.pixels(), image.pixels());
+        // All-opaque RGBA is still an alpha-bearing format; pixel inspection
+        // must not turn it into RGB and change a caller's format decisions.
+        let rgba = Image::from_pixel_vec(image.pixels().to_vec(), (2, 1));
+        assert!(Image::from_bytes(&rgba.to_png().unwrap())
+            .unwrap()
+            .has_alpha());
+        let mut rounded = image.clone();
+        rounded.round_corners(1.0, true, false);
+        assert!(rounded.has_alpha());
+    }
+
+    #[test]
+    fn grayscale_and_palette_transparency_survive_decoding() {
+        for (color, data, has_alpha) in [
+            (png::ColorType::Grayscale, vec![64, 128], false),
+            (
+                png::ColorType::GrayscaleAlpha,
+                vec![64, 255, 128, 128],
+                true,
+            ),
+            (png::ColorType::Indexed, vec![0, 1], true),
+        ] {
+            let mut bytes = Vec::new();
+            let mut encoder = png::Encoder::new(&mut bytes, 2, 1);
+            encoder.set_color(color);
+            encoder.set_depth(png::BitDepth::Eight);
+            if color == png::ColorType::Indexed {
+                encoder.set_palette(vec![255, 0, 0, 0, 255, 0]);
+                encoder.set_trns(vec![255, 0]);
+            }
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&data).unwrap();
+            writer.finish().unwrap();
+            let image = Image::from_bytes(&bytes).unwrap();
+            assert_eq!(image.has_alpha(), has_alpha);
+            assert_eq!(
+                Image::from_bytes(&image.to_png().unwrap())
+                    .unwrap()
+                    .has_alpha(),
+                has_alpha
+            );
+        }
     }
 }
 

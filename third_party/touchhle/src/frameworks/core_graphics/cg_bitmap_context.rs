@@ -147,7 +147,11 @@ pub fn CGBitmapContextCreateImage(env: &mut Environment, context: CGContextRef) 
         .to_vec();
     cg_image::from_image(
         env,
-        Image::from_pixel_vec(pixels, (bitmap_data.width, bitmap_data.height)),
+        Image::from_pixel_vec_with_alpha(
+            pixels,
+            (bitmap_data.width, bitmap_data.height),
+            bitmap_data.alpha_info != kCGImageAlphaNoneSkipLast,
+        ),
     )
 }
 

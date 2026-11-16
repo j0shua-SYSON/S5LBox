@@ -138,7 +138,6 @@ fn CGImageCreate(
             assert_eq!(alpha_info, kCGImageAlphaPremultipliedLast); // TODO
         }
         kCGImageByteOrder32Little => {
-            // TODO: fix CGImageGetAlphaInfo()
             assert_eq!(alpha_info, kCGImageAlphaNoneSkipFirst); // TODO
             for chunk in pixels.as_chunks_mut::<4>().0 {
                 // XRGB in 32 little endian -> RGBX in 32 big endian
@@ -150,7 +149,11 @@ fn CGImageCreate(
         _ => unimplemented!("{byte_order}"),
     }
 
-    let image = Image::from_pixel_vec(pixels, (width, height));
+    let image = Image::from_pixel_vec_with_alpha(
+        pixels,
+        (width, height),
+        alpha_info != kCGImageAlphaNoneSkipFirst,
+    );
     from_image(env, image)
 }
 
@@ -205,11 +208,14 @@ fn CGImageCreateWithJPEGDataProvider(
     from_image(env, image)
 }
 
-fn CGImageGetAlphaInfo(_env: &mut Environment, _image: CGImageRef) -> CGImageAlphaInfo {
-    // our Image type always returns premultiplied RGBA
-    // (the premultiplied part must match what the real UIImage does, but
-    // considering CgBI's design, maybe the order doesn't?)
-    kCGImageAlphaPremultipliedLast
+fn CGImageGetAlphaInfo(env: &mut Environment, image: CGImageRef) -> CGImageAlphaInfo {
+    // Report the normalized RGBA/RGBX storage, retaining the source's alpha
+    // presence. In particular a JPEG must not claim to carry transparency.
+    if borrow_image(&env.objc, image).has_alpha() {
+        kCGImageAlphaPremultipliedLast
+    } else {
+        kCGImageAlphaNoneSkipLast
+    }
 }
 
 fn CGImageGetColorSpace(env: &mut Environment, _image: CGImageRef) -> CGColorSpaceRef {
@@ -304,7 +310,11 @@ fn CGImageCreateWithImageInRect(
     }
     // Note: instead of keeping reference to the orig image,
     // we're creating a copy here
-    let new_img = Image::from_pixel_vec(new_pixels, (w, h));
+    let new_img = Image::from_pixel_vec_with_alpha(
+        new_pixels,
+        (w, h),
+        borrow_image(&env.objc, image).has_alpha(),
+    );
     from_image(env, new_img)
 }
 
