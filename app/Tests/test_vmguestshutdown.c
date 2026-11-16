@@ -67,7 +67,7 @@ int main(void) {
         now += 80u;
         CHECK(vm_guest_shutdown_step(&s, now, false, false, false, false) == VM_SHUTDOWN_NONE);
         CHECK(vm_guest_shutdown_step(&s, now, true, false, false, false) == VM_SHUTDOWN_TOUCH_MOVE);
-        CHECK(vm_guest_shutdown_touch_x(&s) == 55 + (int)i * 11);
+        CHECK(vm_guest_shutdown_touch_x(&s) == 55 + (int)i * 13);
     }
     CHECK(vm_guest_shutdown_step(&s, now + 100u, true, false, false, false) == VM_SHUTDOWN_TOUCH_UP);
     CHECK(vm_guest_shutdown_step(&s, now + 1000u, true, false, false, false) == VM_SHUTDOWN_NONE);

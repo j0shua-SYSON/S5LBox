@@ -79,7 +79,9 @@ vm_shutdown_action_t vm_guest_shutdown_step(
 }
 
 int vm_guest_shutdown_touch_x(const vm_guest_shutdown_t *s) {
-    return 55 + (int)s->drag_step * 11;
+    /* Finish near the right edge. The flat Whited00r track is wider than
+     * the stock thumb's travel; stopping at x=275 can cancel its slide. */
+    return 55 + (int)s->drag_step * 13;
 }
 
 static bool red(const uint8_t *p) {
