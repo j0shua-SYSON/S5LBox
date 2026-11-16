@@ -733,7 +733,10 @@ static void vmfw_strip_trailing_slash(char *path) {
 }
 
 - (BOOL)importDetectedIPSWIfNeeded {
-    if ([self isRunning] || [VMFirmwareStore hasPreparedFilesInDirectory:
+    // A picker copy has a different path from an original in Documents.
+    // Do not replace a failed/cancelled manual attempt with an automatic retry
+    // of that original when Settings is reopened.
+    if (_pickerCopy || [self isRunning] || [VMFirmwareStore hasPreparedFilesInDirectory:
         [VMFirmwareStore activeDirectoryInRoot:self.firmwareRootDirectory]]) return NO;
     NSString *path = self.detectedArchivePaths.firstObject;
     NSString *signature = path ? vmfw_archive_signature(path) : nil;
