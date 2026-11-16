@@ -379,25 +379,14 @@ static void vmfw_strip_trailing_slash(char *path) {
     @synchronized (self) { [_fileCoordinator cancel]; }
 }
 
-- (BOOL)hasImportedFirmware {
-    NSString *root = [self firmwareRootDirectory];
-    return root.length && ([NSFileManager.defaultManager fileExistsAtPath:
-        [root stringByAppendingPathComponent:@"current-firmware.txt"]] ||
-        [VMFirmwareStore hasPreparedFilesInDirectory:root]);
-}
-
 - (BOOL)canChangeChecksumVerification {
-    return !self.isRunning && ![self hasImportedFirmware];
+    return !self.isRunning;
 }
 
 - (BOOL)skipStockChecksums {
     if (self.isRunning) return _skipChecksumsForRun;
-    if ([self hasImportedFirmware]) {
-        NSString *directory = [VMFirmwareStore activeDirectoryInRoot:[self firmwareRootDirectory]];
-        vm_fw_policy_t policy;
-        return vm_fw_policy_read(directory.fileSystemRepresentation, &policy) == 1 &&
-            policy.skip_stock_checksums;
-    }
+    // The next import has its own choice. Existing generations keep the policy
+    // recorded when they were prepared, regardless of this preference.
     return VMSettings.sharedSettings.skipFirmwareChecksums;
 }
 

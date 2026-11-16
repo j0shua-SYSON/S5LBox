@@ -660,8 +660,8 @@ estimatedHeightForRowAtIndexPath:(NSIndexPath *)indexPath {
             if (row == 0) {
                 cell.textLabel.text = @"Skip stock checksums";
                 cell.detailTextLabel.text = _importer.canChangeChecksumVerification
-                    ? @"Custom firmware may not boot."
-                    : @"Fixed when firmware was imported.";
+                    ? @"Applies to the next IPSW import."
+                    : @"Import in progress.";
                 UISwitch *toggle = [[UISwitch alloc] init];
                 toggle.on = _importer.skipStockChecksums;
                 toggle.enabled = _importer.canChangeChecksumVerification;
